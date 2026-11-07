@@ -102,6 +102,7 @@ fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'st
     let mut gapi = false;
     let mut gdi = false;
     let mut sdl = false;
+    let mut gapidraw = false;
     for import in imports {
         let dll = import.dll.to_ascii_lowercase();
         gles |= matches!(
@@ -121,6 +122,8 @@ fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'st
                 name.as_str(),
                 "eglswapbuffers" | "glclear" | "gldrawarrays" | "gldrawelements"
             );
+            gapidraw |= name.contains("@cgapidisplay@@")
+                && (name.starts_with("?opendisplay@") || name.starts_with("?flip@"));
             sdl |= matches!(
                 name.as_str(),
                 "sdl_setvideomode" | "sdl_updaterects" | "sdl_createrenderer"
@@ -151,6 +154,8 @@ fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'st
         Some("DirectDraw")
     } else if gapi {
         Some("GAPI")
+    } else if gapidraw {
+        Some("GapiDraw")
     } else if sdl {
         Some("SDL")
     } else if gdi {
@@ -872,6 +877,17 @@ mod graphics_api_tests {
         );
         assert_eq!(
             graphics_api_from_imports(&[import("SDL.dll", "SDL_mutexP")]),
+            None
+        );
+        assert_eq!(
+            graphics_api_from_imports(&[import(
+                "GD101.dll",
+                "?OpenDisplay@CGapiDisplay@@QAAJPAUHWND__@@K@Z"
+            )]),
+            Some("GapiDraw")
+        );
+        assert_eq!(
+            graphics_api_from_imports(&[import("GD101.dll", "?StartTimer@CGapiTimer@@QAAJK@Z")]),
             None
         );
     }

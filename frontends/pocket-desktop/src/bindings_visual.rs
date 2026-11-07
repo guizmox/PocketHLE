@@ -4,7 +4,8 @@ use pocket_library::{GuestButton, LauncherConfig};
 
 const BLUE: Color32 = Color32::from_rgb(93, 179, 235);
 const GREEN: Color32 = Color32::from_rgb(93, 194, 162);
-const PURPLE: Color32 = Color32::from_rgb(176, 135, 231);
+pub(crate) const LONG_PRESS: Color32 = Color32::from_rgb(231, 181, 96);
+pub(crate) const PURPLE: Color32 = Color32::from_rgb(176, 135, 231);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Assignment {
@@ -160,10 +161,43 @@ fn visible_buttons(gizmondo: bool) -> impl Iterator<Item = GuestButton> {
     GuestButton::ALL.into_iter().filter(move |button| {
         let index = GuestButton::ALL.iter().position(|b| b == button).unwrap();
         if gizmondo {
-            index < 16
+            index < 16 && *button != GuestButton::Turbo
         } else {
             index < 11 || index >= 16
         }
+    })
+}
+
+fn guest_assignment(button: GuestButton, gizmondo: bool) -> Assignment {
+    // The legacy Turbo binding sends VK_F3, which is Gizmondo's Brightness key.
+    Assignment::Guest(if gizmondo && button == GuestButton::Turbo {
+        GuestButton::GizPiano3
+    } else {
+        button
+    })
+}
+
+fn controller_tap(control: &str) -> Option<&'static str> {
+    match control {
+        "Select" => Some("Fullscreen"),
+        "Start" | "Misc1" => Some("Next filter"),
+        _ => None,
+    }
+}
+fn controller_hold(control: &str, gizmondo: bool) -> Option<&'static str> {
+    match control {
+        "Select" if gizmondo => Some("Brightness"),
+        "Select" => Some("Return to library"),
+        "Start" | "Misc1" => Some("Start / stop recording"),
+        "Mode" if !gizmondo => Some("Return to library"),
+        _ => None,
+    }
+}
+fn short_hold(control: &str, gizmondo: bool) -> Option<&'static str> {
+    controller_hold(control, gizmondo).map(|role| match role {
+        "Brightness" => "Brightness",
+        "Return to library" => "Exit",
+        _ => "Record",
     })
 }
 
@@ -181,7 +215,9 @@ fn keyboard_assignment(config: &LauncherConfig, key: &str, gizmondo: bool) -> As
     config
         .keybindings
         .button_for_key(key)
-        .map_or(Assignment::Unbound, Assignment::Guest)
+        .map_or(Assignment::Unbound, |button| {
+            guest_assignment(button, gizmondo)
+        })
 }
 
 fn keyboard_shortcut(key: &str) -> Option<&'static str> {
@@ -236,7 +272,9 @@ fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool)
         .gamepad_bindings
         .get(control)
         .copied()
-        .map_or(Assignment::Unbound, Assignment::Guest)
+        .map_or(Assignment::Unbound, |button| {
+            guest_assignment(button, gizmondo)
+        })
 }
 
 fn controller_fixed(control: &str, gizmondo: bool) -> bool {
@@ -326,8 +364,11 @@ impl Editor {
         config: &mut LauncherConfig,
         controller: bool,
     ) -> Option<Capture> {
-        ui.separator();
-        ui.heading(if controller { "Controller" } else { "Keyboard" });
+        // Controller heading belongs before the launcher's device diagnostics.
+        if !controller {
+            ui.separator();
+            ui.heading("Keyboard");
+        }
         let wide = ui.available_width() >= 1100.0;
         let diagram_width = if wide {
             ui.available_width() * 0.72
@@ -459,7 +500,16 @@ impl Editor {
             keyboard_shortcut(&input)
         };
         if let Some(description) = shortcut {
-            ui.colored_label(PURPLE, description);
+            if controller {
+                if let Some(action) = controller_tap(&input) {
+                    ui.colored_label(PURPLE, format!("Tap: {action}"));
+                }
+                if let Some(action) = controller_hold(&input, self.gizmondo) {
+                    ui.colored_label(LONG_PRESS, format!("Hold: {action}"));
+                }
+            } else {
+                ui.colored_label(PURPLE, description);
+            }
             ui.label("Built-in PocketHLE shortcut.");
             return None;
         }
@@ -561,11 +611,14 @@ impl Editor {
                         })
                         && !(*button == GuestButton::GizPiano3 && self.gizmondo)
                 } else {
-                    !config.keybindings.keys_for(*button).iter().any(|key| {
-                        keyboard_shortcut(key).is_none()
-                            && keyboard_assignment(config, key, self.gizmondo)
-                                == Assignment::Guest(*button)
-                    })
+                    !GuestButton::ALL
+                        .iter()
+                        .flat_map(|mapped| config.keybindings.keys_for(*mapped))
+                        .any(|key| {
+                            keyboard_shortcut(key).is_none()
+                                && keyboard_assignment(config, key, self.gizmondo)
+                                    == Assignment::Guest(*button)
+                        })
                 }
             })
             .collect();
@@ -625,7 +678,17 @@ impl Editor {
             }
             ui.label("AZERTY keyboard. Select a key, then choose its assignment.");
         }
-        ui.label("Blue: game command · green: stylus · purple: host shortcut · gray: unassigned");
+        ui.horizontal_wrapped(|ui| {
+            for (color, label) in [
+                (BLUE, "Game action"),
+                (GREEN, "Stylus"),
+                (PURPLE, "Shortcut"),
+                (LONG_PRESS, "Long press"),
+                (Color32::GRAY, "Unassigned"),
+            ] {
+                ui.colored_label(color, label);
+            }
+        });
     }
 
     fn controller_diagram(&mut self, ui: &mut Ui, config: &LauncherConfig, width: f32) {
@@ -728,12 +791,23 @@ impl Editor {
                         Align2::CENTER_CENTER,
                         label,
                         FontId::proportional((art_width / 760.0 * 14.0).clamp(8.0, 12.0)),
-                        if shortcut.is_some() || configured_fullscreen {
+                        if shortcut.is_some() && controller_tap(name).is_none() {
+                            LONG_PRESS
+                        } else if shortcut.is_some() || configured_fullscreen {
                             PURPLE
                         } else {
                             assignment.color()
                         },
                     );
+                    if let Some(hold) = short_hold(name, self.gizmondo) {
+                        ui.painter().text(
+                            point + Vec2::new(0.0, 14.0),
+                            Align2::CENTER_CENTER,
+                            format!("Hold: {hold}"),
+                            FontId::proportional(8.5),
+                            LONG_PRESS,
+                        );
+                    }
                     let hit =
                         Rect::from_center_size(point, Vec2::splat((art_width * 0.045).max(14.0)));
                     let response =
@@ -847,7 +921,8 @@ impl Editor {
                 "F10" => "Photo",
                 "F11" => "Video",
                 "F12" => "Full",
-                "Select" => "View",
+                "Select" => "Fullscreen",
+                "Mode" => "",
                 "Start" | "Misc1" => "Filter",
                 _ => "Host",
             }
@@ -862,13 +937,32 @@ impl Editor {
                 FontId::proportional(11.0),
                 Color32::from_gray(210),
             );
-            ui.painter().text(
-                rect.right_center() - Vec2::new(6.0, 0.0),
-                Align2::RIGHT_CENTER,
-                command,
-                FontId::proportional(10.0),
-                color,
-            );
+            if let Some(hold) = short_hold(name, self.gizmondo) {
+                if controller_tap(name).is_some() {
+                    ui.painter().text(
+                        rect.right_top() + Vec2::new(-6.0, 6.0),
+                        Align2::RIGHT_CENTER,
+                        command,
+                        FontId::proportional(9.0),
+                        PURPLE,
+                    );
+                }
+                ui.painter().text(
+                    rect.right_bottom() + Vec2::new(-6.0, -6.0),
+                    Align2::RIGHT_CENTER,
+                    format!("Hold: {hold}"),
+                    FontId::proportional(9.0),
+                    LONG_PRESS,
+                );
+            } else {
+                ui.painter().text(
+                    rect.right_center() - Vec2::new(6.0, 0.0),
+                    Align2::RIGHT_CENTER,
+                    command,
+                    FontId::proportional(10.0),
+                    color,
+                );
+            }
         } else {
             ui.painter().text(
                 rect.center_top() + Vec2::new(0.0, rect.height() * 0.28),
@@ -951,6 +1045,19 @@ mod tests {
     }
 
     #[test]
+    fn gizmondo_has_brightness_not_turbo_and_view_hold_is_explicit() {
+        assert!(!visible_buttons(true).any(|b| b == GuestButton::Turbo));
+        assert!(visible_buttons(false).any(|b| b == GuestButton::Turbo));
+        let config = LauncherConfig::default();
+        assert_eq!(
+            keyboard_assignment(&config, "T", true),
+            Assignment::Guest(GuestButton::GizPiano3)
+        );
+        assert_eq!(controller_hold("Select", true), Some("Brightness"));
+        assert_eq!(controller_tap("Select"), Some("Fullscreen"));
+    }
+
+    #[test]
     fn preview_matches_runtime_priority() {
         let mut config = LauncherConfig::default();
         config
@@ -962,7 +1069,7 @@ mod tests {
         );
         assert_eq!(
             controller_assignment(&config, "South", true),
-            Assignment::Guest(GuestButton::Turbo)
+            Assignment::Guest(GuestButton::GizPiano3)
         );
         assert_eq!(
             keyboard_assignment(&config, "O", false),

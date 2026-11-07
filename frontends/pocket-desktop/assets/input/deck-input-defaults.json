@@ -1,0 +1,172 @@
+{
+  "controller": {
+    "DPadDown": "dpad_down",
+    "DPadLeft": "dpad_left",
+    "DPadRight": "dpad_right",
+    "DPadUp": "dpad_up",
+    "East": "button_b",
+    "LeftStickDown": "dpad_down",
+    "LeftStickLeft": "dpad_left",
+    "LeftStickRight": "dpad_right",
+    "LeftStickUp": "dpad_up",
+    "LeftTrigger2": "soft1",
+    "North": "button_a",
+    "RightTrigger": "giz_piano1",
+    "RightTrigger2": "soft2",
+    "South": "action",
+    "Start": "giz_piano2",
+    "West": "button_c"
+  },
+  "fullscreen": "Select",
+  "gizmondo_overrides": {
+    "LeftTrigger": "giz_piano2"
+  },
+  "keyboard": [
+    {
+      "button": "dpad_up",
+      "keys": [
+        "Z"
+      ]
+    },
+    {
+      "button": "dpad_down",
+      "keys": [
+        "S"
+      ]
+    },
+    {
+      "button": "dpad_left",
+      "keys": [
+        "Q"
+      ]
+    },
+    {
+      "button": "dpad_right",
+      "keys": [
+        "D"
+      ]
+    },
+    {
+      "button": "action",
+      "keys": [
+        "Down"
+      ]
+    },
+    {
+      "button": "button_a",
+      "keys": [
+        "Up"
+      ]
+    },
+    {
+      "button": "button_b",
+      "keys": [
+        "Right"
+      ]
+    },
+    {
+      "button": "button_c",
+      "keys": [
+        "Left"
+      ]
+    },
+    {
+      "button": "soft1",
+      "keys": [
+        "1"
+      ]
+    },
+    {
+      "button": "soft2",
+      "keys": [
+        "2"
+      ]
+    },
+    {
+      "button": "turbo",
+      "keys": [
+        "T"
+      ]
+    },
+    {
+      "button": "giz_piano1",
+      "keys": [
+        "F1"
+      ]
+    },
+    {
+      "button": "giz_piano2",
+      "keys": [
+        "F2"
+      ]
+    },
+    {
+      "button": "giz_piano3",
+      "keys": [
+        "F3"
+      ]
+    },
+    {
+      "button": "giz_piano4",
+      "keys": [
+        "F4"
+      ]
+    },
+    {
+      "button": "giz_piano5",
+      "keys": [
+        "F5"
+      ]
+    },
+    {
+      "button": "pocket_pc_app1",
+      "keys": []
+    },
+    {
+      "button": "pocket_pc_app2",
+      "keys": []
+    },
+    {
+      "button": "pocket_pc_app3",
+      "keys": []
+    },
+    {
+      "button": "pocket_pc_app4",
+      "keys": []
+    }
+  ],
+  "ppc_overrides": {
+    "East": "button_b",
+    "LeftThumb": "soft2",
+    "LeftTrigger": "pocket_pc_app1",
+    "LeftTrigger2": "pocket_pc_app3",
+    "North": "soft1",
+    "RightThumb": "action",
+    "RightTrigger": "pocket_pc_app2",
+    "RightTrigger2": "pocket_pc_app4",
+    "South": "button_a",
+    "West": "button_c"
+  },
+  "vk_codes": {
+    "action": 13,
+    "button_a": 17,
+    "button_b": 32,
+    "button_c": 16,
+    "dpad_down": 40,
+    "dpad_left": 37,
+    "dpad_right": 39,
+    "dpad_up": 38,
+    "giz_piano1": 112,
+    "giz_piano2": 113,
+    "giz_piano3": 114,
+    "giz_piano4": 115,
+    "giz_piano5": 122,
+    "pocket_pc_app1": 193,
+    "pocket_pc_app2": 194,
+    "pocket_pc_app3": 195,
+    "pocket_pc_app4": 196,
+    "soft1": 9,
+    "soft2": 27,
+    "turbo": 114
+  }
+}

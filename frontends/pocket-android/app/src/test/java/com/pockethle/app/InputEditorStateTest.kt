@@ -16,7 +16,7 @@ class InputEditorStateTest {
         val state = draft()
         assertEquals("stylus:0", state.assignment("O", false, false))
         assertNull(state.assignment("O", false, true))
-        assertEquals("action", state.assignment("South", true, false))
+        assertEquals("button_a", state.assignment("South", true, false))
         assertFalse(state.visibleButtons(false).contains("giz_piano1"))
         assertFalse(state.visibleButtons(true).contains("pocket_pc_app1"))
     }
@@ -24,11 +24,11 @@ class InputEditorStateTest {
     @Test
     fun movingInputClearsGuestStylusAndFullscreenConflicts() {
         val state = draft()
-        state.json.put("gamepad_fullscreen", "LeftThumb")
-        assertTrue(state.assign("LeftThumb", true, "stylus:1"))
-        assertFalse(state.controller.has("LeftStick"))
+        state.json.put("gamepad_fullscreen", "RightStickUp")
+        assertTrue(state.assign("RightStickUp", true, "stylus:1"))
+        assertFalse(state.controller.has("RightStickUp"))
         assertTrue(state.json.isNull("gamepad_fullscreen"))
-        assertEquals("stylus:1", state.assignment("LeftStick", true, false))
+        assertEquals("stylus:1", state.assignment("RightStickUp", true, false))
         state.assign("O", false, "action")
         assertEquals("action", state.assignment("O", false, false))
         state.assign("O", false, null)

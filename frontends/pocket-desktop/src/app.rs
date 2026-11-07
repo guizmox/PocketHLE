@@ -2839,6 +2839,8 @@ impl PocketLauncher {
         }
         for controller in [false, true] {
             if controller {
+                ui.separator();
+                ui.heading("Controller");
                 ui.label("Connect your controller by USB or pair it in the operating system's Bluetooth settings.");
                 if let Some(error) = &self.gamepad_error {
                     ui.colored_label(
@@ -2962,18 +2964,21 @@ impl PocketLauncher {
                 .num_columns(2)
                 .spacing(Vec2::new(16.0, 6.0))
                 .show(ui, |ui| {
-                    ui.label("View hold");
-                    ui.label(if self.bindings_visual.is_gizmondo() {
-                        "Brightness"
-                    } else {
-                        "Return to library"
-                    });
+                    ui.colored_label(crate::bindings_visual::LONG_PRESS, "View hold");
+                    ui.colored_label(
+                        crate::bindings_visual::LONG_PRESS,
+                        if self.bindings_visual.is_gizmondo() {
+                            "Brightness"
+                        } else {
+                            "Return to library"
+                        },
+                    );
                     ui.end_row();
-                    ui.label("Menu / extra tap");
-                    ui.label("Next library filter");
+                    ui.colored_label(crate::bindings_visual::PURPLE, "Menu / extra tap");
+                    ui.colored_label(crate::bindings_visual::PURPLE, "Next library filter");
                     ui.end_row();
-                    ui.label("Menu / extra hold");
-                    ui.label("Start / stop recording");
+                    ui.colored_label(crate::bindings_visual::LONG_PRESS, "Menu / extra hold");
+                    ui.colored_label(crate::bindings_visual::LONG_PRESS, "Start / stop recording");
                     ui.end_row();
                     ui.label("Library shoulders / triggers");
                     ui.label("Previous / next catalogue tab");

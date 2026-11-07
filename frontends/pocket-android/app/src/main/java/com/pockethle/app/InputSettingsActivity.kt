@@ -31,7 +31,7 @@ class InputSettingsActivity : AppCompatActivity() {
             setPadding(0, dp(5), 0, dp(5))
         }
 
-    private fun button(value: String, action: () -> Unit) =
+    private fun button(value: CharSequence, action: () -> Unit) =
         Button(this).apply {
             text = value
             setAllCaps(false)
@@ -54,6 +54,35 @@ class InputSettingsActivity : AppCompatActivity() {
                 }
             setOnClickListener { action() }
         }
+
+    private fun spans(parts: List<Pair<String, Int>>): android.text.SpannableStringBuilder {
+        val result = android.text.SpannableStringBuilder()
+        for ((value, color) in parts) {
+            val start = result.length
+            result.append(value)
+            result.setSpan(
+                android.text.style.ForegroundColorSpan(color),
+                start,
+                result.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+        }
+        return result
+    }
+
+    private fun bindingText(input: String, label: String): CharSequence {
+        if (input == "Misc1") return "Extra (desktop)"
+        if (state.assignment(input, true, gizmondo) != "host")
+            return "$label: ${state.shortFor(input,true,gizmondo)}"
+        val parts = mutableListOf(label + ": " to Color.LTGRAY)
+        DeckInputPolicy.tap(input)?.let {
+            parts.add(DeckInputPolicy.label(it) to InputSkinView.PURPLE)
+        }
+        DeckInputPolicy.hold(input, gizmondo)?.let {
+            parts.add("\nHold: ${DeckInputPolicy.short(it)}" to InputSkinView.LONG_PRESS)
+        }
+        return spans(parts)
+    }
 
     override fun onStop() {
         captureDialog?.dismiss()
@@ -123,10 +152,23 @@ class InputSettingsActivity : AppCompatActivity() {
         body.addView(profiles)
         body.addView(
             text(
-                "Select an input to inspect or change it. The preview does not change a game's profile. Changes apply after Save."
+                "Select an input to inspect or change it. The preview does not change a game's profile. Save changes, then relaunch a running game to apply the updated bindings."
             )
         )
-        body.addView(text("Blue: game · green: stylus · purple: host · gray: unassigned", 12f))
+        body.addView(
+            text("", 12f).apply {
+                text =
+                    spans(
+                        listOf(
+                            "Game · " to InputSkinView.BLUE,
+                            "Stylus · " to InputSkinView.GREEN,
+                            "Shortcut · " to InputSkinView.PURPLE,
+                            "Long press · " to InputSkinView.LONG_PRESS,
+                            "Unassigned" to Color.GRAY,
+                        )
+                    )
+            }
+        )
         for (pad in listOf(false, true)) section(body, pad)
         scroll =
             ScrollView(this).apply {
@@ -175,14 +217,14 @@ class InputSettingsActivity : AppCompatActivity() {
                 controls.take(13).zip(controls.drop(13)).map { listOf(it.first, it.second) }) {
                 val row = LinearLayout(this)
                 for (control in pair) row.addView(
-                    button(
-                            "${control.label}: ${state.short(state.assignment(control.input!!,true,gizmondo))}"
-                        ) {
+                    button(bindingText(control.input!!, control.label)) {
                             selected[true] = control.input!!
                             render()
                         }
                         .apply {
                             isSelected = selected[true] == control.input
+                            isEnabled = control.input != "Misc1"
+                            alpha = if (isEnabled) 1f else .45f
                             setTextColor(
                                 InputSkinView.color(
                                     state.assignment(control.input!!, true, gizmondo)
@@ -220,11 +262,23 @@ class InputSettingsActivity : AppCompatActivity() {
                 )
             )
         }
+        body.addView(
+            button(if (pad) "Reset controller defaults" else "Reset keys to defaults") {
+                val defaults =
+                    JSONObject(
+                        assets.open("deck-input-defaults.json").bufferedReader().use {
+                            it.readText()
+                        }
+                    )
+                state.reset(pad, defaults)
+                render()
+            }
+        )
         inspector(body, pad)
         val inputs = (diagram.controls.mapNotNull { it.input } + state.savedInputs(pad)).distinct()
         val missing =
             state.visibleButtons(gizmondo).filter { target ->
-                inputs.none { state.assignment(it, pad, gizmondo) == target }
+                !state.assigned(target, pad, gizmondo, inputs)
             }
         if (missing.isNotEmpty())
             body.addView(
@@ -262,17 +316,36 @@ class InputSettingsActivity : AppCompatActivity() {
                     ?: input
             else input
         panel.addView(text("Selected ${if(pad) "control" else "key"}: $physical", 17f))
-        panel.addView(
-            text("Current: ${state.label(target)}").apply {
-                setTextColor(InputSkinView.color(target))
+        if (target == "host") {
+            val tap = if (pad) DeckInputPolicy.tap(input) else DeckInputPolicy.key(input)
+            tap?.let {
+                panel.addView(
+                    text("Tap: ${DeckInputPolicy.label(it)}").apply {
+                        setTextColor(InputSkinView.PURPLE)
+                    }
+                )
             }
-        )
+            if (pad)
+                DeckInputPolicy.hold(input, gizmondo)?.let {
+                    panel.addView(
+                        text("Hold: ${DeckInputPolicy.label(it)}").apply {
+                            setTextColor(InputSkinView.LONG_PRESS)
+                        }
+                    )
+                }
+        } else
+            panel.addView(
+                text("Current: ${state.label(target)}").apply {
+                    setTextColor(InputSkinView.color(target))
+                }
+            )
         panel.addView(
             button("Choose input") {
                 val inputs =
                     (InputSkinView.loadControls(this, pad).mapNotNull { it.input } +
                             state.savedInputs(pad))
                         .distinct()
+                        .filter { !(pad && it == "Misc1") }
                         .sorted()
                 android.app.AlertDialog.Builder(this)
                     .setTitle("Choose input")
@@ -284,8 +357,21 @@ class InputSettingsActivity : AppCompatActivity() {
                     .show()
             }
         )
-        if (target == "host") {
-            panel.addView(text("F10 is reserved for screenshots on Android."))
+        if (
+            target == "host" &&
+                (DeckInputPolicy.key(input) == DeckInputPolicy.Action.RECORDING ||
+                    (pad &&
+                        DeckInputPolicy.hold(input, gizmondo) == DeckInputPolicy.Action.RECORDING))
+        ) {
+            panel.addView(text("* Recording is currently available on desktop only.", 12f))
+        }
+        if (state.fixed(input, pad, gizmondo)) {
+            panel.addView(
+                text(
+                    if (target == "host") "Built-in Deck shortcut."
+                    else "Built-in device mapping (Deck reference)."
+                )
+            )
             return
         }
         panel.addView(
@@ -297,7 +383,7 @@ class InputSettingsActivity : AppCompatActivity() {
                 android.app.AlertDialog.Builder(this)
                     .setTitle("Assign $physical")
                     .setItems(targets.map { state.label(it) }.toTypedArray()) { _, i ->
-                        state.assign(input, pad, targets[i])
+                        state.assign(input, pad, targets[i], gizmondo)
                         render()
                     }
                     .setNegativeButton("Cancel", null)
@@ -307,7 +393,7 @@ class InputSettingsActivity : AppCompatActivity() {
         val row = LinearLayout(this)
         row.addView(
             button("Clear") {
-                state.assign(input, pad, null)
+                state.assign(input, pad, null, gizmondo)
                 render()
             },
             LinearLayout.LayoutParams(0, dp(48), 1f),
@@ -327,7 +413,7 @@ class InputSettingsActivity : AppCompatActivity() {
         val dialog =
             object : Dialog(this) {
                 fun accept(name: String): Boolean {
-                    if (state.assign(name, pad, target)) {
+                    if (state.assign(name, pad, target, gizmondo)) {
                         selected[pad] = if (pad) InputBindings.controllerCanonical(name) else name
                         dismiss()
                         render()
@@ -399,6 +485,7 @@ class InputSettingsActivity : AppCompatActivity() {
                 18f,
             )
         )
+        content.addView(text("Reserved Deck controls keep their built-in assignment.", 12f))
         content.addView(button("Cancel") { dialog.dismiss() })
         dialog.setContentView(content)
         captureDialog = dialog

@@ -84,6 +84,9 @@ The filter carousel includes **No filter**, reconstruction, SMAA variants, xBRZ,
 bicubic, Lanczos, bilinear and nearest. A selected filter is not limited to QVGA
 or to enlargement: native and internally scaled images can still benefit.
 Filters do not regenerate missing texture detail. xBRZ includes CPU preprocessing.
+Android Menu tap cycles this same carousel on the GL thread. Changing filters
+invalidates the presentation upload (including xBRZ dimensions); SMAA is only
+processed while selected and is reused within the current GL context.
 Standalone configurable anisotropic filtering was removed; historical descriptions
 of its controls and JSON fields are not current settings documentation.
 

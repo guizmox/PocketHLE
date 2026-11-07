@@ -235,10 +235,28 @@ text flow. The Gizmondo preview hides Pocket PC stylus settings.
 
 Pocket PC / Gizmondo changes the preview only; saved bindings remain shared.
 Per-game grids, button swaps and display rotation still apply during gameplay.
-Each frontend displays its own real runtime priority: desktop built-in device and
-host shortcuts retain priority, while Android reserves F10 for screenshots and
-keeps its existing configurable gamepad mappings. This UI change does not impose
-desktop's View/Menu/L1 shortcut policy on Android.
+The Deck layout is the common factory reference for keyboard and controller,
+including Pocket PC shoulder/face/thumb overrides and Gizmondo L1 volume.
+`deck-input-defaults.json` is checked against Rust's defaults/profile overrides
+and the Android fallback definitions by tests. Library loading migrates only
+recognized legacy factory maps; customized tables are not rewritten. Reserved
+Deck host/device controls retain priority in both frontends.
+
+Tap shortcuts are purple; long presses are amber. View taps fullscreen and holds
+650 ms for Gizmondo Brightness or Pocket PC exit. Menu taps the next presentation
+filter; its long press reserves recording. Android now routes those gestures,
+F10 screenshots and F12 fullscreen through the same reference policy; video
+recording/F11 remains desktop-only and is labeled unavailable on Android.
+Extra/Misc1 has no standard Android key adapter and is marked desktop-only;
+Guide/Mode also depends on delivery by the operating system. Android filter
+cycling runs on the GL thread, invalidates the presentation upload
+and lazily initializes/reuses SMAA. No guest graphics state or geometry changes.
+A long press consumes its short action, and loss of focus cancels pending holds.
+
+Turbo is a legacy VK_F3 alias, not a Gizmondo hardware button. The Gizmondo preview
+omits Turbo from assignment choices and missing-command reports, and displays
+old Turbo bindings as Brightness because both send the same guest key code.
+The Pocket PC preview retains its existing Turbo helper.
 
 Android's native activity provides the same Keyboard / Controller sections,
 Save/Cancel draft semantics, assignment colors, missing commands and physical
@@ -247,7 +265,8 @@ screen initially, with an enlarged horizontally scrollable mode for accurate
 touch selection. Native input lists provide an accessible alternative to tapping
 a diagram. Controller rows use touch-sized buttons; capture is cancelled when
 the activity stops. Draft/profile/selection state survives recreation. Returning
-to settings reloads the config before another preference can overwrite it.
+to settings reloads the config before another preference can overwrite it. Saved
+Android game bindings take effect when a running game is relaunched.
 
 Existing Android Back/Guide/LeftStick/RightStick click names accept desktop's
 Select/Mode/LeftThumb/RightThumb aliases. Conflicting aliases are removed together
@@ -258,11 +277,11 @@ preferences remain under Pocket PC settings.
 ## Library tile metadata
 
 Desktop and Android tiles show resolution followed by a compact graphics API hint
-(OpenGL ES, Direct3D Mobile, DirectDraw, GAPI, SDL or GDI). The shared detector
+(OpenGL ES, Direct3D Mobile, DirectDraw, GAPI, GapiDraw, SDL or GDI). The shared detector
 inspects the selected executable, resolves COREDLL ordinals through the same
 bundled ARM/MIPS maps as runtime, and recognizes explicit graphics symbol strings
 when GetProcAddress is used. GDI menu drawing does not override stronger 3D or
-framebuffer evidence. SDL is identified as SDL without guessing its video backend.
+framebuffer evidence. SDL and GapiDraw are identified as middleware without guessing their video backend.
 This remains a static hint rather than proof of the active rendering path; no
 DLL traversal, game-name rules, options or metadata migration are introduced.
 Missing evidence leaves only resolution. Existing games benefit after restarting

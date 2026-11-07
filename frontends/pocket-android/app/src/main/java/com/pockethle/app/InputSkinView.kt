@@ -52,7 +52,9 @@ internal class InputSkinView(
         for (control in controls) {
             val input = control.input
             val target = input?.let { state.assignment(it, pad, gizmondo) }
-            val color = color(target)
+            val color =
+                if (pad && target == "host" && DeckInputPolicy.tap(input!!) == null) LONG_PRESS
+                else color(target)
             val rect = control.rect
             if (!pad) {
                 if (input != null) {
@@ -75,7 +77,7 @@ internal class InputSkinView(
                     paint.color = color
                     paint.textSize = 10f
                     canvas.drawText(
-                        state.short(target),
+                        state.shortFor(input, pad, gizmondo),
                         rect.centerX(),
                         rect.top + rect.height() * .84f,
                         paint,
@@ -103,13 +105,24 @@ internal class InputSkinView(
                         "pocket_pc_app2" -> "P2"
                         "pocket_pc_app3" -> "P3"
                         "pocket_pc_app4" -> "P4"
-                        else -> state.short(target)
+                        else -> state.shortFor(input, true, gizmondo)
                     }
                 paint.style = Paint.Style.FILL
                 paint.color = color
                 paint.textSize = 14f
                 paint.textAlign = Paint.Align.CENTER
                 canvas.drawText(label, x, y + 5f, paint)
+                if (target == "host")
+                    DeckInputPolicy.hold(input, gizmondo)?.let {
+                        paint.color = LONG_PRESS
+                        paint.textSize = 13f
+                        canvas.drawText(
+                            "Hold: ${DeckInputPolicy.short(it)}",
+                            rect.centerX(),
+                            rect.centerY() + 26f,
+                            paint,
+                        )
+                    }
                 if (input == selected) {
                     paint.style = Paint.Style.STROKE
                     paint.strokeWidth = 3f
@@ -156,6 +169,9 @@ internal class InputSkinView(
 
     companion object {
         private val skins = mutableMapOf<Boolean, Bitmap>()
+        val LONG_PRESS = Color.rgb(231, 181, 96)
+        val PURPLE = Color.rgb(176, 135, 231)
+        val GREEN = Color.rgb(93, 194, 162)
         val BLUE = Color.rgb(93, 179, 235)
 
         fun color(target: String?) =

@@ -15,7 +15,7 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /** Desktop shaders, including reference three-pass SMAA; filtering never alters guest geometry. */
-internal class AndroidFrameRenderer(context: Context, private val filter: String, private val scale: Int, private val countFps: Boolean = false, private val pocketPc: Boolean = false) : GLSurfaceView.Renderer {
+internal class AndroidFrameRenderer(context: Context, private var filter: String, private val scale: Int, private val countFps: Boolean = false, private val pocketPc: Boolean = false) : GLSurfaceView.Renderer {
     private val frameCounter = PresentedFrameCounter()
     val presentedFrameCount: Long get() = frameCounter.total
     private val app = context.applicationContext
@@ -37,6 +37,14 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
     fun submit(frame: GameActivity.FrameSnapshot) { pending = frame }
     fun setRotationDegrees(degrees: Int) { turn = ((degrees % 360)+360)%360 }
     fun requestScreenshot() { capture = true }
+    /** Called on the GL thread; invalidate uploads when changing xBRZ or SMAA. */
+    fun cycleFilter():String {
+        val order=DeckInputPolicy.filters
+        filter=order[(order.indexOf(filter).coerceAtLeast(0)+1)%order.size]
+        uploaded=null
+        return filter
+    }
+
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         failed = false; uploaded = null; textureW = 0; textureH = 0
@@ -57,6 +65,7 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
         if (failed) return
         val frame = pending ?: return
         try {
+            if ((filter=="smaa" || filter=="smaa_soft") && smaa==null) smaa=Smaa()
             glBindVertexArray(vao)
             if (uploaded !== frame) {
                 var bytes = frame.rgba.copyOfRange(frame.rgbaOffset, frame.rgbaOffset+frame.textureWidth*frame.textureHeight*4)
@@ -68,7 +77,7 @@ internal class AndroidFrameRenderer(context: Context, private val filter: String
                 glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,texture)
                 glPixelStorei(GL_UNPACK_ALIGNMENT,1)
                 glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,textureW,textureH,0,GL_RGBA,GL_UNSIGNED_BYTE,direct(bytes))
-                filtered = smaa?.process(texture,textureW,textureH,filter == "smaa_soft") ?: texture
+                filtered = if(filter=="smaa" || filter=="smaa_soft") smaa!!.process(texture,textureW,textureH,filter == "smaa_soft") else texture
                 uploaded=frame
             }
             glBindFramebuffer(GL_FRAMEBUFFER,0)

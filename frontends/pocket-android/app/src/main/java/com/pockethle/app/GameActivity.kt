@@ -21,6 +21,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import android.widget.Toast
 import org.json.JSONObject
 import android.content.pm.ActivityInfo
 import android.view.KeyEvent
@@ -262,7 +263,6 @@ class GameActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val config = readLauncherConfig()
-        bindings = InputBindings(config)
         stylusBindings = StylusBindings(config)
         showFps = config.showFps
         showIps = config.showIps
@@ -271,6 +271,7 @@ class GameActivity : AppCompatActivity() {
         gameId = intent.getStringExtra(EXTRA_GAME_ID) ?: ""
         gameRoot = LibraryPaths.root(this)
         gizmondoGame = gameId.isNotEmpty() && NativeBridge.isGizmondoGame(gameRoot,gameId)
+        bindings = InputBindings(config,gizmondoGame)
         requestedOrientation = if (gizmondoGame) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         setContentView(if (gizmondoGame) R.layout.activity_game else R.layout.activity_game_pocketpc)
         val content=findViewById<android.view.ViewGroup>(android.R.id.content)
@@ -818,21 +819,62 @@ class GameActivity : AppCompatActivity() {
      * Android controller keys arrive through the activity key dispatch path,
      * not through the SurfaceView touch listener. Dispatch them before child
      * views consume them and use the same guest codes as the virtual pad.
-     * Counts are kept per guest key because Android can report, for example,
-     * Y and Start as two different physical keys that share the Gizmondo
-     * Start code.
+     * Counts are kept per guest key because several physical sources can
+     * share a guest virtual-key code.
      */
+    private val deckHosts=DeckHostTracker()
+    private var inputGeneration=0
+    private val hostLongCheck=Runnable {
+        deckHosts.due(android.os.SystemClock.uptimeMillis(),gizmondoGame).forEach {performHostShortcut(it)}
+    }
+    private fun performHostShortcut(action:DeckInputPolicy.Action) {
+        when(action) {
+            DeckInputPolicy.Action.FULLSCREEN -> setControllerFullscreen(!glRenderer.controllerFullscreen)
+            DeckInputPolicy.Action.EXIT -> finish()
+            DeckInputPolicy.Action.BRIGHTNESS -> {
+                val handle=session
+                if(handle!=0L) {
+                    val generation=inputGeneration
+                    acquireGuestKey(handle,VK_F3)
+                    mainHandler.postDelayed({if(inputGeneration==generation && session==handle) releaseGuestKey(handle,VK_F3)},80)
+                }
+            }
+            DeckInputPolicy.Action.NEXT_FILTER -> surface.queueEvent {
+                val filter=glRenderer.cycleFilter();surface.requestRender()
+                mainHandler.post {
+                    runCatching {val config=JSONObject(NativeBridge.readConfig(gameRoot));config.put("upscale_filter",filter);NativeBridge.writeConfig(gameRoot,config.toString())}
+                    Toast.makeText(this,"Filter: $filter",Toast.LENGTH_SHORT).show()
+                }
+            }
+            DeckInputPolicy.Action.SCREENSHOT -> {glRenderer.requestScreenshot();surface.requestRender()}
+            DeckInputPolicy.Action.RECORDING -> Toast.makeText(this,"Recording is available on desktop only.",Toast.LENGTH_SHORT).show()
+        }
+    }
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_F10) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) { glRenderer.requestScreenshot(); surface.requestRender() }
+        val keyAction=InputBindings.keyName(event)?.let {DeckInputPolicy.key(it)}
+        if(keyAction!=null) {
+            if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0 && ::glRenderer.isInitialized) performHostShortcut(keyAction)
+            return true
+        }
+        if(event.keyCode==KeyEvent.KEYCODE_ESCAPE && ::glRenderer.isInitialized && glRenderer.controllerFullscreen) {
+            if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) setControllerFullscreen(false)
             return true
         }
         val sources = event.device?.sources ?: event.source
         val isController = sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD || sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+        val controllerName=if(isController) InputBindings.controllerName(event.keyCode) else null
+        if(controllerName!=null && DeckInputPolicy.reserved(controllerName,gizmondoGame)) {
+            val now=android.os.SystemClock.uptimeMillis()
+            if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) {
+                deckHosts.down(event.deviceId,controllerName,now,gizmondoGame)
+                mainHandler.postDelayed(hostLongCheck,DeckInputPolicy.HOLD_MS)
+            } else if(event.action==KeyEvent.ACTION_UP) deckHosts.up(event.deviceId,controllerName,now,gizmondoGame)?.let {performHostShortcut(it)}
+            return true
+        }
         val gridName=if(isController) gridControllerName(event.keyCode) else gridKeyName(event)
         if(gridName!=null && routeGrid(GridInput(if(isController) "controller" else "keyboard",gridName),event.action==KeyEvent.ACTION_DOWN)) return true
         val steeringDirection=touchSteeringEnabled && (if(isController) gridName?.let{bindings.controllerKey(it)} else bindings.keyboardKey(event)) in listOf(VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT)
-        if (!gizmondoGame && !steeringDirection && ::stylusBindings.isInitialized && stylusBindings.enabled && session != 0L) {
+        if (!gizmondoGame && !steeringDirection && (!isController || controllerName==null || DeckInputPolicy.guest(controllerName,gizmondoGame)==null) && ::stylusBindings.isInitialized && stylusBindings.enabled && session != 0L) {
             val key=event.deviceId to event.keyCode
             val name=if(isController) InputBindings.controllerName(event.keyCode) else InputBindings.keyName(event)
             val direction=name?.let { if(isController) stylusBindings.pad(it) else stylusBindings.key(it) }
@@ -956,7 +998,7 @@ class GameActivity : AppCompatActivity() {
                 routeGrid(GridInput("controller",name),down)
                 return@forEach
             }
-            val aim=if(!gizmondoGame && stylusBindings.enabled) stylusBindings.pad(name) else null
+            val aim=if(!gizmondoGame && stylusBindings.enabled && DeckInputPolicy.guest(name,gizmondoGame)==null) stylusBindings.pad(name) else null
             if(aim!=null && value>.18f) aimDesired[name]=aim to ((value-.18f)/.82f).coerceIn(0f,1f)
             else if(aim==null && value>.60f) bindings.controllerKey(name)?.let { desired[name]=it }
         }
@@ -1030,6 +1072,9 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun releaseHeldInput() {
+        inputGeneration++
+        deckHosts.clear()
+        mainHandler.removeCallbacks(hostLongCheck)
         cancelGrid()
         gridAxes.clear()
         if(session!=0L && touchSteeringEnabled) NativeBridge.nativeSendInput(session,NativeBridge.INPUT_TOUCH_STEERING,0,0)

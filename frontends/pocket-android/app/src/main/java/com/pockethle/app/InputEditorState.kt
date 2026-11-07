@@ -6,9 +6,10 @@ import org.json.JSONObject
 /** Edits the existing shared schema; a draft is persisted only by Save. */
 internal class InputEditorState(raw: String) {
     val json = JSONObject(raw)
-    val keyboard =
-        json.optJSONArray("keybindings") ?: JSONArray().also { json.put("keybindings", it) }
-    val controller =
+    var keyboard =
+        json.optJSONArray("keybindings")
+            ?: InputBindings.defaultKeyboard().also { json.put("keybindings", it) }
+    var controller =
         json.optJSONObject("gamepad_bindings")
             ?: InputBindings.defaultController().also { json.put("gamepad_bindings", it) }
     val stylus =
@@ -36,7 +37,8 @@ internal class InputEditorState(raw: String) {
 
     fun visibleButtons(gizmondo: Boolean) =
         InputBindings.buttons.keys.filter {
-            if (gizmondo) !it.startsWith("pocket_pc_app") else !it.startsWith("giz_piano")
+            if (gizmondo) !it.startsWith("pocket_pc_app") && it != "turbo"
+            else !it.startsWith("giz_piano")
         }
 
     fun label(target: String?): String =
@@ -72,7 +74,15 @@ internal class InputEditorState(raw: String) {
         else InputBindings.canonical(a).equals(InputBindings.canonical(b), true)
 
     fun assignment(input: String, pad: Boolean, gizmondo: Boolean): String? {
-        if (!pad && input == "F10") return "host"
+        if (
+            (!pad && DeckInputPolicy.key(input) != null) ||
+                (pad && DeckInputPolicy.reserved(input, gizmondo))
+        )
+            return "host"
+        if (pad)
+            DeckInputPolicy.guest(input, gizmondo)?.let {
+                return it
+            }
         if (!gizmondo && stylus.optBoolean("enabled", true)) {
             val directions = stylus.optJSONArray(if (pad) "controller" else "keyboard")
             for (i in 0..3) {
@@ -82,17 +92,56 @@ internal class InputEditorState(raw: String) {
             }
         }
         if (pad)
-            return InputBindings.controllerAliases(input).firstNotNullOfOrNull {
-                controller.optString(it).takeIf(String::isNotEmpty)
-            }
+            return displayGuest(
+                InputBindings.controllerAliases(input).firstNotNullOfOrNull {
+                    controller.optString(it).takeIf(String::isNotEmpty)
+                },
+                gizmondo,
+            )
         for (i in 0 until keyboard.length()) {
             val binding = keyboard.getJSONObject(i)
             val keys = binding.optJSONArray("keys") ?: continue
             if ((0 until keys.length()).any { same(keys.getString(it), input, false) })
-                return binding.getString("button")
+                return displayGuest(binding.getString("button"), gizmondo)
         }
         return null
     }
+
+    fun shortFor(input: String, pad: Boolean, gizmondo: Boolean): String {
+        val target = assignment(input, pad, gizmondo)
+        if (target != "host") return short(target)
+        val action =
+            if (pad) DeckInputPolicy.tap(input) ?: DeckInputPolicy.hold(input, gizmondo)
+            else DeckInputPolicy.key(input)
+        return action?.let { DeckInputPolicy.short(it) } ?: "Fullscreen"
+    }
+
+    fun assigned(target: String, pad: Boolean, gizmondo: Boolean, inputs: List<String>) =
+        inputs.any { assignment(it, pad, gizmondo) == target } ||
+            (pad &&
+                gizmondo &&
+                target == "giz_piano3" &&
+                DeckInputPolicy.hold("Select", true) == DeckInputPolicy.Action.BRIGHTNESS)
+
+    fun reset(pad: Boolean, defaults: JSONObject) {
+        if (pad) {
+            controller = JSONObject(defaults.getJSONObject("controller").toString())
+            json.put("gamepad_bindings", controller)
+            json.put("gamepad_fullscreen", defaults.getString("fullscreen"))
+        } else {
+            keyboard = JSONArray(defaults.getJSONArray("keyboard").toString())
+            json.put("keybindings", keyboard)
+        }
+    }
+
+    private fun displayGuest(target: String?, gizmondo: Boolean) =
+        if (gizmondo && target == "turbo") "giz_piano3" else target
+
+    fun fixed(input: String, pad: Boolean, gizmondo: Boolean) =
+        if (pad)
+            DeckInputPolicy.reserved(input, gizmondo) ||
+                DeckInputPolicy.guest(input, gizmondo) != null
+        else DeckInputPolicy.key(input) != null
 
     fun savedInputs(pad: Boolean): List<String> {
         val keys = mutableListOf<String>()
@@ -110,8 +159,9 @@ internal class InputEditorState(raw: String) {
         return keys.distinct().sorted()
     }
 
-    fun assign(input: String, pad: Boolean, target: String?): Boolean {
-        if (!pad && input == "F10") return false
+    fun assign(input: String, pad: Boolean, target: String?, gizmondo: Boolean? = null): Boolean {
+        if (gizmondo != null && fixed(input, pad, gizmondo)) return false
+        if (!pad && DeckInputPolicy.key(input) != null) return false
         if (pad)
             controller
                 .keys()

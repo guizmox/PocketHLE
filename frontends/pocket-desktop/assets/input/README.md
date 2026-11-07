@@ -19,3 +19,8 @@ control spacing. Full command names remain in the selection inspector and rows.
 
 The 26 controller entries are ordered as 13 left-rail controls, then 13 right-rail
 controls. Both editors use this order for the corresponding selection rows.
+
+`deck-input-defaults.json` is the shared factory/reference fixture used by Android
+Reset actions. Rust and Android tests compare it with their actual defaults and
+Pocket PC/Gizmondo override tables. Regenerate it from the Rust reference when
+changing the factory layout; never silently change it on one frontend only.

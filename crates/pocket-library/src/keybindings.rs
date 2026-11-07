@@ -472,11 +472,7 @@ fn xbox_gamepad_bindings() -> std::collections::BTreeMap<String, GuestButton> {
 }
 
 pub fn default_gamepad_bindings() -> std::collections::BTreeMap<String, GuestButton> {
-    if cfg!(feature = "steam-deck") {
-        steam_deck_gamepad_bindings()
-    } else {
-        xbox_gamepad_bindings()
-    }
+    steam_deck_gamepad_bindings()
 }
 
 pub fn steam_deck_gamepad_bindings() -> std::collections::BTreeMap<String, GuestButton> {
@@ -489,8 +485,8 @@ pub fn steam_deck_gamepad_bindings() -> std::collections::BTreeMap<String, Guest
     bindings
 }
 
-/// Desktop launchers share the Deck layout. Upgrade only known factory
-/// maps; Android's defaults and explicitly customized maps stay untouched.
+/// All launchers share the Deck layout. Upgrade only known factory maps;
+/// explicitly customized maps stay untouched.
 pub fn migrate_desktop_gamepad_layout(
     bindings: &mut std::collections::BTreeMap<String, GuestButton>,
     fullscreen: &mut Option<String>,
@@ -556,7 +552,7 @@ pub fn migrate_steam_deck_gamepad_bindings(
 
 /// Steam Deck View toggles host fullscreen in both UI and game.
 pub fn default_gamepad_fullscreen() -> Option<String> {
-    cfg!(feature = "steam-deck").then(|| "Select".to_owned())
+    Some("Select".to_owned())
 }
 
 /// Move the previous factory fullscreen shortcut; preserve other assignments.
@@ -571,6 +567,45 @@ pub fn migrate_steam_deck_fullscreen(binding: &mut Option<String>) -> bool {
 
 #[cfg(test)]
 mod controller_tests {
+    #[test]
+    fn android_reference_fixture_matches_deck_factory() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../frontends/pocket-desktop/assets/input/deck-input-defaults.json"
+        ))
+        .unwrap();
+        for button in GuestButton::ALL {
+            let name = serde_json::to_value(button).unwrap();
+            assert_eq!(
+                fixture["vk_codes"][name.as_str().unwrap()].as_u64(),
+                Some(button.vk() as u64)
+            );
+        }
+        assert_eq!(
+            fixture["keyboard"],
+            serde_json::to_value(KeyBindings::default()).unwrap()
+        );
+        assert_eq!(
+            fixture["controller"],
+            serde_json::to_value(default_gamepad_bindings()).unwrap()
+        );
+        assert_eq!(
+            fixture["fullscreen"],
+            serde_json::to_value(default_gamepad_fullscreen()).unwrap()
+        );
+        for (name, button) in fixture["ppc_overrides"].as_object().unwrap() {
+            assert_eq!(
+                *button,
+                serde_json::to_value(steam_deck_guest_button(name, false)).unwrap()
+            );
+        }
+        for (name, button) in fixture["gizmondo_overrides"].as_object().unwrap() {
+            assert_eq!(
+                *button,
+                serde_json::to_value(steam_deck_guest_button(name, true)).unwrap()
+            );
+        }
+    }
+
     use super::*;
     #[test]
     fn desktop_factory_layout_migrates_and_keeps_explicit_customizations() {
@@ -693,15 +728,10 @@ mod controller_tests {
     }
 
     #[test]
-    fn build_defaults_are_scoped_to_the_deck_edition() {
+    fn build_defaults_match_the_deck_reference() {
         let config: crate::LauncherConfig = serde_json::from_str("{}").unwrap();
-        if cfg!(feature = "steam-deck") {
-            assert!(config.gamepad_toggles_fullscreen("Select"));
-            assert_eq!(config.gamepad_bindings, steam_deck_gamepad_bindings());
-        } else {
-            assert_eq!(config.gamepad_fullscreen, None);
-            assert_eq!(config.gamepad_bindings, xbox_gamepad_bindings());
-        }
+        assert!(config.gamepad_toggles_fullscreen("Select"));
+        assert_eq!(config.gamepad_bindings, steam_deck_gamepad_bindings());
     }
     #[test]
     fn xbox_deck_preset_separates_host_fullscreen_from_gizmondo_keys() {
