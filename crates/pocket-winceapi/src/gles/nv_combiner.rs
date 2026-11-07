@@ -10,7 +10,7 @@ pub(super) const TARGET: u32 = 0x890a;
 
 pub(super) fn enabled() -> bool {
     with_ctx(|c| {
-        (c.nv_combiner_client && c.gpu_supports_combiner())
+        (c.nv_combiner_client && (!c.gpu_active() || c.gpu_supports_combiner()))
             || (!c.gpu_requested()
                 && std::env::var_os("POCKETHLE_EXPERIMENTAL_NV_COMBINER").is_some())
     })
@@ -174,5 +174,31 @@ pub(super) fn is_entry_point(name: &str) -> bool {
 pub(super) fn register(d: &mut WinCeDispatcher) {
     for &(name, handler) in ENTRY_POINTS {
         d.register_handler("libgles_cm.dll", name, handler);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detected_software_client_gets_combiners_without_gpu() {
+        crate::gles::reset_for_session();
+        with_ctx(|context| {
+            context.nv_combiner_client = true;
+            assert!(!context.gpu_requested());
+            assert!(!context.gpu_active());
+        });
+        assert!(enabled());
+        with_ctx(|context| {
+            context.set_egl_gpu_policy(true);
+            assert!(context.gpu_requested());
+            assert!(!context.gpu_active());
+        });
+        assert!(
+            enabled(),
+            "software fallback also needs the detected extension"
+        );
+        crate::gles::reset_for_session();
     }
 }
