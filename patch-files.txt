@@ -4,11 +4,13 @@ crates\pocket-library\src\keybindings.rs
 crates\pocket-library\src\stylus_grid.rs
 crates\pocket-winceapi\src\coredll.rs
 docs\FRONTENDS.md
+docs\IMPLEMENTATION-NOTES.md
 docs\STEAMDECK.md
 docs\UPDATES.md
 frontends\pocket-android\app\build.gradle.kts
 frontends\pocket-android\app\src\main\java\com\pockethle\app\AssignmentShortcuts.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\DeckInputPolicy.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\HostKeyActivity.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\InputBindings.kt
@@ -23,8 +25,10 @@ frontends\pocket-android\app\src\test\java\com\pockethle\app\DeckInputPolicyTest
 frontends\pocket-android\app\src\test\java\com\pockethle\app\InputEditorStateTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\InputGesturesTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\StylusGridTest.kt
+frontends\pocket-desktop\assets\input\deck-input-defaults.json
 frontends\pocket-desktop\src\app.rs
 frontends\pocket-desktop\src\bindings_visual.rs
 frontends\pocket-desktop\src\controller_ui.rs
+frontends\pocket-desktop\src\deck_navigation.rs
 frontends\pocket-desktop\src\desktop_main.rs
 frontends\pocket-desktop\src\host_shortcuts.rs

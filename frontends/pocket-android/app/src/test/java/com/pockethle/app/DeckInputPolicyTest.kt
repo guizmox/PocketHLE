@@ -19,6 +19,27 @@ class DeckInputPolicyTest {
         (0 until value.length()).map { value.getString(it) }
 
     @Test
+    fun androidHasNoScreenshotOrRecordingShortcuts() {
+        for (giz in listOf(false, true)) {
+            assertNull(DeckInputPolicy.tap("Mode"))
+            assertNull(DeckInputPolicy.hold("Mode", giz))
+            assertNull(DeckInputPolicy.hold("Start", giz))
+            assertFalse(DeckInputPolicy.reserved("Mode", giz))
+            assertFalse(DeckInputPolicy.reserved("Misc1", giz))
+            val tracker = DeckHostTracker()
+            assertFalse(tracker.down(1, "Mode", 0, giz))
+            assertTrue(tracker.down(1, "Start", 0, giz))
+            assertTrue(tracker.due(1000, giz).isEmpty())
+            assertNull(tracker.up(1, "Start", 1001, giz))
+            assertNull(InputBindings(LauncherConfig.default(), giz).controllerKey("Misc1"))
+        }
+        for (key in listOf("F10", "F11")) {
+            assertTrue(DeckInputPolicy.reservedKey(key))
+            assertNull(DeckInputPolicy.key(key))
+        }
+    }
+
+    @Test
     fun factoryMapsAndProfileOverridesMatchSharedDeckReference() {
         val reference = defaults()
         val expected = reference.getJSONObject("controller")
@@ -67,8 +88,7 @@ class DeckInputPolicyTest {
                 )
             for (i in 0 until controls.length()) {
                 val name = controls.getJSONObject(i).getString("input")
-                val host =
-                    name in listOf("Select", "Start", "Misc1") || (!gizmondo && name == "Mode")
+                val host = name in listOf("Select", "Start")
                 val button = overrides.optString(name).ifEmpty { expected.optString(name) }
                 assertEquals(
                     "$name / gizmondo=$gizmondo",
@@ -85,10 +105,10 @@ class DeckInputPolicyTest {
         assertFalse(state.visibleButtons(true).contains("turbo"))
         assertTrue(state.visibleButtons(false).contains("turbo"))
         state.assign("T", false, "turbo")
-        assertEquals("giz_piano3", state.assignment("T", false, true))
+        assertNull(state.assignment("T", false, true))
         assertEquals("turbo", state.assignment("T", false, false))
-        assertTrue(state.assigned("giz_piano3", true, true, listOf("Select")))
-        assertEquals(DeckInputPolicy.Action.BRIGHTNESS, DeckInputPolicy.hold("Select", true))
+        assertFalse(state.assigned("giz_piano3", true, true, listOf("Select")))
+        assertEquals(DeckInputPolicy.Action.EXIT, DeckInputPolicy.hold("Select", true))
         state.reset(true, defaults())
         assertEquals(stringMap(defaults().getJSONObject("controller")), stringMap(state.controller))
     }
@@ -98,7 +118,7 @@ class DeckInputPolicyTest {
         val held = DeckHostTracker()
         assertTrue(held.down(1, "Back", 0, true))
         assertTrue(held.due(649, true).isEmpty())
-        assertEquals(listOf(DeckInputPolicy.Action.BRIGHTNESS), held.due(650, true))
+        assertEquals(listOf(DeckInputPolicy.Action.EXIT), held.due(650, true))
         assertNull(held.up(1, "Select", 800, true))
         held.down(2, "Select", 1000, false)
         assertEquals(DeckInputPolicy.Action.FULLSCREEN, held.up(2, "Back", 1200, false))

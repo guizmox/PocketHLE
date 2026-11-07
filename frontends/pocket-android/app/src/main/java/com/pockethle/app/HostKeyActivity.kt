@@ -2,6 +2,7 @@ package com.pockethle.app
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.View
 import android.view.Window
@@ -12,6 +13,10 @@ import org.json.JSONObject
 
 /** Reserved physical host keys are handled before launcher widgets or capture dialogs. */
 abstract class HostKeyActivity : AppCompatActivity() {
+    private val hostController = DeckHostTracker()
+
+    protected open fun hostGizmondo() = false
+
     private var hostFullscreen = false
     private val normalWindows = java.util.WeakHashMap<Window, Pair<Int, Int>>()
     private var barWasShowing = false
@@ -60,10 +65,31 @@ abstract class HostKeyActivity : AppCompatActivity() {
     }
 
     protected fun handleHostKeyEvent(event: KeyEvent): Boolean {
+        val source = event.device?.sources ?: event.source
+        val pad =
+            source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
+                source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+        if (pad) {
+            val control = InputBindings.controllerName(event.keyCode) ?: return false
+            if (!DeckInputPolicy.reserved(control, hostGizmondo())) return false
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                hostController.down(event.deviceId, control, event.eventTime, hostGizmondo())
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                hostController.up(event.deviceId, control, event.eventTime, hostGizmondo())?.let {
+                    runHostAction(it)
+                }
+            }
+            return true
+        }
         val name = InputBindings.keyName(event) ?: return false
         if (!DeckInputPolicy.reservedKey(name)) return false
         if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return true
-        when (DeckInputPolicy.key(name)) {
+        DeckInputPolicy.key(name)?.let { runHostAction(it) }
+        return true
+    }
+
+    private fun runHostAction(action: DeckInputPolicy.Action) {
+        when (action) {
             DeckInputPolicy.Action.EXIT -> {
                 startActivity(
                     Intent(this, MainActivity::class.java)
@@ -100,9 +126,12 @@ abstract class HostKeyActivity : AppCompatActivity() {
                 applyHostFullscreen(window)
                 onHostFullscreenChanged()
             }
-            else -> {} // F10/F11 retain their game-only actions, and stay reserved in menus.
         }
-        return true
+    }
+
+    override fun onPause() {
+        hostController.clear()
+        super.onPause()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =

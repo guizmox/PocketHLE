@@ -22,10 +22,10 @@ identification in an ordinary desktop executable.
 | Menu, short press | Next presentation filter |
 | Menu, hold 650 ms | Start/stop video recording |
 | View, short press | Toggle fullscreen |
-| View, hold 650 ms | Gizmondo brightness; exit game on PocketPC |
-| Extra/Misc1, short press (if delivered) | Next presentation filter |
-| Extra/Misc1, hold 650 ms (if delivered) | Start/stop video recording |
-| Guide/Mode, hold 650 ms (if delivered) | Exit game on PocketPC; no built-in Gizmondo action |
+| View, hold 650 ms | Return to library on both PocketPC and Gizmondo |
+| Extra/Misc1, short press (if delivered) | Unassigned on both profiles (assignable) |
+| Extra/Misc1, hold 650 ms (if delivered) | Unassigned by default |
+| Guide/Mode, short press (if delivered) | Screenshot by default; customizable, no default hold |
 
 These host gestures take precedence over an old default-binding migration note.
 They change emulator presentation/device controls, not SteamOS volume/brightness.
@@ -38,13 +38,14 @@ They change emulator presentation/device controls, not SteamOS volume/brightness
 | L1 / R1 | P1 / P2 |
 | L2 / R2 | P3 / P4 |
 | Left-stick click | Escape |
-| Right-stick click | Action / Enter |
-| A / B / X / Y | A / B / C / Tab (Ctrl / Space / Shift / Tab) |
+| Right-stick click | Tab |
+| A / B / X / Y | Action / B / C / A (Enter / Space / Shift / Ctrl) |
 
 P1-P4 are the buttons exposed by GAPI; Action/Enter is separate. A game that
 only lists GAPI buttons need not accept every keyboard key. Stick clicks and
-motion are independent. Guide/Mode holds to exit a PocketPC game if SDL receives
-it. Extra/Misc1 follows Menu: tap for the next filter, hold for recording.
+motion are independent. Guide/Mode taps screenshot when SDL receives it and has
+no long action. Extra/Misc1 is unassigned on both profiles.
+View hold exits either device profile; it never sends Brightness.
 SteamOS may reserve these controls before they reach the application.
 
 ### Gizmondo factory guest mappings
@@ -129,3 +130,14 @@ Output is target/release/pockethle-steamdeck.exe, or the CI's configured target
 folder. The standard desktop and Android use the same factory binding reference;
 the dedicated edition has its own startup behavior and configuration filename. Native services and
 physical Deck behavior require device validation; build success alone is not it.
+
+The small top-left View/Select (Full) and top-right Menu/Start (Filter) buttons
+are reserved for PocketHLE, including their holds. Their mapping outlines are
+red and neither gesture can be assigned to a guest command. Fullscreen and
+filter taps remain active in launcher menus and the assignment assistant.
+
+Keyboard profiles use PocketPC P1/P2/P3/P4 on number-row 1/2/3/4. Gizmondo
+keeps F1–F5 for its piano keys, uses L1/R1 for its shoulder command names, and
+has no factory T-to-Brightness alias. PocketPC has no factory Gizmondo F-key
+actions. Number-row binding events ignore Shift via physical digit positions;
+AZERTY letter mappings and ordinary text entry retain their layout.

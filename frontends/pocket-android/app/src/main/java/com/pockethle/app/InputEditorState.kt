@@ -52,10 +52,12 @@ internal class InputEditorState(raw: String) {
                 (0..3).map { "stylus:$it" }
             else emptyList()
 
-    fun label(target: String?): String =
+    fun label(target: String?, gizmondo: Boolean = false): String =
         when {
+                gizmondo && target in gizmondoNames -> gizmondoNames.getValue(target!!)
+                !gizmondo && target in pocketNames -> pocketNames.getValue(target!!)
                 target == null -> "Unassigned"
-                target == "host" -> "Screenshot"
+                target == "host" -> "Reserved"
                 target.startsWith("stylus:") ->
                     "Stylus ${StylusBindings.directions[target.substringAfter(':').toInt()]}"
                 else -> InputBindings.buttons[target]?.first ?: target
@@ -65,10 +67,40 @@ internal class InputEditorState(raw: String) {
             .replace("←", "Left")
             .replace("→", "Right")
 
-    fun short(target: String?) =
+    private val gizmondoNames =
+        mapOf(
+            "action" to "Play",
+            "button_a" to "Stop",
+            "button_b" to "Forward",
+            "button_c" to "Rewind",
+            "soft1" to "L1",
+            "soft2" to "R1",
+        )
+
+    private val pocketNames =
+        mapOf(
+            "action" to "ACTION",
+            "soft1" to "TAB",
+            "soft2" to "ESC",
+            "turbo" to "TURBO",
+            "button_a" to "A",
+            "button_b" to "B",
+            "button_c" to "C",
+            "pocket_pc_app1" to "P1",
+            "pocket_pc_app2" to "P2",
+            "pocket_pc_app3" to "P3",
+            "pocket_pc_app4" to "P4",
+        )
+
+    fun short(target: String?, gizmondo: Boolean = false) =
         when {
+            gizmondo && target in gizmondoNames -> gizmondoNames.getValue(target!!)
+            target == "action" -> "Act"
+            !gizmondo && target == "soft1" -> "Tab"
+            !gizmondo && target == "soft2" -> "Esc"
+            !gizmondo && target in pocketNames -> pocketNames.getValue(target!!)
             target == null -> "—"
-            target == "host" -> "Photo"
+            target == "host" -> "Reserved"
             target.startsWith("stylus:") ->
                 "Pen ${StylusBindings.directions[target.substringAfter(':').toInt()]}"
             target.startsWith("dpad_") ->
@@ -85,7 +117,7 @@ internal class InputEditorState(raw: String) {
         else InputBindings.canonical(a).equals(InputBindings.canonical(b), true)
 
     fun assignment(input: String, pad: Boolean, gizmondo: Boolean): String? {
-        if (!pad && DeckInputPolicy.reservedKey(input)) return "host"
+        if (fixed(input, pad, gizmondo)) return "host"
         val customKey = InputGestures.bindingKey(gizmondo, pad, input)
         if (shortPress.has(customKey))
             return displayGuest(
@@ -124,19 +156,19 @@ internal class InputEditorState(raw: String) {
             val binding = keyboard.getJSONObject(i)
             val keys = binding.optJSONArray("keys") ?: continue
             if ((0 until keys.length()).any { same(keys.getString(it), input, false) })
-                return displayGuest(binding.getString("button"), gizmondo)
+                return DeckInputPolicy.keyboardGuest(input, binding.getString("button"), gizmondo)
         }
-        return null
+        return if (pad) null else DeckInputPolicy.keyboardGuest(input, null, gizmondo)
     }
 
     fun shortFor(input: String, pad: Boolean, gizmondo: Boolean): String {
         if (!pad && input.equals("F8", true)) return "Library"
         val target = assignment(input, pad, gizmondo)
-        if (target != "host") return short(target)
+        if (target != "host") return short(target, gizmondo)
         val action =
             if (pad) DeckInputPolicy.tap(input) ?: DeckInputPolicy.hold(input, gizmondo)
             else DeckInputPolicy.key(input)
-        return action?.let { DeckInputPolicy.short(it) } ?: "Fullscreen"
+        return action?.let { DeckInputPolicy.short(it) } ?: "Reserved"
     }
 
     fun assigned(target: String, pad: Boolean, gizmondo: Boolean, inputs: List<String>) =
@@ -146,12 +178,9 @@ internal class InputEditorState(raw: String) {
             longPress.keys().asSequence().any {
                 it.startsWith(InputGestures.bindingKey(gizmondo, pad, "")) &&
                     longPress.optString(it) == target &&
-                    (pad || !DeckInputPolicy.reservedKey(it.substringAfter(":keyboard:")))
-            } ||
-            (pad &&
-                gizmondo &&
-                target == "giz_piano3" &&
-                DeckInputPolicy.hold("Select", true) == DeckInputPolicy.Action.BRIGHTNESS)
+                    (if (pad) !DeckInputPolicy.reserved(it.substringAfter(":controller:"), gizmondo)
+                    else !DeckInputPolicy.reservedKey(it.substringAfter(":keyboard:")))
+            }
 
     val shortPress =
         json.optJSONObject("short_press_bindings")
@@ -161,7 +190,7 @@ internal class InputEditorState(raw: String) {
             ?: JSONObject().also { json.put("long_press_bindings", it) }
 
     fun longTarget(input: String, pad: Boolean, gizmondo: Boolean): String? =
-        if (!pad && DeckInputPolicy.reservedKey(input)) null
+        if (fixed(input, pad, gizmondo)) null
         else
             longPress.optString(InputGestures.bindingKey(gizmondo, pad, input)).takeIf {
                 it.isNotEmpty()

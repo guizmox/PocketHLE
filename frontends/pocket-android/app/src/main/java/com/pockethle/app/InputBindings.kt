@@ -13,11 +13,16 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
         JSONObject(config.originalJson).optJSONObject("short_press_bindings") ?: JSONObject()
 
     fun hasShort(input: String, pad: Boolean) =
-        (pad || !DeckInputPolicy.reservedKey(input)) &&
+        (if (pad) !DeckInputPolicy.reserved(input, gizmondo ?: false)
+        else !DeckInputPolicy.reservedKey(input)) &&
             shortPress.has(InputGestures.bindingKey(gizmondo ?: false, pad, input))
 
     fun shortKey(input: String, pad: Boolean): Int? =
-        if (!pad && DeckInputPolicy.reservedKey(input)) null
+        if (
+            if (pad) DeckInputPolicy.reserved(input, gizmondo ?: false)
+            else DeckInputPolicy.reservedKey(input)
+        )
+            null
         else
             buttons[shortPress.optString(InputGestures.bindingKey(gizmondo ?: false, pad, input))]
                 ?.second
@@ -44,9 +49,15 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
             for (j in 0 until keys.length()) if (
                 canonical(keys.getString(j)).equals(canonical(name), true)
             )
-                return buttons[entry.optString("button")]?.second
+                return buttons[
+                        DeckInputPolicy.keyboardGuest(
+                            name,
+                            entry.optString("button"),
+                            gizmondo ?: false,
+                        )]
+                    ?.second
         }
-        return null
+        return buttons[DeckInputPolicy.keyboardGuest(name, null, gizmondo ?: false)]?.second
     }
 
     fun keyboardKey(event: KeyEvent): Int? = keyName(event)?.let { keyboardName(it) }
@@ -179,14 +190,11 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
                 else -> if (name.startsWith("Arrow", true)) name.substring(5) else name
             }
 
-        fun keyName(event: KeyEvent): String? =
-            namedKey(event.keyCode)
-                ?: event
-                    .getUnicodeChar(0)
-                    .takeIf { it > 32 && it <= 126 }
-                    ?.toChar()
-                    ?.uppercaseChar()
-                    ?.toString()
+        fun keyName(event: KeyEvent): String? = keyName(event.keyCode, event.getUnicodeChar(0))
+
+        fun keyName(code: Int, unicode: Int): String? =
+            namedKey(code)
+                ?: unicode.takeIf { it > 32 && it <= 126 }?.toChar()?.uppercaseChar()?.toString()
 
         fun namedKey(code: Int): String? =
             when (code) {

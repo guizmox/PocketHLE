@@ -64,7 +64,7 @@ impl HostInput {
             {
                 Some("Reserved by PocketHLE (Escape / F8–F12).")
             }
-            Self::Controller(n) if matches!(n.as_str(), "Select" | "Start" | "Mode" | "Misc1") => {
+            Self::Controller(n) if matches!(n.as_str(), "Select" | "Start") => {
                 Some("Reserved by PocketHLE (fullscreen, filters, recording or system button).")
             }
             Self::Controller(n)
@@ -256,7 +256,7 @@ mod tests {
         for name in ["F8", "F9", "F10", "F11", "F12", "Escape"] {
             assert!(g.bind(0, HostInput::Keyboard(name.into()), None).is_err());
         }
-        for name in ["Start", "Select", "Guide", "Misc1"] {
+        for name in ["Start", "Select"] {
             assert!(g.bind(0, HostInput::Controller(name.into()), None).is_err());
         }
         assert!(g

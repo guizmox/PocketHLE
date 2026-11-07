@@ -221,6 +221,9 @@ class InputSettingsActivity : HostKeyActivity() {
     private lateinit var state: InputEditorState
     private lateinit var rootDir: String
     private var gizmondo = false
+
+    override fun hostGizmondo() = gizmondo
+
     private var zoomKeyboard = false
     private var assignmentDialog: Dialog? = null
     private var scroll: ScrollView? = null
@@ -291,16 +294,20 @@ class InputSettingsActivity : HostKeyActivity() {
                         InputSkinView.color(state.assignment(input, true, gizmondo))
                 ) +
                     (state.longTarget(input, true, gizmondo)?.let {
-                        listOf("\nHold: ${state.short(it)}" to InputSkinView.LONG_PRESS)
+                        listOf("\nHold: ${state.short(it, gizmondo)}" to InputSkinView.LONG_PRESS)
                     } ?: emptyList())
             )
         val parts = mutableListOf(label + ": " to Color.LTGRAY)
         DeckInputPolicy.tap(input)?.let {
             parts.add(DeckInputPolicy.label(it) to InputSkinView.PURPLE)
         }
-        DeckInputPolicy.hold(input, gizmondo)?.let {
-            parts.add("\nHold: ${DeckInputPolicy.short(it)}" to InputSkinView.LONG_PRESS)
-        }
+        val customHold = state.longTarget(input, true, gizmondo)
+        if (customHold != null) {
+            parts.add("\nHold: ${state.short(customHold, gizmondo)}" to InputSkinView.LONG_PRESS)
+        } else
+            DeckInputPolicy.hold(input, gizmondo)?.let {
+                parts.add("\nHold: ${DeckInputPolicy.short(it)}" to InputSkinView.LONG_PRESS)
+            }
         return spans(parts)
     }
 
@@ -525,9 +532,11 @@ class InputSettingsActivity : HostKeyActivity() {
             }
         if (missing.isNotEmpty())
             body.addView(
-                text("Unassigned commands: ${missing.joinToString {state.label(it)}}", 12f).apply {
-                    setTextColor(Color.GRAY)
-                }
+                text(
+                        "Unassigned commands: ${missing.joinToString {state.label(it, gizmondo)}}",
+                        12f,
+                    )
+                    .apply { setTextColor(Color.GRAY) }
             )
     }
 
@@ -571,13 +580,13 @@ class InputSettingsActivity : HostKeyActivity() {
                 }
         } else {
             panel.addView(
-                text("Short press: ${state.label(target)}").apply {
+                text("Short press: ${state.label(target, gizmondo)}").apply {
                     setTextColor(InputSkinView.color(target))
                 }
             )
             val long = state.longTarget(input, pad, gizmondo)
             panel.addView(
-                text("Long press: ${state.label(long)}").apply {
+                text("Long press: ${state.label(long, gizmondo)}").apply {
                     setTextColor(if (long == null) Color.GRAY else InputSkinView.LONG_PRESS)
                 }
             )
@@ -643,7 +652,7 @@ class InputSettingsActivity : HostKeyActivity() {
                         }
                         selected[pad] = name
                         notice =
-                            "${if(long) "Long" else "Short"} press: $name → ${state.label(target)}"
+                            "${if(long) "Long" else "Short"} press: $name → ${state.label(target, gizmondo)}"
                         stage = 2
                         index = 0
                         render()
@@ -723,7 +732,7 @@ class InputSettingsActivity : HostKeyActivity() {
                                 )
                         }
                         val choices =
-                            if (stage == 1) targets.map { state.label(it) }
+                            if (stage == 1) targets.map { state.label(it, gizmondo) }
                             else
                                 listOf(
                                     "Assign another input",

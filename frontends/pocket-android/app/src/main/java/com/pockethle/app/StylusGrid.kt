@@ -34,7 +34,7 @@ internal data class GridInput(val source:String,val name:String) {
     fun conflict(fullscreen:String?):String? {
         val input=canonical()
         if(source=="keyboard" && input.name in listOf("ESCAPE","F8","F9","F10","F11","F12")) return "Reserved by PocketHLE (Escape / F8–F12)."
-        if(source=="controller" && input.name in listOf("Select","Start","Mode","Misc1")) return "Reserved by PocketHLE (fullscreen, filters, recording or system button)."
+        if(source=="controller" && input.name in listOf("Select","Start")) return "Reserved by PocketHLE (fullscreen, filters, recording or system button)."
         if(source=="controller" && fullscreen!=null && input==GridInput("controller",fullscreen).canonical()) return "This input is assigned to fullscreen in PocketHLE settings."
         return null
     }

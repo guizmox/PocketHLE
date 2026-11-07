@@ -39,7 +39,7 @@ impl Assignment {
                 Turbo => "Turbo",
                 GizPiano1 => "Home",
                 GizPiano2 => "Vol",
-                GizPiano3 => "Light",
+                GizPiano3 => "Brightness",
                 GizPiano4 => "Geo",
                 GizPiano5 => "Power",
                 PocketPcApp1 => "App 1",
@@ -62,6 +62,39 @@ impl Assignment {
 
     fn label_for(self, gizmondo: bool) -> String {
         if let Self::Guest(button) = self {
+            if gizmondo {
+                let name = match button {
+                    GuestButton::Action => Some("Play"),
+                    GuestButton::ButtonA => Some("Stop"),
+                    GuestButton::ButtonB => Some("Forward"),
+                    GuestButton::ButtonC => Some("Rewind"),
+                    GuestButton::Soft1 => Some("L1"),
+                    GuestButton::Soft2 => Some("R1"),
+                    _ => None,
+                };
+                if let Some(name) = name {
+                    return name.into();
+                }
+            }
+            if !gizmondo {
+                let name = match button {
+                    GuestButton::Action => Some("ACTION"),
+                    GuestButton::Soft1 => Some("TAB"),
+                    GuestButton::Soft2 => Some("ESC"),
+                    GuestButton::Turbo => Some("TURBO"),
+                    GuestButton::ButtonA => Some("A"),
+                    GuestButton::ButtonB => Some("B"),
+                    GuestButton::ButtonC => Some("C"),
+                    GuestButton::PocketPcApp1 => Some("P1"),
+                    GuestButton::PocketPcApp2 => Some("P2"),
+                    GuestButton::PocketPcApp3 => Some("P3"),
+                    GuestButton::PocketPcApp4 => Some("P4"),
+                    _ => None,
+                };
+                if let Some(name) = name {
+                    return name.into();
+                }
+            }
             let label = readable(button.label());
             if let Some((ppc, giz)) = label.split_once(" / ") {
                 return if gizmondo {
@@ -72,6 +105,35 @@ impl Assignment {
             }
         }
         self.label()
+    }
+
+    /// Compact captions for diagrams; command lists keep the full profile names.
+    fn diagram_label(self, gizmondo: bool) -> String {
+        if gizmondo
+            && matches!(
+                self,
+                Self::Guest(
+                    GuestButton::Action
+                        | GuestButton::ButtonA
+                        | GuestButton::ButtonB
+                        | GuestButton::ButtonC
+                        | GuestButton::Soft1
+                        | GuestButton::Soft2
+                )
+            )
+        {
+            return self.label_for(true);
+        }
+        match self {
+            Self::Guest(GuestButton::Action) => "Act".into(),
+            Self::Guest(GuestButton::Soft1) => if gizmondo { "S1" } else { "Tab" }.into(),
+            Self::Guest(GuestButton::Soft2) => if gizmondo { "S2" } else { "Esc" }.into(),
+            Self::Guest(GuestButton::PocketPcApp1) => "P1".into(),
+            Self::Guest(GuestButton::PocketPcApp2) => "P2".into(),
+            Self::Guest(GuestButton::PocketPcApp3) => "P3".into(),
+            Self::Guest(GuestButton::PocketPcApp4) => "P4".into(),
+            _ => self.short().into(),
+        }
     }
 
     fn color(self) -> Color32 {
@@ -212,22 +274,20 @@ fn guest_assignment(button: GuestButton, gizmondo: bool) -> Assignment {
 fn controller_tap(control: &str) -> Option<&'static str> {
     match control {
         "Select" => Some("Fullscreen"),
-        "Start" | "Misc1" => Some("Next filter"),
+        "Start" => Some("Next filter"),
+        "Mode" => Some("Screenshot"),
         _ => None,
     }
 }
-fn controller_hold(control: &str, gizmondo: bool) -> Option<&'static str> {
+fn controller_hold(control: &str, _gizmondo: bool) -> Option<&'static str> {
     match control {
-        "Select" if gizmondo => Some("Brightness"),
         "Select" => Some("Return to library"),
-        "Start" | "Misc1" => Some("Start / stop recording"),
-        "Mode" if !gizmondo => Some("Return to library"),
+        "Start" => Some("Start / stop recording"),
         _ => None,
     }
 }
 fn short_hold(control: &str, gizmondo: bool) -> Option<&'static str> {
     controller_hold(control, gizmondo).map(|role| match role {
-        "Brightness" => "Brightness",
         "Return to library" => "Exit",
         _ => "Record",
     })
@@ -263,9 +323,7 @@ fn keyboard_assignment(config: &LauncherConfig, key: &str, gizmondo: bool) -> As
             return Assignment::Stylus(index);
         }
     }
-    config
-        .keybindings
-        .button_for_key(key)
+    pocket_library::keybindings::keyboard_button_for_profile(&config.keybindings, key, gizmondo)
         .map_or(Assignment::Unbound, |button| {
             guest_assignment(button, gizmondo)
         })
@@ -292,17 +350,19 @@ fn keyboard_context_note(key: &str) -> Option<&'static str> {
     }
 }
 
-fn controller_shortcut(control: &str, gizmondo: bool) -> Option<&'static str> {
+fn controller_shortcut(control: &str, _gizmondo: bool) -> Option<&'static str> {
     match control {
-        "Select" if gizmondo => Some("Tap: fullscreen · hold: Brightness"),
         "Select" => Some("Tap: fullscreen · hold: return to library"),
-        "Start" | "Misc1" => Some("Tap: next filter · hold: start / stop recording"),
-        "Mode" if !gizmondo => Some("Hold: return to library (if delivered by the OS)"),
+        "Start" => Some("Tap: next filter · hold: start / stop recording"),
+        "Mode" => Some("Default: screenshot (customizable)"),
         _ => None,
     }
 }
 
 fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool) -> Assignment {
+    if controller_fixed(control, gizmondo) {
+        return Assignment::Unbound;
+    }
     if let Some(button) =
         config
             .short_press_bindings
@@ -315,7 +375,7 @@ fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool)
     if let Some(button) = pocket_library::keybindings::steam_deck_guest_button(control, gizmondo) {
         return Assignment::Guest(button);
     }
-    if controller_shortcut(control, gizmondo).is_some()
+    if effective_controller_shortcut(config, control, gizmondo).is_some()
         || config.gamepad_toggles_fullscreen(control)
     {
         return Assignment::Unbound;
@@ -346,8 +406,21 @@ fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool)
         })
 }
 
-fn controller_fixed(control: &str, gizmondo: bool) -> bool {
-    controller_shortcut(control, gizmondo).is_some()
+fn controller_fixed(control: &str, _gizmondo: bool) -> bool {
+    matches!(control, "Select" | "Start")
+}
+
+fn effective_controller_shortcut(
+    config: &LauncherConfig,
+    control: &str,
+    gizmondo: bool,
+) -> Option<&'static str> {
+    if control == "Mode"
+        && !pocket_library::keybindings::default_controller_screenshot(config, control, gizmondo)
+    {
+        return None;
+    }
+    controller_shortcut(control, gizmondo)
 }
 
 fn set_assignment(
@@ -933,7 +1006,7 @@ impl Editor {
         };
         ui.heading(physical);
         let shortcut = if controller {
-            controller_shortcut(input, self.gizmondo)
+            effective_controller_shortcut(config, input, self.gizmondo)
         } else {
             keyboard_shortcut(input)
         };
@@ -942,7 +1015,23 @@ impl Editor {
                 if let Some(action) = controller_tap(input) {
                     ui.colored_label(PURPLE, format!("Short press: {action}"));
                 }
-                if let Some(action) = controller_hold(input, self.gizmondo) {
+                if let Some(button) = config
+                    .long_press_bindings
+                    .get(&pocket_library::input_gestures::binding_key(
+                        self.gizmondo,
+                        true,
+                        input,
+                    ))
+                    .filter(|_| !controller_fixed(input, self.gizmondo))
+                {
+                    ui.colored_label(
+                        LONG_PRESS,
+                        format!(
+                            "Long press: {}",
+                            Assignment::Guest(*button).label_for(self.gizmondo)
+                        ),
+                    );
+                } else if let Some(action) = controller_hold(input, self.gizmondo) {
                     ui.colored_label(LONG_PRESS, format!("Long press: {action}"));
                 }
             } else {
@@ -996,6 +1085,9 @@ impl Editor {
                     .iter()
                     .flat_map(|b| config.keybindings.keys_for(*b).iter().cloned()),
             );
+            if !self.gizmondo {
+                inputs.extend((1..=4).map(|n| n.to_string()));
+            }
         }
         let prefix = pocket_library::input_gestures::binding_key(self.gizmondo, controller, "");
         let missing: Vec<_> = visible_buttons(self.gizmondo)
@@ -1003,19 +1095,22 @@ impl Editor {
                 if config.long_press_bindings.iter().any(|(key, b)| {
                     key.starts_with(&prefix)
                         && b == button
-                        && (controller
-                            || !pocket_library::keybindings::reserved_host_key(
+                        && if controller {
+                            !controller_fixed(
                                 key.strip_prefix(&prefix).unwrap_or(""),
-                            ))
+                                self.gizmondo,
+                            )
+                        } else {
+                            !pocket_library::keybindings::reserved_host_key(
+                                key.strip_prefix(&prefix).unwrap_or(""),
+                            )
+                        }
                 }) {
-                    return false;
-                }
-                if controller && self.gizmondo && *button == GuestButton::GizPiano3 {
                     return false;
                 }
                 !inputs.iter().any(|name| {
                     if controller {
-                        controller_shortcut(name, self.gizmondo).is_none()
+                        effective_controller_shortcut(config, name, self.gizmondo).is_none()
                             && controller_assignment(config, name, self.gizmondo)
                                 == Assignment::Guest(*button)
                     } else {
@@ -1102,11 +1197,9 @@ impl Editor {
                 (LONG_PRESS, "Long press"),
                 (Color32::GRAY, "Unassigned"),
                 (LIVE, "Pressed input"),
-                (RESERVED, "Reserved host key"),
+                (RESERVED, "Reserved host input"),
             ] {
-                if color != RESERVED || !controller {
-                    ui.colored_label(color, label);
-                }
+                ui.colored_label(color, label);
             }
         });
     }
@@ -1161,7 +1254,18 @@ impl Editor {
                 let point = art.min + Vec2::new(*x, *y) * (art_width / 760.0);
                 let active = self.control(ui, config, true, name, label, rail);
                 {
-                    if self.live_control(name) {
+                    if self.live_control(name) && controller_fixed(name, self.gizmondo) {
+                        let outline = Rect::from_center_size(
+                            point,
+                            Vec2::new(46.0, 24.0) * (art_width / 760.0),
+                        );
+                        ui.painter().rect(
+                            outline,
+                            10.0 * (art_width / 760.0),
+                            Color32::from_rgb(30, 62, 72),
+                            Stroke::new(1.5, RESERVED),
+                        );
+                    } else if self.live_control(name) {
                         ui.painter().circle(
                             point,
                             (art_width * 0.028).max(9.0),
@@ -1179,7 +1283,7 @@ impl Editor {
                         }
                     }
                     let assignment = controller_assignment(config, name, self.gizmondo);
-                    let shortcut = controller_shortcut(name, self.gizmondo);
+                    let shortcut = effective_controller_shortcut(config, name, self.gizmondo);
                     let configured_fullscreen = !controller_fixed(name, self.gizmondo)
                         && config.gamepad_toggles_fullscreen(name);
                     let label = if configured_fullscreen {
@@ -1187,29 +1291,24 @@ impl Editor {
                     } else if shortcut.is_some() {
                         match *name {
                             "Select" => "Full",
-                            "Start" | "Misc1" => "Filter",
-                            "Mode" => "Exit",
+                            "Start" => "Filter",
+                            "Mode" => "Screenshot",
                             _ => "Host",
                         }
                     } else {
-                        match assignment {
-                            Assignment::Stylus(0) => "PenU",
-                            Assignment::Stylus(1) => "PenD",
-                            Assignment::Stylus(2) => "PenL",
-                            Assignment::Stylus(_) => "PenR",
-                            Assignment::Guest(GuestButton::Action) => "Act",
-                            Assignment::Guest(GuestButton::Soft1) => "S1",
-                            Assignment::Guest(GuestButton::Soft2) => "S2",
-                            Assignment::Guest(GuestButton::PocketPcApp1) => "P1",
-                            Assignment::Guest(GuestButton::PocketPcApp2) => "P2",
-                            Assignment::Guest(GuestButton::PocketPcApp3) => "P3",
-                            Assignment::Guest(GuestButton::PocketPcApp4) => "P4",
-                            _ => assignment.short(),
-                        }
+                        assignment.short()
+                    };
+                    let label = if shortcut.is_none() && matches!(assignment, Assignment::Guest(_))
+                    {
+                        assignment.diagram_label(self.gizmondo)
+                    } else {
+                        label.to_owned()
                     };
                     let mut label_point = point;
                     if *name == "Misc1" {
                         label_point.y += 17.0;
+                    } else if *name == "Mode" && shortcut.is_some() {
+                        label_point.y += 26.0 * (art_width / 760.0);
                     }
                     if name.starts_with("LeftStick") || name.starts_with("RightStick") {
                         let distance = 14.0 * art_width / 760.0;
@@ -1239,21 +1338,39 @@ impl Editor {
                             assignment.color()
                         },
                     );
-                    let custom_hold = config
-                        .long_press_bindings
-                        .get(&pocket_library::input_gestures::binding_key(
-                            self.gizmondo,
-                            true,
-                            name,
-                        ))
-                        .map(|b| Assignment::Guest(*b).short());
-                    if let Some(hold) = custom_hold.or_else(|| short_hold(name, self.gizmondo)) {
+                    let custom_hold = (!controller_fixed(name, self.gizmondo))
+                        .then(|| {
+                            config
+                                .long_press_bindings
+                                .get(&pocket_library::input_gestures::binding_key(
+                                    self.gizmondo,
+                                    true,
+                                    name,
+                                ))
+                                .map(|b| Assignment::Guest(*b).diagram_label(self.gizmondo))
+                        })
+                        .flatten();
+                    if let Some(hold) = custom_hold
+                        .as_deref()
+                        .or_else(|| short_hold(name, self.gizmondo))
+                    {
                         ui.painter().text(
                             point + Vec2::new(0.0, if *name == "Misc1" { 27.0 } else { 14.0 }),
                             Align2::CENTER_CENTER,
                             format!("Hold: {hold}"),
                             FontId::proportional(8.5),
                             LONG_PRESS,
+                        );
+                    }
+                    if matches!(*name, "Select" | "Start") {
+                        let outline = Rect::from_center_size(
+                            point,
+                            Vec2::new(46.0, 24.0) * (art_width / 760.0),
+                        );
+                        ui.painter().rect_stroke(
+                            outline,
+                            10.0 * (art_width / 760.0),
+                            Stroke::new(1.5, RESERVED),
                         );
                     }
                     let hit =
@@ -1264,11 +1381,13 @@ impl Editor {
                         self.control = Some((*name).into());
                     }
                     if active || response.hovered() {
-                        ui.painter().circle_stroke(
-                            point,
-                            (art_width * 0.023).max(7.0),
-                            Stroke::new(1.5, BLUE),
-                        );
+                        if !controller_fixed(name, self.gizmondo) {
+                            ui.painter().circle_stroke(
+                                point,
+                                (art_width * 0.023).max(7.0),
+                                Stroke::new(1.5, BLUE),
+                            );
+                        }
                         if !compact {
                             let from = if side == 0 {
                                 rail.right_center()
@@ -1300,7 +1419,7 @@ impl Editor {
             keyboard_assignment(config, name, self.gizmondo)
         };
         let shortcut = if controller {
-            controller_shortcut(name, self.gizmondo)
+            effective_controller_shortcut(config, name, self.gizmondo)
         } else {
             keyboard_shortcut(name)
         };
@@ -1350,7 +1469,9 @@ impl Editor {
                 },
                 Stroke::new(
                     1.0,
-                    if pressed {
+                    if controller_fixed(name, self.gizmondo) {
+                        RESERVED
+                    } else if pressed {
                         LIVE
                     } else if is_selected {
                         BLUE
@@ -1392,17 +1513,23 @@ impl Editor {
             match name {
                 "F8" => "Library",
                 "F9" => "Filter",
-                "F10" => "Photo",
+                "F10" => "Screenshot",
                 "F11" => "Video",
                 "F12" => "Full",
                 "Select" => "Fullscreen",
-                "Mode" => "",
-                "Start" | "Misc1" => "Filter",
+                "Mode" => "Screenshot",
+                "Start" => "Filter",
                 _ => "Host",
             }
         } else {
             assignment.short()
         };
+        let command_label = if matches!(assignment, Assignment::Guest(_)) {
+            assignment.diagram_label(self.gizmondo)
+        } else {
+            command.to_owned()
+        };
+        let command = command_label.as_str();
         if controller {
             ui.painter().text(
                 rect.left_center() + Vec2::new(6.0, 0.0),
@@ -1411,15 +1538,22 @@ impl Editor {
                 FontId::proportional(11.0),
                 Color32::from_gray(210),
             );
-            let custom_hold = config
-                .long_press_bindings
-                .get(&pocket_library::input_gestures::binding_key(
-                    self.gizmondo,
-                    true,
-                    name,
-                ))
-                .map(|b| Assignment::Guest(*b).short());
-            if let Some(hold) = custom_hold.or_else(|| short_hold(name, self.gizmondo)) {
+            let custom_hold = (!controller_fixed(name, self.gizmondo))
+                .then(|| {
+                    config
+                        .long_press_bindings
+                        .get(&pocket_library::input_gestures::binding_key(
+                            self.gizmondo,
+                            true,
+                            name,
+                        ))
+                        .map(|b| Assignment::Guest(*b).diagram_label(self.gizmondo))
+                })
+                .flatten();
+            if let Some(hold) = custom_hold
+                .as_deref()
+                .or_else(|| short_hold(name, self.gizmondo))
+            {
                 if custom_hold.is_some() || controller_tap(name).is_some() {
                     ui.painter().text(
                         rect.right_top() + Vec2::new(-6.0, 6.0),
@@ -1522,6 +1656,184 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| editor.quick_assign(ui, config, true));
         });
     }
+    #[test]
+    fn keyboard_factory_bindings_follow_the_selected_device_profile() {
+        let mut config = LauncherConfig::default();
+        for (key, button) in [
+            ("1", GuestButton::PocketPcApp1),
+            ("2", GuestButton::PocketPcApp2),
+            ("3", GuestButton::PocketPcApp3),
+            ("4", GuestButton::PocketPcApp4),
+        ] {
+            assert!(
+                matches!(keyboard_assignment(&config,key,false),Assignment::Guest(b) if b==button)
+            );
+        }
+        for key in ["F1", "F2", "F3", "F4", "F5"] {
+            assert!(matches!(
+                keyboard_assignment(&config, key, false),
+                Assignment::Unbound
+            ));
+        }
+        assert!(matches!(
+            keyboard_assignment(&config, "T", true),
+            Assignment::Unbound
+        ));
+        assert!(matches!(
+            keyboard_assignment(&config, "F3", true),
+            Assignment::Guest(GuestButton::GizPiano3)
+        ));
+        let key = pocket_library::input_gestures::binding_key(false, false, "1");
+        config
+            .short_press_bindings
+            .insert(key, Some(GuestButton::Action));
+        assert!(matches!(
+            keyboard_assignment(&config, "1", false),
+            Assignment::Guest(GuestButton::Action)
+        ));
+    }
+
+    #[test]
+    fn gizmondo_has_its_own_labels_and_no_extra_or_system_brightness() {
+        for (button, label) in [
+            (GuestButton::Action, "Play"),
+            (GuestButton::ButtonA, "Stop"),
+            (GuestButton::ButtonB, "Forward"),
+            (GuestButton::ButtonC, "Rewind"),
+            (GuestButton::Soft1, "L1"),
+            (GuestButton::Soft2, "R1"),
+        ] {
+            assert_eq!(Assignment::Guest(button).label_for(true), label);
+            assert_eq!(Assignment::Guest(button).diagram_label(true), label);
+        }
+        let config = LauncherConfig::default();
+        assert!(matches!(
+            controller_assignment(&config, "Misc1", true),
+            Assignment::Unbound
+        ));
+        assert!(matches!(
+            controller_assignment(&config, "Misc1", false),
+            Assignment::Unbound
+        ));
+        assert_eq!(controller_hold("Select", true), Some("Return to library"));
+        assert!(!controller_shortcut("Select", true)
+            .unwrap()
+            .contains("Brightness"));
+    }
+
+    #[test]
+    fn diagram_captions_are_compact_while_command_names_stay_explicit() {
+        for (button, caption) in [
+            (GuestButton::Action, "Act"),
+            (GuestButton::Soft1, "Tab"),
+            (GuestButton::Soft2, "Esc"),
+            (GuestButton::DpadLeft, "Left"),
+            (GuestButton::DpadRight, "Right"),
+        ] {
+            assert_eq!(Assignment::Guest(button).diagram_label(false), caption);
+        }
+        assert_eq!(
+            Assignment::Guest(GuestButton::Action).label_for(false),
+            "ACTION"
+        );
+    }
+
+    #[test]
+    fn guide_screenshot_is_only_a_customizable_default() {
+        for gizmondo in [false, true] {
+            let mut config = LauncherConfig::default();
+            let mut editor = Editor::default();
+            editor.gizmondo = gizmondo;
+            assert!(!controller_fixed("Mode", gizmondo));
+            assert!(pocket_library::keybindings::default_controller_screenshot(
+                &config, "Mode", gizmondo
+            ));
+            let key = pocket_library::input_gestures::binding_key(gizmondo, true, "Mode");
+            config
+                .long_press_bindings
+                .insert(key.clone(), GuestButton::Action);
+            assert!(pocket_library::keybindings::default_controller_screenshot(
+                &config, "Mode", gizmondo
+            ));
+            assert!(editor.assign_short(
+                &mut config,
+                "Mode",
+                true,
+                Assignment::Guest(GuestButton::ButtonA)
+            ));
+            assert!(!pocket_library::keybindings::default_controller_screenshot(
+                &config, "Mode", gizmondo
+            ));
+            assert!(effective_controller_shortcut(&config, "Mode", gizmondo).is_none());
+            assert!(matches!(
+                controller_assignment(&config, "Mode", gizmondo),
+                Assignment::Guest(GuestButton::ButtonA)
+            ));
+            assert!(editor.assign_short(&mut config, "Mode", true, Assignment::Unbound));
+            assert!(!pocket_library::keybindings::default_controller_screenshot(
+                &config, "Mode", gizmondo
+            ));
+        }
+    }
+
+    #[test]
+    fn pocketpc_command_labels_and_unassigned_extra_match_the_guest_codes() {
+        use GuestButton::*;
+        for (button, label) in [
+            (Action, "ACTION"),
+            (Soft1, "TAB"),
+            (Soft2, "ESC"),
+            (Turbo, "TURBO"),
+            (ButtonA, "A"),
+            (ButtonB, "B"),
+            (ButtonC, "C"),
+            (PocketPcApp1, "P1"),
+            (PocketPcApp2, "P2"),
+            (PocketPcApp3, "P3"),
+            (PocketPcApp4, "P4"),
+        ] {
+            assert_eq!(Assignment::Guest(button).label_for(false), label);
+        }
+        assert_eq!(Soft1.vk(), 0x09);
+        assert_eq!(Soft2.vk(), 0x1b);
+        let config = LauncherConfig::default();
+        assert!(matches!(
+            controller_assignment(&config, "Misc1", false),
+            Assignment::Unbound
+        ));
+        assert!(!controller_fixed("Misc1", false));
+        assert_eq!(controller_tap("Mode"), Some("Screenshot"));
+        assert_eq!(controller_hold("Mode", false), None);
+        assert_eq!(controller_hold("Mode", true), None);
+    }
+
+    #[test]
+    fn function_buttons_ignore_legacy_short_and_long_guest_assignments() {
+        for gizmondo in [false, true] {
+            let mut config = LauncherConfig::default();
+            let mut editor = Editor::default();
+            editor.gizmondo = gizmondo;
+            for control in ["Select", "Start"] {
+                let key = pocket_library::input_gestures::binding_key(gizmondo, true, control);
+                config
+                    .short_press_bindings
+                    .insert(key.clone(), Some(GuestButton::ButtonA));
+                config.long_press_bindings.insert(key, GuestButton::ButtonB);
+                assert!(controller_fixed(control, gizmondo));
+                assert!(matches!(
+                    controller_assignment(&config, control, gizmondo),
+                    Assignment::Unbound
+                ));
+                assert!(!editor.assign_short(
+                    &mut config,
+                    control,
+                    true,
+                    Assignment::Guest(GuestButton::Action)
+                ));
+            }
+        }
+    }
+
     #[test]
     fn assistant_is_centered_when_opened_and_after_viewport_resize() {
         let ctx = egui::Context::default();
@@ -1934,11 +2246,8 @@ mod tests {
         assert!(!visible_buttons(true).any(|b| b == GuestButton::Turbo));
         assert!(visible_buttons(false).any(|b| b == GuestButton::Turbo));
         let config = LauncherConfig::default();
-        assert_eq!(
-            keyboard_assignment(&config, "T", true),
-            Assignment::Guest(GuestButton::GizPiano3)
-        );
-        assert_eq!(controller_hold("Select", true), Some("Brightness"));
+        assert_eq!(keyboard_assignment(&config, "T", true), Assignment::Unbound);
+        assert_eq!(controller_hold("Select", true), Some("Return to library"));
         assert_eq!(controller_tap("Select"), Some("Fullscreen"));
     }
 
@@ -1950,7 +2259,7 @@ mod tests {
             .insert("South".into(), GuestButton::Turbo);
         assert_eq!(
             controller_assignment(&config, "South", false),
-            Assignment::Guest(GuestButton::ButtonA)
+            Assignment::Guest(GuestButton::Action)
         );
         assert_eq!(
             controller_assignment(&config, "South", true),
@@ -2004,7 +2313,7 @@ mod tests {
         let mut config = LauncherConfig::default();
         let before = serde_json::to_value(&config).unwrap();
         let mut editor = Editor::default();
-        for input in ["Start", "Select", "Mode"] {
+        for input in ["Start", "Select"] {
             assert!(!editor.assign_short(
                 &mut config,
                 input,

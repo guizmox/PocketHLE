@@ -824,7 +824,6 @@ class GameActivity : AppCompatActivity() {
      * share a guest virtual-key code.
      */
     private val deckHosts=DeckHostTracker()
-    private var inputGeneration=0
     private val hostLongCheck=Runnable {
         deckHosts.due(android.os.SystemClock.uptimeMillis(),gizmondoGame).forEach {performHostShortcut(it)}
     }
@@ -832,14 +831,6 @@ class GameActivity : AppCompatActivity() {
         when(action) {
             DeckInputPolicy.Action.FULLSCREEN -> setControllerFullscreen(!glRenderer.controllerFullscreen)
             DeckInputPolicy.Action.EXIT -> finish()
-            DeckInputPolicy.Action.BRIGHTNESS -> {
-                val handle=session
-                if(handle!=0L) {
-                    val generation=inputGeneration
-                    acquireGuestKey(handle,VK_F3)
-                    mainHandler.postDelayed({if(inputGeneration==generation && session==handle) releaseGuestKey(handle,VK_F3)},80)
-                }
-            }
             DeckInputPolicy.Action.NEXT_FILTER -> surface.queueEvent {
                 val filter=glRenderer.cycleFilter();surface.requestRender()
                 mainHandler.post {
@@ -847,8 +838,6 @@ class GameActivity : AppCompatActivity() {
                     Toast.makeText(this,"Filter: $filter",Toast.LENGTH_SHORT).show()
                 }
             }
-            DeckInputPolicy.Action.SCREENSHOT -> {glRenderer.requestScreenshot();surface.requestRender()}
-            DeckInputPolicy.Action.RECORDING -> Toast.makeText(this,"Recording is available on desktop only.",Toast.LENGTH_SHORT).show()
         }
     }
     private val inputGestures = InputGestures()
@@ -901,6 +890,7 @@ class GameActivity : AppCompatActivity() {
             if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0 && ::glRenderer.isInitialized) performHostShortcut(keyAction)
             return true
         }
+        if (InputBindings.keyName(event)?.let { DeckInputPolicy.reservedKey(it) } == true) return true
         if(event.keyCode==KeyEvent.KEYCODE_ESCAPE && ::glRenderer.isInitialized && glRenderer.controllerFullscreen) {
             if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) setControllerFullscreen(false)
             return true
@@ -1195,7 +1185,6 @@ class GameActivity : AppCompatActivity() {
         inputGestures.clear()
         gestureAxes.clear()
         mainHandler.removeCallbacks(gestureTick)
-        inputGeneration++
         deckHosts.clear()
         mainHandler.removeCallbacks(hostLongCheck)
         cancelGrid()

@@ -2578,7 +2578,8 @@ three API calls' exact PCM and sample rate with both feature configurations.
 #### Approved Deck controls (2026-10-22)
 
 View (left/Select): release before 650ms toggles fullscreen; hold sends ESC
-for PocketPC or Piano3 brightness for Gizmondo. Menu (right/Start): tap cycles
+in the original layout. Superseded in 0.4.4: View hold now exits to the
+library for both profiles, with no Brightness guest key. Menu (right/Start): tap cycles
 filter, hold exits to library. Hold consumes tap; no guest Start/Select leaks.
 Gizmondo L1 sends Piano2 volume; all other saved Gizmondo bindings stay.
 PocketPC R2=Action,L2=APP2,R1=APP3,L1=APP4,A=A,B=B,X=C,Y=TAB. These reserved
@@ -3105,10 +3106,12 @@ Full Windows GUI, APK and physical Deck controller not run in this environment.
 
 #### User layout integration and callback-only IMGDECMP (2026-10-24)
 User supplied complete keybindings.rs and app.rs supersede the previous Deck
-layout. PPC only: L1=P1, R1=P2, L2=P3, R2=P4, L3=ESC, R3=Action. Preserve their
+layout. PPC originally used L1=P1, R1=P2, L2=P3, R2=P4, L3=ESC, R3=Action.
+Current 0.4.4 defaults use R3=Tab, South=Action, North=A and unassigned Extra. Preserve their
 FN/View/Menu hold-to-exit logic and all Gizmondo branches. The SDL worker names
-Guide "Mode"; accept both names in steam_deck_pocketpc_fn_exit_control, plus
-Misc1, without renaming existing saved backend controls.
+Guide "Mode". The former FN exit helper is superseded by the 0.4.4 input
+policy: Guide taps screenshot with no hold, Extra is now unassigned on both profiles, and
+View/Menu retain their reserved tap/hold gestures.
 IMGDECMP: phBM and ppImageRender can both be NULL when pfnImageProgress consumes
 the image. Validate the callback as an output sink; retain the temporary DIB
 and renderer during the synchronous callback and release afterward unless the
@@ -3487,7 +3490,7 @@ Assigned stick directions use 18% press/14% release deadzones, ignoring strength
 beyond that threshold. Unassigned right-stick aim remains available; held grid
 presses take priority over velocity aim. Real screen touch takes priority over both.
 
-Reserved Escape/F10/F11/F12 and View/Menu/Guide/QuickAccess controller inputs,
+Reserved Escape/F8/F9/F10/F11/F12 and View/Menu controller inputs,
 plus the configured controller fullscreen input, are refused by capture and runtime
 lookups. Never steal these host gestures or silently route them to guest touch.
 Grid capture and steering preview are local editor operations, never guest input.

@@ -66,12 +66,36 @@ internal class InputSkinView(
             if (pressed) {
                 paint.style = Paint.Style.FILL
                 paint.color = Color.rgb(30, 62, 72)
-                if (pad) canvas.drawCircle(rect.centerX(), rect.centerY(), 22f, paint)
+                if (pad && input != null && DeckInputPolicy.reserved(input, gizmondo))
+                    canvas.drawRoundRect(
+                        RectF(
+                            rect.centerX() - 23f,
+                            rect.centerY() - 12f,
+                            rect.centerX() + 23f,
+                            rect.centerY() + 12f,
+                        ),
+                        10f,
+                        10f,
+                        paint,
+                    )
+                else if (pad) canvas.drawCircle(rect.centerX(), rect.centerY(), 22f, paint)
                 else canvas.drawRoundRect(rect, 4f, 4f, paint)
                 paint.style = Paint.Style.STROKE
                 paint.color = LIVE
                 paint.strokeWidth = 3f
-                if (pad) canvas.drawCircle(rect.centerX(), rect.centerY(), 22f, paint)
+                if (pad && input != null && DeckInputPolicy.reserved(input, gizmondo))
+                    canvas.drawRoundRect(
+                        RectF(
+                            rect.centerX() - 23f,
+                            rect.centerY() - 12f,
+                            rect.centerX() + 23f,
+                            rect.centerY() + 12f,
+                        ),
+                        10f,
+                        10f,
+                        paint,
+                    )
+                else if (pad) canvas.drawCircle(rect.centerX(), rect.centerY(), 22f, paint)
                 else canvas.drawRoundRect(rect, 4f, 4f, paint)
             }
             if (pressed && pad && input == "Misc1") {
@@ -135,9 +159,9 @@ internal class InputSkinView(
                         "stylus:1" -> "PenD"
                         "stylus:2" -> "PenL"
                         "stylus:3" -> "PenR"
-                        "action" -> "Act"
-                        "soft1" -> "S1"
-                        "soft2" -> "S2"
+                        "action" -> if (gizmondo) "Play" else "Act"
+                        "soft1" -> if (gizmondo) "L1" else "Tab"
+                        "soft2" -> if (gizmondo) "R1" else "Esc"
                         "pocket_pc_app1" -> "P1"
                         "pocket_pc_app2" -> "P2"
                         "pocket_pc_app3" -> "P3"
@@ -151,7 +175,7 @@ internal class InputSkinView(
                 canvas.drawText(label, x, y + 5f, paint)
                 val customHold = state.longTarget(input, true, gizmondo)
                 val holdLabel =
-                    customHold?.let { state.short(it) }
+                    customHold?.let { state.short(it, gizmondo) }
                         ?: if (target == "host")
                             DeckInputPolicy.hold(input, gizmondo)?.let { DeckInputPolicy.short(it) }
                         else null
@@ -165,12 +189,28 @@ internal class InputSkinView(
                         paint,
                     )
                 }
-                if (input == selected) {
+                if (input == selected && !DeckInputPolicy.reserved(input, gizmondo)) {
                     paint.style = Paint.Style.STROKE
                     paint.strokeWidth = 3f
                     paint.color = BLUE
                     canvas.drawCircle(rect.centerX(), rect.centerY(), 18f, paint)
                 }
+            }
+            if (pad && input != null && DeckInputPolicy.reserved(input, gizmondo)) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2.5f
+                paint.color = RESERVED
+                canvas.drawRoundRect(
+                    RectF(
+                        rect.centerX() - 23f,
+                        rect.centerY() - 12f,
+                        rect.centerX() + 23f,
+                        rect.centerY() + 12f,
+                    ),
+                    10f,
+                    10f,
+                    paint,
+                )
             }
         }
         paint.style = Paint.Style.FILL

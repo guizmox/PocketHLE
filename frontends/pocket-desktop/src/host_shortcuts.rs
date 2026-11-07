@@ -1,6 +1,35 @@
 //! Reserved keys are removed before any UI/editor or guest input consumer.
 use egui::{Context, Event, Key};
 
+/// Keep the number row stable on AZERTY and with Shift; leave text events and
+/// letter layout unchanged. Called before egui builds key state/capture events.
+pub fn normalize_number_row(raw: &mut egui::RawInput) {
+    for event in &mut raw.events {
+        if let Event::Key {
+            key,
+            physical_key: Some(physical),
+            ..
+        } = event
+        {
+            if matches!(
+                physical,
+                Key::Num0
+                    | Key::Num1
+                    | Key::Num2
+                    | Key::Num3
+                    | Key::Num4
+                    | Key::Num5
+                    | Key::Num6
+                    | Key::Num7
+                    | Key::Num8
+                    | Key::Num9
+            ) {
+                *key = *physical;
+            }
+        }
+    }
+}
+
 pub fn take(ctx: &Context) -> Vec<Key> {
     ctx.input_mut(|input| {
         let keys = input
@@ -40,6 +69,53 @@ mod tests {
             modifiers: Default::default(),
         }
     }
+    #[test]
+    fn number_row_is_shift_insensitive_before_egui_state_and_capture() {
+        let digits = [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ];
+        for digit in digits {
+            let ctx = Context::default();
+            for (pressed, shift) in [(true, false), (false, true), (true, true), (false, false)] {
+                let mut raw = egui::RawInput::default();
+                raw.events.push(Event::Key {
+                    key: Key::Num7,
+                    physical_key: Some(digit),
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers {
+                        shift,
+                        ..Default::default()
+                    },
+                });
+                raw.events.push(Event::Text("&".into()));
+                normalize_number_row(&mut raw);
+                assert!(matches!(&raw.events[1],Event::Text(text) if text=="&"));
+                let _ = ctx.run(raw, |ctx| {
+                    assert_eq!(ctx.input(|i| i.key_down(digit)), pressed)
+                });
+            }
+        }
+        let mut raw = egui::RawInput::default();
+        raw.events.push(Event::Key {
+            key: Key::Z,
+            physical_key: Some(Key::W),
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        normalize_number_row(&mut raw);
+        assert!(matches!(raw.events[0], Event::Key { key: Key::Z, .. }));
+    }
+
     #[test]
     fn host_keys_are_taken_before_editor_capture_and_repeats_do_not_trigger_actions() {
         let ctx = Context::default();

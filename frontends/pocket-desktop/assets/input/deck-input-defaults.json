@@ -140,11 +140,11 @@
     "LeftThumb": "soft2",
     "LeftTrigger": "pocket_pc_app1",
     "LeftTrigger2": "pocket_pc_app3",
-    "North": "soft1",
-    "RightThumb": "action",
+    "North": "button_a",
+    "RightThumb": "soft1",
     "RightTrigger": "pocket_pc_app2",
     "RightTrigger2": "pocket_pc_app4",
-    "South": "button_a",
+    "South": "action",
     "West": "button_c"
   },
   "vk_codes": {

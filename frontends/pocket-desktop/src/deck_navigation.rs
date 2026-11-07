@@ -90,12 +90,12 @@ pub fn menu_action(elapsed: std::time::Duration, released: bool) -> Option<MenuA
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewAction {
     ToggleFullscreen,
-    SecondaryKey,
+    ReturnToLibrary,
 }
 
 pub fn view_action(elapsed: std::time::Duration, released: bool) -> Option<ViewAction> {
     if elapsed >= std::time::Duration::from_millis(650) {
-        Some(ViewAction::SecondaryKey)
+        Some(ViewAction::ReturnToLibrary)
     } else if released {
         Some(ViewAction::ToggleFullscreen)
     } else {
@@ -107,7 +107,7 @@ pub fn view_action(elapsed: std::time::Duration, released: bool) -> Option<ViewA
 mod tests {
     use super::*;
     #[test]
-    fn view_hold_does_not_toggle_fullscreen_before_secondary_key() {
+    fn view_hold_returns_to_library_without_toggling_fullscreen() {
         use std::time::Duration;
         assert_eq!(view_action(Duration::from_millis(0), false), None);
         assert_eq!(view_action(Duration::from_millis(649), false), None);
@@ -117,11 +117,11 @@ mod tests {
         );
         assert_eq!(
             view_action(Duration::from_millis(650), false),
-            Some(ViewAction::SecondaryKey)
+            Some(ViewAction::ReturnToLibrary)
         );
         assert_eq!(
             view_action(Duration::from_millis(650), true),
-            Some(ViewAction::SecondaryKey)
+            Some(ViewAction::ReturnToLibrary)
         );
     }
 
@@ -249,34 +249,60 @@ mod game_menu_tests {
 /// Toggle between two live focus scopes, restoring valid remembered items.
 /// Missing scopes make the shortcut inert (for example, a modal dialog).
 pub fn section_target<T: Copy + Eq>(
-    focused: Option<T>, toolbar: &[T], page: &[T],
-    last_toolbar: Option<T>, last_page: Option<T>,
+    focused: Option<T>,
+    toolbar: &[T],
+    page: &[T],
+    last_toolbar: Option<T>,
+    last_page: Option<T>,
 ) -> Option<T> {
-    if toolbar.is_empty() || page.is_empty() { return None; }
+    if toolbar.is_empty() || page.is_empty() {
+        return None;
+    }
     let (items, remembered) = if focused.is_some_and(|id| toolbar.contains(&id)) {
-        (page,last_page)
-    } else { (toolbar,last_toolbar) };
-    remembered.filter(|id| items.contains(id)).or_else(|| items.first().copied())
+        (page, last_page)
+    } else {
+        (toolbar, last_toolbar)
+    };
+    remembered
+        .filter(|id| items.contains(id))
+        .or_else(|| items.first().copied())
 }
 
 #[cfg(test)]
 mod section_tests {
     use super::section_target;
-    #[test] fn toolbar_to_page_restores_selection() {
-        assert_eq!(section_target(Some(2),&[1,2],&[3,4],Some(1),Some(4)),Some(4));
+    #[test]
+    fn toolbar_to_page_restores_selection() {
+        assert_eq!(
+            section_target(Some(2), &[1, 2], &[3, 4], Some(1), Some(4)),
+            Some(4)
+        );
     }
-    #[test] fn page_to_toolbar_restores_selection() {
-        assert_eq!(section_target(Some(3),&[1,2],&[3,4],Some(2),Some(4)),Some(2));
+    #[test]
+    fn page_to_toolbar_restores_selection() {
+        assert_eq!(
+            section_target(Some(3), &[1, 2], &[3, 4], Some(2), Some(4)),
+            Some(2)
+        );
     }
-    #[test] fn stale_or_disabled_remembered_controls_fall_back_to_first_live_item() {
-        assert_eq!(section_target(Some(2),&[1,2],&[3,4],None,Some(99)),Some(3));
-        assert_eq!(section_target(Some(3),&[1,2],&[3,4],Some(99),None),Some(1));
+    #[test]
+    fn stale_or_disabled_remembered_controls_fall_back_to_first_live_item() {
+        assert_eq!(
+            section_target(Some(2), &[1, 2], &[3, 4], None, Some(99)),
+            Some(3)
+        );
+        assert_eq!(
+            section_target(Some(3), &[1, 2], &[3, 4], Some(99), None),
+            Some(1)
+        );
     }
-    #[test] fn missing_scope_never_escapes_a_modal() {
-        assert_eq!(section_target(Some(1),&[1],&[],None,None),None);
-        assert_eq!(section_target(Some(3),&[],&[3],None,None),None);
+    #[test]
+    fn missing_scope_never_escapes_a_modal() {
+        assert_eq!(section_target(Some(1), &[1], &[], None, None), None);
+        assert_eq!(section_target(Some(3), &[], &[3], None, None), None);
     }
-    #[test] fn absent_focus_starts_in_toolbar() {
-        assert_eq!(section_target(None,&[1,2],&[3,4],None,None),Some(1));
+    #[test]
+    fn absent_focus_starts_in_toolbar() {
+        assert_eq!(section_target(None, &[1, 2], &[3, 4], None, None), Some(1));
     }
 }

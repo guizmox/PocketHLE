@@ -7,31 +7,24 @@ internal object DeckInputPolicy {
     enum class Action {
         FULLSCREEN,
         EXIT,
-        BRIGHTNESS,
         NEXT_FILTER,
-        RECORDING,
-        SCREENSHOT,
     }
 
     fun tap(control: String): Action? =
         when (InputBindings.controllerCanonical(control)) {
             "Select" -> Action.FULLSCREEN
-            "Start",
-            "Misc1" -> Action.NEXT_FILTER
+            "Start" -> Action.NEXT_FILTER
             else -> null
         }
 
     fun hold(control: String, gizmondo: Boolean): Action? =
         when (InputBindings.controllerCanonical(control)) {
-            "Select" -> if (gizmondo) Action.BRIGHTNESS else Action.EXIT
-            "Start",
-            "Misc1" -> Action.RECORDING
-            "Mode" -> if (gizmondo) null else Action.EXIT
+            "Select" -> Action.EXIT
             else -> null
         }
 
     fun reserved(control: String, gizmondo: Boolean) =
-        tap(control) != null || hold(control, gizmondo) != null
+        InputBindings.controllerCanonical(control) in listOf("Select", "Start")
 
     fun guest(control: String, gizmondo: Boolean): String? {
         val name = InputBindings.controllerCanonical(control)
@@ -42,23 +35,33 @@ internal object DeckInputPolicy {
             "LeftTrigger2" -> "pocket_pc_app3"
             "RightTrigger2" -> "pocket_pc_app4"
             "LeftThumb" -> "soft2"
-            "RightThumb" -> "action"
-            "South" -> "button_a"
+            "RightThumb" -> "soft1"
+            "South" -> "action"
             "East" -> "button_b"
             "West" -> "button_c"
-            "North" -> "soft1"
+            "North" -> "button_a"
             else -> null
         }
     }
 
-    fun reservedKey(name:String) = name.uppercase() in listOf("F8","F9","F10","F11","F12")
+    fun keyboardGuest(name: String, current: String?, gizmondo: Boolean): String? {
+        if (gizmondo) return current?.takeUnless { it == "turbo" || it.startsWith("pocket_pc_app") }
+        if (current?.startsWith("giz_piano") == true) return null
+        return when {
+            name == "1" && current in listOf(null, "soft1", "pocket_pc_app1") -> "pocket_pc_app1"
+            name == "2" && current in listOf(null, "soft2", "pocket_pc_app2") -> "pocket_pc_app2"
+            name == "3" && current in listOf(null, "pocket_pc_app3") -> "pocket_pc_app3"
+            name == "4" && current in listOf(null, "pocket_pc_app4") -> "pocket_pc_app4"
+            else -> current
+        }
+    }
+
+    fun reservedKey(name: String) = name.uppercase() in listOf("F8", "F9", "F10", "F11", "F12")
 
     fun key(name: String): Action? =
         when (name.uppercase()) {
             "F8" -> Action.EXIT
             "F9" -> Action.NEXT_FILTER
-            "F10" -> Action.SCREENSHOT
-            "F11" -> Action.RECORDING
             "F12" -> Action.FULLSCREEN
             else -> null
         }
@@ -67,20 +70,14 @@ internal object DeckInputPolicy {
         when (action) {
             Action.FULLSCREEN -> "Fullscreen"
             Action.EXIT -> "Return to library"
-            Action.BRIGHTNESS -> "Brightness"
             Action.NEXT_FILTER -> "Next filter"
-            Action.RECORDING -> "Recording (desktop only)"
-            Action.SCREENSHOT -> "Screenshot"
         }
 
     fun short(action: Action) =
         when (action) {
             Action.EXIT -> "Exit"
             Action.NEXT_FILTER -> "Filter"
-            Action.RECORDING -> "Record*"
-            Action.SCREENSHOT -> "Photo"
             Action.FULLSCREEN -> "Full"
-            Action.BRIGHTNESS -> "Brightness"
         }
 
     val filters =
@@ -104,7 +101,8 @@ internal class DeckHostTracker {
     private val held = mutableMapOf<Pair<Int, String>, Press>()
 
     fun down(device: Int, control: String, now: Long, gizmondo: Boolean): Boolean {
-        if (!DeckInputPolicy.reserved(control, gizmondo)) return false
+        if (DeckInputPolicy.tap(control) == null && DeckInputPolicy.hold(control, gizmondo) == null)
+            return false
         val name = InputBindings.controllerCanonical(control)
         held.getOrPut(device to name) { Press(name, now) }
         return true

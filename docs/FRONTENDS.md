@@ -346,10 +346,16 @@ draft/profile/selection survive recreation, but an active capture is not resumed
 Returning to Android settings reloads saved config before another preference can
 overwrite it.
 
-View/Select taps fullscreen; its 650 ms hold is Gizmondo Brightness or Pocket PC
-return to library. Menu/Start and Extra/Misc1 tap the next presentation filter
-and hold to toggle recording. Guide/Mode holds to return to library on Pocket PC
-only, when delivered by the OS. Extra has no standard Android key adapter and is
+View/Select taps fullscreen; its 650 ms hold returns to the library for both
+PocketPC and Gizmondo. It never sends Gizmondo Brightness. Menu/Start taps the next presentation filter; its hold toggles
+recording on desktop and has no action on Android. View/Select and Menu/Start (the small top-left and top-right
+Steam Deck buttons, shown as Full and Filter) are immutable for both tap and
+hold, outlined in red and handled before menu capture/navigation. Guide/Mode
+defaults to a short-press Screenshot on desktop, with no default long action,
+when delivered by the OS. On Android Guide has no default short or long action. Guide is customizable (including its hold) and has no reserved red outline;
+explicit assignments or clearing its short binding override the factory Screenshot. Extra/Misc1 is unassigned by default on both device profiles. It is assignable and has no long
+binding by default; it is no longer a Filter duplicate. Extra has no standard
+Android key adapter and is
 marked desktop-only. Physical **F8–F12 are immutable host keys**, outlined in red
 on the keyboard skin (the red border remains during physical feedback):
 
@@ -357,8 +363,8 @@ on the keyboard skin (the red border remains during physical feedback):
 | --- | --- |
 | F8 | Return to the library from gameplay or another launcher page |
 | F9 | Next presentation/upscaling filter, in the same order as Menu |
-| F10 | Existing game screenshot action |
-| F11 | Existing video recording action (desktop only) |
+| F10 | Game Screenshot on desktop; reserved without action on Android |
+| F11 | Video recording on desktop; reserved without action on Android |
 | F12 | Toggle fullscreen/windowed, including binding pages and the assistant |
 
 Host keys are removed before capture, per-game grids, stylus routes and guest
@@ -371,14 +377,16 @@ F12 keeps its existing game-only layout; launcher F12 hides/restores app/system
 bars. Android F9 persists the global filter and keeps an open binding draft in
 sync; other launcher pages refresh their configuration. On desktop the open
 launcher draft is likewise synchronized so Save cannot restore the old filter.
-Video recording remains unavailable on Android.
+Android mapping pages expose neither Screenshot nor Recording shortcuts. Guide
+is freely assignable; Filter remains reserved but its long press has no action
+and consumes the short tap. F10/F11 remain reserved without an action.
 A host hold consumes its tap. Android filter changes run on the GL thread,
 invalidate presentation upload and lazily initialize/reuse SMAA without changing
 guest graphics state or geometry.
 
 Android Back/Guide/LeftStick/RightStick names accept SDL's Select/Mode/LeftThumb/
 RightThumb aliases. Gizmondo omits the legacy Turbo helper from choices and
-missing-command reports; old Turbo bindings display as Brightness because both
+missing-command reports; legacy explicitly configured Turbo bindings display as Brightness because both
 send VK_F3. Pocket PC keeps its existing Turbo helper.
 
 ## Library tile metadata
@@ -401,3 +409,29 @@ baseline follows the global default; explicit Normal controls equal default
 controls. Non-default screen/rotation settings count, including those selected
 automatically during import. The marker describes the saved configuration, not a
 history of user edits; restoring the defaults removes it.
+
+PocketPC command labels are ACTION, TAB (Soft1/VK_TAB), ESC (Soft2/VK_ESCAPE),
+TURBO, A, B, C and P1–P4, plus the D-pad directions. Mapping captions use compact Act, Tab, Esc and direction names to avoid
+collisions, while lists retain the explicit command names; serialized binding IDs and guest virtual keys are unchanged.
+Gizmondo keeps its device-specific labels. Old factory controller maps gain the
+removal of the obsolete Extra-to-ESC default; customized maps are preserved. Gizmondo
+face labels are Play, Stop, Forward and Rewind (per the official user manual);
+the shoulder commands are labelled L1 and R1. Brightness remains a freely assignable
+guest command, never a fixed View/System gesture.
+Source: https://fcc.report/FCC-ID/THGGZ2056/591669.pdf (Quick Start Guide, page 33).
+
+Factory keyboard fallback is profile-specific: PocketPC uses number-row 1–4
+for P1–P4 and excludes the Gizmondo F1–F5 actions. Gizmondo keeps F1–F5 and
+leaves the former T/Turbo alias unassigned. Explicit profile short/long mappings
+remain authoritative. Gizmondo shoulder commands are named L1/R1 in both
+keyboard and controller editors. Before egui builds input state, the desktop
+normalizes only physical number-row key events (0–9), so Shift and AZERTY
+symbols do not change the assigned input; letter layout and committed Text are
+unchanged. Android digit names come from key codes, independently of Unicode
+characters/modifiers.
+
+PocketPC controller factory layout: North sends A (VK_CONTROL), South sends
+Action (VK_RETURN), right-stick click sends Tab (VK_TAB), left-stick click
+retains Esc (VK_ESCAPE), and Extra is unassigned. East/West remain B/C. These
+defaults are shared by desktop and Android and do not change Gizmondo or saved
+explicit short/long assignments.
