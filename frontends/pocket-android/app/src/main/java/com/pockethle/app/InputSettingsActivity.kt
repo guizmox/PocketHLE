@@ -10,6 +10,9 @@ import org.json.JSONObject
 
 /** The desktop editor's two sections, adapted to touch and narrow screens. */
 class InputSettingsActivity : AppCompatActivity() {
+    private val controllerOnly: Boolean
+        get() = intent.getBooleanExtra("controller", false)
+
     private val liveInput = InputLiveState()
     private val livePictures = mutableListOf<InputSkinView>()
     private val liveRows = mutableMapOf<String, Button>()
@@ -26,6 +29,7 @@ class InputSettingsActivity : AppCompatActivity() {
             }
 
             override fun onInputDeviceRemoved(id: Int) {
+                captureDialog?.dismiss()
                 liveInput.removeDevice(id)
                 if (::state.isInitialized) render()
             }
@@ -43,6 +47,7 @@ class InputSettingsActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        captureDialog?.dismiss()
         if (listening) {
             (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager)
                 .unregisterInputDeviceListener(inputListener)
@@ -249,7 +254,15 @@ class InputSettingsActivity : AppCompatActivity() {
     private fun bindingText(input: String, label: String): CharSequence {
         if (input == "Misc1") return "Extra (desktop)"
         if (state.assignment(input, true, gizmondo) != "host")
-            return "$label: ${state.shortFor(input,true,gizmondo)}"
+            return spans(
+                listOf(
+                    "$label: ${state.shortFor(input,true,gizmondo)}" to
+                        InputSkinView.color(state.assignment(input, true, gizmondo))
+                ) +
+                    (state.longTarget(input, true, gizmondo)?.let {
+                        listOf("\nHold: ${state.short(it)}" to InputSkinView.LONG_PRESS)
+                    } ?: emptyList())
+            )
         val parts = mutableListOf(label + ": " to Color.LTGRAY)
         DeckInputPolicy.tap(input)?.let {
             parts.add(DeckInputPolicy.label(it) to InputSkinView.PURPLE)
@@ -305,7 +318,9 @@ class InputSettingsActivity : AppCompatActivity() {
                 setBackgroundColor(Color.rgb(23, 25, 29))
                 setPadding(dp(12), dp(8), dp(12), dp(8))
             }
-        root.addView(text("Keyboard & controller", 22f))
+        root.addView(
+            text(if (controllerOnly) "External controller bindings" else "Keyboard bindings", 22f)
+        )
         val actions = LinearLayout(this)
         actions.addView(button("Save") { save() }, LinearLayout.LayoutParams(0, dp(48), 1f))
         actions.addView(button("Cancel") { finish() }, LinearLayout.LayoutParams(0, dp(48), 1f))
@@ -326,11 +341,11 @@ class InputSettingsActivity : AppCompatActivity() {
             gizmondo = id == 101
             render()
         }
-        body.addView(text("Preview device"))
+        body.addView(text("Device profile"))
         body.addView(profiles)
         body.addView(
             text(
-                "Select an input to inspect or change it. The preview does not change a game's profile. Save changes, then relaunch a running game to apply the updated bindings."
+                "Select an input to inspect it, or use Assign an input. Guest button assignments apply to the selected device profile. Save changes, then relaunch a running game to apply them."
             )
         )
         body.addView(
@@ -348,7 +363,16 @@ class InputSettingsActivity : AppCompatActivity() {
                     )
             }
         )
-        for (pad in listOf(false, true)) section(body, pad)
+        body.addView(
+            button("Assign an input…") { quickAssign() },
+            LinearLayout.LayoutParams(-1, dp(56)),
+        )
+        body.addView(
+            text(
+                "Press and release an input, then choose a device command. Hold for 0.65 s to assign a long press."
+            )
+        )
+        section(body, controllerOnly)
         scroll =
             ScrollView(this).apply {
                 isFillViewport = true
@@ -491,6 +515,20 @@ class InputSettingsActivity : AppCompatActivity() {
             },
         )
         panel.addView(text("Assignment", 18f))
+        val longTarget = state.longTarget(input, pad, gizmondo)
+        if (longTarget != null) {
+            panel.addView(
+                text("Hold: ${state.label(longTarget)}").apply {
+                    setTextColor(InputSkinView.LONG_PRESS)
+                }
+            )
+            panel.addView(
+                button("Clear long press") {
+                    state.assignLong(input, pad, null, gizmondo)
+                    render()
+                }
+            )
+        }
         val target = state.assignment(input, pad, gizmondo)
         if (pad && input == "Misc1")
             panel.addView(
@@ -593,6 +631,229 @@ class InputSettingsActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(0, dp(48), 1f),
         )
         panel.addView(row)
+    }
+
+    private fun quickAssign() {
+        captureDialog?.dismiss()
+        val pad = controllerOnly
+        val targets = listOf<String?>(null) + state.visibleButtons(gizmondo)
+        val dialog =
+            object : Dialog(this) {
+                var stage = 0 // capture, choose guest action, then continue/save
+                var input: String? = null
+                var started = 0L
+                var long = false
+                var index = 0
+                var axisNav: String? = null
+                var notice = ""
+
+                fun begin() {
+                    stage = 0
+                    input = null
+                    index = 0
+                    draw()
+                }
+
+                fun choose(name: String, now: Long) {
+                    input =
+                        if (pad) InputBindings.controllerCanonical(name)
+                        else InputBindings.canonical(name)
+                    long = now - started >= InputGestures.HOLD_MS
+                    if (
+                        state.fixed(input!!, pad, gizmondo) || (!pad && long && input == "Escape")
+                    ) {
+                        notice = "This input has a built-in PocketHLE shortcut. Choose another input."
+                        begin()
+                        return
+                    }
+                    stage = 1
+                    index = 0
+                    draw()
+                }
+
+                fun applyChoice() {
+                    if (stage == 1) {
+                        val name = input ?: return
+                        val target = targets[index]
+                        val ok =
+                            if (long) state.assignLong(name, pad, target, gizmondo)
+                            else state.assign(name, pad, target, gizmondo)
+                        if (!ok) {
+                            notice = "This input is reserved. Choose another input."
+                            begin()
+                            return
+                        }
+                        selected[pad] = name
+                        notice =
+                            "${if(long) "Long" else "Short"} press: $name → ${state.label(target)}"
+                        stage = 2
+                        index = 0
+                        render()
+                        draw()
+                    } else if (stage == 2)
+                        when (index) {
+                            0 -> begin()
+                            1 -> {
+                                dismiss()
+                                save()
+                            }
+                            else -> dismiss()
+                        }
+                }
+
+                fun navigate(name: String) {
+                    if (stage == 0) return
+                    val size = if (stage == 1) targets.size else 3
+                    when (InputBindings.controllerCanonical(name)) {
+                        "Up",
+                        "DPadUp",
+                        "LeftStickUp" -> index = (index + size - 1) % size
+                        "Down",
+                        "DPadDown",
+                        "LeftStickDown" -> index = (index + 1) % size
+                        "Enter",
+                        "South" -> {
+                            applyChoice()
+                            return
+                        }
+                        "Escape",
+                        "East" -> {
+                            dismiss()
+                            return
+                        }
+                        else -> return
+                    }
+                    draw()
+                }
+
+                fun draw() {
+                    val content =
+                        column().apply {
+                            setPadding(dp(20), dp(12), dp(20), dp(12))
+                            setBackgroundColor(Color.rgb(23, 25, 29))
+                        }
+                    content.addView(text("Assign an input", 22f))
+                    if (notice.isNotEmpty())
+                        content.addView(text(notice).apply { setTextColor(InputSkinView.LIVE) })
+                    if (stage == 0) {
+                        content.addView(
+                            text(
+                                if (input == null)
+                                    "Press and release a ${if(pad) "controller button" else "keyboard key"}…"
+                                else "$input — release to continue"
+                            )
+                        )
+                        content.addView(
+                            text("Hold for 0.65 s for a long press. Android Back cancels.")
+                        )
+                    } else {
+                        if (stage == 1) {
+                            content.addView(
+                                text("$input · ${if(long) "Long" else "Short"} press", 20f)
+                            )
+                            content.addView(
+                                text(
+                                    "Up / Down to choose · Enter / A to apply · Escape / B to cancel"
+                                )
+                            )
+                            if (long)
+                                content.addView(
+                                    text(
+                                        "Adding a long action delays this input's short action until release."
+                                    )
+                                )
+                        }
+                        val choices =
+                            if (stage == 1) targets.map { state.label(it) }
+                            else listOf("Assign another input", "Save and finish", "Back to editor")
+                        val list = column()
+                        var selectedView: View? = null
+                        choices.forEachIndexed { i, label ->
+                            val item =
+                                button(label) {
+                                    index = i
+                                    applyChoice()
+                                }
+                            item.isSelected = i == index
+                            list.addView(item, LinearLayout.LayoutParams(-1, dp(48)))
+                            if (i == index) selectedView = item
+                        }
+                        val scroller =
+                            ScrollView(this@InputSettingsActivity).apply { addView(list) }
+                        content.addView(scroller, LinearLayout.LayoutParams(-1, dp(300)))
+                        scroller.post { selectedView?.let { scroller.smoothScrollTo(0, it.top) } }
+                    }
+                    content.addView(button("Cancel") { dismiss() })
+                    setContentView(content)
+                    window?.setLayout((resources.displayMetrics.widthPixels * .94f).toInt(), -2)
+                }
+
+                override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                    recordKey(event)
+                    if (event.keyCode == KeyEvent.KEYCODE_BACK && !controllerEvent(event))
+                        return super.dispatchKeyEvent(event)
+                    val fromPad = controllerEvent(event)
+                    val name =
+                        if (fromPad) InputBindings.controllerName(event.keyCode)
+                        else InputBindings.keyName(event)
+                    if (stage != 0) {
+                        if (
+                            event.action == KeyEvent.ACTION_DOWN &&
+                                event.repeatCount == 0 &&
+                                name != null
+                        )
+                            navigate(name)
+                        return true
+                    }
+                    if (fromPad != pad || name == null) return true
+                    if (
+                        event.action == KeyEvent.ACTION_DOWN &&
+                            event.repeatCount == 0 &&
+                            input == null
+                    ) {
+                        input = name
+                        started = event.eventTime
+                        draw()
+                    } else if (
+                        event.action == KeyEvent.ACTION_UP &&
+                            input?.let {
+                                if (pad)
+                                    InputBindings.controllerCanonical(it) ==
+                                        InputBindings.controllerCanonical(name)
+                                else it == name
+                            } == true
+                    )
+                        if (!pad || !liveInput.isDown(name, true)) choose(name, event.eventTime)
+                    return true
+                }
+
+                override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+                    val candidate = recordMotion(event)?.takeIf { it.second > .6f }?.first
+                    if (stage != 0) {
+                        if (candidate != axisNav) {
+                            axisNav = candidate
+                            candidate?.let { navigate(it) }
+                        }
+                        return true
+                    }
+                    if (!pad) return true
+                    if (input == null && candidate != null) {
+                        input = InputBindings.controllerCanonical(candidate)
+                        started = event.eventTime
+                        draw()
+                    } else
+                        input?.let { if (!liveInput.isDown(it, true)) choose(it, event.eventTime) }
+                    return true
+                }
+            }
+        captureDialog = dialog
+        dialog.setOnDismissListener {
+            captureDialog = null
+            liveInput.clear()
+            refreshLive()
+        }
+        dialog.show()
+        dialog.draw()
     }
 
     private fun capture(pad: Boolean, target: String) {

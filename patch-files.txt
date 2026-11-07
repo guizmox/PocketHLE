@@ -1,4 +1,5 @@
 crates\pocket-library\src\analysis.rs
+crates\pocket-library\src\input_gestures.rs
 crates\pocket-library\src\keybindings.rs
 crates\pocket-library\src\lib.rs
 docs\FRONTENDS.md
@@ -13,6 +14,7 @@ frontends\pocket-android\app\src\main\java\com\pockethle\app\GameAdapter.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\InputBindings.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\InputEditorState.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\InputGestures.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\InputLiveState.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\InputSettingsActivity.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\InputSkinView.kt
@@ -22,6 +24,7 @@ frontends\pocket-android\app\src\main\res\layout\item_game_grid.xml
 frontends\pocket-android\app\src\main\res\values\strings.xml
 frontends\pocket-android\app\src\test\java\com\pockethle\app\DeckInputPolicyTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\InputEditorStateTest.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\InputGesturesTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\InputLiveStateTest.kt
 frontends\pocket-desktop\assets\input\README.md
 frontends\pocket-desktop\assets\input\controller-flat.png

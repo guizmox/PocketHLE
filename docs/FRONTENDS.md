@@ -233,14 +233,17 @@ commands and desktop host-shortcut details are separate collapsible blocks.
 The assignment inspector has its own panel rather than sharing an undifferentiated
 text flow. The Gizmondo preview hides Pocket PC stylus settings.
 
-Pocket PC / Gizmondo changes the preview only; saved bindings remain shared.
+The device profile selector chooses which guest assignments to edit. Legacy
+keyboard/controller tables remain shared; explicit short/long overrides are
+stored separately for Pocket PC and Gizmondo.
 Per-game grids, button swaps and display rotation still apply during gameplay.
 The Deck layout is the common factory reference for keyboard and controller,
 including Pocket PC shoulder/face/thumb overrides and Gizmondo L1 volume.
 `deck-input-defaults.json` is checked against Rust's defaults/profile overrides
 and the Android fallback definitions by tests. Library loading migrates only
 recognized legacy factory maps; customized tables are not rewritten. Reserved
-Deck host/device controls retain priority in both frontends.
+Deck host shortcuts retain priority in both frontends. Device mappings are the
+factory reference; explicit profile bindings can override guest buttons.
 
 Tap shortcuts are purple; long presses are amber. View taps fullscreen and holds
 650 ms for Gizmondo Brightness or Pocket PC exit. Menu taps the next presentation
@@ -303,3 +306,33 @@ keys and axis channels preserve simultaneous presses, with axis hysteresis. Focu
 loss and device removal clear feedback. Testing inputs does not invoke game/host
 shortcuts or alter assignments. Keyboard modifiers are logical (both matching
 keycaps can light); system-reserved keys only work when delivered by the OS.
+
+Keyboard bindings and External controller bindings are separate settings entries
+on desktop and Android. Each screen shows only its device and assignment controls;
+controller connection status and shortcuts stay in the controller screen.
+
+The input editors offer an input-first assistant above each skin: Assign an input,
+press and release, then select a guest command. A release after at least 650 ms
+selects the long action; shorter presses select the normal action. D-pad / left
+stick or keyboard arrows navigate; A / Enter applies; B / Escape cancels the
+choice. After assignment, Assign another input and Save and finish avoid a
+return to pointer/touch controls. Draft changes still require Save. Choosing
+Back to editor leaves the draft available for manual editing.
+
+`short_press_bindings` and `long_press_bindings` are optional maps in config.json.
+Keys have the form `pocketpc:keyboard:x` or `gizmondo:controller:South` (canonical
+keyboard punctuation and lowercase names; canonical SDL controller names).
+Short values are guest button names or null for explicit unbinding; long values
+are guest button names. The maps are profile-specific and default empty, leaving
+existing configurations and Deck defaults intact. Factory guest assignments can
+be overridden; reserved host shortcuts cannot. Reset clears both kinds for the
+selected input device, across profiles.
+
+A short-only assignment sends normal down/up immediately, including held
+movement. An input with a long action delays its short action until release;
+a short tap then emits an 80 ms guest pulse. At 650 ms the long action goes down
+and remains down until release, suppressing the short action. A delayed event
+loop still emits an observable 80 ms long pulse. Sources are reference-counted,
+key-repeat does not restart timing, and focus loss/disconnect cancels pending
+holds without generating a short action. Amber marks custom long actions on
+controller captions and keycap indicators; the inspector shows their full name.

@@ -222,13 +222,17 @@ class SettingsActivity : AppCompatActivity() {
                     writeConfig(); true
                 }
             })
-            input.addPreference(Preference(requireContext()).apply {
-                key="visual_input_editor"; title="Keyboard & controller"
-                summary="Inspect and edit bindings on the same generic keyboard and controller skins as desktop."
-                setOnPreferenceClickListener {
-                    startActivity(android.content.Intent(requireContext(),InputSettingsActivity::class.java));true
-                }
-            })
+            for ((controller, label) in listOf(false to "Keyboard bindings", true to "External controller bindings")) {
+                input.addPreference(Preference(requireContext()).apply {
+                    key = if (controller) "controller_bindings" else "keyboard_bindings"
+                    title = label
+                    summary = if (controller) "Inspect and edit external controller assignments." else "Inspect and edit keyboard assignments."
+                    setOnPreferenceClickListener {
+                        startActivity(android.content.Intent(requireContext(), InputSettingsActivity::class.java).putExtra("controller", controller))
+                        true
+                    }
+                })
+            }
             val stylusScreen=androidx.preference.PreferenceScreen(requireContext(),null).apply {
                 title="Pocket PC only — stylus stick";key="stylus_options"
             }

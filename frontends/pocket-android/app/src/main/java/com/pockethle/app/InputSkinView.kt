@@ -102,6 +102,10 @@ internal class InputSkinView(
                     paint,
                 )
                 if (input != null) {
+                    if (state.longTarget(input, false, gizmondo) != null) {
+                        paint.color = LONG_PRESS
+                        canvas.drawCircle(rect.right - 5f, rect.top + 5f, 2.5f, paint)
+                    }
                     paint.color = color
                     paint.textSize = 10f
                     canvas.drawText(
@@ -141,17 +145,22 @@ internal class InputSkinView(
                 paint.textSize = 14f
                 paint.textAlign = Paint.Align.CENTER
                 canvas.drawText(label, x, y + 5f, paint)
-                if (target == "host")
-                    DeckInputPolicy.hold(input, gizmondo)?.let {
-                        paint.color = LONG_PRESS
-                        paint.textSize = 13f
-                        canvas.drawText(
-                            "Hold: ${DeckInputPolicy.short(it)}",
-                            rect.centerX(),
-                            rect.centerY() + if (input == "Misc1") 43f else 26f,
-                            paint,
-                        )
-                    }
+                val customHold = state.longTarget(input, true, gizmondo)
+                val holdLabel =
+                    customHold?.let { state.short(it) }
+                        ?: if (target == "host")
+                            DeckInputPolicy.hold(input, gizmondo)?.let { DeckInputPolicy.short(it) }
+                        else null
+                if (holdLabel != null) {
+                    paint.color = LONG_PRESS
+                    paint.textSize = 13f
+                    canvas.drawText(
+                        "Hold: $holdLabel",
+                        rect.centerX(),
+                        rect.centerY() + if (input == "Misc1") 43f else 26f,
+                        paint,
+                    )
+                }
                 if (input == selected) {
                     paint.style = Paint.Style.STROKE
                     paint.strokeWidth = 3f

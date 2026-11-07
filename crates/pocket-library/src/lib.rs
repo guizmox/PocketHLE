@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 pub mod backup;
 pub mod colors_save;
 pub mod frame_rate;
+pub mod input_gestures;
 pub use frame_rate::FrameRateLimit;
 
 use rars::ArchiveReader;
@@ -1141,6 +1142,12 @@ pub struct LauncherConfig {
     /// the D-pad to match their keyboard once, not once per title.
     #[serde(default)]
     pub keybindings: KeyBindings,
+    /// Optional per-profile long actions; a matching short action waits for release.
+    #[serde(default)]
+    pub long_press_bindings: input_gestures::LongPressBindings,
+    /// Per-profile guest overrides. Null explicitly unbinds an input.
+    #[serde(default)]
+    pub short_press_bindings: std::collections::BTreeMap<String, Option<GuestButton>>,
     #[serde(default)]
     pub stylus_stick: stylus::StylusBindings,
     /// Physical controller inputs, independent of keyboard bindings.
@@ -1381,6 +1388,8 @@ impl Default for LauncherConfig {
             fullscreen_mode: default_fullscreen_mode(),
             orientation: default_orientation(),
             keybindings: KeyBindings::default(),
+            long_press_bindings: Default::default(),
+            short_press_bindings: Default::default(),
             stylus_stick: Default::default(),
             gamepad_bindings: keybindings::default_gamepad_bindings(),
             gamepad_fullscreen: keybindings::default_gamepad_fullscreen(),

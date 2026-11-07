@@ -122,6 +122,7 @@ class GameActivity : AppCompatActivity() {
         override fun onInputDeviceAdded(id:Int) {}
         override fun onInputDeviceChanged(id:Int) {}
         override fun onInputDeviceRemoved(id:Int) {
+            sendGestureEdges(inputGestures.cancelPrefix("pad:$id:"));sendGestureEdges(inputGestures.cancelPrefix("key:$id:"));gestureAxes.removeAll {it.first==id}
             cancelGrid();gridAxes.clear()
             stylusKeys.keys.removeAll { it.first==id }
             stylusAxes.keys.removeAll { it.first==id }
@@ -850,6 +851,50 @@ class GameActivity : AppCompatActivity() {
             DeckInputPolicy.Action.RECORDING -> Toast.makeText(this,"Recording is available on desktop only.",Toast.LENGTH_SHORT).show()
         }
     }
+    private val inputGestures = InputGestures()
+    private val gestureAxes = mutableSetOf<Pair<Int, String>>()
+
+    private fun sendGestureEdges(edges: List<Pair<Int, Boolean>>) {
+        val handle = session
+        if (handle == 0L) return
+        edges.forEach { (vk, down) ->
+            val mapped = mappedPhysicalKey(vk)
+            if (down) acquireGuestKey(handle, mapped) else releaseGuestKey(handle, mapped)
+        }
+    }
+
+    private val gestureTick =
+        object : Runnable {
+            override fun run() {
+                if (session == 0L || !activityResumed || !hasWindowFocus()) return
+                sendGestureEdges(inputGestures.tick(android.os.SystemClock.uptimeMillis()))
+                if (inputGestures.active()) mainHandler.postDelayed(this, 10)
+            }
+        }
+
+    private fun routeLongPress(
+        device: Int,
+        pad: Boolean,
+        input: String,
+        down: Boolean,
+        channel: String = "key",
+    ): Boolean {
+        if (!::bindings.isInitialized || session == 0L) return false
+        val long = bindings.longKey(input, pad)
+        if (long == null && !bindings.hasShort(input, pad)) return false
+        val short = if (pad) bindings.controllerKey(input) else bindings.keyboardName(input)
+        val token =
+            "${if(pad) "pad" else "key"}:$device:$channel:${InputBindings.controllerCanonical(input)}"
+        sendGestureEdges(
+            if (long != null)
+                inputGestures.edge(token, down, android.os.SystemClock.uptimeMillis(), short, long)
+            else inputGestures.immediateEdge(token, down, short)
+        )
+        mainHandler.removeCallbacks(gestureTick)
+        if (inputGestures.active()) mainHandler.postDelayed(gestureTick, 10)
+        return true
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val keyAction=InputBindings.keyName(event)?.let {DeckInputPolicy.key(it)}
         if(keyAction!=null) {
@@ -871,6 +916,8 @@ class GameActivity : AppCompatActivity() {
             } else if(event.action==KeyEvent.ACTION_UP) deckHosts.up(event.deviceId,controllerName,now,gizmondoGame)?.let {performHostShortcut(it)}
             return true
         }
+        val gestureName=if(isController) controllerName else InputBindings.keyName(event)
+        if(gestureName!=null && routeLongPress(event.deviceId,isController,gestureName,event.action==KeyEvent.ACTION_DOWN)) return true
         val gridName=if(isController) gridControllerName(event.keyCode) else gridKeyName(event)
         if(gridName!=null && routeGrid(GridInput(if(isController) "controller" else "keyboard",gridName),event.action==KeyEvent.ACTION_DOWN)) return true
         val steeringDirection=touchSteeringEnabled && (if(isController) gridName?.let{bindings.controllerKey(it)} else bindings.keyboardKey(event)) in listOf(VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT)
@@ -943,72 +990,145 @@ class GameActivity : AppCompatActivity() {
      * button can be held at once without one release cancelling both.
      */
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
-        val joystick = event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK ||
-            event.source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD
+        val joystick =
+            event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK ||
+                event.source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD
         val handle = session
         if (!joystick || handle == 0L || event.action != MotionEvent.ACTION_MOVE) {
             return super.onGenericMotionEvent(event)
         }
-        val desired = linkedMapOf<String,Int>()
-        val aimDesired=linkedMapOf<String,Pair<Int,Float>>()
-        fun axis(name: String,value: Float,negative: String,positive: String) {
-            val steeringArrows=touchSteeringEnabled && name=="DPad"
-            if(gridRouter!=null) {
-            listOf(name+negative to -value,name+positive to value).forEach { (control,v)->
-                val input=GridInput("controller",control)
-                if(gridRouter?.assigned(input)==true) {
-                    val down=v >= if(control in gridAxes) .14f else .18f
-                    if(down) gridAxes.add(control) else gridAxes.remove(control)
-                    routeGrid(input,down)
-                }
+        val gestureControls = mutableSetOf<String>()
+        fun gestureAxis(control: String, strength: Float) {
+            if (bindings.longKey(control, true) == null && !bindings.hasShort(control, true)) return
+            gestureControls.add(control)
+            val token = event.deviceId to control
+            val down = strength.isFinite() && strength >= if (token in gestureAxes) .15f else .25f
+            if (down != (token in gestureAxes)) {
+                if (down) gestureAxes.add(token) else gestureAxes.remove(token)
+                routeLongPress(event.deviceId, true, control, down, "axis")
             }
-            }
-            if(!gizmondoGame && !steeringArrows && stylusBindings.enabled) {
-                listOf(name+negative to -value, name+positive to value).forEach { (control,v) ->
-                    if(gridRouter?.assigned(GridInput("controller",control))!=true) stylusBindings.pad(control)?.let { direction ->
-                        val strength=((v-.18f)/.82f).coerceIn(0f,1f)
-                        if(strength>0f) aimDesired[control]=direction to strength
+        }
+        fun gesturePair(axis: Int, negative: String, positive: String) {
+            val value = event.getAxisValue(axis)
+            gestureAxis(negative, -value)
+            gestureAxis(positive, value)
+        }
+        gesturePair(MotionEvent.AXIS_HAT_X, "DPadLeft", "DPadRight")
+        gesturePair(MotionEvent.AXIS_HAT_Y, "DPadUp", "DPadDown")
+        gesturePair(MotionEvent.AXIS_X, "LeftStickLeft", "LeftStickRight")
+        gesturePair(MotionEvent.AXIS_Y, "LeftStickUp", "LeftStickDown")
+        gesturePair(MotionEvent.AXIS_Z, "RightStickLeft", "RightStickRight")
+        gesturePair(MotionEvent.AXIS_RZ, "RightStickUp", "RightStickDown")
+        gestureAxis("LeftTrigger2", event.getAxisValue(MotionEvent.AXIS_LTRIGGER))
+        gestureAxis("RightTrigger2", event.getAxisValue(MotionEvent.AXIS_RTRIGGER))
+        val desired = linkedMapOf<String, Int>()
+        val aimDesired = linkedMapOf<String, Pair<Int, Float>>()
+        fun axis(name: String, value: Float, negative: String, positive: String) {
+            val steeringArrows = touchSteeringEnabled && name == "DPad"
+            if (gridRouter != null) {
+                listOf(name + negative to -value, name + positive to value).forEach { (control, v)
+                    ->
+                    val input = GridInput("controller", control)
+                    if (control !in gestureControls && gridRouter?.assigned(input) == true) {
+                        val down = v >= if (control in gridAxes) .14f else .18f
+                        if (down) gridAxes.add(control) else gridAxes.remove(control)
+                        routeGrid(input, down)
                     }
                 }
             }
-            fun active(v: Float, control: String) = if (name == "DPad") v >= 0.5f
+            if (!gizmondoGame && !steeringArrows && stylusBindings.enabled) {
+                listOf(name + negative to -value, name + positive to value).forEach { (control, v)
+                    ->
+                    if (
+                        control !in gestureControls &&
+                            gridRouter?.assigned(GridInput("controller", control)) != true
+                    )
+                        stylusBindings.pad(control)?.let { direction ->
+                            val strength = ((v - .18f) / .82f).coerceIn(0f, 1f)
+                            if (strength > 0f) aimDesired[control] = direction to strength
+                        }
+                }
+            }
+            fun active(v: Float, control: String) =
+                if (name == "DPad") v >= 0.5f
                 else dpadDeadzone.active(v, heldAxisKeys.containsKey(control))
-            if(gridRouter?.assigned(GridInput("controller",name+negative))!=true && (steeringArrows || stylusBindings.pad(name+negative).let { gizmondoGame || !stylusBindings.enabled || it==null }) && active(-value, name+negative)) bindings.controllerKey(name+negative)?.let { desired[name+negative]=it }
-            if(gridRouter?.assigned(GridInput("controller",name+positive))!=true && (steeringArrows || stylusBindings.pad(name+positive).let { gizmondoGame || !stylusBindings.enabled || it==null }) && active(value, name+positive)) bindings.controllerKey(name+positive)?.let { desired[name+positive]=it }
+            if (
+                name + negative !in gestureControls &&
+                    gridRouter?.assigned(GridInput("controller", name + negative)) != true &&
+                    (steeringArrows ||
+                        stylusBindings.pad(name + negative).let {
+                            gizmondoGame || !stylusBindings.enabled || it == null
+                        }) &&
+                    active(-value, name + negative)
+            )
+                bindings.controllerKey(name + negative)?.let { desired[name + negative] = it }
+            if (
+                name + positive !in gestureControls &&
+                    gridRouter?.assigned(GridInput("controller", name + positive)) != true &&
+                    (steeringArrows ||
+                        stylusBindings.pad(name + positive).let {
+                            gizmondoGame || !stylusBindings.enabled || it == null
+                        }) &&
+                    active(value, name + positive)
+            )
+                bindings.controllerKey(name + positive)?.let { desired[name + positive] = it }
         }
-        axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_X),"Left","Right")
-        axis("DPad",event.getAxisValue(MotionEvent.AXIS_HAT_Y),"Up","Down")
+        axis("DPad", event.getAxisValue(MotionEvent.AXIS_HAT_X), "Left", "Right")
+        axis("DPad", event.getAxisValue(MotionEvent.AXIS_HAT_Y), "Up", "Down")
         if (touchSteeringEnabled) {
             steeringDevice = event.deviceId
             val active = activityResumed && hasWindowFocus() && !surfacePointerDown
-            val x = if(active) (event.getAxisValue(MotionEvent.AXIS_X).coerceIn(-1f,1f)*1000).toInt() else 0
-            val y = if(active) (event.getAxisValue(MotionEvent.AXIS_Y).coerceIn(-1f,1f)*1000).toInt() else 0
-            NativeBridge.nativeSendInput(session,NativeBridge.INPUT_TOUCH_STEERING,x,y)
+            val x =
+                if (active)
+                    (event.getAxisValue(MotionEvent.AXIS_X).coerceIn(-1f, 1f) * 1000).toInt()
+                else 0
+            val y =
+                if (active)
+                    (event.getAxisValue(MotionEvent.AXIS_Y).coerceIn(-1f, 1f) * 1000).toInt()
+                else 0
+            NativeBridge.nativeSendInput(session, NativeBridge.INPUT_TOUCH_STEERING, x, y)
         } else {
-            axis("LeftStick",event.getAxisValue(MotionEvent.AXIS_X),"Left","Right")
-            axis("LeftStick",event.getAxisValue(MotionEvent.AXIS_Y),"Up","Down")
+            axis("LeftStick", event.getAxisValue(MotionEvent.AXIS_X), "Left", "Right")
+            axis("LeftStick", event.getAxisValue(MotionEvent.AXIS_Y), "Up", "Down")
         }
-        axis("RightStick",event.getAxisValue(MotionEvent.AXIS_Z),"Left","Right")
-        axis("RightStick",event.getAxisValue(MotionEvent.AXIS_RZ),"Up","Down")
-        listOf("LeftTrigger2" to MotionEvent.AXIS_LTRIGGER,"RightTrigger2" to MotionEvent.AXIS_RTRIGGER).forEach { (name,axis) ->
-            val value=event.getAxisValue(axis)
-            if(gridRouter?.assigned(GridInput("controller",name))==true) {
-                val down=value >= if(name in gridAxes) .14f else .18f
-                if(down) gridAxes.add(name) else gridAxes.remove(name)
-                routeGrid(GridInput("controller",name),down)
-                return@forEach
+        axis("RightStick", event.getAxisValue(MotionEvent.AXIS_Z), "Left", "Right")
+        axis("RightStick", event.getAxisValue(MotionEvent.AXIS_RZ), "Up", "Down")
+        listOf(
+                "LeftTrigger2" to MotionEvent.AXIS_LTRIGGER,
+                "RightTrigger2" to MotionEvent.AXIS_RTRIGGER,
+            )
+            .forEach { (name, axis) ->
+                val value = event.getAxisValue(axis)
+                if (name in gestureControls) return@forEach
+                if (gridRouter?.assigned(GridInput("controller", name)) == true) {
+                    val down = value >= if (name in gridAxes) .14f else .18f
+                    if (down) gridAxes.add(name) else gridAxes.remove(name)
+                    routeGrid(GridInput("controller", name), down)
+                    return@forEach
+                }
+                val aim =
+                    if (
+                        !gizmondoGame &&
+                            stylusBindings.enabled &&
+                            DeckInputPolicy.guest(name, gizmondoGame) == null
+                    )
+                        stylusBindings.pad(name)
+                    else null
+                if (aim != null && value > .18f)
+                    aimDesired[name] = aim to ((value - .18f) / .82f).coerceIn(0f, 1f)
+                else if (aim == null && value > .60f)
+                    bindings.controllerKey(name)?.let { desired[name] = it }
             }
-            val aim=if(!gizmondoGame && stylusBindings.enabled && DeckInputPolicy.guest(name,gizmondoGame)==null) stylusBindings.pad(name) else null
-            if(aim!=null && value>.18f) aimDesired[name]=aim to ((value-.18f)/.82f).coerceIn(0f,1f)
-            else if(aim==null && value>.60f) bindings.controllerKey(name)?.let { desired[name]=it }
-        }
-        stylusAxes.keys.removeAll { it.first==event.deviceId }
-        aimDesired.forEach { (name,value) -> stylusAxes[event.deviceId to name]=value }
+        stylusAxes.keys.removeAll { it.first == event.deviceId }
+        aimDesired.forEach { (name, value) -> stylusAxes[event.deviceId to name] = value }
         updateStylusAim()
-        heldAxisKeys.keys.toList().filter { it !in desired }.forEach { name -> heldAxisKeys.remove(name)?.let { releaseGuestKey(handle,it) } }
-        desired.forEach { (name,vk) ->
-            val mapped=mappedPhysicalKey(vk)
-            if (heldAxisKeys.putIfAbsent(name,mapped)==null) acquireGuestKey(handle,mapped)
+        heldAxisKeys.keys
+            .toList()
+            .filter { it !in desired }
+            .forEach { name -> heldAxisKeys.remove(name)?.let { releaseGuestKey(handle, it) } }
+        desired.forEach { (name, vk) ->
+            val mapped = mappedPhysicalKey(vk)
+            if (heldAxisKeys.putIfAbsent(name, mapped) == null) acquireGuestKey(handle, mapped)
         }
         return true
     }
@@ -1072,15 +1192,22 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun releaseHeldInput() {
+        inputGestures.clear()
+        gestureAxes.clear()
+        mainHandler.removeCallbacks(gestureTick)
         inputGeneration++
         deckHosts.clear()
         mainHandler.removeCallbacks(hostLongCheck)
         cancelGrid()
         gridAxes.clear()
-        if(session!=0L && touchSteeringEnabled) NativeBridge.nativeSendInput(session,NativeBridge.INPUT_TOUCH_STEERING,0,0)
-        stylusKeys.clear();stylusAxes.clear();stylusTouch.fill(0f)
-        if(session!=0L && stylusSent!=(0 to 0)) NativeBridge.nativeSendInput(session,NativeBridge.INPUT_STYLUS_AIM,0,0)
-        stylusSent=0 to 0
+        if (session != 0L && touchSteeringEnabled)
+            NativeBridge.nativeSendInput(session, NativeBridge.INPUT_TOUCH_STEERING, 0, 0)
+        stylusKeys.clear()
+        stylusAxes.clear()
+        stylusTouch.fill(0f)
+        if (session != 0L && stylusSent != (0 to 0))
+            NativeBridge.nativeSendInput(session, NativeBridge.INPUT_STYLUS_AIM, 0, 0)
+        stylusSent = 0 to 0
         (gameControls as? PocketPcControls)?.clearPressedControls()
         val handle = session
         if (handle != 0L) {
@@ -1088,16 +1215,33 @@ class GameActivity : AppCompatActivity() {
                 NativeBridge.nativeSendInput(handle, NativeBridge.INPUT_KEY_UP, vk, 0)
             }
             if (surfacePointerDown) {
-                NativeBridge.nativeSendInput(handle, NativeBridge.INPUT_POINTER_UP, lastPointerX, lastPointerY)
+                NativeBridge.nativeSendInput(
+                    handle,
+                    NativeBridge.INPUT_POINTER_UP,
+                    lastPointerX,
+                    lastPointerY,
+                )
             }
         }
         heldPhysicalKeys.clear()
         heldGuestKeys.clear()
         (gameControls as? GizmondoControls)?.clearPressedControls()
         if (!gizmondoGame) {
-            for (id in intArrayOf(R.id.btn_up,R.id.btn_down,R.id.btn_left,R.id.btn_right,
-                R.id.btn_action,R.id.btn_turbo,R.id.btn_a,R.id.btn_b,R.id.btn_c,R.id.btn_soft1,R.id.btn_soft2)) {
-                findViewById<View?>(id)?.isPressed=false
+            for (id in
+                intArrayOf(
+                    R.id.btn_up,
+                    R.id.btn_down,
+                    R.id.btn_left,
+                    R.id.btn_right,
+                    R.id.btn_action,
+                    R.id.btn_turbo,
+                    R.id.btn_a,
+                    R.id.btn_b,
+                    R.id.btn_c,
+                    R.id.btn_soft1,
+                    R.id.btn_soft2,
+                )) {
+                findViewById<View?>(id)?.isPressed = false
             }
         }
         heldVirtualKeys.clear()
