@@ -218,65 +218,130 @@ Unlimited/120 FPS are useful for performance benchmarks, not that contract test.
 
 ## Visual input editor — desktop and Android
 
-Keyboard & controller settings use the same flat, unbranded keyboard/controller
-skins on both frontends. Their PNGs, SVG originals and hitbox JSON are bundled
-from `frontends/pocket-desktop/assets/input/`; Android's Gradle assets source
-points directly at this directory. Neither artwork nor control geometry is
-independently recreated on Android. Modifier-only keyboard keycaps are not assignable but show physical feedback.
-Direction labels use ASCII words to avoid unsupported arrow glyphs.
+### Entry points and shared artwork
 
-Select a physical input to inspect its assignments. Assign an input is the sole
-assignment workflow; the picture and selected-input summary are read-only. Blue indicates guest commands, green stylus, purple
-host shortcuts and gray unassigned inputs. The controller also displays compact
-live mappings on its actual controls. Selection highlights the control; unassigned
-commands and desktop host-shortcut details are separate collapsible blocks.
-The selected-input summary shows the input once and its short/long actions.
-The old assignment forms, target-first capture dialogs, temporary form state and
-duplicate stylus assignment preferences have been removed from both frontends. The Gizmondo preview hides Pocket PC stylus settings.
+Settings has two entries: **Keyboard bindings** and **External controller
+bindings**, on desktop and Android. Each opens only the selected input device's
+screen. Connection status and controller shortcuts belong to the controller
+screen. **Device profile** selects Pocket PC or Gizmondo guest assignments;
+it does not change the platform of a library game.
 
-The device profile selector chooses which guest assignments to edit. Legacy
-keyboard/controller tables remain shared; explicit short/long overrides are
-stored separately for Pocket PC and Gizmondo.
-Per-game grids, button swaps and display rotation still apply during gameplay.
-The Deck layout is the common factory reference for keyboard and controller,
-including Pocket PC shoulder/face/thumb overrides and Gizmondo L1 volume.
-`deck-input-defaults.json` is checked against Rust's defaults/profile overrides
-and the Android fallback definitions by tests. Library loading migrates only
-recognized legacy factory maps; customized tables are not rewritten. Reserved
-Deck host shortcuts retain priority in both frontends. Device mappings are the
-factory reference; explicit profile bindings can override guest buttons.
+Both screens use the same flat, unbranded skins. PNGs, editable SVG originals
+and hitbox JSON live in `frontends/pocket-desktop/assets/input/`; Android's Gradle
+assets source points directly at that directory. Artwork and geometry are not
+recreated independently. Direction labels use ASCII words. Extra/Misc1 has a
+visible three-dot button on the controller skin, separate from Menu.
 
-Tap shortcuts are purple; long presses are amber. View taps fullscreen and holds
-650 ms for Gizmondo Brightness or Pocket PC exit. Menu taps the next presentation
-filter; its long press reserves recording. Android now routes those gestures,
-F10 screenshots and F12 fullscreen through the same reference policy; video
-recording/F11 remains desktop-only and is labeled unavailable on Android.
-Extra/Misc1 has no standard Android key adapter and is marked desktop-only;
-Guide/Mode also depends on delivery by the operating system. Android filter
-cycling runs on the GL thread, invalidates the presentation upload
-and lazily initializes/reuses SMAA. No guest graphics state or geometry changes.
-A long press consumes its short action, and loss of focus cancels pending holds.
+The keyboard initially fits the Android screen and can be enlarged and scrolled
+horizontally. Controller rows provide touch-sized selection buttons. Selecting
+an input on the picture or a row changes only the read-only **Selected input**
+summary. It shows the physical input and its available short/long actions.
+There are no editable assignment dropdowns, Apply/Clear forms or target-first
+capture dialogs. Their temporary state and duplicate capture routing have been
+removed, along with the old stylus assignment preferences.
 
-Turbo is a legacy VK_F3 alias, not a Gizmondo hardware button. The Gizmondo preview
-omits Turbo from assignment choices and missing-command reports, and displays
-old Turbo bindings as Brightness because both send the same guest key code.
-The Pocket PC preview retains its existing Turbo helper.
+### One assignment workflow
 
-Android's native activity provides the same Keyboard / Controller sections,
-Save/Cancel draft semantics, assignment colors, missing commands and physical
-capture (keyboard, buttons, sticks, D-pad and triggers). The keyboard fits the
-screen initially, with an enlarged horizontally scrollable mode for accurate
-touch selection. The assistant accepts physical input without tapping a diagram. Controller rows use touch-sized buttons; capture is cancelled when
-the activity stops. Draft/profile/selection state survives recreation. Returning
-to settings reloads the config before another preference can overwrite it. Saved
-Android game bindings take effect when a running game is relaunched.
+**Assign an input…** is the sole binding editor. Start it once, press and release
+a physical input, then choose the guest command. Releasing before 650 ms selects
+the short assignment; holding at least 650 ms selects the long assignment.
+Keyboard arrows or controller D-pad/left stick navigate. Enter or the physical
+South/A button applies; Escape or East/B cancels the command choice. Android
+Back can cancel the assistant. These navigation buttons are physical UI controls,
+independent of their saved guest assignments.
 
-Existing Android Back/Guide/LeftStick/RightStick click names accept desktop's
-Select/Mode/LeftThumb/RightThumb aliases. Conflicting aliases are removed together
-where legacy stylus reassignment requires it. Explicit guest overrides preserve
-the legacy tables; configurable-fullscreen conflicts are cleared on assignment.
-Assigning a stylus command enables it. The existing stylus speed and enable
-preferences remain under Pocket PC settings.
+After applying, **Assign another input** starts another capture, **Save and
+finish** persists the draft, and **Back to overview** returns without saving.
+This permits assignment and saving without another mouse/touch interaction.
+The normal screen Save/Cancel actions remain. A reserved host input is rejected
+and capture restarts with an explanation; it is not silently rebound.
+
+Choose **Unassigned** after a short capture to clear that profile's short action,
+or after a long capture to remove its long action. Removing a long action restores
+immediate short behavior; it does not clear the short assignment. Short choices
+also include stylus directions for Pocket PC inputs supported by the existing
+stylus router. Long stylus actions are not offered. Inputs with a built-in guest
+mapping that the stylus router prioritizes do not offer a stylus choice.
+Stylus enable/speed remain separate settings. Gizmondo has no stylus choices.
+
+**Reset keys to defaults** and **Reset controller defaults** are directly visible
+in their respective screens. Reset restores the corresponding legacy guest
+binding table and removes explicit short/long overrides for that input device
+in both Pocket PC and Gizmondo profiles. Controller reset also restores the
+additional fullscreen shortcut to View/Select. These actions do not reset the
+stylus direction tables, enable state or speed. Reset edits the draft and still
+requires Save. Android bindings are loaded when a game starts; relaunch a running
+game after saving. Desktop physical routing reads the saved launcher config.
+
+### Storage, precedence and runtime timing
+
+The Deck layout is the common factory reference on desktop, dedicated Deck and
+Android, including Pocket PC shoulder/face/thumb mappings and Gizmondo L1 volume.
+`deck-input-defaults.json` is checked against Rust and Android defaults by tests.
+Library loading migrates recognized legacy factory maps without rewriting custom
+tables. Legacy keyboard/controller and stylus tables remain shared between device
+profiles; new explicit guest overrides are profile-specific.
+
+`short_press_bindings` and `long_press_bindings` are optional maps in the launcher
+configuration (`config.json`, or `config-steamdeck.json` for the dedicated edition).
+Keys are `pocketpc:keyboard:x` or `gizmondo:controller:South`, using canonical
+punctuation/lowercase keyboard names and canonical SDL controller names. Short
+values are guest button names, or null for explicit unbinding. Long values are
+guest button names. Empty maps preserve existing behavior. Explicit guest overrides
+preserve legacy tables; assigning a legacy stylus direction moves conflicting
+legacy entries. Assigning stylus enables it. A conflicting optional fullscreen
+shortcut is cleared when the input is assigned through the assistant.
+
+Reserved host shortcuts retain priority; factory guest mappings are overridable.
+In normal gameplay, explicit physical short/long mappings are consumed before the
+per-game grid and ordinary stylus routes. Without an explicit override those
+existing routes still apply. Guest direction rotation and Pocket PC button-group
+swaps remain in the output path. Native text entry and context-dependent host
+shortcuts retain their existing priority; this editor does not replace them.
+
+A short-only binding emits immediate guest down/up and supports held movement.
+With a long binding on the same input, short waits for release and emits an 80 ms
+pulse. At 650 ms the long action goes down and stays down until release,
+suppressing short. If the event loop first observes the deadline at release,
+the long action emits an observable 80 ms pulse instead. Source refcounts preserve
+simultaneous inputs. Auto-repeat does not restart hold timing. Focus loss and
+disconnection cancel pending holds without generating a short action.
+
+### Colors, physical feedback and host shortcuts
+
+Blue marks guest commands, green stylus, purple host shortcuts, amber long presses
+and gray unassigned inputs. Custom long actions appear in amber captions or
+keycap indicators; the read-only summary gives their full name. Unassigned guest
+commands are listed separately (collapsible on desktop, a read-only list on
+Android). The controller-shortcut reference is separate from the summary.
+
+Cyan borders with dark teal fill identify physical held inputs, independent of
+assignment colors and mouse selection. Keys, buttons, stick directions and
+triggers clear on release, focus loss or device removal. Desktop uses the selected
+controller; Android combines connected sources and keeps key/axis channels
+separate. Axis hysteresis avoids flicker. Modifier keycaps are not assignable but
+can show logical modifier feedback, so both matching keycaps may light together.
+Only OS-delivered keys can be shown. Outside the assistant, testing inputs does
+not trigger guest/host actions or alter bindings. Inside it, inputs capture or
+navigate the current step. Android capture is cancelled when the activity stops;
+draft/profile/selection survive recreation, but an active capture is not resumed.
+Returning to Android settings reloads saved config before another preference can
+overwrite it.
+
+View/Select taps fullscreen; its 650 ms hold is Gizmondo Brightness or Pocket PC
+return to library. Menu/Start and Extra/Misc1 tap the next presentation filter
+and hold to toggle recording. Guide/Mode holds to return to library on Pocket PC
+only, when delivered by the OS. Extra has no standard Android key adapter and is
+marked desktop-only. F10 screenshots and F12 fullscreen work on both frontends;
+video recording/F11 remain desktop-only and Android labels them unavailable.
+A host hold consumes its tap. Android filter changes run on the GL thread,
+invalidate presentation upload and lazily initialize/reuse SMAA without changing
+guest graphics state or geometry.
+
+Android Back/Guide/LeftStick/RightStick names accept SDL's Select/Mode/LeftThumb/
+RightThumb aliases. Gizmondo omits the legacy Turbo helper from choices and
+missing-command reports; old Turbo bindings display as Brightness because both
+send VK_F3. Pocket PC keeps its existing Turbo helper.
 
 ## Library tile metadata
 
@@ -298,46 +363,3 @@ baseline follows the global default; explicit Normal controls equal default
 controls. Non-default screen/rotation settings count, including those selected
 automatically during import. The marker describes the saved configuration, not a
 history of user edits; restoring the defaults removes it.
-
-Physical input feedback in the binding editor uses cyan borders and a dark teal
-fill, independent of assignment colors and selection. Keyboard keys, controller
-buttons, stick directions and triggers stay highlighted until released. Desktop
-uses the selected controller; Android combines connected input sources. Independent
-keys and axis channels preserve simultaneous presses, with axis hysteresis. Focus
-loss and device removal clear feedback. Testing inputs does not invoke game/host
-shortcuts or alter assignments. Keyboard modifiers are logical (both matching
-keycaps can light); system-reserved keys only work when delivered by the OS.
-
-Keyboard bindings and External controller bindings are separate settings entries
-on desktop and Android. Each screen shows only its device and assignment controls;
-controller connection status and shortcuts stay in the controller screen.
-
-The input editors offer an input-first assistant above each skin: Assign an input,
-press and release, then select a guest command. A release after at least 650 ms
-selects the long action; shorter presses select the normal action. D-pad / left
-stick or keyboard arrows navigate; A / Enter applies; B / Escape cancels the
-choice. After assignment, Assign another input and Save and finish avoid a
-return to pointer/touch controls. Draft changes still require Save. Choosing
-Back to overview leaves the draft available to the assistant.
-
-`short_press_bindings` and `long_press_bindings` are optional maps in config.json.
-Keys have the form `pocketpc:keyboard:x` or `gizmondo:controller:South` (canonical
-keyboard punctuation and lowercase names; canonical SDL controller names).
-Short values are guest button names or null for explicit unbinding; long values
-are guest button names. The maps are profile-specific and default empty, leaving
-existing configurations and Deck defaults intact. Factory guest assignments can
-be overridden; reserved host shortcuts cannot. Reset clears both kinds for the
-selected input device, across profiles.
-
-A short-only assignment sends normal down/up immediately, including held
-movement. An input with a long action delays its short action until release;
-a short tap then emits an 80 ms guest pulse. At 650 ms the long action goes down
-and remains down until release, suppressing the short action. A delayed event
-loop still emits an observable 80 ms long pulse. Sources are reference-counted,
-key-repeat does not restart timing, and focus loss/disconnect cancels pending
-holds without generating a short action. Amber marks custom long actions on
-controller captions and keycap indicators; the read-only summary shows their full name.
-
-Stylus direction assignment is available in the assistant for short presses on
-inputs supported by the stylus router. Enable/speed controls remain settings,
-not a second binding editor. Reset is visible directly in each device screen.

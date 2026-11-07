@@ -23,11 +23,14 @@ identification in an ordinary desktop executable.
 | Menu, hold 650 ms | Start/stop video recording |
 | View, short press | Toggle fullscreen |
 | View, hold 650 ms | Gizmondo brightness; exit game on PocketPC |
+| Extra/Misc1, short press (if delivered) | Next presentation filter |
+| Extra/Misc1, hold 650 ms (if delivered) | Start/stop video recording |
+| Guide/Mode, hold 650 ms (if delivered) | Exit game on PocketPC; no built-in Gizmondo action |
 
 These host gestures take precedence over an old default-binding migration note.
 They change emulator presentation/device controls, not SteamOS volume/brightness.
 
-### PocketPC / WinCE
+### PocketPC / WinCE factory guest mappings
 
 | Deck control | Guest action |
 | --- | --- |
@@ -40,10 +43,11 @@ They change emulator presentation/device controls, not SteamOS volume/brightness
 
 P1-P4 are the buttons exposed by GAPI; Action/Enter is separate. A game that
 only lists GAPI buttons need not accept every keyboard key. Stick clicks and
-motion are independent. If SDL exposes Guide/Mode or Misc1, their long press
-can exit a PocketPC game; SteamOS may reserve these controls.
+motion are independent. Guide/Mode holds to exit a PocketPC game if SDL receives
+it. Extra/Misc1 follows Menu: tap for the next filter, hold for recording.
+SteamOS may reserve these controls before they reach the application.
 
-### Gizmondo
+### Gizmondo factory guest mappings
 
 | Deck control | Guest action |
 | --- | --- |
@@ -53,7 +57,8 @@ can exit a PocketPC game; SteamOS may reserve these controls.
 | R1 | Home (Piano 1) |
 | L2 / R2 | Gizmondo L / R |
 
-Customized Gizmondo bindings remain, except L1 reserved for volume. Game-only
+These are defaults, not locked guest controls: explicit profile assignments can
+rebind them, including L1 volume. Reserved host gestures remain protected. Game-only
 fullscreen hides the virtual Gizmondo panel and EXIT/FULL buttons; see
 [FRONTENDS.md](FRONTENDS.md). It does not change the guest's LCD geometry.
 
@@ -69,16 +74,28 @@ left/right adjusts sliders and A activates the selected control. Dropdowns use
 up/down, A to accept and B to cancel. Pages scroll to keep focus visible.
 
 A on a text field opens the virtual keyboard. Directions select, A types, Y
-switches symbols and Shift changes case. Apply accepts; B cancels. External
-file dialogs remain OS dialogs. Initial import may need a trackpad or keyboard.
+switches symbols and Shift changes case. Apply accepts; B cancels.
+File browsing for import and backups uses the integrated controller-friendly
+dialog. Native error/confirmation dialogs may still be shown by the OS.
 
 Colors startup uses directions for language, A to launch and B to cancel. Its
 explicit unlock action uses X; see [COLORS.md](COLORS.md).
 
 The Deck edition uses config-steamdeck.json; standard desktop uses config.json.
-They may share a library. **Apply Steam Deck preset** restores the preset;
-custom bindings should otherwise be preserved. Do not confuse historical
-Start=Home/Volume migration values with the reserved Menu gestures above.
+They may share a library. **Keyboard bindings** and **External controller bindings**
+are separate settings entries. **Assign an input…** captures the physical input
+first, distinguishes short/long on release, then lets directions and A select
+and apply a guest command. **Assign another input** continues; **Save and finish**
+saves without returning to touch/mouse controls. The device picture and selected
+input card are read-only. See [FRONTENDS.md](FRONTENDS.md#visual-input-editor--desktop-and-android)
+for precedence, timing and the configuration schema.
+
+**Reset keys to defaults** and **Reset controller defaults** replace the old
+**Apply Steam Deck preset** action. Each resets its guest table and explicit
+short/long overrides across the two device profiles; controller reset also
+restores View as the additional fullscreen shortcut. Stylus configuration is
+not reset. Save is required. Do not confuse historical Start=Home/Volume
+migration values with the reserved Menu gestures above.
 
 ## Captures
 
@@ -94,5 +111,6 @@ cargo build --release --locked -p pocket-desktop --features steam-deck --bin poc
 ```
 
 Output is target/release/pockethle-steamdeck.exe, or the CI's configured target
-folder. The standard build retains its own control policy. Native services and
+folder. The standard desktop and Android use the same factory binding reference;
+the dedicated edition has its own startup behavior and configuration filename. Native services and
 physical Deck behavior require device validation; build success alone is not it.
