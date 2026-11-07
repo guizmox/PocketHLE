@@ -14,8 +14,13 @@ internal class CenterTapPulse {
 
     fun press(now: Long, width: Int, height: Int): Pair<Int, Int>? {
         if (active || width <= 0 || height <= 0) return null
-        due = now + DURATION_MS
-        return (width / 2 to height / 2).also { point = it }
+        return pressAt(now,width/2,height/2)
+    }
+
+    fun pressAt(now: Long, x: Int, y: Int): Pair<Int,Int>? {
+        if (active) return null
+        due=now+DURATION_MS
+        return (x to y).also { point=it }
     }
 
     fun releaseDue(now: Long): Pair<Int, Int>? = if (active && now >= due) cancel() else null

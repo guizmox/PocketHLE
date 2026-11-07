@@ -572,13 +572,13 @@ pub fn steam_deck_guest_button(control: &str, gizmondo: bool) -> Option<GuestBut
     }
     match control {
         "Misc1" => Some(RotateScreen),
-        "Mode" => Some(CenterTap),
+        "Mode" => Some(Soft1),
         "LeftTrigger" => Some(PocketPcApp1),   // L1 = P1
         "RightTrigger" => Some(PocketPcApp2),  // R1 = P2
         "LeftTrigger2" => Some(PocketPcApp3),  // L2 = P3
         "RightTrigger2" => Some(PocketPcApp4), // R2 = P4
         "LeftThumb" => Some(Soft2),            // L3 = ESC (VK_ESCAPE)
-        "RightThumb" => Some(Soft1),           // R3 = Tab (VK_TAB)
+        "RightThumb" => None,                  // Reserved stylus mode/click control.
         "South" => Some(Action),
         "East" => Some(ButtonB),
         "West" => Some(ButtonC),
@@ -718,7 +718,7 @@ mod controller_tests {
             ("LeftTrigger2", PocketPcApp3),
             ("RightTrigger2", PocketPcApp4),
             ("LeftThumb", Soft2),
-            ("RightThumb", Soft1),
+            ("Mode", Soft1),
             ("South", Action),
             ("East", ButtonB),
             ("West", ButtonC),
@@ -742,10 +742,7 @@ mod controller_tests {
             steam_deck_guest_button("LeftThumb", false).unwrap().vk(),
             0x1B
         );
-        assert_eq!(
-            steam_deck_guest_button("RightThumb", false).unwrap().vk(),
-            0x09
-        );
+        assert_eq!(steam_deck_guest_button("Mode", false).unwrap().vk(), 0x09);
         assert_eq!(steam_deck_guest_button("North", false).unwrap().vk(), 0x11);
     }
 

@@ -154,13 +154,12 @@
     "LeftTrigger": "pocket_pc_app1",
     "LeftTrigger2": "pocket_pc_app3",
     "North": "button_a",
-    "RightThumb": "soft1",
     "RightTrigger": "pocket_pc_app2",
     "RightTrigger2": "pocket_pc_app4",
     "South": "action",
     "West": "button_c",
     "Misc1": "rotate_screen",
-    "Mode": "center_tap"
+    "Mode": "soft1"
   },
   "vk_codes": {
     "action": 13,

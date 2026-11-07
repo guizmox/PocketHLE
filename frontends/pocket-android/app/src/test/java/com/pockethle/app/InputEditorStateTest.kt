@@ -62,11 +62,11 @@ class InputEditorStateTest {
         for (giz in listOf(false, true)) {
             val state = draft()
             assertFalse(state.fixed("Mode", true, giz))
-            assertEquals(if (giz) null else "center_tap", state.assignment("Mode", true, giz))
-            assertEquals(if (giz) "—" else "Tap", state.shortFor("Mode", true, giz))
+            assertEquals(if (giz) null else "soft1", state.assignment("Mode", true, giz))
+            assertEquals(if (giz) "—" else "Tab", state.shortFor("Mode", true, giz))
             assertTrue(state.assignLong("Mode", true, "action", giz))
             assertEquals("action", state.longTarget("Mode", true, giz))
-            assertEquals(if (giz) null else "center_tap", state.assignment("Mode", true, giz))
+            assertEquals(if (giz) null else "soft1", state.assignment("Mode", true, giz))
             assertTrue(state.assign("Mode", true, "button_a", giz))
             assertEquals("button_a", state.assignment("Mode", true, giz))
             val runtime =
@@ -175,7 +175,7 @@ class InputEditorStateTest {
     fun assistantKeepsSupportedStylusAssignments() {
         val state = draft()
         assertTrue(state.targets(false, "O", false, false).contains("stylus:0"))
-        assertTrue(state.targets(true, "RightStickUp", false, false).contains("stylus:0"))
+        assertFalse(state.targets(true, "RightStickUp", false, false).contains("stylus:0"))
         assertFalse(
             state.targets(true, "South", false, false).any { it?.startsWith("stylus:") == true }
         )
@@ -201,10 +201,10 @@ class InputEditorStateTest {
     fun movingInputClearsGuestStylusAndFullscreenConflicts() {
         val state = draft()
         state.json.put("gamepad_fullscreen", "RightStickUp")
-        assertTrue(state.assign("RightStickUp", true, "stylus:1"))
+        assertFalse(state.assign("RightStickUp", true, "stylus:1", false))
         assertFalse(state.controller.has("RightStickUp"))
-        assertTrue(state.json.isNull("gamepad_fullscreen"))
-        assertEquals("stylus:1", state.assignment("RightStickUp", true, false))
+        assertEquals("RightStickUp",state.json.optString("gamepad_fullscreen"))
+        assertEquals("stylus:0", state.assignment("RightStickUp", true, false))
         state.assign("O", false, "action")
         assertEquals("action", state.assignment("O", false, false))
         state.assign("O", false, null)

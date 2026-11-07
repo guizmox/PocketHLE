@@ -41,11 +41,11 @@ class StylusGridTest {
     @Test fun settingsMigrateAndRoundTrip() {
         val old=GameSettings.fromJson(JSONObject().put("pocketpc_touch_steering",true))
         assertEquals("zones",old.controlsMode())
-        val g=StylusGridConfig();g.bind(7,GridInput("controller","RightStickLeft"),null)
+        val g=StylusGridConfig();g.bind(7,GridInput("controller","LeftStickLeft"),null)
         val settings=old.copy(pocketpcControls="grid",pocketpcTouchSteering=false,pocketpcStylusGridJson=g.json().toString())
         val saved=GameSettings.fromJson(settings.toJson())
         assertEquals("grid",saved.controlsMode())
-        assertEquals(7,StylusGridConfig.parse(saved.pocketpcStylusGridJson).cellFor(GridInput("controller","RightStickLeft"),null))
+        assertEquals(7,StylusGridConfig.parse(saved.pocketpcStylusGridJson).cellFor(GridInput("controller","LeftStickLeft"),null))
         assertEquals("normal",GameSettings.default().controlsMode())
     }
     @Test fun replacingBindingsAndCancellationDoNotLeakHeldPresses() {

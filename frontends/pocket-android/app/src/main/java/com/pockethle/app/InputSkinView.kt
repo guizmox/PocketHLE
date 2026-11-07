@@ -59,14 +59,15 @@ internal class InputSkinView(
             val input = control.input
             val target = input?.let { state.assignment(it, pad, gizmondo) }
             val color =
-                if (pad && target == "host" && DeckInputPolicy.tap(input!!) == null) LONG_PRESS
+                if (pad && input == "RightThumb" && !gizmondo) GREEN
+                else if (pad && target == "host" && DeckInputPolicy.tap(input!!) == null) LONG_PRESS
                 else color(target)
             val rect = control.rect
             val pressed = control.liveKey?.let { live.isDown(it, pad) } ?: false
             if (pressed) {
                 paint.style = Paint.Style.FILL
                 paint.color = Color.rgb(30, 62, 72)
-                if (pad && input != null && DeckInputPolicy.reserved(input, gizmondo))
+                if (pad && input in listOf("Select","Start"))
                     canvas.drawRoundRect(
                         RectF(
                             rect.centerX() - 23f,
@@ -83,7 +84,7 @@ internal class InputSkinView(
                 paint.style = Paint.Style.STROKE
                 paint.color = LIVE
                 paint.strokeWidth = 3f
-                if (pad && input != null && DeckInputPolicy.reserved(input, gizmondo))
+                if (pad && input in listOf("Select","Start"))
                     canvas.drawRoundRect(
                         RectF(
                             rect.centerX() - 23f,
@@ -154,7 +155,9 @@ internal class InputSkinView(
                     if (input.endsWith("Down")) y += 14f
                 }
                 val label =
-                    when (target) {
+                    when {
+                        input == "RightThumb" && !gizmondo -> "Mode ×2"
+                        else -> when (target) {
                         "center_tap" -> "Tap"
                         "rotate_screen" -> "Rotate"
                         "stylus:0" -> "PenU"
@@ -170,6 +173,7 @@ internal class InputSkinView(
                         "pocket_pc_app4" -> "P4"
                         else -> state.shortFor(input, true, gizmondo)
                     }
+                }
                 paint.style = Paint.Style.FILL
                 paint.color = color
                 paint.textSize = 14f
@@ -202,18 +206,11 @@ internal class InputSkinView(
                 paint.style = Paint.Style.STROKE
                 paint.strokeWidth = 2.5f
                 paint.color = RESERVED
-                canvas.drawRoundRect(
-                    RectF(
-                        rect.centerX() - 23f,
-                        rect.centerY() - 12f,
-                        rect.centerX() + 23f,
-                        rect.centerY() + 12f,
-                    ),
-                    10f,
-                    10f,
-                    paint,
-                )
+                if(input=="RightThumb" && !gizmondo) canvas.drawCircle(rect.centerX(),rect.centerY(),44f,paint)
+                else if(input in listOf("Select","Start")) canvas.drawRoundRect(
+                    RectF(rect.centerX()-23f,rect.centerY()-12f,rect.centerX()+23f,rect.centerY()+12f),10f,10f,paint)
             }
+
         }
         paint.style = Paint.Style.FILL
         canvas.restore()

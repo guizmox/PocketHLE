@@ -315,7 +315,6 @@ fn keyboard_assignment(config: &LauncherConfig, key: &str, gizmondo: bool) -> As
         return button.map_or(Assignment::Unbound, |b| guest_assignment(b, gizmondo));
     }
     if !gizmondo
-        && config.stylus_stick.enabled
         && !config
             .long_press_bindings
             .contains_key(&pocket_library::input_gestures::binding_key(
@@ -366,6 +365,11 @@ fn controller_shortcut(control: &str, _gizmondo: bool) -> Option<&'static str> {
 }
 
 fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool) -> Assignment {
+    if let Some(direction) =
+        pocket_library::stylus::controller_direction(control).filter(|_| !gizmondo)
+    {
+        return Assignment::Stylus(direction);
+    }
     if controller_fixed(control, gizmondo) {
         return Assignment::Unbound;
     }
@@ -386,23 +390,6 @@ fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool)
     {
         return Assignment::Unbound;
     }
-    if !gizmondo
-        && config.stylus_stick.enabled
-        && !config
-            .long_press_bindings
-            .contains_key(&pocket_library::input_gestures::binding_key(
-                gizmondo, true, control,
-            ))
-    {
-        if let Some(index) = config
-            .stylus_stick
-            .controller
-            .iter()
-            .position(|keys| keys.iter().any(|key| key == control))
-        {
-            return Assignment::Stylus(index);
-        }
-    }
     config
         .gamepad_bindings
         .get(control)
@@ -412,8 +399,9 @@ fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool)
         })
 }
 
-fn controller_fixed(control: &str, _gizmondo: bool) -> bool {
+fn controller_fixed(control: &str, gizmondo: bool) -> bool {
     matches!(control, "Select" | "Start")
+        || pocket_library::stylus::controller_reserved(control, gizmondo)
 }
 
 fn set_assignment(
@@ -423,6 +411,10 @@ fn set_assignment(
     gizmondo: bool,
     target: Assignment,
 ) {
+    if controller && (controller_fixed(input, gizmondo) || matches!(target, Assignment::Stylus(_)))
+    {
+        return;
+    }
     let key = pocket_library::input_gestures::binding_key(gizmondo, controller, input);
     if controller && config.gamepad_fullscreen.as_deref() == Some(input) {
         config.gamepad_fullscreen = None;
@@ -442,13 +434,7 @@ fn set_assignment(
             direction
         }
     };
-    if controller {
-        config.gamepad_bindings.remove(input);
-        for keys in &mut config.stylus_stick.controller {
-            keys.retain(|key| key != input);
-        }
-        config.stylus_stick.controller[direction].push(input.into());
-    } else {
+    if !controller {
         for button in GuestButton::ALL {
             config.keybindings.unbind(button, input);
         }
@@ -457,21 +443,15 @@ fn set_assignment(
         }
         config.stylus_stick.keyboard[direction].push(input.into());
     }
-    config.stylus_stick.enabled = true;
 }
 
 fn assignment_targets(
     gizmondo: bool,
     controller: bool,
-    input: Option<&str>,
+    _input: Option<&str>,
     long: bool,
 ) -> Vec<Assignment> {
-    let stylus = !gizmondo
-        && !long
-        && !(controller
-            && input.is_some_and(|name| {
-                pocket_library::keybindings::steam_deck_guest_button(name, false).is_some()
-            }));
+    let stylus = !controller && !gizmondo && !long;
     std::iter::once(Assignment::Unbound)
         .chain(visible_buttons(gizmondo).map(Assignment::Guest))
         .chain((0..if stylus { 4 } else { 0 }).map(Assignment::Stylus))
@@ -666,8 +646,7 @@ impl Editor {
                 keyboard_shortcut(input).is_some() || (*long && input == "Escape")
             };
             if fixed {
-                q.message =
-                    "This input has a built-in PocketHLE shortcut. Choose another input.".into();
+                q.message = "This input is reserved by PocketHLE. Choose another input.".into();
                 q.choice = None;
                 q.pressed = None;
                 accept = false;
@@ -888,6 +867,13 @@ impl Editor {
             }
         })
     }
+    pub fn reserved_input_attempt(&mut self) -> bool {
+        if let Some(quick) = self.quick.as_mut().filter(|q| !q.wait_launch_release) {
+            quick.message = "This input is reserved by PocketHLE. Choose another input.".into();
+            return true;
+        }
+        false
+    }
     pub fn is_gizmondo(&self) -> bool {
         self.gizmondo
     }
@@ -902,7 +888,8 @@ impl Editor {
         if self.gizmondo && matches!(target, Assignment::Guest(GuestButton::CenterTap)) {
             return false;
         }
-        if (controller && controller_fixed(input, self.gizmondo))
+        if (controller
+            && (controller_fixed(input, self.gizmondo) || matches!(target, Assignment::Stylus(_))))
             || (!controller && keyboard_shortcut(input).is_some())
         {
             return false;
@@ -1001,6 +988,15 @@ impl Editor {
             input
         };
         ui.heading(physical);
+        if controller && !self.gizmondo && pocket_library::stylus::controller_reserved(input, false)
+        {
+            ui.colored_label(GREEN, "Reserved stylus control");
+            ui.label("Double-click R3 to switch stylus mode.");
+            ui.label("Stick: automatic drags; single click unused.");
+            ui.label("Pointer: move cursor; single click to tap.");
+            return;
+        }
+
         let shortcut = if controller {
             controller_shortcut(input, self.gizmondo)
         } else {
@@ -1194,7 +1190,7 @@ impl Editor {
                 (LONG_PRESS, "Long press"),
                 (Color32::GRAY, "Unassigned"),
                 (LIVE, "Pressed input"),
-                (RESERVED, "Reserved host input"),
+                (RESERVED, "Reserved input"),
             ] {
                 ui.colored_label(color, label);
             }
@@ -1283,7 +1279,9 @@ impl Editor {
                     let shortcut = controller_shortcut(name, self.gizmondo);
                     let configured_fullscreen = !controller_fixed(name, self.gizmondo)
                         && config.gamepad_toggles_fullscreen(name);
-                    let label = if configured_fullscreen {
+                    let label = if *name == "RightThumb" && !self.gizmondo {
+                        "Mode"
+                    } else if configured_fullscreen {
                         "Full"
                     } else if shortcut.is_some() {
                         match *name {
@@ -1326,7 +1324,9 @@ impl Editor {
                         Align2::CENTER_CENTER,
                         label,
                         FontId::proportional((art_width / 760.0 * 14.0).clamp(8.0, 12.0)),
-                        if shortcut.is_some() && controller_tap(name).is_none() {
+                        if *name == "RightThumb" && !self.gizmondo {
+                            GREEN
+                        } else if shortcut.is_some() && controller_tap(name).is_none() {
                             LONG_PRESS
                         } else if shortcut.is_some() || configured_fullscreen {
                             PURPLE
@@ -1356,6 +1356,13 @@ impl Editor {
                             format!("Hold: {hold}"),
                             FontId::proportional(8.5),
                             LONG_PRESS,
+                        );
+                    }
+                    if *name == "RightThumb" && !self.gizmondo {
+                        ui.painter().circle_stroke(
+                            point,
+                            (art_width * 0.058).max(14.0),
+                            Stroke::new(1.5, RESERVED),
                         );
                     }
                     if matches!(*name, "Select" | "Start") {
@@ -1422,7 +1429,9 @@ impl Editor {
         let fullscreen = controller
             && !controller_fixed(name, self.gizmondo)
             && config.gamepad_toggles_fullscreen(name);
-        let color = if shortcut.is_some() || fullscreen {
+        let color = if controller && name == "RightThumb" && !self.gizmondo {
+            GREEN
+        } else if shortcut.is_some() || fullscreen {
             PURPLE
         } else {
             assignment.color()
@@ -1525,7 +1534,11 @@ impl Editor {
         } else {
             command.to_owned()
         };
-        let command = command_label.as_str();
+        let command = if controller && name == "RightThumb" && !self.gizmondo {
+            "Mode ×2"
+        } else {
+            command_label.as_str()
+        };
         if controller {
             ui.painter().text(
                 rect.left_center() + Vec2::new(6.0, 0.0),
@@ -1735,12 +1748,12 @@ mod tests {
     }
 
     #[test]
-    fn guide_center_tap_and_extra_rotation_are_customizable() {
+    fn guide_tab_and_extra_rotation_are_customizable() {
         let mut config = LauncherConfig::default();
         let mut editor = Editor::default();
         assert!(matches!(
             controller_assignment(&config, "Mode", false),
-            Assignment::Guest(GuestButton::CenterTap)
+            Assignment::Guest(GuestButton::Soft1)
         ));
         assert!(matches!(
             controller_assignment(&config, "Misc1", false),
@@ -2016,8 +2029,10 @@ mod tests {
     #[test]
     fn assistant_keeps_supported_stylus_assignments_without_a_second_editor() {
         assert!(assignment_targets(false, false, Some("O"), false).contains(&Assignment::Stylus(0)));
-        assert!(assignment_targets(false, true, Some("RightStickUp"), false)
-            .contains(&Assignment::Stylus(0)));
+        assert!(
+            !assignment_targets(false, true, Some("RightStickUp"), false)
+                .contains(&Assignment::Stylus(0))
+        );
         for (giz, pad, name, long) in [
             (true, false, "O", false),
             (false, false, "O", true),
@@ -2270,22 +2285,26 @@ mod tests {
         assert_eq!(keyboard_assignment(&config, "O", true), Assignment::Unbound);
         assert_eq!(editor.key.as_deref(), Some("O"));
         config.gamepad_fullscreen = Some("RightStickUp".into());
-        assert!(editor.assign_short(
-            &mut config,
+        let before = serde_json::to_value(&config).unwrap();
+        for input in [
+            "RightThumb",
             "RightStickUp",
-            true,
-            Assignment::Guest(GuestButton::Turbo)
-        ));
-        assert_eq!(config.gamepad_fullscreen, None);
+            "RightStickDown",
+            "RightStickLeft",
+            "RightStickRight",
+        ] {
+            assert!(!editor.assign_short(
+                &mut config,
+                input,
+                true,
+                Assignment::Guest(GuestButton::Turbo)
+            ));
+            assert!(!editor.assign_short(&mut config, input, true, Assignment::Stylus(1)));
+        }
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
         assert_eq!(
             controller_assignment(&config, "RightStickUp", false),
-            Assignment::Guest(GuestButton::Turbo)
-        );
-        assert!(editor.assign_short(&mut config, "RightStickUp", true, Assignment::Stylus(1)));
-        assert!(!config.gamepad_bindings.contains_key("RightStickUp"));
-        assert_eq!(
-            controller_assignment(&config, "RightStickUp", false),
-            Assignment::Stylus(1)
+            Assignment::Stylus(0)
         );
     }
 
@@ -2306,6 +2325,42 @@ mod tests {
         assert_eq!(serde_json::to_value(&config).unwrap(), before);
     }
 
+    #[test]
+    fn reserved_stylus_input_card_explains_mode_switch_and_ignores_stale_overrides() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::default();
+        editor.control = Some("RightThumb".into());
+        let mut config = LauncherConfig::default();
+        config.short_press_bindings.insert(
+            pocket_library::input_gestures::binding_key(false, true, "RightThumb"),
+            Some(GuestButton::Soft1),
+        );
+        assert_eq!(
+            controller_assignment(&config, "RightThumb", false),
+            Assignment::Unbound
+        );
+        assert!(!controller_fixed("RightThumb", true));
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1280., 720.),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| editor.show(ui, &config, true));
+            },
+        );
+        fn has(shapes: &[egui::epaint::ClippedShape], text: &str) -> bool {
+            shapes
+                .iter()
+                .any(|s| matches!(&s.shape,egui::Shape::Text(t) if t.galley.text().contains(text)))
+        }
+        assert!(has(&out.shapes, "Double-click R3 to switch stylus mode."));
+        assert!(has(&out.shapes, "Mode ×2"));
+        assert!(has(&out.shapes, "Tab"));
+    }
     #[test]
     fn both_profiles_render_at_narrow_and_wide_widths() {
         for width in [400.0, 820.0, 1200.0] {

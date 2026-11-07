@@ -16,7 +16,6 @@ internal class InputEditorState(raw: String) {
         json.optJSONObject("stylus_stick")
             ?: JSONObject()
                 .apply {
-                    put("enabled", true)
                     put("speed", 240)
                     put(
                         "keyboard",
@@ -24,16 +23,11 @@ internal class InputEditorState(raw: String) {
                             listOf("O", "L", "K", "M").forEach { put(JSONArray().put(it)) }
                         },
                     )
-                    put(
-                        "controller",
-                        JSONArray().apply {
-                            StylusBindings.directions.forEach {
-                                put(JSONArray().put("RightStick$it"))
-                            }
-                        },
-                    )
+
                 }
                 .also { json.put("stylus_stick", it) }
+
+    init { stylus.remove("enabled");stylus.remove("controller") }
 
     fun visibleButtons(gizmondo: Boolean) =
         InputBindings.buttons.keys
@@ -49,7 +43,7 @@ internal class InputEditorState(raw: String) {
             if (
                 !gizmondo &&
                     !long &&
-                    (!pad || input?.let { DeckInputPolicy.guest(it, false) } == null)
+                    !pad
             )
                 (0..3).map { "stylus:$it" }
             else emptyList()
@@ -121,6 +115,9 @@ internal class InputEditorState(raw: String) {
         else InputBindings.canonical(a).equals(InputBindings.canonical(b), true)
 
     fun assignment(input: String, pad: Boolean, gizmondo: Boolean): String? {
+        if (pad && !gizmondo && input.startsWith("RightStick")) {
+            StylusBindings.directions.indexOfFirst { "RightStick$it" == input }.takeIf { it>=0 }?.let { return "stylus:$it" }
+        }
         if (fixed(input, pad, gizmondo)) return "host"
         val customKey = InputGestures.bindingKey(gizmondo, pad, input)
         if (shortPress.has(customKey))
@@ -138,11 +135,10 @@ internal class InputEditorState(raw: String) {
                 return it
             }
         if (
-            !gizmondo &&
-                stylus.optBoolean("enabled", true) &&
+            !pad && !gizmondo &&
                 longTarget(input, pad, gizmondo) == null
         ) {
-            val directions = stylus.optJSONArray(if (pad) "controller" else "keyboard")
+            val directions = stylus.optJSONArray("keyboard")
             for (i in 0..3) {
                 val keys = directions?.optJSONArray(i) ?: continue
                 if ((0 until keys.length()).any { same(keys.getString(it), input, pad) })
@@ -166,6 +162,7 @@ internal class InputEditorState(raw: String) {
     }
 
     fun shortFor(input: String, pad: Boolean, gizmondo: Boolean): String {
+        if (pad && !gizmondo && input == "RightThumb") return "Mode ×2"
         if (!pad && input.equals("F8", true)) return "Library"
         val target = assignment(input, pad, gizmondo)
         if (target != "host") return short(target, gizmondo)
@@ -250,7 +247,7 @@ internal class InputEditorState(raw: String) {
                 .getJSONObject(i)
                 .optJSONArray("keys")
                 ?.let { a -> for (j in 0 until a.length()) keys.add(a.getString(j)) }
-        stylus.optJSONArray(if (pad) "controller" else "keyboard")?.let { a ->
+        (if (pad) null else stylus.optJSONArray("keyboard"))?.let { a ->
             for (i in 0 until a.length()) a.optJSONArray(i)?.let { b ->
                 for (j in 0 until b.length()) keys.add(b.getString(j))
             }
@@ -266,8 +263,8 @@ internal class InputEditorState(raw: String) {
     }
 
     fun assign(input: String, pad: Boolean, target: String?, gizmondo: Boolean? = null): Boolean {
-        if (target == "screenshot" || (gizmondo == true && target == "center_tap")) return false
-        if (gizmondo != null && fixed(input, pad, gizmondo)) return false
+        if (target == "screenshot" || (gizmondo == true && target == "center_tap") || (pad && target?.startsWith("stylus:") == true)) return false
+        if (fixed(input, pad, gizmondo ?: false)) return false
         if (!pad && DeckInputPolicy.reservedKey(input)) return false
         if (gizmondo != null) {
             val key = InputGestures.bindingKey(gizmondo, pad, input)
@@ -300,9 +297,8 @@ internal class InputEditorState(raw: String) {
                     },
                 )
             }
-        val kind = if (pad) "controller" else "keyboard"
-        val directions = stylus.optJSONArray(kind) ?: JSONArray().also { stylus.put(kind, it) }
-        for (i in 0..3) {
+        val directions = stylus.optJSONArray("keyboard") ?: JSONArray().also { stylus.put("keyboard", it) }
+        if(!pad) for (i in 0..3) {
             val old = directions.optJSONArray(i) ?: JSONArray()
             directions.put(
                 i,
@@ -315,7 +311,6 @@ internal class InputEditorState(raw: String) {
         if (pad && same(json.optString("gamepad_fullscreen"), input, true))
             json.put("gamepad_fullscreen", JSONObject.NULL)
         if (target?.startsWith("stylus:") == true) {
-            stylus.put("enabled", true)
             directions.getJSONArray(target.substringAfter(':').toInt()).put(input)
         } else if (target != null) {
             if (pad) controller.put(InputBindings.controllerCanonical(input), target)

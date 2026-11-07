@@ -16,6 +16,7 @@ abstract class HostKeyActivity : AppCompatActivity() {
     private val hostController = DeckHostTracker()
 
     protected open fun hostGizmondo() = false
+    protected open fun reservedInputAttempt() {}
 
     private var hostFullscreen = false
     private val normalWindows = java.util.WeakHashMap<Window, Pair<Int, Int>>()
@@ -73,6 +74,7 @@ abstract class HostKeyActivity : AppCompatActivity() {
             val control = InputBindings.controllerName(event.keyCode) ?: return false
             if (!DeckInputPolicy.reserved(control, hostGizmondo())) return false
             if (event.action == KeyEvent.ACTION_DOWN) {
+                if(event.repeatCount==0) reservedInputAttempt()
                 hostController.down(event.deviceId, control, event.eventTime, hostGizmondo())
             } else if (event.action == KeyEvent.ACTION_UP) {
                 hostController.up(event.deviceId, control, event.eventTime, hostGizmondo())?.let {
@@ -84,6 +86,7 @@ abstract class HostKeyActivity : AppCompatActivity() {
         val name = InputBindings.keyName(event) ?: return false
         if (!DeckInputPolicy.reservedKey(name)) return false
         if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return true
+        reservedInputAttempt()
         DeckInputPolicy.key(name)?.let { runHostAction(it) }
         return true
     }

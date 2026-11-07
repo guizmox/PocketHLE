@@ -21,14 +21,14 @@ class StylusBindingsTest {
         val diagonal=b.velocity(floatArrayOf(1f,0f,0f,1f),0)
         assertTrue(kotlin.math.abs(kotlin.math.hypot(diagonal.first.toDouble(),diagonal.second.toDouble())-240.0)<1.0)
     }
-    @Test fun explicitUnboundAndDisabledSurviveConfigRoundTrip() {
+    @Test fun oldEnableAndControllerOverridesCannotDisableReservedStick() {
         val data=JSONObject().put("enabled",false).put("speed",1200)
             .put("keyboard",JSONArray().apply { repeat(4) { put(JSONArray()) } })
             .put("controller",JSONArray().apply { repeat(4) { put(JSONArray()) } })
         val saved=LauncherConfig.default().copy(originalJson=JSONObject().put("stylus_stick",data).toString())
         val loaded=LauncherConfig.fromJson(saved.toJson())
         val b=StylusBindings(loaded)
-        assertFalse(b.enabled);assertEquals(1200,b.speed);assertNull(b.key("O"))
-        assertNull(b.pad("RightStickUp"));assertEquals(0 to 0,b.velocity(floatArrayOf(1f,0f,0f,0f),0))
+        assertEquals(1200,b.speed);assertNull(b.key("O"))
+        assertEquals(0,b.pad("RightStickUp"));assertEquals(0 to -1200,b.velocity(floatArrayOf(1f,0f,0f,0f),0))
     }
 }

@@ -18,6 +18,13 @@ impl CenterTap {
         }
         let x = (width / 2).min(u16::MAX as u32) as u16;
         let y = (height / 2).min(u16::MAX as u32) as u16;
+        self.press_at(now, x, y)
+    }
+
+    pub fn press_at(&mut self, now: u64, x: u16, y: u16) -> Option<(u16, u16)> {
+        if self.active() {
+            return None;
+        }
         self.held = Some((now.saturating_add(DURATION_MS), x, y));
         Some((x, y))
     }

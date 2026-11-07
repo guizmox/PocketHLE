@@ -27,7 +27,10 @@ internal object DeckInputPolicy {
         }
 
     fun reserved(control: String, gizmondo: Boolean) =
-        InputBindings.controllerCanonical(control) in listOf("Select", "Start")
+        InputBindings.controllerCanonical(control) in listOf("Select", "Start") || stylusReserved(control,gizmondo)
+
+    fun stylusReserved(control: String, gizmondo: Boolean) = !gizmondo &&
+        InputBindings.controllerCanonical(control) in listOf("RightThumb","RightStickUp","RightStickDown","RightStickLeft","RightStickRight")
 
     fun guest(control: String, gizmondo: Boolean): String? {
         val name = InputBindings.controllerCanonical(control)
@@ -39,13 +42,13 @@ internal object DeckInputPolicy {
             }
         return when (name) {
             "Misc1" -> "rotate_screen"
-            "Mode" -> "center_tap"
+            "Mode" -> "soft1"
             "LeftTrigger" -> "pocket_pc_app1"
             "RightTrigger" -> "pocket_pc_app2"
             "LeftTrigger2" -> "pocket_pc_app3"
             "RightTrigger2" -> "pocket_pc_app4"
             "LeftThumb" -> "soft2"
-            "RightThumb" -> "soft1"
+            "RightThumb" -> null
             "South" -> "action"
             "East" -> "button_b"
             "West" -> "button_c"

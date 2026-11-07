@@ -14,6 +14,9 @@ class InputSettingsActivity : HostKeyActivity() {
 
     private val shortcuts = AssignmentShortcuts()
     private val liveInput = InputLiveState()
+    override fun reservedInputAttempt() {
+        if(assignmentDialog!=null && !shortcuts.awaitingRelease) android.widget.Toast.makeText(this,"This input is reserved by PocketHLE. Choose another input.",android.widget.Toast.LENGTH_SHORT).show()
+    }
     private val livePictures = mutableListOf<InputSkinView>()
     private val liveRows = mutableMapOf<String, Button>()
     private var listening = false
@@ -397,7 +400,7 @@ class InputSettingsActivity : HostKeyActivity() {
                             "Long press · " to InputSkinView.LONG_PRESS,
                             "Unassigned · " to Color.GRAY,
                             "Pressed input · " to InputSkinView.LIVE,
-                            "Reserved host key" to InputSkinView.RESERVED,
+                            "Reserved input" to InputSkinView.RESERVED,
                         )
                     )
             }
@@ -417,6 +420,20 @@ class InputSettingsActivity : HostKeyActivity() {
             )
         )
         section(body, controllerOnly)
+        if(!gizmondo) {
+            if(controllerOnly) body.addView(text("Double-click R3 to switch stylus mode. Stick: automatic drags, single click unused. Pointer: move cursor, single click to tap. Right stick and R3 are reserved."))
+            val speedLabel=text("Stylus speed (pixels): ${state.stylus.optInt("speed",240).coerceIn(30,1200)}")
+            body.addView(speedLabel)
+            body.addView(android.widget.SeekBar(this).apply {
+                max=1170;progress=(state.stylus.optInt("speed",240).coerceIn(30,1200)-30)
+                setOnSeekBarChangeListener(object: android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(bar:android.widget.SeekBar?,value:Int,fromUser:Boolean) { if(fromUser) { state.stylus.put("speed",value+30);speedLabel.text="Stylus speed (pixels): ${value+30}" } }
+                    override fun onStartTrackingTouch(bar:android.widget.SeekBar?) {}
+                    override fun onStopTrackingTouch(bar:android.widget.SeekBar?) {}
+                })
+            })
+        }
+
         scroll =
             ScrollView(this).apply {
                 isFillViewport = true
@@ -560,6 +577,13 @@ class InputSettingsActivity : HostKeyActivity() {
                     ?: input
             else input
         panel.addView(text("Selected input: $physical", 18f))
+        if (pad && DeckInputPolicy.stylusReserved(input,gizmondo)) {
+            panel.addView(text("Reserved stylus control"))
+            panel.addView(text("Double-click R3 to switch stylus mode."))
+            panel.addView(text("Stick: automatic drags; single click unused."))
+            panel.addView(text("Pointer: move cursor; single click to tap."))
+            return
+        }
         val target = state.assignment(input, pad, gizmondo)
         if (target == "host") {
             val tap = if (pad) DeckInputPolicy.tap(input) else DeckInputPolicy.key(input)
@@ -629,7 +653,7 @@ class InputSettingsActivity : HostKeyActivity() {
                         state.fixed(input!!, pad, gizmondo) || (!pad && long && input == "Escape")
                     ) {
                         notice =
-                            "This input has a built-in PocketHLE shortcut. Choose another input."
+                            "This input is reserved by PocketHLE. Choose another input."
                         begin()
                         return
                     }

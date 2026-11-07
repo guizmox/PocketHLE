@@ -15,6 +15,9 @@ pub(super) struct StylusEditor {
     modifiers: [bool; 4],
 }
 impl StylusEditor {
+    pub fn reserved_input_attempt(&mut self) {
+        self.message = "This input is reserved by PocketHLE. Choose another input.".into();
+    }
     pub fn new(testing: bool, portrait: bool) -> Self {
         Self {
             waiting: None,
@@ -114,6 +117,9 @@ impl PocketLauncher {
             self.library.config().gamepad_fullscreen.as_deref(),
         );
         if let Some(action) = action {
+            if matches!(action, TouchAction::Down(..)) {
+                self.stylus_pointer.cancel_click();
+            }
             self.send_grid_action(action);
         }
         consumed

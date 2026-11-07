@@ -276,17 +276,18 @@ and capture restarts with an explanation; it is not silently rebound.
 Choose **Unassigned** after a short capture to clear that profile's short action,
 or after a long capture to remove its long action. Removing a long action restores
 immediate short behavior; it does not clear the short assignment. Short choices
-also include stylus directions for Pocket PC inputs supported by the existing
-stylus router. Long stylus actions are not offered. Inputs with a built-in guest
-mapping that the stylus router prioritizes do not offer a stylus choice.
-Stylus enable/speed remain separate settings. Gizmondo has no stylus choices.
+include stylus directions for PocketPC keyboard inputs. Controller stylus
+directions are fixed to the right stick and are never assignment choices.
+Long stylus actions are not offered. Gizmondo has no stylus choices.
+Only **Stylus speed (pixels)** remains below the editor, shared by both modes;
+there is no enable switch or configurable controller direction table.
 
 **Reset keys to defaults** and **Reset controller defaults** are directly visible
 in their respective screens. Reset restores the corresponding legacy guest
 binding table and removes explicit short/long overrides for that input device
 in both Pocket PC and Gizmondo profiles. Controller reset also restores the
 additional fullscreen shortcut to View/Select. These actions do not reset the
-stylus direction tables, enable state or speed. Reset edits the draft and still
+keyboard stylus direction table or speed. Reset edits the draft and still
 requires Save. Android bindings are loaded when a game starts; relaunch a running
 game after saving. Desktop physical routing reads the saved launcher config.
 
@@ -296,7 +297,7 @@ The Deck layout is the common factory reference on desktop, dedicated Deck and
 Android, including Pocket PC shoulder/face/thumb mappings and Gizmondo L1 volume.
 `deck-input-defaults.json` is checked against Rust and Android defaults by tests.
 Library loading migrates recognized legacy factory maps without rewriting custom
-tables. Legacy keyboard/controller and stylus tables remain shared between device
+tables. Legacy keyboard/controller and keyboard stylus tables remain shared between device
 profiles; new explicit command overrides are profile-specific.
 
 `short_press_bindings` and `long_press_bindings` are optional maps in the launcher
@@ -307,10 +308,12 @@ values are assignable device-button or host-command IDs, or null for explicit
 unbinding. Long values are assignable IDs. Empty maps use the current profile
 defaults. Explicit overrides
 preserve legacy tables; assigning a legacy stylus direction moves conflicting
-legacy entries. Assigning stylus enables it. A conflicting optional fullscreen
+legacy keyboard entries. A conflicting optional fullscreen
 shortcut is cleared when the input is assigned through the assistant.
 
-Reserved host shortcuts retain priority; factory guest mappings are overridable.
+Reserved host shortcuts and the PocketPC right stick/R3 retain priority over
+explicit overrides, grids and optional fullscreen bindings. Factory guest mappings
+on other inputs are overridable.
 In normal gameplay, explicit physical short/long mappings are consumed before the
 per-game grid and ordinary stylus routes. Without an explicit override those
 existing routes still apply. Guest direction rotation and Pocket PC button-group
@@ -432,8 +435,8 @@ consumed by the frontend before any guest-key dispatch.
 | Controller L2 / R2 | P3 / P4 | L1 / R1 |
 | Controller North / South | A / Action | Stop / Play |
 | Controller East / West | B / C | Forward / Rewind |
-| Left-stick click / right-stick click | Esc / Tab | Unassigned / unassigned |
-| Guide/Mode short press | Center tap | Unassigned |
+| Left-stick click / right-stick click | Esc / reserved stylus click and mode switch | Unassigned / unassigned |
+| Guide/Mode short press | Tab | Unassigned |
 | Extra/Misc1 short press | Rotation | Rotation |
 
 Guide and Extra remain customizable, with no default hold. Screenshot is an
@@ -441,7 +444,8 @@ optional desktop assignment with no controller default; F10 remains its dedicate
 host key. Android hides and ignores Screenshot assignments imported from desktop.
 View short toggles fullscreen and View long returns to the library for both
 profiles. Menu short cycles filters; Menu long records on desktop and has no
-Android action. View/Menu remain immutable. Extra has no standard Android key
+Android action. View/Menu remain immutable. PocketPC also reserves all four right-stick directions
+and R3, including their short/long overrides. Extra has no standard Android key
 adapter; its configured action only runs if that input is delivered by the OS.
 
 PocketPC lists use ACTION, TAB (Soft1/VK_TAB), ESC (Soft2/VK_ESCAPE), TURBO, A,
@@ -462,10 +466,50 @@ key events (0–9), so Shift and AZERTY symbols do not change the assigned input
 Letter layout and committed Text remain unchanged. Android digit names come
 from key codes, independently of Unicode characters and modifiers.
 
+## PocketPC right-stick stylus modes
+
+On Windows/Linux/Deck and Android with an external controller, the PocketPC
+right stick is permanently assigned to the stylus. **Double-click R3 to switch
+stylus mode** is shown below the input editor and in the read-only selected-input
+card. The controller picture and rails show **Mode ×2** on R3 and **Tab** on
+Guide; reserved inputs use red outlines. Gizmondo is unchanged.
+
+* **Stick** is the initial mode for each game session: the existing held-stylus
+  drag behavior, including edge lift/recentering, remains. A single R3 click does
+  nothing.
+* **Pointer** moves a visible, outlined crosshair within the logical game screen.
+  A single R3 click sends a 60 ms stylus pulse at the position captured on release.
+  There is no automatic held drag or edge recentering in this mode.
+
+The double-click window is 300 ms from the first release to the second press.
+The first click is deferred; a second press inside that window cancels it and
+switches modes on release, without injecting a guest tap. Repeat key events do
+not count as additional clicks. A mode notification uses the same desktop overlay
+or Android Toast location as filter changes: **Stylus mode: Stick / Pointer**.
+
+**Stylus speed (pixels)** is the only setting, shared by both modes (logical
+pixels per second). Keyboard stylus directions and the on-screen aim pad use the
+same current mode. Pointer coordinates follow logical resolution, zoom and the
+existing inverse rotation; the crosshair is a host overlay, not guest pixels.
+Physical touch and active grids take priority. Touch/grid strokes, focus loss,
+disconnection and transitions cancel pending clicks; synthetic pulses always
+release. A new game starts in Stick mode, while focus/rotation preserve the mode.
+
+The obsolete `stylus_stick.enabled` and `stylus_stick.controller` fields are no
+longer read or emitted; saving removes them. `speed` and keyboard direction
+bindings remain compatible. Old explicit short/long or grid assignments targeting
+reserved inputs cannot override the fixed controls.
+
+All immutable keyboard inputs (F7–F12) and controller inputs (View/Menu plus the
+PocketPC right stick/R3) are refused by per-game grid capture as well as the global
+assistant. A reserved-input attempt reports **This input is reserved by PocketHLE**.
+Existing saved grid entries for these inputs are ignored at runtime.
+
 ## Center tap
 
 Center tap is an assignable PocketPC-only host stylus command. Factory bindings
-are keyboard Tab and a short Guide press. It emits PointerDown at
+use keyboard Tab. Guide now defaults to the guest Tab command; it no longer
+performs Center tap. It emits PointerDown at
 (width/2, height/2) of the logical guest framebuffer, then PointerUp after
 60 ms; display zoom, GPU resolution and rotation do not change that point.
 Holding/repeat does not extend or repeat the pulse. It does not take ownership
@@ -481,7 +525,12 @@ PocketPC Center tap, but not Screenshot.
 The former Game library, Settings and About dropdown hierarchy is replaced by
 direct buttons in four separated groups: Game library, Settings, Features,
 About. Each group has at most two rows; small windows scroll horizontally
-instead of shrinking labels. Controller focus reveals the selected button.
+instead of shrinking labels. The initial desktop width is 1280 logical points;
+at the first library display a one-shot fit also widens an older restored window
+using the measured toolbar overflow. It preserves height, caps width to the
+monitor (with decoration/margin allowance), skips maximized/fullscreen windows,
+and does not constrain later manual resizing. Controller focus reveals the
+selected button.
 Directions use button geometry within the toolbar; L3 switches between toolbar
 and page, and A activates the focused button. The footer lists these controls.
 The former F6 section-switch shortcut, interception and help were removed.

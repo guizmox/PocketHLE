@@ -257,7 +257,7 @@ pub struct PocketLauncher {
     analysis_cache: std::collections::HashMap<String, GameAnalysis>,
     upscale_x2: bool,
     upscale_filter: UpscaleFilter,
-    deck_filter_notice: Option<(String, Instant)>,
+    control_notice: Option<(String, Instant)>,
     deck_menu_press: Option<(usize, Instant)>,
     deck_view_press: Option<(usize, Instant)>,
     /// PocketPC only: additional Steam / Quick Access FN buttons, when exposed by SDL.
@@ -303,6 +303,7 @@ pub struct PocketLauncher {
     colors_startup_notice: Option<(String, String)>,
     screen: Screen,
     about_parent: Screen,
+    startup_toolbar_fit: bool,
     runner: Runner,
     shared_gpu_context: Option<pocket_core::winceapi::gles::ExternalGpuContext>,
     run_thread: Option<std::thread::JoinHandle<()>>,
@@ -373,6 +374,9 @@ pub struct PocketLauncher {
     stylus_gamepad: std::collections::HashMap<(usize, String), f32>,
     stylus_touch: [f32; 4],
     stylus_last: (i16, i16),
+    stylus_pointer: pocket_library::stylus::StylusPointer,
+    stylus_clock: Instant,
+    stylus_tick: Instant,
     steering_axes: (i16, i16),
     stylus_editor: Option<StylusEditor>,
     stylus_grid_router: GridRouter,
@@ -896,7 +900,7 @@ impl PocketLauncher {
             analysis_cache: std::collections::HashMap::new(),
             upscale_x2: false,
             upscale_filter,
-            deck_filter_notice: None,
+            control_notice: None,
             deck_menu_press: None,
             deck_view_press: None,
             upscale_window_size: None,
@@ -941,6 +945,7 @@ impl PocketLauncher {
             colors_startup_prompt: None,
             screen: Screen::Library,
             about_parent: Screen::Library,
+            startup_toolbar_fit: true,
             runner,
             shared_gpu_context,
             run_thread: None,
@@ -989,6 +994,9 @@ impl PocketLauncher {
             stylus_gamepad: Default::default(),
             stylus_touch: [0.0; 4],
             stylus_last: (0, 0),
+            stylus_pointer: Default::default(),
+            stylus_clock: Instant::now(),
+            stylus_tick: Instant::now(),
             steering_axes: (0, 0),
             stylus_editor: None,
             stylus_grid_router: Default::default(),
@@ -1523,7 +1531,36 @@ impl PocketLauncher {
             filter_help: self.upscale_filter.label(),
             rotation: self.game_rotation.degrees(),
         };
-        if let Some(action) = crate::toolbar_ui::show(ui, &state) {
+        let output = crate::toolbar_ui::show(ui, &state);
+        if self.startup_toolbar_fit
+            && self.screen == Screen::Library
+            && self.library_restore_pending.is_none()
+        {
+            let viewport = ui.ctx().input(|i| i.viewport().clone());
+            if viewport.fullscreen.unwrap_or(false) || viewport.maximized.unwrap_or(false) {
+                self.startup_toolbar_fit = false;
+            } else if let (Some(inner), Some(monitor)) =
+                (viewport.inner_rect, viewport.monitor_size)
+            {
+                self.startup_toolbar_fit = false;
+                let decorations = viewport
+                    .outer_rect
+                    .map_or(0.0, |outer| (outer.width() - inner.width()).max(0.0));
+                if let Some(width) = crate::toolbar_ui::opening_width(
+                    inner.width(),
+                    output.horizontal_overflow,
+                    monitor.x,
+                    decorations,
+                ) {
+                    let size = Vec2::new(width, inner.height());
+                    self.library_viewport.size = Some(size);
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        if let Some(action) = output.action {
             self.handle_toolbar_action(ui.ctx(), action);
         }
     }
@@ -2863,16 +2900,13 @@ impl PocketLauncher {
         }
         if !self.bindings_visual.is_gizmondo() {
             ui.separator();
-            ui.heading("Stylus stick");
-            crate::controller_ui::checkbox(
-                ui,
-                &mut draft.stylus_stick.enabled,
-                "Enable stylus stick (right stick by default)",
-            );
-            ui.label("Emulates held-stylus drags; lifts and recentres at screen edges. Physical touch takes priority.");
+            ui.heading("Stylus");
+            if controller {
+                ui.label("Double-click R3 to switch stylus mode. Stick: automatic drags, single click unused. Pointer: move the cursor, single click to tap. Right stick and R3 are reserved.");
+            }
             let slider = ui.add(
                 egui::Slider::new(&mut draft.stylus_stick.speed, 30..=1200)
-                    .text("Stylus speed (pixels/s)"),
+                    .text("Stylus speed (pixels)"),
             );
             crate::controller_ui::track_focus(ui, &slider);
         }
@@ -3220,6 +3254,38 @@ impl PocketLauncher {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
     }
 
+    fn paint_stylus_pointer(&self, ui: &egui::Ui, rect: Rect) {
+        if self.running_is_gizmondo || !self.stylus_pointer.pointer {
+            return;
+        }
+        let (Some(frame), Some((x, y))) = (
+            self.last_frame_snapshot.as_ref(),
+            self.stylus_pointer.position(),
+        ) else {
+            return;
+        };
+        let (x, y) = (f32::from(x), f32::from(y));
+        let (w, h) = (frame.width as f32, frame.height as f32);
+        let (u, v) = match rotation_turns(self.game_rotation) {
+            1 => ((h - 1.0 - y) / h, x / w),
+            2 => ((w - 1.0 - x) / w, (h - 1.0 - y) / h),
+            3 => (y / h, (w - 1.0 - x) / w),
+            _ => (x / w, y / h),
+        };
+        let point = rect.min + Vec2::new(u * rect.width(), v * rect.height());
+        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        for (width, color) in [(4.0, Color32::BLACK), (2.0, Color32::WHITE)] {
+            painter.line_segment(
+                [point - Vec2::new(7.0, 0.0), point + Vec2::new(7.0, 0.0)],
+                egui::Stroke::new(width, color),
+            );
+            painter.line_segment(
+                [point - Vec2::new(0.0, 7.0), point + Vec2::new(0.0, 7.0)],
+                egui::Stroke::new(width, color),
+            );
+        }
+    }
+
     fn paint_guest_frame(&mut self, ui: &egui::Ui, rect: Rect) {
         if !rect.intersect(ui.clip_rect()).is_positive() {
             let mut capture = self.screenshot.lock().unwrap_or_else(|e| e.into_inner());
@@ -3282,6 +3348,7 @@ impl PocketLauncher {
                     },
                 )),
             });
+            self.paint_stylus_pointer(ui, rect);
             self.paint_recording_indicator(ui, rect);
             self.paint_rate_indicators(ui, rect);
             self.ui_system_media(ui.ctx(), rect);
@@ -3345,6 +3412,7 @@ impl PocketLauncher {
                 });
             }
         }
+        self.paint_stylus_pointer(ui, rect);
         self.paint_recording_indicator(ui, rect);
         self.paint_rate_indicators(ui, rect);
         self.ui_system_media(ui.ctx(), rect);
@@ -3989,6 +4057,7 @@ impl PocketLauncher {
                     // The guest cancels its emulated stroke on physical Down.
                     // Rearm a held stick after even a same-frame touch tap.
                     self.cancel_grid();
+                    self.stylus_pointer.cancel_click();
                     self.stylus_last = (0, 0);
                     InputEvent::PointerDown { x, y }
                 }
@@ -4031,11 +4100,12 @@ impl PocketLauncher {
                 strengths[i] = 1.0;
             }
             for ((_, name), value) in &self.stylus_gamepad {
-                if config.controller[i].contains(name) {
+                if pocket_library::stylus::controller_direction(name) == Some(i) {
                     strengths[i] = strengths[i].max(*value);
                 }
             }
         }
+
         let active = self.screen == Screen::Run
             && !self.running_is_gizmondo
             && self.running_game.is_some()
@@ -4052,12 +4122,54 @@ impl PocketLauncher {
         // Touch temporarily owns the stylus, but does not release held
         // controller axes. SDL may not send another event for an unchanged
         // stick position when the finger lifts.
-        let vector =
-            if active && self.pointer_down_at.is_none() && !self.stylus_grid_router.active() && !self.center_tap.borrow().active() {
-                config.velocity(strengths, rotation_turns(self.game_rotation))
-            } else {
-                (0, 0)
-            };
+        let vector = if active
+            && self.pointer_down_at.is_none()
+            && !self.stylus_grid_router.active()
+            && !self.center_tap.borrow().active()
+        {
+            config.velocity(strengths, rotation_turns(self.game_rotation))
+        } else {
+            (0, 0)
+        };
+        let now = Instant::now();
+        let dt = now.duration_since(self.stylus_tick).as_secs_f32();
+        self.stylus_tick = now;
+        if let Some(frame) = self.last_frame_snapshot.as_ref() {
+            self.stylus_pointer
+                .advance(vector, dt, (frame.width, frame.height));
+        }
+        if !active {
+            self.stylus_pointer.cancel_click();
+        }
+        if let Some((x, y)) = self
+            .stylus_pointer
+            .take_tap(self.stylus_clock.elapsed().as_millis() as u64)
+        {
+            if active
+                && self.pointer_down_at.is_none()
+                && !self.stylus_grid_router.active()
+                && !self.center_tap.borrow().active()
+            {
+                if self
+                    .center_tap
+                    .borrow_mut()
+                    .press_at(self.input_gesture_clock.elapsed().as_millis() as u64, x, y)
+                    .is_some()
+                {
+                    self.dispatch_input(InputEvent::StylusAim { x: 0, y: 0 });
+                    self.dispatch_input(InputEvent::PointerDown { x, y });
+                }
+            }
+        }
+        let animate = self.stylus_pointer.needs_tick(vector);
+        let vector = if self.stylus_pointer.pointer {
+            (0, 0)
+        } else {
+            vector
+        };
+        if active && animate {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
         self.recording
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -4271,6 +4383,8 @@ impl PocketLauncher {
             self.send_input(InputEvent::TouchSteeringPosition { x: 0, y: 0 });
             self.steering_axes = (0, 0);
         }
+        self.stylus_pointer.cancel_click();
+        self.stylus_tick=Instant::now();
         self.stylus_keyboard.clear();
         self.stylus_gamepad.clear();
         self.stylus_touch = [0.0; 4];
@@ -4405,10 +4519,8 @@ impl PocketLauncher {
                     if Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
-                        if self.capture_grid_axis(ctx, true, horizontal, value) {
-                            continue;
-                        }
-                        self.route_grid_axis(true, horizontal, value);
+                        if self.capture_grid_axis(ctx, true, horizontal, value) { continue; }
+                        if self.running_is_gizmondo { self.route_grid_axis(true, horizontal, value); }
                     }
                     if self.screen == Screen::Run
                         && !self.running_is_gizmondo
@@ -4423,7 +4535,6 @@ impl PocketLauncher {
                             let key = (device, name.to_string());
                             let strength = ((strength - 0.18) / 0.82).clamp(0.0, 1.0);
                             if strength > 0.0
-                                && !self.grid_assigned(&HostInput::Controller(name.into()))
                             {
                                 self.stylus_gamepad.insert(key, strength);
                             } else {
@@ -4434,6 +4545,7 @@ impl PocketLauncher {
                 }
                 crate::gamepad::Event::Error(error) => {self.gamepad_error=Some(error);self.bindings_visual.clear_live();},
                 crate::gamepad::Event::Devices(devices) => {
+                    if !devices.iter().any(|(id,_)|Some(*id)==self.gamepad_selected) { self.stylus_pointer.cancel_click(); }
                     if self
                         .gamepad_selected
                         .is_some_and(|id| !devices.iter().any(|(d, _)| *d == id))
@@ -4491,6 +4603,13 @@ impl PocketLauncher {
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                         && matches!(control.as_str(), "Select" | "Start")
                     {
+                        if let Some(editor)=self.stylus_editor.as_mut().filter(|e|e.waiting.is_some()) {
+                            if down { editor.reserved_input_attempt(); }
+                            continue;
+                        }
+                        if down && self.screen==Screen::InputSettings && self.bindings_visual.reserved_input_attempt() {
+                            self.control_notice=Some(("This input is reserved by PocketHLE.".into(),Instant::now()+Duration::from_secs(3)));
+                        }
                         self.handle_menu_host_control(ctx, device, &control, down);
                         continue;
                     }
@@ -4505,6 +4624,18 @@ impl PocketLauncher {
                             if !down {self.controller_ui.release(&control);continue;}
                             continue;
                         }
+                    }
+                    if self.screen == Screen::Run && !self.running_is_gizmondo && Some(device) == self.gamepad_selected
+                        && pocket_library::stylus::controller_reserved(&control, false) {
+                        if control == "RightThumb" && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+                            if self.stylus_pointer.button(down, self.stylus_clock.elapsed().as_millis() as u64) {
+                                self.send_input(InputEvent::StylusAim { x:0,y:0 });
+                                self.stylus_last=(0,0);
+                                let mode=if self.stylus_pointer.pointer { "Pointer" } else { "Stick" };
+                                self.control_notice=Some((format!("Stylus mode: {mode}"),Instant::now()+Duration::from_secs(3)));
+                            }
+                        }
+                        continue;
                     }
                     if Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) && self.route_long_press(true,device,&control,down) {continue;}
                     if (self.file_dialog.is_some() || self.restore_archive.is_some())
@@ -4813,20 +4944,6 @@ impl PocketLauncher {
                         &control,
                         self.running_is_gizmondo,
                     );
-                    if deck_button.is_none()
-                        && !self.running_is_gizmondo
-                        && self.library.config().stylus_stick.enabled
-                        && self
-                            .library
-                            .config()
-                            .stylus_stick
-                            .controller
-                            .iter()
-                            .any(|names| names.contains(&control))
-                    {
-                        self.stylus_gamepad.insert(key, 1.0);
-                        continue;
-                    }
                     let Some(button) = deck_button.or_else(|| {
                         self.library
                             .config()
@@ -4888,8 +5005,8 @@ impl PocketLauncher {
             Ok(()) => format!("Upscaling filter: {}", self.upscale_filter.label()),
             Err(error) => format!("Could not save filter: {error}"),
         };
-        self.deck_filter_notice = Some((
-            self.upscale_filter.label().to_owned(),
+        self.control_notice = Some((
+            format!("Filter: {}", self.upscale_filter.label()),
             Instant::now() + Duration::from_secs(3),
         ));
         if let Some(frame) = self.last_frame_snapshot.clone() {
@@ -4919,6 +5036,17 @@ impl PocketLauncher {
         let keys = crate::host_shortcuts::take(ctx);
         let mut fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         for key in keys {
+            if let Some(editor) = self.stylus_editor.as_mut().filter(|e| e.waiting.is_some()) {
+                editor.reserved_input_attempt();
+                continue;
+            }
+            if self.screen == Screen::InputSettings && self.bindings_visual.reserved_input_attempt()
+            {
+                self.control_notice = Some((
+                    "This input is reserved by PocketHLE.".into(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+            }
             match key {
                 egui::Key::F7 => self.cycle_rotation(ctx),
                 egui::Key::F8 => {
@@ -5071,7 +5199,7 @@ impl PocketLauncher {
             if !self.running_is_gizmondo
                 && !text_input
                 && !steering_direction
-                && self.library.config().stylus_stick.enabled
+
                 && self
                     .library
                     .config()
@@ -5548,6 +5676,8 @@ impl PocketLauncher {
         } else {
             game.settings.controls_mode()
         };
+        self.stylus_pointer=Default::default();
+        self.stylus_tick=Instant::now();
         self.running_stylus_grid = game.settings.pocketpc_stylus_grid.clone();
         self.console_fit_pending = true;
         let (frame_tx, frame_rx) = crate::latest_frame::channel();
@@ -6084,20 +6214,18 @@ impl eframe::App for PocketLauncher {
         if self.screen == Screen::Library {
             self.ui_game_information(ctx);
         }
-        if self.screen == Screen::Run {
-            if let Some((label, expires)) = self.deck_filter_notice.clone() {
-                if Instant::now() < expires {
-                    egui::Area::new(egui::Id::new("deck_filter_notice"))
-                        .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 12.0))
-                        .interactable(false)
-                        .show(ctx, |ui| {
-                            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                ui.label(format!("Filter: {label}"));
-                            });
+        if let Some((label, expires)) = self.control_notice.clone() {
+            if Instant::now() < expires {
+                egui::Area::new(egui::Id::new("control_notice"))
+                    .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 12.0))
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(label);
                         });
-                } else {
-                    self.deck_filter_notice = None;
-                }
+                    });
+            } else {
+                self.control_notice = None;
             }
         }
         if let Some((message, expires)) = self.gps_notice.clone() {

@@ -25,7 +25,7 @@ identification in an ordinary desktop executable.
 | View, hold 650 ms | Return to library on both PocketPC and Gizmondo |
 | Extra/Misc1, short press (if delivered) | Next rotation (customizable) |
 | Extra/Misc1, hold 650 ms (if delivered) | Unassigned by default |
-| Guide/Mode, short press (if delivered) | PocketPC Center tap; Gizmondo unassigned (customizable) |
+| Guide/Mode, short press (if delivered) | PocketPC Tab; Gizmondo unassigned (customizable) |
 
 These host gestures take precedence over an old default-binding migration note.
 They change emulator presentation/device controls, not SteamOS volume/brightness.
@@ -38,12 +38,12 @@ They change emulator presentation/device controls, not SteamOS volume/brightness
 | L1 / R1 | P1 / P2 |
 | L2 / R2 | P3 / P4 |
 | Left-stick click | Escape |
-| Right-stick click | Tab |
+| Right-stick click | Reserved: single click taps only in Pointer mode; double-click switches stylus mode |
 | A / B / X / Y | Action / B / C / A (Enter / Space / Shift / Ctrl) |
 
 P1-P4 are the buttons exposed by GAPI; Action/Enter is separate. A game that
 only lists GAPI buttons need not accept every keyboard key. Stick clicks and
-motion are independent. Guide/Mode taps the screen center on PocketPC when SDL receives it and has
+motion are independent. Guide/Mode sends guest Tab on PocketPC when SDL receives it and has
 no default long action. Extra/Misc1 cycles rotation on both profiles. Screenshot
 is optional and assignable on desktop.
 View hold exits either device profile; it never sends Brightness.
@@ -145,8 +145,17 @@ actions. Number-row binding events ignore Shift via physical digit positions;
 AZERTY letter mappings and ordinary text entry retain their layout.
 
 F7 cycles the active game's presentation rotation and is reserved. Keyboard Tab
-and controller Guide default to a 60 ms Center tap only for PocketPC. Both
-Center tap and Extra's Rotation are assignable commands.
+defaults to a 60 ms Center tap only for PocketPC; Guide sends guest Tab.
+Center tap and Extra's Rotation remain assignable commands.
+
+PocketPC reserves the right stick and R3 in every assignment editor, including
+per-game grids. Double-click R3 to switch between automatic Stylus stick drags
+and a visible Pointer. Single R3 does nothing in Stick mode; in Pointer mode it
+taps the cursor position after the 300 ms double-click window. A mode notice
+appears at the filter-notice location. The only setting is Stylus speed (pixels),
+shared by both modes. Old enable and controller-direction options are removed.
+See [FRONTENDS.md](FRONTENDS.md#pocketpc-right-stick-stylus-modes) for timing,
+priority, cancellation and Android parity.
 
 Desktop launcher buttons are grouped into Game library, Settings, Features and
 About. D-pad/left stick navigate their actual two-row positions and reveal

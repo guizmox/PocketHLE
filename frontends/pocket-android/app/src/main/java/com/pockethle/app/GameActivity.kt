@@ -112,6 +112,9 @@ class GameActivity : AppCompatActivity() {
     private val stylusAxes = HashMap<Pair<Int,String>,Pair<Int,Float>>()
     private var stylusTouch = floatArrayOf(0f,0f,0f,0f)
     private var stylusSent = 0 to 0
+    private val stylusPointer=StylusPointer()
+    private var stylusPointerTick=0L
+    private var stylusCursor: View?=null
     private var surfacePointerDown = false
     private var surfacePointerId = -1
     private var lastPointerX = 0
@@ -122,6 +125,7 @@ class GameActivity : AppCompatActivity() {
         override fun onInputDeviceAdded(id:Int) {}
         override fun onInputDeviceChanged(id:Int) {}
         override fun onInputDeviceRemoved(id:Int) {
+            stylusPointer.cancelClick()
             sendGestureEdges(inputGestures.cancelPrefix("pad:$id:"));sendGestureEdges(inputGestures.cancelPrefix("key:$id:"));gestureAxes.removeAll {it.first==id}
             cancelGrid();gridAxes.clear()
             stylusKeys.keys.removeAll { it.first==id }
@@ -902,6 +906,15 @@ class GameActivity : AppCompatActivity() {
         val sources = event.device?.sources ?: event.source
         val isController = sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD || sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
         val controllerName=if(isController) InputBindings.controllerName(event.keyCode) else null
+        if(controllerName=="RightThumb" && !gizmondoGame) {
+            if(event.repeatCount==0 && session!=0L && activityResumed && hasWindowFocus()) {
+                if(stylusPointer.button(event.action==KeyEvent.ACTION_DOWN,android.os.SystemClock.uptimeMillis())) {
+                    updateStylusAim()
+                    Toast.makeText(this,"Stylus mode: ${if(stylusPointer.pointer) "Pointer" else "Stick"}",Toast.LENGTH_SHORT).show()
+                }
+            }
+            return true
+        }
         if(controllerName!=null && DeckInputPolicy.reserved(controllerName,gizmondoGame)) {
             val now=android.os.SystemClock.uptimeMillis()
             if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) {
@@ -915,7 +928,7 @@ class GameActivity : AppCompatActivity() {
         val gridName=if(isController) gridControllerName(event.keyCode) else gridKeyName(event)
         if(gridName!=null && routeGrid(GridInput(if(isController) "controller" else "keyboard",gridName),event.action==KeyEvent.ACTION_DOWN)) return true
         val steeringDirection=touchSteeringEnabled && (if(isController) gridName?.let{bindings.controllerKey(it)} else bindings.keyboardKey(event)) in listOf(VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT)
-        if (!gizmondoGame && !steeringDirection && (!isController || controllerName==null || DeckInputPolicy.guest(controllerName,gizmondoGame)==null) && ::stylusBindings.isInitialized && stylusBindings.enabled && session != 0L) {
+        if (!gizmondoGame && !steeringDirection && (!isController || controllerName==null || DeckInputPolicy.guest(controllerName,gizmondoGame)==null) && ::stylusBindings.isInitialized && session != 0L) {
             val key=event.deviceId to event.keyCode
             val name=if(isController) InputBindings.controllerName(event.keyCode) else InputBindings.keyName(event)
             val direction=name?.let { if(isController) stylusBindings.pad(it) else stylusBindings.key(it) }
@@ -993,6 +1006,7 @@ class GameActivity : AppCompatActivity() {
         }
         val gestureControls = mutableSetOf<String>()
         fun gestureAxis(control: String, strength: Float) {
+            if(DeckInputPolicy.stylusReserved(control,gizmondoGame)) return
             if (bindings.longKey(control, true) == null && !bindings.hasShort(control, true)) return
             gestureControls.add(control)
             val token = event.deviceId to control
@@ -1030,12 +1044,12 @@ class GameActivity : AppCompatActivity() {
                     }
                 }
             }
-            if (!gizmondoGame && !steeringArrows && stylusBindings.enabled) {
+            if (!gizmondoGame && !steeringArrows) {
                 listOf(name + negative to -value, name + positive to value).forEach { (control, v)
                     ->
                     if (
                         control !in gestureControls &&
-                            gridRouter?.assigned(GridInput("controller", control)) != true
+                            (DeckInputPolicy.stylusReserved(control,gizmondoGame) || gridRouter?.assigned(GridInput("controller", control)) != true)
                     )
                         stylusBindings.pad(control)?.let { direction ->
                             val strength = ((v - .18f) / .82f).coerceIn(0f, 1f)
@@ -1051,7 +1065,7 @@ class GameActivity : AppCompatActivity() {
                     gridRouter?.assigned(GridInput("controller", name + negative)) != true &&
                     (steeringArrows ||
                         stylusBindings.pad(name + negative).let {
-                            gizmondoGame || !stylusBindings.enabled || it == null
+                            gizmondoGame || it == null
                         }) &&
                     active(-value, name + negative)
             )
@@ -1061,7 +1075,7 @@ class GameActivity : AppCompatActivity() {
                     gridRouter?.assigned(GridInput("controller", name + positive)) != true &&
                     (steeringArrows ||
                         stylusBindings.pad(name + positive).let {
-                            gizmondoGame || !stylusBindings.enabled || it == null
+                            gizmondoGame || it == null
                         }) &&
                     active(value, name + positive)
             )
@@ -1103,7 +1117,6 @@ class GameActivity : AppCompatActivity() {
                 val aim =
                     if (
                         !gizmondoGame &&
-                            stylusBindings.enabled &&
                             DeckInputPolicy.guest(name, gizmondoGame) == null
                     )
                         stylusBindings.pad(name)
@@ -1128,7 +1141,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun sendGrid(touch:GridTouch) {
-        if (touch.phase == 0) cancelCenterTap()
+        if (touch.phase == 0) { stylusPointer.cancelClick();cancelCenterTap() }
         if(session==0L) return
         val frame=lastFrame ?: return
         val (x,y)=StylusGridConfig.guestPoint(touch.x,touch.y,rotationDegrees/90,frame.width,frame.height)
@@ -1210,13 +1223,56 @@ class GameActivity : AppCompatActivity() {
     }
 
     /** Release keys and pointer state before the native session can outlive the UI. */
+    private fun updateStylusCursor() {
+        if(!::surface.isInitialized || (!stylusPointer.pointer && stylusCursor==null)) return
+        val overlay=stylusCursor ?: object: View(this) {
+            private val paint=android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+            override fun onDraw(canvas:android.graphics.Canvas) {
+                val f=lastFrame ?: return
+                val p=stylusPointer.position() ?: return
+                if(!stylusPointer.pointer || gizmondoGame) return
+                val rect=renderedDisplayRect(width,height,f.width,f.height,f.textureWidth,f.textureHeight,rotationDegrees,displayScale,true,controllerFullscreenHost.active)
+                val w=f.width.toFloat();val h=f.height.toFloat();val x=p.first.toFloat();val y=p.second.toFloat()
+                val uv=when(rotationDegrees) {90->(h-1-y)/h to x/w;180->(w-1-x)/w to (h-1-y)/h;270->y/h to (w-1-x)/w;else->x/w to y/h}
+                val cx=rect.left+uv.first*rect.width;val cy=rect.top+uv.second*rect.height
+                val radius=7*resources.displayMetrics.density
+                canvas.save();canvas.clipRect(rect.left,rect.top,rect.left+rect.width,rect.top+rect.height)
+                listOf(4f to android.graphics.Color.BLACK,2f to android.graphics.Color.WHITE).forEach { (stroke,color)->
+                    paint.color=color;paint.strokeWidth=stroke*resources.displayMetrics.density
+                    canvas.drawLine(cx-radius,cy,cx+radius,cy,paint);canvas.drawLine(cx,cy-radius,cx,cy+radius,paint)
+                };canvas.restore()
+            }
+        }.also {
+            it.isClickable=false;it.isFocusable=false
+            (surface.parent as android.widget.FrameLayout).addView(it,android.widget.FrameLayout.LayoutParams(-1,-1))
+            stylusCursor=it
+        }
+        overlay.visibility=if(stylusPointer.pointer) View.VISIBLE else View.GONE
+        if(stylusPointer.pointer) overlay.invalidate()
+    }
+
     private fun updateStylusAim() {
         if(gizmondoGame || session==0L || !::stylusBindings.isInitialized) return
         val strengths=stylusTouch.copyOf()
         stylusKeys.values.forEach { strengths[it]=1f }
         stylusAxes.values.forEach { (i,v) -> strengths[i]=maxOf(strengths[i],v) }
-        val vector=if(!activityResumed || !hasWindowFocus() || surfacePointerDown || centerTap.active || gridRouter?.active==true) 0 to 0
+        var vector=if(!activityResumed || !hasWindowFocus() || surfacePointerDown || centerTap.active || gridRouter?.active==true) 0 to 0
             else stylusBindings.velocity(strengths,rotationDegrees/90)
+        val now=android.os.SystemClock.uptimeMillis()
+        val active=activityResumed && hasWindowFocus() && !surfacePointerDown && gridRouter?.active!=true
+        lastFrame?.let { frame -> stylusPointer.advance(vector,if(stylusPointerTick==0L) 0f else (now-stylusPointerTick)/1000f,frame.width,frame.height) }
+        stylusPointerTick=now
+        if(!active) stylusPointer.cancelClick()
+        val tap=stylusPointer.takeTap(now)
+        if(active && tap!=null && !centerTap.active) {
+            centerTap.pressAt(now,tap.first,tap.second)
+            centerTapSession=session
+            NativeBridge.nativeSendInput(session,NativeBridge.INPUT_STYLUS_AIM,0,0)
+            NativeBridge.nativeSendInput(session,NativeBridge.INPUT_POINTER_DOWN,tap.first,tap.second)
+            mainHandler.postDelayed(centerTapRelease,CenterTapPulse.DURATION_MS)
+        }
+        if(stylusPointer.pointer) vector=0 to 0
+        updateStylusCursor()
         if(vector!=stylusSent) {
             NativeBridge.nativeSendInput(session,NativeBridge.INPUT_STYLUS_AIM,vector.first,vector.second)
             stylusSent=vector
@@ -1224,6 +1280,8 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun releaseHeldInput() {
+        stylusPointer.cancelClick()
+        stylusPointerTick=0L
         cancelCenterTap()
         inputGestures.clear()
         gestureAxes.clear()
@@ -1298,6 +1356,7 @@ class GameActivity : AppCompatActivity() {
             val mapped = if(pointerIndex>=0) frame?.let { mapTouchToGame(v, event, it,pointerIndex) } else null
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    stylusPointer.cancelClick()
                     cancelCenterTap()
                     val (gx, gy) = mapped ?: return@setOnTouchListener true
                     cancelGrid()
@@ -1341,7 +1400,7 @@ class GameActivity : AppCompatActivity() {
      */
     private fun wireVirtualGamepad() {
         (gameControls as? PocketPcControls)?.aim?.apply {
-            visibility=if(stylusBindings.enabled || touchSteeringEnabled || gridRouter!=null) View.VISIBLE else View.GONE
+            visibility=View.VISIBLE
             onAim={ x,y ->
                 if(touchSteeringEnabled) {
                     NativeBridge.nativeSendInput(session,NativeBridge.INPUT_TOUCH_STEERING,(x*1000).toInt(),(y*1000).toInt())

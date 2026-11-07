@@ -89,6 +89,7 @@ data class GameSettings(
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
         remove("optimizations")
         remove("anisotropic_filtering")
+        optJSONObject("stylus_stick")?.apply { remove("enabled");remove("controller") }
         put("frame_rate_limit", frameRateLimit ?: JSONObject.NULL)
         put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
         put("executable_heap", executableHeap ?: JSONObject.NULL)
@@ -212,6 +213,7 @@ data class LauncherConfig(
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
         remove("optimizations")
         remove("anisotropic_filtering")
+        optJSONObject("stylus_stick")?.apply { remove("enabled");remove("controller") }
         put("frame_rate_limit", frameRateLimit)
         put("schema_version", schemaVersion)
         put("default_cpu_backend", defaultCpuBackend)

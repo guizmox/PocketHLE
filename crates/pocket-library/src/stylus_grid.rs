@@ -65,10 +65,13 @@ impl HostInput {
                     "ESCAPE" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
                 ) =>
             {
-                Some("Reserved by PocketHLE (Escape / F7–F12).")
+                Some("This input is reserved by PocketHLE (Escape / F7–F12).")
             }
-            Self::Controller(n) if matches!(n.as_str(), "Select" | "Start") => {
-                Some("Reserved by PocketHLE (fullscreen, filters, recording or system button).")
+            Self::Controller(n)
+                if matches!(n.as_str(), "Select" | "Start")
+                    || crate::stylus::controller_reserved(&n, false) =>
+            {
+                Some("This input is reserved by PocketHLE.")
             }
             Self::Controller(n)
                 if fullscreen.is_some_and(|f| {
@@ -259,7 +262,15 @@ mod tests {
         for name in ["F7", "F8", "F9", "F10", "F11", "F12", "Escape"] {
             assert!(g.bind(0, HostInput::Keyboard(name.into()), None).is_err());
         }
-        for name in ["Start", "Select"] {
+        for name in [
+            "Start",
+            "Select",
+            "RightThumb",
+            "RightStickUp",
+            "RightStickDown",
+            "RightStickLeft",
+            "RightStickRight",
+        ] {
             assert!(g.bind(0, HostInput::Controller(name.into()), None).is_err());
         }
         assert!(g
@@ -317,22 +328,43 @@ mod tests {
         }
     }
     #[test]
+    fn saved_reserved_grid_entries_cannot_capture_immutable_inputs() {
+        for name in [
+            "Start",
+            "Select",
+            "RightThumb",
+            "RightStickUp",
+            "RightStickDown",
+            "RightStickLeft",
+            "RightStickRight",
+        ] {
+            let input = HostInput::Controller(name.into());
+            let mut grid = StylusGrid::default();
+            grid.bindings.push(GridBinding {
+                cell: 0,
+                input: input.clone(),
+            });
+            assert_eq!(grid.cell_for(&input, None), None);
+            assert!(!GridRouter::default().input(&grid, input, true, None).0);
+        }
+    }
+    #[test]
     fn only_bound_inputs_are_muted_and_cancellation_releases_once() {
         let mut g = StylusGrid::default();
-        let a = HostInput::Controller("RightStickLeft".into());
+        let a = HostInput::Controller("LeftStickLeft".into());
         g.bind(3, a.clone(), None).unwrap();
         let mut r = GridRouter::default();
         assert_eq!(
             r.input(
                 &g,
-                HostInput::Controller("RightStickRight".into()),
+                HostInput::Controller("LeftStickRight".into()),
                 true,
                 None
             ),
             (false, None)
         );
         assert_eq!(
-            r.input(&g, a.clone(), true, Some("RightStickLeft")),
+            r.input(&g, a.clone(), true, Some("LeftStickLeft")),
             (false, None)
         );
         assert!(r.input(&g, a.clone(), true, None).1.is_some());

@@ -232,28 +232,6 @@ class SettingsActivity : HostKeyActivity() {
                     }
                 })
             }
-            val stylusScreen=androidx.preference.PreferenceScreen(requireContext(),null).apply {
-                title="Pocket PC only — stylus stick";key="stylus_options"
-            }
-            ppc.addPreference(stylusScreen)
-            fun stylusJson()=current.toJson().optJSONObject("stylus_stick") ?: org.json.JSONObject().apply {
-                put("enabled",true);put("speed",240)
-                put("keyboard",org.json.JSONArray().apply { listOf("O","L","K","M").forEach { put(org.json.JSONArray().put(it)) } })
-                put("controller",org.json.JSONArray().apply { StylusBindings.directions.forEach { put(org.json.JSONArray().put("RightStick$it")) } })
-            }
-            fun saveStylus(value:org.json.JSONObject) {
-                current=current.copy(originalJson=current.toJson().put("stylus_stick",value).toString());writeConfig()
-            }
-            stylusScreen.addPreference(SwitchPreferenceCompat(requireContext()).apply {
-                title="Enable stylus stick";summary="Emulates stylus drags; lifts and recentres at screen edges. Pocket PC only."
-                isPersistent=false;isChecked=stylusJson().optBoolean("enabled",true)
-                setOnPreferenceChangeListener { _,v -> saveStylus(stylusJson().put("enabled",v as Boolean));true }
-            })
-            stylusScreen.addPreference(androidx.preference.SeekBarPreference(requireContext()).apply {
-                title="Stylus speed (pixels/s)";min=30;max=1200;showSeekBarValue=true;isPersistent=false
-                value=stylusJson().optInt("speed",240)
-                setOnPreferenceChangeListener { _,v -> saveStylus(stylusJson().put("speed",v as Int));true }
-            })
             findPreference<androidx.preference.PreferenceCategory>("diagnostic_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key="log_unimplemented_apis";title="Unimplemented API report";isPersistent=false;isChecked=current.logUnimplementedApis
                 summary="Writes pockethle-unimplemented.log in the library folder."
