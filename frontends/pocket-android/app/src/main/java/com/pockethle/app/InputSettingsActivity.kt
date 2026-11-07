@@ -13,6 +13,7 @@ class InputSettingsActivity : AppCompatActivity() {
     private val controllerOnly: Boolean
         get() = intent.getBooleanExtra("controller", false)
 
+    private val shortcuts = AssignmentShortcuts()
     private val liveInput = InputLiveState()
     private val livePictures = mutableListOf<InputSkinView>()
     private val liveRows = mutableMapOf<String, Button>()
@@ -24,12 +25,14 @@ class InputSettingsActivity : AppCompatActivity() {
             }
 
             override fun onInputDeviceChanged(id: Int) {
+                shortcuts.removeDevice(id)
                 liveInput.removeDevice(id)
                 refreshLive()
             }
 
             override fun onInputDeviceRemoved(id: Int) {
                 assignmentDialog?.dismiss()
+                shortcuts.removeDevice(id)
                 liveInput.removeDevice(id)
                 if (::state.isInitialized) render()
             }
@@ -48,6 +51,7 @@ class InputSettingsActivity : AppCompatActivity() {
 
     override fun onPause() {
         assignmentDialog?.dismiss()
+        shortcuts.clear()
         if (listening) {
             (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager)
                 .unregisterInputDeviceListener(inputListener)
@@ -61,6 +65,7 @@ class InputSettingsActivity : AppCompatActivity() {
     override fun onWindowFocusChanged(focused: Boolean) {
         super.onWindowFocusChanged(focused)
         if (!focused) {
+            if (assignmentDialog == null) shortcuts.clear()
             liveInput.clear()
             refreshLive()
         }
@@ -77,26 +82,30 @@ class InputSettingsActivity : AppCompatActivity() {
             sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
     }
 
+    private fun inputName(event: KeyEvent): String? {
+        val pad = controllerEvent(event)
+        return if (pad) InputBindings.controllerName(event.keyCode)
+        else
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_SHIFT_LEFT,
+                KeyEvent.KEYCODE_SHIFT_RIGHT -> "Shift"
+                KeyEvent.KEYCODE_CTRL_LEFT,
+                KeyEvent.KEYCODE_CTRL_RIGHT -> "Ctrl"
+                KeyEvent.KEYCODE_ALT_LEFT,
+                KeyEvent.KEYCODE_ALT_RIGHT -> "Alt"
+                KeyEvent.KEYCODE_META_LEFT,
+                KeyEvent.KEYCODE_META_RIGHT -> "Super"
+                KeyEvent.KEYCODE_CAPS_LOCK -> "CapsLock"
+                KeyEvent.KEYCODE_MENU -> "ContextMenu"
+                KeyEvent.KEYCODE_GRAVE -> "Backtick"
+                KeyEvent.KEYCODE_APOSTROPHE -> "Quote"
+                else -> InputBindings.keyName(event)
+            }
+    }
+
     private fun recordKey(event: KeyEvent): Boolean {
         val pad = controllerEvent(event)
-        val name =
-            if (pad) InputBindings.controllerName(event.keyCode)
-            else
-                when (event.keyCode) {
-                    KeyEvent.KEYCODE_SHIFT_LEFT,
-                    KeyEvent.KEYCODE_SHIFT_RIGHT -> "Shift"
-                    KeyEvent.KEYCODE_CTRL_LEFT,
-                    KeyEvent.KEYCODE_CTRL_RIGHT -> "Ctrl"
-                    KeyEvent.KEYCODE_ALT_LEFT,
-                    KeyEvent.KEYCODE_ALT_RIGHT -> "Alt"
-                    KeyEvent.KEYCODE_META_LEFT,
-                    KeyEvent.KEYCODE_META_RIGHT -> "Super"
-                    KeyEvent.KEYCODE_CAPS_LOCK -> "CapsLock"
-                    KeyEvent.KEYCODE_MENU -> "ContextMenu"
-                    KeyEvent.KEYCODE_GRAVE -> "Backtick"
-                    KeyEvent.KEYCODE_APOSTROPHE -> "Quote"
-                    else -> InputBindings.keyName(event)
-                }
+        val name = inputName(event)
         if (
             name != null &&
                 (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP)
@@ -109,6 +118,20 @@ class InputSettingsActivity : AppCompatActivity() {
                 event.action == KeyEvent.ACTION_DOWN,
             )
             refreshLive()
+            val activate =
+                shortcuts.key(
+                    device = event.deviceId,
+                    pad = pad,
+                    name = name,
+                    down = event.action == KeyEvent.ACTION_DOWN,
+                    repeat = event.repeatCount != 0,
+                    ctrlPressed = event.isCtrlPressed,
+                    controllerScreen = controllerOnly,
+                    active = assignmentDialog != null,
+                    extraModifiers =
+                        event.isAltPressed || event.isShiftPressed || event.isMetaPressed,
+                )
+            if (activate && ::state.isInitialized) quickAssign()
         }
         return pad || name != null
     }
@@ -364,7 +387,12 @@ class InputSettingsActivity : AppCompatActivity() {
             }
         )
         body.addView(
-            button("Assign an input…") { quickAssign() },
+            button(
+                if (controllerOnly) "Assign an input… (L3 + R3)"
+                else "Assign an input… (Ctrl+Enter)"
+            ) {
+                quickAssign()
+            },
             LinearLayout.LayoutParams(-1, dp(56)),
         )
         body.addView(
@@ -659,7 +687,8 @@ class InputSettingsActivity : AppCompatActivity() {
                     if (stage == 0) {
                         content.addView(
                             text(
-                                if (input == null)
+                                if (shortcuts.awaitingRelease) "Release the shortcut buttons first…"
+                                else if (input == null)
                                     "Press and release a ${if(pad) "controller button" else "keyboard key"}…"
                                 else "$input — release to continue"
                             )
@@ -714,8 +743,18 @@ class InputSettingsActivity : AppCompatActivity() {
                     window?.setLayout((resources.displayMetrics.widthPixels * .94f).toInt(), -2)
                 }
 
+                override fun onWindowFocusChanged(focused: Boolean) {
+                    super.onWindowFocusChanged(focused)
+                    if (!focused) dismiss()
+                }
+
                 override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+                    val waiting = shortcuts.awaitingRelease
                     recordKey(event)
+                    if (waiting) {
+                        if (!shortcuts.awaitingRelease) draw()
+                        return true
+                    }
                     if (event.keyCode == KeyEvent.KEYCODE_BACK && !controllerEvent(event))
                         return super.dispatchKeyEvent(event)
                     val fromPad = controllerEvent(event)
@@ -755,6 +794,7 @@ class InputSettingsActivity : AppCompatActivity() {
 
                 override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
                     val candidate = recordMotion(event)?.takeIf { it.second > .6f }?.first
+                    if (shortcuts.awaitingRelease) return true
                     if (stage != 0) {
                         if (candidate != axisNav) {
                             axisNav = candidate
@@ -775,6 +815,7 @@ class InputSettingsActivity : AppCompatActivity() {
         assignmentDialog = dialog
         dialog.setOnDismissListener {
             assignmentDialog = null
+            shortcuts.clear()
             liveInput.clear()
             refreshLive()
         }

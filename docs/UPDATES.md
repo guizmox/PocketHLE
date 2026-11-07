@@ -14,9 +14,10 @@ whose Windows store is empty. No game/catalogue data is sent or modified.
 Only a strictly newer semantic version is offered. Tags use `v0.3.3` or
 `0.3.3`; drafts, prereleases and non-version tags are ignored. Build metadata
 does not change precedence. Desktop compares the workspace Cargo version.
-Android's generated `BuildConfig.UPDATE_VERSION` reads that same version from
-the root Cargo.toml; its existing `versionName` test suffix is not the update
-comparison baseline.
+Android's generated `BuildConfig.UPDATE_VERSION` and displayed `versionName`
+both read that same version from the root Cargo.toml. `versionCode` is a separate
+monotonically increasing Android package number; it must also increase for a
+new distributed APK.
 
 On desktop, the prompt waits until the catalogue is available, outside imports,
 gameplay and other launch prompts. Download opens the system browser; Later

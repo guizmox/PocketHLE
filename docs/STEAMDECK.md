@@ -83,7 +83,11 @@ explicit unlock action uses X; see [COLORS.md](COLORS.md).
 
 The Deck edition uses config-steamdeck.json; standard desktop uses config.json.
 They may share a library. **Keyboard bindings** and **External controller bindings**
-are separate settings entries. **Assign an input…** captures the physical input
+are separate settings entries. In the controller entry, clicking both sticks
+(**L3 + R3**) starts **Assign an input…**; the keyboard entry uses **Ctrl+Enter**.
+Both shortcuts are shown on their buttons. Release the combination before
+pressing the input to bind. They are editor-only, not gameplay shortcuts.
+The assistant captures the physical input
 first, distinguishes short/long on release, then lets directions and A select
 and apply a guest command. **Assign another input** continues; **Save and finish**
 saves without returning to touch/mouse controls. The device picture and selected

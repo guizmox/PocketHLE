@@ -1,3 +1,14 @@
+Cargo.lock
+Cargo.toml
 crates\pocket-winceapi\src\coredll.rs
+docs\FRONTENDS.md
+docs\STEAMDECK.md
+docs\UPDATES.md
+frontends\pocket-android\app\build.gradle.kts
+frontends\pocket-android\app\src\main\java\com\pockethle\app\AssignmentShortcuts.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\InputSettingsActivity.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\AssignmentShortcutsTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\DeckInputPolicyTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\InputGesturesTest.kt
+frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\bindings_visual.rs

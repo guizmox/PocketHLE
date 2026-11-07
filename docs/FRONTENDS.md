@@ -242,7 +242,17 @@ removed, along with the old stylus assignment preferences.
 
 ### One assignment workflow
 
-**Assign an input…** is the sole binding editor. Start it once, press and release
+**Assign an input…** is the sole binding editor. Its button shows **Ctrl+Enter**
+on the keyboard page and **L3 + R3** on the external-controller page. Either
+shortcut starts the assistant without clicking the button. L3/R3 means the two
+stick-click buttons held together on the same controller (the selected controller
+on desktop), not stick directions. These shortcuts apply only to the matching binding page, never
+normal gameplay or other settings. Release both launch buttons (Ctrl and Enter,
+or L3 and R3) before capture starts; the launch chord is consumed and cannot
+become the assigned input. Holding/repeating it does not reopen the assistant.
+Focus loss or disconnection clears pending shortcut state.
+
+Start it once, press and release
 a physical input, then choose the guest command. Releasing before 650 ms selects
 the short assignment; holding at least 650 ms selects the long assignment.
 Keyboard arrows or controller D-pad/left stick navigate. Enter or the physical

@@ -112,6 +112,8 @@ fn load_skin(ctx: &egui::Context, name: &str, bytes: &[u8]) -> egui::TextureHand
 #[derive(Default)]
 struct QuickAssign {
     controller: bool,
+    wait_launch_release: bool,
+    launch_device: Option<usize>,
     done: bool,
     pressed: Option<(String, std::time::Instant)>,
     choice: Option<(String, bool)>,
@@ -125,6 +127,7 @@ pub struct Editor {
     quick_nav: Vec<String>,
     gizmondo: bool,
     live_controls: std::collections::HashSet<(usize, String)>,
+    thumb_chord_latched: std::collections::HashSet<usize>,
     controller_skin: Option<egui::TextureHandle>,
     keyboard_skin: Option<egui::TextureHandle>,
     keyboard_layout: Vec<SkinKey>,
@@ -140,6 +143,7 @@ impl Default for Editor {
             quick_nav: Vec::new(),
             gizmondo: false,
             live_controls: Default::default(),
+            thumb_chord_latched: Default::default(),
             controller_skin: None,
             keyboard_skin: None,
             keyboard_layout: {
@@ -402,6 +406,53 @@ fn assignment_targets(
 }
 
 impl Editor {
+    /// Called before the editor's ordinary key-event suppression.
+    pub fn keyboard_shortcut(&mut self, ctx: &egui::Context, controller: bool) {
+        if controller
+            || self.quick_active()
+            || !ctx.input(|i| i.viewport().focused.unwrap_or(true))
+            || ctx.memory(|m| m.any_popup_open())
+        {
+            return;
+        }
+        let activate=ctx.input(|i|i.events.iter().any(|e|matches!(e,egui::Event::Key{key:egui::Key::Enter,pressed:true,repeat:false,modifiers,..} if modifiers.ctrl && !modifiers.alt && !modifiers.shift && !modifiers.mac_cmd)));
+        if activate {
+            self.quick = Some(QuickAssign {
+                wait_launch_release: true,
+                ..Default::default()
+            });
+            self.quick_nav.clear();
+            ctx.input_mut(|i| {
+                i.events.retain(|e| {
+                    !matches!(
+                        e,
+                        egui::Event::Key {
+                            key: egui::Key::Enter,
+                            ..
+                        } | egui::Event::Text(_)
+                    )
+                })
+            });
+            ctx.request_repaint();
+        }
+    }
+    /// Both click buttons must be held on the same selected controller.
+    pub fn controller_shortcut(&mut self, device: usize) {
+        let left = self.live_controls.contains(&(device, "LeftThumb".into()));
+        let right = self.live_controls.contains(&(device, "RightThumb".into()));
+        if !left && !right {
+            self.thumb_chord_latched.remove(&device);
+        }
+        if left && right && self.thumb_chord_latched.insert(device) && !self.quick_active() {
+            self.quick = Some(QuickAssign {
+                controller: true,
+                wait_launch_release: true,
+                launch_device: Some(device),
+                ..Default::default()
+            });
+            self.quick_nav.clear();
+        }
+    }
     pub fn quick_active(&self) -> bool {
         self.quick.is_some()
     }
@@ -414,7 +465,11 @@ impl Editor {
                 crate::controller_ui::sized_button(
                     ui,
                     [ui.available_width(), 48.0].into(),
-                    "Assign an input…",
+                    if controller {
+                        "Assign an input… (L3 + R3)"
+                    } else {
+                        "Assign an input… (Ctrl+Enter)"
+                    },
                 )
             })
             .inner
@@ -433,7 +488,14 @@ impl Editor {
         let mut cancel = false;
         let mut accept = false;
         let events = ui.input(|i| i.events.clone());
-        if !q.controller {
+        let waiting = q.wait_launch_release;
+        if waiting
+            && !q.controller
+            && !ui.input(|i| i.modifiers.ctrl || i.key_down(egui::Key::Enter))
+        {
+            q.wait_launch_release = false;
+        }
+        if !q.controller && !waiting {
             for event in &events {
                 if let egui::Event::Key {
                     key,
@@ -514,10 +576,13 @@ impl Editor {
                 }
                 if q.done {
                     ui.label("Up / Down to choose · Enter / A to continue");
-                    for (index, label) in
-                        ["Assign another input", "Save and finish", "Back to overview"]
-                            .iter()
-                            .enumerate()
+                    for (index, label) in [
+                        "Assign another input",
+                        "Save and finish",
+                        "Back to overview",
+                    ]
+                    .iter()
+                    .enumerate()
                     {
                         if ui.selectable_label(index == q.index, *label).clicked() {
                             q.index = index;
@@ -557,7 +622,11 @@ impl Editor {
                         accept = true;
                     }
                 } else {
-                    ui.heading("Press and release a key or controller button…");
+                    ui.heading(if q.wait_launch_release {
+                        "Release the shortcut buttons first…"
+                    } else {
+                        "Press and release a key or controller button…"
+                    });
                     if let Some((name, at)) = &q.pressed {
                         ui.colored_label(
                             if at.elapsed().as_millis() >= 650 {
@@ -641,8 +710,28 @@ impl Editor {
         }
     }
     pub fn live_input(&mut self, device: usize, control: &str, down: bool) {
+        let key = (device, control.to_owned());
+        if down {
+            self.live_controls.insert(key);
+        } else {
+            self.live_controls.remove(&key);
+        }
+        let launch_released = self
+            .quick
+            .as_ref()
+            .and_then(|q| q.launch_device)
+            .is_some_and(|id| {
+                !self.live_controls.contains(&(id, "LeftThumb".into()))
+                    && !self.live_controls.contains(&(id, "RightThumb".into()))
+            });
         if let Some(q) = self.quick.as_mut() {
             if q.controller {
+                if q.wait_launch_release {
+                    if launch_released {
+                        q.wait_launch_release = false;
+                    }
+                    return;
+                }
                 if q.choice.is_some() || q.done {
                     if down {
                         self.quick_nav.push(control.into());
@@ -657,19 +746,16 @@ impl Editor {
                 }
             }
         }
-        let key = (device, control.to_owned());
-        if down {
-            self.live_controls.insert(key);
-        } else {
-            self.live_controls.remove(&key);
-        }
     }
     pub fn clear_live(&mut self) {
         self.live_controls.clear();
+        self.thumb_chord_latched.clear();
         self.quick = None;
         self.quick_nav.clear();
     }
     pub fn retain_live_devices(&mut self, devices: &[(usize, String)]) {
+        self.thumb_chord_latched
+            .retain(|id| devices.iter().any(|(device, _)| device == id));
         if self
             .live_controls
             .iter()
@@ -1380,6 +1466,121 @@ mod tests {
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| editor.quick_assign(ui, config, true));
         });
+    }
+    #[test]
+    fn controller_launch_chord_waits_for_both_releases_without_binding_them() {
+        let mut e = Editor::default();
+        e.live_input(1, "LeftThumb", true);
+        e.controller_shortcut(1);
+        assert!(!e.quick_active());
+        e.live_input(1, "RightThumb", true);
+        e.controller_shortcut(1);
+        assert!(e.quick.as_ref().unwrap().wait_launch_release);
+        e.live_input(1, "LeftThumb", false);
+        e.controller_shortcut(1);
+        assert!(e.quick.as_ref().unwrap().wait_launch_release);
+        e.live_input(1, "South", true);
+        assert!(e.quick.as_ref().unwrap().pressed.is_none());
+        e.live_input(1, "South", false);
+        e.live_input(1, "RightThumb", false);
+        e.controller_shortcut(1);
+        assert!(!e.quick.as_ref().unwrap().wait_launch_release);
+        assert!(e.quick.as_ref().unwrap().choice.is_none());
+        e.live_input(1, "DPadDown", true);
+        e.live_input(1, "DPadDown", false);
+        assert_eq!(
+            e.quick.as_ref().unwrap().choice,
+            Some(("DPadDown".into(), false))
+        );
+    }
+    #[test]
+    fn controller_launch_requires_one_device_and_rearms_only_after_full_release() {
+        let mut e = Editor::default();
+        e.live_input(1, "LeftThumb", true);
+        e.controller_shortcut(1);
+        e.live_input(2, "RightThumb", true);
+        e.controller_shortcut(2);
+        assert!(!e.quick_active());
+        e.live_input(1, "RightThumb", true);
+        e.controller_shortcut(1);
+        assert!(e.quick_active());
+        e.quick = None;
+        e.controller_shortcut(1);
+        assert!(!e.quick_active());
+        e.live_input(1, "LeftThumb", false);
+        e.controller_shortcut(1);
+        e.live_input(1, "LeftThumb", true);
+        e.controller_shortcut(1);
+        assert!(!e.quick_active());
+        e.live_input(1, "LeftThumb", false);
+        e.controller_shortcut(1);
+        e.live_input(1, "RightThumb", false);
+        e.controller_shortcut(1);
+        e.live_input(1, "LeftThumb", true);
+        e.controller_shortcut(1);
+        e.live_input(1, "RightThumb", true);
+        e.controller_shortcut(1);
+        assert!(e.quick_active());
+        e.clear_live();
+        assert!(!e.quick_active());
+        assert!(e.thumb_chord_latched.is_empty());
+    }
+    #[test]
+    fn ctrl_enter_starts_keyboard_assistant_and_is_not_captured() {
+        let ctx = egui::Context::default();
+        let mut e = Editor::default();
+        let mut c = LauncherConfig::default();
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let key = |pressed| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
+            pressed,
+            repeat: false,
+            modifiers: ctrl,
+        };
+        let frame = |e: &mut Editor, c: &mut LauncherConfig, mods, events, controller| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    modifiers: mods,
+                    ..Default::default()
+                },
+                |ctx| {
+                    e.keyboard_shortcut(ctx, controller);
+                    egui::CentralPanel::default().show(ctx, |ui| e.quick_assign(ui, c, controller));
+                },
+            );
+        };
+        frame(&mut e, &mut c, ctrl, vec![key(true)], true);
+        assert!(!e.quick_active());
+        frame(&mut e, &mut c, ctrl, vec![key(false)], false);
+        frame(&mut e, &mut c, ctrl, vec![key(true)], false);
+        assert!(e.quick.as_ref().unwrap().wait_launch_release);
+        assert!(e.quick.as_ref().unwrap().pressed.is_none());
+        frame(&mut e, &mut c, ctrl, vec![key(false)], false);
+        assert!(e.quick.as_ref().unwrap().wait_launch_release);
+        frame(&mut e, &mut c, Default::default(), vec![], false);
+        assert!(!e.quick.as_ref().unwrap().wait_launch_release);
+        assert!(e.quick.as_ref().unwrap().choice.is_none());
+        for pressed in [true, false] {
+            frame(
+                &mut e,
+                &mut c,
+                Default::default(),
+                vec![egui::Event::Key {
+                    key: egui::Key::X,
+                    physical_key: Some(egui::Key::X),
+                    pressed,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+                false,
+            );
+        }
+        assert_eq!(e.quick.as_ref().unwrap().choice, Some(("X".into(), false)));
     }
     #[test]
     fn assistant_keeps_supported_stylus_assignments_without_a_second_editor() {

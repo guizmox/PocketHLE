@@ -4430,6 +4430,9 @@ impl PocketLauncher {
                         let focused=ctx.input(|i|i.viewport().focused.unwrap_or(true));
                         if Some(device)==self.gamepad_selected && focused {
                             self.bindings_visual.live_input(device,&control,down);
+                            if self.input_controller {
+                                self.bindings_visual.controller_shortcut(device);
+                            }
                             ctx.request_repaint();
                             if !down {self.controller_ui.release(&control);continue;}
                             continue;
@@ -5660,6 +5663,9 @@ impl eframe::App for PocketLauncher {
         );
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.screen == Screen::InputSettings {
+            self.bindings_visual.keyboard_shortcut(ctx, self.input_controller);
+        }
         // Input-editor keystrokes are visual tests; the assistant and open popups retain events.
         if self.screen==Screen::InputSettings && !self.bindings_visual.quick_active()
             && !ctx.memory(|memory|memory.any_popup_open()) {
