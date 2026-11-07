@@ -1,14 +1,18 @@
 Cargo.lock
 Cargo.toml
+crates\pocket-library\src\center_tap.rs
 crates\pocket-library\src\keybindings.rs
+crates\pocket-library\src\lib.rs
 crates\pocket-library\src\stylus_grid.rs
 crates\pocket-winceapi\src\coredll.rs
 docs\FRONTENDS.md
 docs\IMPLEMENTATION-NOTES.md
+docs\README.md
 docs\STEAMDECK.md
 docs\UPDATES.md
 frontends\pocket-android\app\build.gradle.kts
 frontends\pocket-android\app\src\main\java\com\pockethle\app\AssignmentShortcuts.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\CenterTapPulse.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\DeckInputPolicy.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
@@ -21,6 +25,7 @@ frontends\pocket-android\app\src\main\java\com\pockethle\app\MainActivity.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\SettingsActivity.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\StylusGrid.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\AssignmentShortcutsTest.kt
+frontends\pocket-android\app\src\test\java\com\pockethle\app\CenterTapPulseTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\DeckInputPolicyTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\InputEditorStateTest.kt
 frontends\pocket-android\app\src\test\java\com\pockethle\app\InputGesturesTest.kt
@@ -32,3 +37,4 @@ frontends\pocket-desktop\src\controller_ui.rs
 frontends\pocket-desktop\src\deck_navigation.rs
 frontends\pocket-desktop\src\desktop_main.rs
 frontends\pocket-desktop\src\host_shortcuts.rs
+frontends\pocket-desktop\src\toolbar_ui.rs

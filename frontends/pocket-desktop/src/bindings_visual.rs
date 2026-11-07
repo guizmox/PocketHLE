@@ -46,6 +46,9 @@ impl Assignment {
                 PocketPcApp2 => "App 2",
                 PocketPcApp3 => "App 3",
                 PocketPcApp4 => "App 4",
+                CenterTap => "Tap",
+                RotateScreen => "Rotate",
+                Screenshot => "Screenshot",
             },
         }
     }
@@ -139,6 +142,8 @@ impl Assignment {
     fn color(self) -> Color32 {
         match self {
             Self::Unbound => Color32::from_gray(90),
+            Self::Guest(GuestButton::CenterTap) => GREEN,
+            Self::Guest(GuestButton::RotateScreen | GuestButton::Screenshot) => PURPLE,
             Self::Guest(_) => BLUE,
             Self::Stylus(_) => GREEN,
         }
@@ -255,7 +260,8 @@ fn visible_buttons(gizmondo: bool) -> impl Iterator<Item = GuestButton> {
     GuestButton::ALL.into_iter().filter(move |button| {
         let index = GuestButton::ALL.iter().position(|b| b == button).unwrap();
         if gizmondo {
-            index < 16 && *button != GuestButton::Turbo
+            (index < 16 && *button != GuestButton::Turbo)
+                || matches!(*button, GuestButton::RotateScreen | GuestButton::Screenshot)
         } else {
             index < 11 || index >= 16
         }
@@ -263,6 +269,9 @@ fn visible_buttons(gizmondo: bool) -> impl Iterator<Item = GuestButton> {
 }
 
 fn guest_assignment(button: GuestButton, gizmondo: bool) -> Assignment {
+    if gizmondo && button == GuestButton::CenterTap {
+        return Assignment::Unbound;
+    }
     // The legacy Turbo binding sends VK_F3, which is Gizmondo's Brightness key.
     Assignment::Guest(if gizmondo && button == GuestButton::Turbo {
         GuestButton::GizPiano3
@@ -275,7 +284,6 @@ fn controller_tap(control: &str) -> Option<&'static str> {
     match control {
         "Select" => Some("Fullscreen"),
         "Start" => Some("Next filter"),
-        "Mode" => Some("Screenshot"),
         _ => None,
     }
 }
@@ -331,6 +339,7 @@ fn keyboard_assignment(config: &LauncherConfig, key: &str, gizmondo: bool) -> As
 
 fn keyboard_shortcut(key: &str) -> Option<&'static str> {
     match key.to_ascii_uppercase().as_str() {
+        "F7" => Some("Next rotation"),
         "F8" => Some("Return to library"),
         "F9" => Some("Next filter"),
         "F10" => Some("Screenshot"),
@@ -343,9 +352,7 @@ fn keyboard_shortcut(key: &str) -> Option<&'static str> {
 fn keyboard_context_note(key: &str) -> Option<&'static str> {
     match key {
         "Escape" => Some("In fullscreen, Escape exits fullscreen before reaching the game."),
-        "F6" => Some(
-            "F6 also navigates the launcher toolbar. In Colors, randomized GPS can consume it.",
-        ),
+        "F6" => Some("In Colors, randomized GPS can consume F6."),
         _ => None,
     }
 }
@@ -354,7 +361,6 @@ fn controller_shortcut(control: &str, _gizmondo: bool) -> Option<&'static str> {
     match control {
         "Select" => Some("Tap: fullscreen · hold: return to library"),
         "Start" => Some("Tap: next filter · hold: start / stop recording"),
-        "Mode" => Some("Default: screenshot (customizable)"),
         _ => None,
     }
 }
@@ -375,7 +381,7 @@ fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool)
     if let Some(button) = pocket_library::keybindings::steam_deck_guest_button(control, gizmondo) {
         return Assignment::Guest(button);
     }
-    if effective_controller_shortcut(config, control, gizmondo).is_some()
+    if controller_shortcut(control, gizmondo).is_some()
         || config.gamepad_toggles_fullscreen(control)
     {
         return Assignment::Unbound;
@@ -408,19 +414,6 @@ fn controller_assignment(config: &LauncherConfig, control: &str, gizmondo: bool)
 
 fn controller_fixed(control: &str, _gizmondo: bool) -> bool {
     matches!(control, "Select" | "Start")
-}
-
-fn effective_controller_shortcut(
-    config: &LauncherConfig,
-    control: &str,
-    gizmondo: bool,
-) -> Option<&'static str> {
-    if control == "Mode"
-        && !pocket_library::keybindings::default_controller_screenshot(config, control, gizmondo)
-    {
-        return None;
-    }
-    controller_shortcut(control, gizmondo)
 }
 
 fn set_assignment(
@@ -906,6 +899,9 @@ impl Editor {
         controller: bool,
         target: Assignment,
     ) -> bool {
+        if self.gizmondo && matches!(target, Assignment::Guest(GuestButton::CenterTap)) {
+            return false;
+        }
         if (controller && controller_fixed(input, self.gizmondo))
             || (!controller && keyboard_shortcut(input).is_some())
         {
@@ -931,7 +927,7 @@ impl Editor {
                 }
             }
         });
-        ui.label("Select an input to inspect its assignments. Use Assign an input to change them. Guest button assignments apply to the selected device profile.");
+        ui.label("Select an input to inspect its assignments. Use Assign an input to change them. Assignments apply to the selected device profile.");
     }
 
     pub fn show(&mut self, ui: &mut Ui, config: &LauncherConfig, controller: bool) {
@@ -1006,7 +1002,7 @@ impl Editor {
         };
         ui.heading(physical);
         let shortcut = if controller {
-            effective_controller_shortcut(config, input, self.gizmondo)
+            controller_shortcut(input, self.gizmondo)
         } else {
             keyboard_shortcut(input)
         };
@@ -1087,6 +1083,7 @@ impl Editor {
             );
             if !self.gizmondo {
                 inputs.extend((1..=4).map(|n| n.to_string()));
+                inputs.push("Tab".into());
             }
         }
         let prefix = pocket_library::input_gestures::binding_key(self.gizmondo, controller, "");
@@ -1110,7 +1107,7 @@ impl Editor {
                 }
                 !inputs.iter().any(|name| {
                     if controller {
-                        effective_controller_shortcut(config, name, self.gizmondo).is_none()
+                        controller_shortcut(name, self.gizmondo).is_none()
                             && controller_assignment(config, name, self.gizmondo)
                                 == Assignment::Guest(*button)
                     } else {
@@ -1283,7 +1280,7 @@ impl Editor {
                         }
                     }
                     let assignment = controller_assignment(config, name, self.gizmondo);
-                    let shortcut = effective_controller_shortcut(config, name, self.gizmondo);
+                    let shortcut = controller_shortcut(name, self.gizmondo);
                     let configured_fullscreen = !controller_fixed(name, self.gizmondo)
                         && config.gamepad_toggles_fullscreen(name);
                     let label = if configured_fullscreen {
@@ -1292,7 +1289,6 @@ impl Editor {
                         match *name {
                             "Select" => "Full",
                             "Start" => "Filter",
-                            "Mode" => "Screenshot",
                             _ => "Host",
                         }
                     } else {
@@ -1419,7 +1415,7 @@ impl Editor {
             keyboard_assignment(config, name, self.gizmondo)
         };
         let shortcut = if controller {
-            effective_controller_shortcut(config, name, self.gizmondo)
+            controller_shortcut(name, self.gizmondo)
         } else {
             keyboard_shortcut(name)
         };
@@ -1511,13 +1507,13 @@ impl Editor {
             "Fullscreen"
         } else if shortcut.is_some() {
             match name {
+                "F7" => "Rotate",
                 "F8" => "Library",
                 "F9" => "Filter",
                 "F10" => "Screenshot",
                 "F11" => "Video",
                 "F12" => "Full",
                 "Select" => "Fullscreen",
-                "Mode" => "Screenshot",
                 "Start" => "Filter",
                 _ => "Host",
             }
@@ -1709,11 +1705,11 @@ mod tests {
         let config = LauncherConfig::default();
         assert!(matches!(
             controller_assignment(&config, "Misc1", true),
-            Assignment::Unbound
+            Assignment::Guest(GuestButton::RotateScreen)
         ));
         assert!(matches!(
             controller_assignment(&config, "Misc1", false),
-            Assignment::Unbound
+            Assignment::Guest(GuestButton::RotateScreen)
         ));
         assert_eq!(controller_hold("Select", true), Some("Return to library"));
         assert!(!controller_shortcut("Select", true)
@@ -1739,41 +1735,26 @@ mod tests {
     }
 
     #[test]
-    fn guide_screenshot_is_only_a_customizable_default() {
-        for gizmondo in [false, true] {
-            let mut config = LauncherConfig::default();
-            let mut editor = Editor::default();
-            editor.gizmondo = gizmondo;
-            assert!(!controller_fixed("Mode", gizmondo));
-            assert!(pocket_library::keybindings::default_controller_screenshot(
-                &config, "Mode", gizmondo
-            ));
-            let key = pocket_library::input_gestures::binding_key(gizmondo, true, "Mode");
-            config
-                .long_press_bindings
-                .insert(key.clone(), GuestButton::Action);
-            assert!(pocket_library::keybindings::default_controller_screenshot(
-                &config, "Mode", gizmondo
-            ));
-            assert!(editor.assign_short(
-                &mut config,
-                "Mode",
-                true,
-                Assignment::Guest(GuestButton::ButtonA)
-            ));
-            assert!(!pocket_library::keybindings::default_controller_screenshot(
-                &config, "Mode", gizmondo
-            ));
-            assert!(effective_controller_shortcut(&config, "Mode", gizmondo).is_none());
-            assert!(matches!(
-                controller_assignment(&config, "Mode", gizmondo),
-                Assignment::Guest(GuestButton::ButtonA)
-            ));
-            assert!(editor.assign_short(&mut config, "Mode", true, Assignment::Unbound));
-            assert!(!pocket_library::keybindings::default_controller_screenshot(
-                &config, "Mode", gizmondo
-            ));
+    fn guide_center_tap_and_extra_rotation_are_customizable() {
+        let mut config = LauncherConfig::default();
+        let mut editor = Editor::default();
+        assert!(matches!(
+            controller_assignment(&config, "Mode", false),
+            Assignment::Guest(GuestButton::CenterTap)
+        ));
+        assert!(matches!(
+            controller_assignment(&config, "Misc1", false),
+            Assignment::Guest(GuestButton::RotateScreen)
+        ));
+        for input in ["Mode", "Misc1"] {
+            assert!(editor.assign_short(&mut config, input, true, Assignment::Unbound));
         }
+        assert!(matches!(
+            controller_assignment(&config, "Mode", false),
+            Assignment::Unbound
+        ));
+        assert!(visible_buttons(false).any(|b| b == GuestButton::Screenshot));
+        assert!(visible_buttons(true).any(|b| b == GuestButton::Screenshot));
     }
 
     #[test]
@@ -1799,10 +1780,10 @@ mod tests {
         let config = LauncherConfig::default();
         assert!(matches!(
             controller_assignment(&config, "Misc1", false),
-            Assignment::Unbound
+            Assignment::Guest(GuestButton::RotateScreen)
         ));
         assert!(!controller_fixed("Misc1", false));
-        assert_eq!(controller_tap("Mode"), Some("Screenshot"));
+        assert_eq!(controller_tap("Mode"), None);
         assert_eq!(controller_hold("Mode", false), None);
         assert_eq!(controller_hold("Mode", true), None);
     }
@@ -1907,7 +1888,7 @@ mod tests {
     fn reserved_function_keys_reject_all_assignments_and_ignore_stale_overrides() {
         let mut e = Editor::default();
         let mut c = LauncherConfig::default();
-        for key in ["F8", "F9", "F10", "F11", "F12"] {
+        for key in ["F7", "F8", "F9", "F10", "F11", "F12"] {
             let id = pocket_library::input_gestures::binding_key(false, false, key);
             c.short_press_bindings
                 .insert(id.clone(), Some(GuestButton::Action));

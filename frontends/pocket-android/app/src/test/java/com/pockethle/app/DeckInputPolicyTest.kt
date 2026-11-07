@@ -31,7 +31,10 @@ class DeckInputPolicyTest {
             assertTrue(tracker.down(1, "Start", 0, giz))
             assertTrue(tracker.due(1000, giz).isEmpty())
             assertNull(tracker.up(1, "Start", 1001, giz))
-            assertNull(InputBindings(LauncherConfig.default(), giz).controllerKey("Misc1"))
+            assertEquals(
+                DeckInputPolicy.ROTATION_COMMAND,
+                InputBindings(LauncherConfig.default(), giz).controllerKey("Misc1"),
+            )
         }
         for (key in listOf("F10", "F11")) {
             assertTrue(DeckInputPolicy.reservedKey(key))

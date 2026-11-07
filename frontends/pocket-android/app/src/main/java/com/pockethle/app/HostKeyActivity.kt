@@ -90,6 +90,7 @@ abstract class HostKeyActivity : AppCompatActivity() {
 
     private fun runHostAction(action: DeckInputPolicy.Action) {
         when (action) {
+            DeckInputPolicy.Action.ROTATION -> {} // Requires an active game image.
             DeckInputPolicy.Action.EXIT -> {
                 startActivity(
                     Intent(this, MainActivity::class.java)

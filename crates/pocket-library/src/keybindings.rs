@@ -80,11 +80,15 @@ pub enum GuestButton {
     PocketPcApp2,
     PocketPcApp3,
     PocketPcApp4,
+    /// Host-only quick stylus tap, consumed before the guest key path.
+    CenterTap,
+    RotateScreen,
+    Screenshot,
 }
 
 impl GuestButton {
     /// Every button, in the order the settings UI lists them.
-    pub const ALL: [GuestButton; 20] = [
+    pub const ALL: [GuestButton; 23] = [
         GuestButton::DpadUp,
         GuestButton::DpadDown,
         GuestButton::DpadLeft,
@@ -105,9 +109,12 @@ impl GuestButton {
         GuestButton::PocketPcApp2,
         GuestButton::PocketPcApp3,
         GuestButton::PocketPcApp4,
+        GuestButton::CenterTap,
+        GuestButton::RotateScreen,
+        GuestButton::Screenshot,
     ];
 
-    /// The virtual-key code this button sends into the guest.
+    /// Guest VK for device buttons, or a host-command tag consumed by frontends.
     pub fn vk(self) -> u16 {
         match self {
             GuestButton::DpadUp => vk::UP,
@@ -131,6 +138,9 @@ impl GuestButton {
             GuestButton::PocketPcApp2 => 0xC2,
             GuestButton::PocketPcApp3 => 0xC3,
             GuestButton::PocketPcApp4 => 0xC4,
+            GuestButton::CenterTap => crate::center_tap::COMMAND,
+            GuestButton::RotateScreen => ROTATION_COMMAND,
+            GuestButton::Screenshot => SCREENSHOT_COMMAND,
         }
     }
 
@@ -156,6 +166,9 @@ impl GuestButton {
             GuestButton::PocketPcApp2 => "Pocket PC hardware button 2",
             GuestButton::PocketPcApp3 => "Pocket PC hardware button 3",
             GuestButton::PocketPcApp4 => "Pocket PC hardware button 4",
+            GuestButton::CenterTap => "Center tap",
+            GuestButton::RotateScreen => "Rotation",
+            GuestButton::Screenshot => "Screenshot",
         }
     }
 
@@ -188,17 +201,23 @@ impl GuestButton {
             GuestButton::PocketPcApp1
             | GuestButton::PocketPcApp2
             | GuestButton::PocketPcApp3
-            | GuestButton::PocketPcApp4 => &[],
+            | GuestButton::PocketPcApp4
+            | GuestButton::CenterTap
+            | GuestButton::RotateScreen
+            | GuestButton::Screenshot => &[],
         }
     }
 }
 
-/// Physical F8-F12 belong to the frontend, never to a guest binding.
+/// Physical F7-F12 belong to the frontend, never to a guest binding.
 /// This does not reserve guest VK_F11 (Gizmondo Power), which other host keys can send.
+pub const ROTATION_COMMAND: u16 = 0x1001;
+pub const SCREENSHOT_COMMAND: u16 = 0x1002;
+
 pub fn reserved_host_key(key: &str) -> bool {
     matches!(
         key.to_ascii_uppercase().as_str(),
-        "F8" | "F9" | "F10" | "F11" | "F12"
+        "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
     )
 }
 
@@ -357,7 +376,7 @@ mod tests {
     #[test]
     fn host_function_keys_are_never_guest_bindings_even_in_legacy_json() {
         let mut keys = super::KeyBindings::default();
-        for name in ["F8", "F9", "F10", "F11", "F12"] {
+        for name in ["F7", "F8", "F9", "F10", "F11", "F12"] {
             keys.bind(super::GuestButton::Action, name);
             assert_eq!(keys.vk_for_key(name), None);
             let raw = format!(r#"[{{"button":"action","keys":["{name}"]}}]"#);
@@ -381,11 +400,11 @@ mod tests {
             assert!(bindings.keys_for(*button).is_empty());
         }
         bindings.bind(super::GuestButton::PocketPcApp3, "F6");
-        bindings.bind(super::GuestButton::PocketPcApp4, "F7");
+        bindings.bind(super::GuestButton::PocketPcApp4, "J");
         let json = serde_json::to_string(&bindings).unwrap();
         let restored: super::KeyBindings = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.vk_for_key("F6"), Some(0xc3));
-        assert_eq!(restored.vk_for_key("F7"), Some(0xc4));
+        assert_eq!(restored.vk_for_key("J"), Some(0xc4));
         let mut pad = super::xbox_gamepad_bindings();
         pad.insert("South".into(), super::GuestButton::PocketPcApp3);
         let json = serde_json::to_string(&pad).unwrap();
@@ -545,9 +564,15 @@ pub fn migrate_desktop_gamepad_layout(
 pub fn steam_deck_guest_button(control: &str, gizmondo: bool) -> Option<GuestButton> {
     use GuestButton::*;
     if gizmondo {
-        return (control == "LeftTrigger").then_some(GizPiano2);
+        return match control {
+            "LeftTrigger" => Some(GizPiano2),
+            "Misc1" => Some(RotateScreen),
+            _ => None,
+        };
     }
     match control {
+        "Misc1" => Some(RotateScreen),
+        "Mode" => Some(CenterTap),
         "LeftTrigger" => Some(PocketPcApp1),   // L1 = P1
         "RightTrigger" => Some(PocketPcApp2),  // R1 = P2
         "LeftTrigger2" => Some(PocketPcApp3),  // L2 = P3
@@ -848,29 +873,6 @@ mod controller_tests {
     }
 }
 
-/// Guide's factory screenshot is replaced by explicit guest, stylus or fullscreen mappings.
-/// Long guest bindings coexist with the default short screenshot.
-pub fn default_controller_screenshot(
-    config: &crate::LauncherConfig,
-    control: &str,
-    gizmondo: bool,
-) -> bool {
-    if control != "Mode" {
-        return false;
-    }
-    let key = crate::input_gestures::binding_key(gizmondo, true, control);
-    !config.short_press_bindings.contains_key(&key)
-        && !config.gamepad_bindings.contains_key(control)
-        && !config.gamepad_toggles_fullscreen(control)
-        && (gizmondo
-            || !config.stylus_stick.enabled
-            || !config
-                .stylus_stick
-                .controller
-                .iter()
-                .any(|keys| keys.iter().any(|k| k == control)))
-}
-
 #[cfg(test)]
 mod profile_factory_regression {
     use super::*;
@@ -881,8 +883,14 @@ mod profile_factory_regression {
         let mut fullscreen = Some("Select".into());
         assert!(migrate_desktop_gamepad_layout(&mut old, &mut fullscreen));
         assert!(!old.contains_key("Misc1"));
-        assert_eq!(steam_deck_guest_button("Misc1", false), None);
-        assert_eq!(steam_deck_guest_button("Misc1", true), None);
+        assert_eq!(
+            steam_deck_guest_button("Misc1", false),
+            Some(GuestButton::RotateScreen)
+        );
+        assert_eq!(
+            steam_deck_guest_button("Misc1", true),
+            Some(GuestButton::RotateScreen)
+        );
     }
 }
 
@@ -899,7 +907,7 @@ pub fn keyboard_button_for_profile(
         return button.filter(|b| {
             !matches!(
                 b,
-                Turbo | PocketPcApp1 | PocketPcApp2 | PocketPcApp3 | PocketPcApp4
+                Turbo | PocketPcApp1 | PocketPcApp2 | PocketPcApp3 | PocketPcApp4 | CenterTap
             )
         });
     }
@@ -910,6 +918,7 @@ pub fn keyboard_button_for_profile(
         return None;
     }
     match (key, button) {
+        ("Tab", None | Some(CenterTap)) => Some(CenterTap),
         ("1", None | Some(Soft1 | PocketPcApp1)) => Some(PocketPcApp1),
         ("2", None | Some(Soft2 | PocketPcApp2)) => Some(PocketPcApp2),
         ("3", None | Some(PocketPcApp3)) => Some(PocketPcApp3),

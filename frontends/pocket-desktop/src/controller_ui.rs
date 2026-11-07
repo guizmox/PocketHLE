@@ -15,12 +15,12 @@ struct Widgets {
     committed: HashMap<Id, String>,
     popup: Option<Popup>,
     collecting: Option<Vec<(Id, bool)>>,
-    keep_popup: bool,
     page: Option<Id>,
     page_items: Vec<Id>,
     page_collecting: bool,
     page_seen: bool,
     toolbar_items: Vec<Id>,
+    toolbar_rects: HashMap<Id, egui::Rect>,
     toolbar_collecting: bool,
     toolbar_seen: bool,
     last_toolbar: Option<Id>,
@@ -42,6 +42,56 @@ fn edit_widgets(ctx: &egui::Context, edit: impl FnOnce(&mut Widgets)) {
         edit(&mut state);
         d.insert_temp(state_id(), state);
     });
+}
+
+/// Spatial navigation keeps two-row toolbar controls distinct from page order.
+fn toolbar_neighbor(focused: Option<Id>, control: &str, state: &Widgets) -> Option<Id> {
+    let (horizontal, sign) = match control {
+        "DPadLeft" | "LeftStickLeft" => (true, -1.0),
+        "DPadRight" | "LeftStickRight" => (true, 1.0),
+        "DPadUp" | "LeftStickUp" => (false, -1.0),
+        "DPadDown" | "LeftStickDown" => (false, 1.0),
+        _ => return None,
+    };
+    let Some(origin) = focused
+        .and_then(|id| state.toolbar_rects.get(&id))
+        .map(|rect| rect.center())
+    else {
+        return state.toolbar_items.first().copied();
+    };
+    let coordinates = |point: egui::Pos2| {
+        if horizontal {
+            (point.x, point.y)
+        } else {
+            (point.y, point.x)
+        }
+    };
+    let (along, across) = coordinates(origin);
+    let candidates: Vec<_> = state
+        .toolbar_items
+        .iter()
+        .filter(|id| Some(**id) != focused)
+        .filter_map(|id| {
+            state
+                .toolbar_rects
+                .get(id)
+                .map(|rect| (*id, coordinates(rect.center())))
+        })
+        .collect();
+    candidates
+        .iter()
+        .filter(|(_, (a, _))| (*a - along) * sign > 1.0)
+        .min_by(|(_, (a, b)), (_, (c, d))| {
+            ((a - along).abs() + (b - across).abs() * 3.0)
+                .total_cmp(&((c - along).abs() + (d - across).abs() * 3.0))
+        })
+        .or_else(|| {
+            candidates.iter().min_by(|(_, (a, b)), (_, (c, d))| {
+                ((b - across).abs() * 4.0 + a * sign)
+                    .total_cmp(&((d - across).abs() * 4.0 + c * sign))
+            })
+        })
+        .map(|(id, _)| *id)
 }
 
 #[derive(Default)]
@@ -161,7 +211,11 @@ impl Navigation {
         true
     }
     pub fn prepare_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput, enabled: bool) {
-        if widgets(ctx).modal_input {self.stop_repeat();self.keyboard=None;return;}
+        if widgets(ctx).modal_input {
+            self.stop_repeat();
+            self.keyboard = None;
+            return;
+        }
         if !enabled || !raw.focused {
             self.pending.clear();
             self.held = None;
@@ -169,21 +223,6 @@ impl Navigation {
                 self.keyboard = None;
             }
             return;
-        }
-        let f6 = raw.events.iter().any(|event| {
-            matches!(
-                event,
-                Event::Key {
-                    key: Key::F6,
-                    pressed: true,
-                    repeat: false,
-                    ..
-                }
-            )
-        });
-        if f6 && self.switch_section(ctx) {
-            raw.events
-                .retain(|event| !matches!(event, Event::Key { key: Key::F6, .. }));
         }
         if let Some((control, next)) = &mut self.held {
             if Instant::now() >= *next {
@@ -203,7 +242,11 @@ impl Navigation {
             }
             let w = widgets(ctx);
             let focused = ctx.memory(|m| m.focused());
-            if let Some(popup) = w.popup.filter(|_| ctx.memory(|m| m.any_popup_open())) {
+            if let Some(popup) = w
+                .popup
+                .as_ref()
+                .filter(|_| ctx.memory(|m| m.any_popup_open()))
+            {
                 if let Some(next) = crate::deck_navigation::menu_index(
                     focused
                         .and_then(|id| popup.items.iter().position(|i| *i == id))
@@ -222,27 +265,25 @@ impl Navigation {
                 } else {
                     &w.page_items
                 };
-                let direction = if in_toolbar {
-                    match control.as_str() {
-                        "DPadLeft" | "LeftStickLeft" => "DPadUp",
-                        "DPadRight" | "LeftStickRight" => "DPadDown",
-                        other => other,
-                    }
+                let next = if in_toolbar {
+                    toolbar_neighbor(focused, &control, &w)
                 } else {
-                    control.as_str()
+                    crate::deck_navigation::menu_index(
+                        focused
+                            .and_then(|id| items.iter().position(|item| *item == id))
+                            .unwrap_or(0),
+                        &control,
+                        items.len(),
+                    )
+                    .map(|index| items[index])
                 };
-                if let Some(next) = crate::deck_navigation::menu_index(
-                    focused
-                        .and_then(|id| items.iter().position(|item| *item == id))
-                        .unwrap_or(0),
-                    direction,
-                    items.len(),
-                ) {
-                    ctx.memory_mut(|m| m.request_focus(items[next]));
-                    edit_widgets(ctx, |w| w.reveal_focus = Some(items[next]));
+                if let Some(next) = next {
+                    ctx.memory_mut(|m| m.request_focus(next));
+                    edit_widgets(ctx, |w| w.reveal_focus = Some(next));
                     continue;
                 }
             }
+
             match control.as_str() {
                 "Escape" => key(raw, Key::Escape, false),
                 "South" => {
@@ -312,7 +353,11 @@ impl Navigation {
         }
     }
     pub fn show(&mut self, ctx: &egui::Context) {
-        if widgets(ctx).modal_input {self.stop_repeat();self.keyboard=None;return;}
+        if widgets(ctx).modal_input {
+            self.stop_repeat();
+            self.keyboard = None;
+            return;
+        }
         edit_widgets(ctx, |w| {
             if !w.page_seen {
                 w.page = None;
@@ -320,6 +365,7 @@ impl Navigation {
             }
             if !w.toolbar_seen {
                 w.toolbar_items.clear();
+                w.toolbar_rects.clear();
                 w.last_toolbar = None;
             }
         });
@@ -496,14 +542,8 @@ impl ComboBox {
         let old = widgets(&ctx).popup;
         edit_widgets(&ctx, |w| {
             w.collecting = Some(Vec::new());
-            w.keep_popup = false;
         });
         let response = self.0.show_ui(ui, contents);
-        // egui 0.27 closes a popup for any mouse click away from its trigger,
-        // including a click on an expandable header inside that popup.
-        if widgets(&ctx).keep_popup {
-            ctx.memory_mut(|m| m.open_popup(response.response.id.with("popup")));
-        }
         let entries = widgets(&ctx).collecting.unwrap_or_default();
         edit_widgets(&ctx, |w| w.collecting = None);
         register_page_widget(ui, &response.response);
@@ -570,15 +610,19 @@ pub fn selectable_value<T: PartialEq>(
 
 /// The assistant owns navigation and its selected-row highlight while modal.
 /// Drop stale widget focus instead of drawing its old rectangle over the window title.
-pub fn claim_modal_input(ctx:&egui::Context) {
-    edit_widgets(ctx,|w|w.modal_input=true);
-    ctx.memory_mut(|memory|{if let Some(id)=memory.focused() {memory.surrender_focus(id);}});
+pub fn claim_modal_input(ctx: &egui::Context) {
+    edit_widgets(ctx, |w| w.modal_input = true);
+    ctx.memory_mut(|memory| {
+        if let Some(id) = memory.focused() {
+            memory.surrender_focus(id);
+        }
+    });
 }
 
 pub fn begin_frame(ctx: &egui::Context) {
     let open = ctx.memory(|m| m.any_popup_open());
     edit_widgets(ctx, |w| {
-        w.modal_input=false;
+        w.modal_input = false;
         w.text.clear();
         w.page_seen = false;
         w.toolbar_seen = false;
@@ -594,6 +638,7 @@ pub fn toolbar_scope<R>(ui: &mut Ui, contents: impl FnOnce(&mut Ui) -> R) -> R {
         w.toolbar_seen = true;
         w.toolbar_collecting = true;
         w.toolbar_items.clear();
+        w.toolbar_rects.clear();
     });
     let result = contents(ui);
     let focused = ui.memory(|m| m.focused());
@@ -667,6 +712,7 @@ fn register_page_widget(ui: &Ui, response: &Response) {
                 && !w.toolbar_items.contains(&response.id)
             {
                 w.toolbar_items.push(response.id);
+                w.toolbar_rects.insert(response.id, response.rect);
             }
             if w.page_collecting && w.collecting.is_none() && !w.page_items.contains(&response.id) {
                 w.page_items.push(response.id);
@@ -716,12 +762,19 @@ mod tests {
         });
         (toolbar, page)
     }
-    #[test] fn modal_owner_drops_old_focus_overlay_and_pending_navigation() {
-        let ctx=egui::Context::default();let mut nav=Navigation::default();
-        let _=ctx.run(Default::default(),|ctx| {
-            begin_frame(ctx);ctx.memory_mut(|m|m.request_focus(Id::new("old_assign_button")));
-            nav.press("DPadDown");claim_modal_input(ctx);nav.show(ctx);
-            assert!(ctx.memory(|m|m.focused()).is_none());assert!(nav.pending.is_empty());assert!(nav.held.is_none());
+    #[test]
+    fn modal_owner_drops_old_focus_overlay_and_pending_navigation() {
+        let ctx = egui::Context::default();
+        let mut nav = Navigation::default();
+        let _ = ctx.run(Default::default(), |ctx| {
+            begin_frame(ctx);
+            ctx.memory_mut(|m| m.request_focus(Id::new("old_assign_button")));
+            nav.press("DPadDown");
+            claim_modal_input(ctx);
+            nav.show(ctx);
+            assert!(ctx.memory(|m| m.focused()).is_none());
+            assert!(nav.pending.is_empty());
+            assert!(nav.held.is_none());
         });
     }
     #[test]
@@ -763,6 +816,29 @@ mod tests {
             "controller navigation must scroll the section"
         );
         assert!(target_visible, "the focused row must be fully visible");
+    }
+
+    #[test]
+    fn f6_does_not_switch_sections_or_get_consumed() {
+        let ctx = egui::Context::default();
+        let mut nav = Navigation::default();
+        let mut target = Id::NULL;
+        frame(&ctx, &mut nav, |ui| {
+            let (_, page) = sections(ui);
+            target = page[0];
+        });
+        ctx.memory_mut(|m| m.request_focus(target));
+        let mut raw = egui::RawInput::default();
+        raw.events.push(Event::Key {
+            key: Key::F6,
+            physical_key: Some(Key::F6),
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        });
+        nav.prepare_input(&ctx, &mut raw, true);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(target));
+        assert_eq!(raw.events.len(), 1);
     }
 
     #[test]
@@ -1001,35 +1077,6 @@ mod tests {
         assert!(!nav.back(&ctx));
     }
     #[test]
-    fn b_closes_a_native_toolbar_menu_before_leaving_the_page() {
-        let ctx = egui::Context::default();
-        let mut nav = Navigation::default();
-        let mut owner = Id::NULL;
-        frame(&ctx, &mut nav, |ui| {
-            owner = menu_button(ui, "Settings", |ui| {
-                let _ = ui.button("General");
-            })
-            .response
-            .id
-        });
-        ctx.memory_mut(|m| m.request_focus(owner));
-        nav.press("South");
-        frame(&ctx, &mut nav, |ui| {
-            menu_button(ui, "Settings", |ui| {
-                let _ = ui.button("General");
-            });
-        });
-        assert!(menu_open(&ctx));
-        assert!(nav.back(&ctx));
-        frame(&ctx, &mut nav, |ui| {
-            menu_button(ui, "Settings", |ui| {
-                let _ = ui.button("General");
-            });
-        });
-        assert!(!menu_open(&ctx));
-        assert!(!nav.back(&ctx));
-    }
-    #[test]
     fn keyboard_is_one_third_larger_and_adapts_to_small_viewports() {
         let deck = KeyboardLayout::for_viewport(egui::vec2(1280.0, 800.0));
         assert_eq!(deck.key, egui::vec2(64.0, 40.0));
@@ -1125,37 +1172,6 @@ pub fn menu_open(ctx: &egui::Context) -> bool {
     ctx.memory(|m| m.any_popup_open())
 }
 
-/// Top-level launcher menus share the same controller focus scope as combo boxes.
-/// Nested menu groups expand in place so focus never escapes into the page behind them.
-pub fn menu_button<R>(
-    ui: &mut Ui,
-    title: impl Into<WidgetText>,
-    contents: impl FnOnce(&mut Ui) -> R,
-) -> egui::InnerResponse<Option<R>> {
-    let title = title.into();
-    if widgets(ui.ctx()).collecting.is_some() {
-        let index = widgets(ui.ctx()).collecting.as_ref().map_or(0, Vec::len);
-        let response = egui::CollapsingHeader::new(title).show(ui, contents);
-        if response.header_response.clicked() {
-            edit_widgets(ui.ctx(), |w| w.keep_popup = true);
-        }
-        if response.header_response.enabled() {
-            edit_widgets(ui.ctx(), |w| {
-                if let Some(entries) = &mut w.collecting {
-                    entries.insert(
-                        index.min(entries.len()),
-                        (response.header_response.id, false),
-                    );
-                }
-            });
-        }
-        egui::InnerResponse::new(response.body_returned, response.header_response)
-    } else {
-        ComboBox::from_id_source(("launcher_menu", title.text()))
-            .selected_text(title.clone())
-            .show_ui(ui, contents)
-    }
-}
 fn register(ui: &Ui, response: &Response, close: bool) {
     register_page_widget(ui, response);
     if response.enabled() {
@@ -1195,6 +1211,18 @@ pub fn sized_button(ui: &mut Ui, size: egui::Vec2, text: impl Into<WidgetText>) 
     register(ui, &r, true);
     r
 }
+pub fn add_sized_enabled(
+    ui: &mut Ui,
+    enabled: bool,
+    size: egui::Vec2,
+    widget: impl egui::Widget,
+) -> Response {
+    let response = ui
+        .add_enabled_ui(enabled, |ui| ui.add_sized(size, widget))
+        .inner;
+    register(ui, &response, true);
+    response
+}
 pub fn checkbox(ui: &mut Ui, value: &mut bool, text: impl Into<WidgetText>) -> Response {
     let r = ui.checkbox(value, text);
     register(ui, &r, true);
@@ -1209,76 +1237,4 @@ pub fn hyperlink_to(ui: &mut Ui, text: impl Into<WidgetText>, url: impl ToString
     let r = ui.hyperlink_to(text, url);
     register(ui, &r, true);
     r
-}
-
-#[cfg(test)]
-mod mouse_menu_regression {
-    use super::*;
-    #[test]
-    fn clicking_a_nested_header_keeps_its_parent_open() {
-        let ctx = egui::Context::default();
-        let mut nav = Navigation::default();
-        let mut owner = Id::NULL;
-        let mut draw = |raw: egui::RawInput| {
-            let mut expanded = false;
-            let _ = ctx.run(raw, |ctx| {
-                begin_frame(ctx);
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    owner = menu_button(ui, "Settings", |ui| {
-                        menu_button(ui, "Filters", |ui| {
-                            expanded = true;
-                            ui.label("Nearest");
-                        });
-                    })
-                    .response
-                    .id;
-                });
-            });
-            expanded
-        };
-        let raw = || egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(900.0, 700.0),
-            )),
-            ..Default::default()
-        };
-        draw(raw());
-        ctx.memory_mut(|m| m.request_focus(owner));
-        let mut input = raw();
-        nav.press("South");
-        nav.prepare_input(&ctx, &mut input, true);
-        let render = |input| {
-            let mut expanded = false;
-            let _ = ctx.run(input, |ctx| {
-                begin_frame(ctx);
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    menu_button(ui, "Settings", |ui| {
-                        menu_button(ui, "Filters", |ui| {
-                            expanded = true;
-                            ui.label("Nearest");
-                        });
-                    });
-                });
-            });
-            expanded
-        };
-        render(input);
-        render(raw());
-        let header = widgets(&ctx).popup.unwrap().items[0];
-        let point = ctx.read_response(header).unwrap().rect.center();
-        for pressed in [true, false] {
-            let mut input = raw();
-            input.events.push(Event::PointerMoved(point));
-            input.events.push(Event::PointerButton {
-                pos: point,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: Modifiers::NONE,
-            });
-            render(input);
-        }
-        assert!(ctx.memory(|m| m.any_popup_open()));
-        assert!(render(raw()));
-    }
 }

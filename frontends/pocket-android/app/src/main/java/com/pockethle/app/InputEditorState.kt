@@ -36,10 +36,12 @@ internal class InputEditorState(raw: String) {
                 .also { json.put("stylus_stick", it) }
 
     fun visibleButtons(gizmondo: Boolean) =
-        InputBindings.buttons.keys.filter {
-            if (gizmondo) !it.startsWith("pocket_pc_app") && it != "turbo"
-            else !it.startsWith("giz_piano")
-        }
+        InputBindings.buttons.keys
+            .filter { it != "screenshot" }
+            .filter {
+                if (gizmondo) !it.startsWith("pocket_pc_app") && it != "turbo" && it != "center_tap"
+                else !it.startsWith("giz_piano")
+            }
 
     fun targets(pad: Boolean, input: String?, long: Boolean, gizmondo: Boolean): List<String?> =
         listOf<String?>(null) +
@@ -94,6 +96,8 @@ internal class InputEditorState(raw: String) {
 
     fun short(target: String?, gizmondo: Boolean = false) =
         when {
+            target == "center_tap" -> "Tap"
+            target == "rotate_screen" -> "Rotate"
             gizmondo && target in gizmondoNames -> gizmondoNames.getValue(target!!)
             target == "action" -> "Act"
             !gizmondo && target == "soft1" -> "Tab"
@@ -193,7 +197,7 @@ internal class InputEditorState(raw: String) {
         if (fixed(input, pad, gizmondo)) null
         else
             longPress.optString(InputGestures.bindingKey(gizmondo, pad, input)).takeIf {
-                it.isNotEmpty()
+                it.isNotEmpty() && it != "screenshot" && !(gizmondo && it == "center_tap")
             }
 
     fun assignLong(input: String, pad: Boolean, target: String?, gizmondo: Boolean): Boolean {
@@ -232,7 +236,8 @@ internal class InputEditorState(raw: String) {
     }
 
     private fun displayGuest(target: String?, gizmondo: Boolean) =
-        if (gizmondo && target == "turbo") "giz_piano3" else target
+        if (target == "screenshot" || (gizmondo && target == "center_tap")) null
+        else if (gizmondo && target == "turbo") "giz_piano3" else target
 
     fun fixed(input: String, pad: Boolean, gizmondo: Boolean) =
         if (pad) DeckInputPolicy.reserved(input, gizmondo) else DeckInputPolicy.reservedKey(input)
@@ -261,6 +266,7 @@ internal class InputEditorState(raw: String) {
     }
 
     fun assign(input: String, pad: Boolean, target: String?, gizmondo: Boolean? = null): Boolean {
+        if (target == "screenshot" || (gizmondo == true && target == "center_tap")) return false
         if (gizmondo != null && fixed(input, pad, gizmondo)) return false
         if (!pad && DeckInputPolicy.reservedKey(input)) return false
         if (gizmondo != null) {

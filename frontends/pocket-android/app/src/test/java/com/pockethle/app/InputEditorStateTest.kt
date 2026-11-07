@@ -52,8 +52,8 @@ class InputEditorStateTest {
             assertEquals(label, state.label(id, true))
             assertEquals(label, state.short(id, true))
         }
-        assertNull(state.assignment("Misc1", true, true))
-        assertNull(state.assignment("Misc1", true, false))
+        assertEquals("rotate_screen", state.assignment("Misc1", true, true))
+        assertEquals("rotate_screen", state.assignment("Misc1", true, false))
         assertFalse(state.assigned("giz_piano3", true, true, listOf("Select")))
     }
 
@@ -62,11 +62,11 @@ class InputEditorStateTest {
         for (giz in listOf(false, true)) {
             val state = draft()
             assertFalse(state.fixed("Mode", true, giz))
-            assertNull(state.assignment("Mode", true, giz))
-            assertEquals("—", state.shortFor("Mode", true, giz))
+            assertEquals(if (giz) null else "center_tap", state.assignment("Mode", true, giz))
+            assertEquals(if (giz) "—" else "Tap", state.shortFor("Mode", true, giz))
             assertTrue(state.assignLong("Mode", true, "action", giz))
             assertEquals("action", state.longTarget("Mode", true, giz))
-            assertNull(state.assignment("Mode", true, giz))
+            assertEquals(if (giz) null else "center_tap", state.assignment("Mode", true, giz))
             assertTrue(state.assign("Mode", true, "button_a", giz))
             assertEquals("button_a", state.assignment("Mode", true, giz))
             val runtime =
@@ -133,7 +133,7 @@ class InputEditorStateTest {
 
     @Test
     fun functionKeysAreImmutableEvenWithLegacyGuestAndLongOverrides() {
-        for (name in listOf("F8", "F9", "F10", "F11", "F12")) {
+        for (name in listOf("F7", "F8", "F9", "F10", "F11", "F12")) {
             val key = InputGestures.bindingKey(false, false, name)
             val raw =
                 JSONObject()

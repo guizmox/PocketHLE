@@ -172,10 +172,9 @@ Oval action buttons and the stylus wrapper reject only new touches outside their
 oval; ongoing MOVE/UP/CANCEL and split multitouch dispatch keep their existing
 behavior. Mapping/steering previews use the same control view and geometry.
 
-## Native service parity
+## Windows/Linux native service parity
 
-
-Both platforms build the same pocket-desktop binary source (eframe/egui), use
+Windows and Linux build the same pocket-desktop binary source (eframe/egui), use
 identical Gizmondo and Pocket PC layouts, library tabs, import policies, GPU
 options, filters, screenshots, game settings, information panels and credits.
 SDL controller handling and software/GPU geometry code are shared.
@@ -220,9 +219,9 @@ Unlimited/120 FPS are useful for performance benchmarks, not that contract test.
 
 ### Entry points and shared artwork
 
-Settings has two entries: **Keyboard bindings** and **External controller
-bindings**, on desktop and Android. Each opens only the selected input device's
-screen. Connection status and controller shortcuts belong to the controller
+Desktop exposes **Keyboard** and **Controller** buttons in the Settings toolbar
+group. Android keeps **Keyboard bindings** and **External controller bindings**
+entries in its settings. Each opens only the selected input device's screen. Connection status and controller shortcuts belong to the controller
 screen. **Device profile** selects Pocket PC or Gizmondo guest assignments;
 it does not change the platform of a library game.
 
@@ -298,14 +297,15 @@ Android, including Pocket PC shoulder/face/thumb mappings and Gizmondo L1 volume
 `deck-input-defaults.json` is checked against Rust and Android defaults by tests.
 Library loading migrates recognized legacy factory maps without rewriting custom
 tables. Legacy keyboard/controller and stylus tables remain shared between device
-profiles; new explicit guest overrides are profile-specific.
+profiles; new explicit command overrides are profile-specific.
 
 `short_press_bindings` and `long_press_bindings` are optional maps in the launcher
 configuration (`config.json`, or `config-steamdeck.json` for the dedicated edition).
 Keys are `pocketpc:keyboard:x` or `gizmondo:controller:South`, using canonical
 punctuation/lowercase keyboard names and canonical SDL controller names. Short
-values are guest button names, or null for explicit unbinding. Long values are
-guest button names. Empty maps preserve existing behavior. Explicit guest overrides
+values are assignable device-button or host-command IDs, or null for explicit
+unbinding. Long values are assignable IDs. Empty maps use the current profile
+defaults. Explicit overrides
 preserve legacy tables; assigning a legacy stylus direction moves conflicting
 legacy entries. Assigning stylus enables it. A conflicting optional fullscreen
 shortcut is cleared when the input is assigned through the assistant.
@@ -317,7 +317,9 @@ existing routes still apply. Guest direction rotation and Pocket PC button-group
 swaps remain in the output path. Native text entry and context-dependent host
 shortcuts retain their existing priority; this editor does not replace them.
 
-A short-only binding emits immediate guest down/up and supports held movement.
+Device-button short-only bindings emit immediate guest down/up and support held
+movement. Host commands consume the trigger and use their own action lifecycle
+(for example the Center tap pulse described below).
 With a long binding on the same input, short waits for release and emits an 80 ms
 pulse. At 650 ms the long action goes down and stays down until release,
 suppressing short. If the event loop first observes the deadline at release,
@@ -339,7 +341,8 @@ triggers clear on release, focus loss or device removal. Desktop uses the select
 controller; Android combines connected sources and keeps key/axis channels
 separate. Axis hysteresis avoids flicker. Modifier keycaps are not assignable but
 can show logical modifier feedback, so both matching keycaps may light together.
-Only OS-delivered keys can be shown. Outside the assistant, ordinary bindable
+Reserved inputs retain their red border while the dark teal fill indicates a
+physical press. Only OS-delivered keys can be shown. Outside the assistant, ordinary bindable
 inputs only test feedback. Inside it, they capture or navigate the current step.
 Reserved host function keys remain active before either route. Android capture is cancelled when the activity stops;
 draft/profile/selection survive recreation, but an active capture is not resumed.
@@ -351,16 +354,17 @@ PocketPC and Gizmondo. It never sends Gizmondo Brightness. Menu/Start taps the n
 recording on desktop and has no action on Android. View/Select and Menu/Start (the small top-left and top-right
 Steam Deck buttons, shown as Full and Filter) are immutable for both tap and
 hold, outlined in red and handled before menu capture/navigation. Guide/Mode
-defaults to a short-press Screenshot on desktop, with no default long action,
-when delivered by the OS. On Android Guide has no default short or long action. Guide is customizable (including its hold) and has no reserved red outline;
-explicit assignments or clearing its short binding override the factory Screenshot. Extra/Misc1 is unassigned by default on both device profiles. It is assignable and has no long
-binding by default; it is no longer a Filter duplicate. Extra has no standard
-Android key adapter and is
-marked desktop-only. Physical **F8–F12 are immutable host keys**, outlined in red
+is customizable: its short default is Center tap on PocketPC and unassigned on
+Gizmondo. Extra/Misc1 defaults to Rotation on both profiles and is customizable.
+Neither has a default hold. Screenshot is an optional assignable command on
+desktop only, with no controller default. Extra has no standard Android key
+adapter and is marked desktop-only in that adapter's UI. Physical **F7–F12 are
+immutable host keys**, outlined in red
 on the keyboard skin (the red border remains during physical feedback):
 
 | Key | Host action |
 | --- | --- |
+| F7 | Next rotation (0°, 90°, 180°, 270°) |
 | F8 | Return to the library from gameplay or another launcher page |
 | F9 | Next presentation/upscaling filter, in the same order as Menu |
 | F10 | Game Screenshot on desktop; reserved without action on Android |
@@ -410,28 +414,91 @@ controls. Non-default screen/rotation settings count, including those selected
 automatically during import. The marker describes the saved configuration, not a
 history of user edits; restoring the defaults removes it.
 
-PocketPC command labels are ACTION, TAB (Soft1/VK_TAB), ESC (Soft2/VK_ESCAPE),
-TURBO, A, B, C and P1–P4, plus the D-pad directions. Mapping captions use compact Act, Tab, Esc and direction names to avoid
-collisions, while lists retain the explicit command names; serialized binding IDs and guest virtual keys are unchanged.
-Gizmondo keeps its device-specific labels. Old factory controller maps gain the
-removal of the obsolete Extra-to-ESC default; customized maps are preserved. Gizmondo
-face labels are Play, Stop, Forward and Rewind (per the official user manual);
-the shoulder commands are labelled L1 and R1. Brightness remains a freely assignable
-guest command, never a fixed View/System gesture.
+## Factory input profiles
+
+The effective default map is profile-specific. Explicit saved short/long
+assignments take precedence; restoring defaults clears those overrides. Existing
+serialized device-button IDs and guest VKs are preserved. `center_tap`,
+`rotate_screen` and desktop-only `screenshot` are additional host commands,
+consumed by the frontend before any guest-key dispatch.
+
+| Input | PocketPC default | Gizmondo default |
+| --- | --- | --- |
+| Keyboard 1 / 2 / 3 / 4 | P1 / P2 / P3 / P4 | L1 / R1 / unassigned / unassigned |
+| Keyboard Tab | Center tap | Unassigned |
+| Keyboard T | TURBO | Unassigned |
+| Keyboard F1–F5 | Unassigned | Home / Volume / Brightness / Geofence / Power |
+| Controller L1 / R1 | P1 / P2 | Volume / Home |
+| Controller L2 / R2 | P3 / P4 | L1 / R1 |
+| Controller North / South | A / Action | Stop / Play |
+| Controller East / West | B / C | Forward / Rewind |
+| Left-stick click / right-stick click | Esc / Tab | Unassigned / unassigned |
+| Guide/Mode short press | Center tap | Unassigned |
+| Extra/Misc1 short press | Rotation | Rotation |
+
+Guide and Extra remain customizable, with no default hold. Screenshot is an
+optional desktop assignment with no controller default; F10 remains its dedicated
+host key. Android hides and ignores Screenshot assignments imported from desktop.
+View short toggles fullscreen and View long returns to the library for both
+profiles. Menu short cycles filters; Menu long records on desktop and has no
+Android action. View/Menu remain immutable. Extra has no standard Android key
+adapter; its configured action only runs if that input is delivered by the OS.
+
+PocketPC lists use ACTION, TAB (Soft1/VK_TAB), ESC (Soft2/VK_ESCAPE), TURBO, A,
+B, C and P1–P4. Diagram captions use compact Act, Tab, Esc and direction names.
+Gizmondo face labels are Play, Stop, Forward and Rewind; shoulder commands are
+L1/R1. The official manual calls the backward media button Rewind. Brightness
+remains a freely assignable guest command, never a fixed View/System gesture.
 Source: https://fcc.report/FCC-ID/THGGZ2056/591669.pdf (Quick Start Guide, page 33).
 
-Factory keyboard fallback is profile-specific: PocketPC uses number-row 1–4
-for P1–P4 and excludes the Gizmondo F1–F5 actions. Gizmondo keeps F1–F5 and
-leaves the former T/Turbo alias unassigned. Explicit profile short/long mappings
-remain authoritative. Gizmondo shoulder commands are named L1/R1 in both
-keyboard and controller editors. Before egui builds input state, the desktop
-normalizes only physical number-row key events (0–9), so Shift and AZERTY
-symbols do not change the assigned input; letter layout and committed Text are
-unchanged. Android digit names come from key codes, independently of Unicode
-characters/modifiers.
+The serialized legacy keyboard base map is retained for compatibility. The
+shared profile fallback supplies the effective defaults above without rewriting
+custom keys. Exact obsolete factory controller maps containing Extra-to-Esc are
+migrated out of the shared map; custom assignments are preserved. The common
+fixture is `frontends/pocket-desktop/assets/input/deck-input-defaults.json`.
 
-PocketPC controller factory layout: North sends A (VK_CONTROL), South sends
-Action (VK_RETURN), right-stick click sends Tab (VK_TAB), left-stick click
-retains Esc (VK_ESCAPE), and Extra is unassigned. East/West remain B/C. These
-defaults are shared by desktop and Android and do not change Gizmondo or saved
-explicit short/long assignments.
+Before egui builds input state, desktop normalizes only physical number-row
+key events (0–9), so Shift and AZERTY symbols do not change the assigned input.
+Letter layout and committed Text remain unchanged. Android digit names come
+from key codes, independently of Unicode characters and modifiers.
+
+## Center tap
+
+Center tap is an assignable PocketPC-only host stylus command. Factory bindings
+are keyboard Tab and a short Guide press. It emits PointerDown at
+(width/2, height/2) of the logical guest framebuffer, then PointerUp after
+60 ms; display zoom, GPU resolution and rotation do not change that point.
+Holding/repeat does not extend or repeat the pulse. It does not take ownership
+from an already-held real stylus or touch grid. A new real touch/grid stroke,
+focus loss, screen change or shutdown cancels it and releases the old point.
+No synthetic virtual key reaches the guest. Rotation and desktop Screenshot
+use the same assignable-command model. F7 remains immutable, while Extra's
+factory Rotation can be replaced or cleared. Android exposes Rotation and
+PocketPC Center tap, but not Screenshot.
+
+## Desktop button toolbar
+
+The former Game library, Settings and About dropdown hierarchy is replaced by
+direct buttons in four separated groups: Game library, Settings, Features,
+About. Each group has at most two rows; small windows scroll horizontally
+instead of shrinking labels. Controller focus reveals the selected button.
+Directions use button geometry within the toolbar; L3 switches between toolbar
+and page, and A activates the focused button. The footer lists these controls.
+The former F6 section-switch shortcut, interception and help were removed.
+F6 remains assignable and retains the existing in-game Colors GPS action.
+
+Features contains Upscale ×2, Filter, Rotation, Fullscreen, Screenshot and
+Recording. Filter and Rotation advance their existing carousels and display
+the current mode; F9/F7 use the same actions. Upscale/fullscreen show their
+active state. Recording shows a red Stop video button while active, and a
+disabled Saving video state while encoding. Captures remain game-only and
+backup/restore remain disabled while a game/import is active. Filter changes
+are synchronized into any open settings draft before saving.
+
+About is a dedicated page retaining version, project links and acknowledgments.
+Back/B/Escape return to the originating page without discarding its draft.
+Return to game remains available above the buttons while a session runs behind
+a settings page. Fullscreen gameplay still hides host chrome. Legacy toolbar
+menus, nested-menu expansion state and their obsolete tests were removed;
+settings combo boxes retain their popup navigation. Android's settings layout
+is unchanged by this desktop-only toolbar.

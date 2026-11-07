@@ -31,6 +31,7 @@ mod rumble;
 mod runner;
 mod screenshot;
 mod smaa;
+mod toolbar_ui;
 mod unimplemented_log;
 
 use anyhow::{Context, Result};

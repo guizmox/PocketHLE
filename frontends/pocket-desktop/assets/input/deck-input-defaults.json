@@ -19,7 +19,8 @@
   },
   "fullscreen": "Select",
   "gizmondo_overrides": {
-    "LeftTrigger": "giz_piano2"
+    "LeftTrigger": "giz_piano2",
+    "Misc1": "rotate_screen"
   },
   "keyboard": [
     {
@@ -133,6 +134,18 @@
     {
       "button": "pocket_pc_app4",
       "keys": []
+    },
+    {
+      "button": "center_tap",
+      "keys": []
+    },
+    {
+      "button": "rotate_screen",
+      "keys": []
+    },
+    {
+      "button": "screenshot",
+      "keys": []
     }
   ],
   "ppc_overrides": {
@@ -145,7 +158,9 @@
     "RightTrigger": "pocket_pc_app2",
     "RightTrigger2": "pocket_pc_app4",
     "South": "action",
-    "West": "button_c"
+    "West": "button_c",
+    "Misc1": "rotate_screen",
+    "Mode": "center_tap"
   },
   "vk_codes": {
     "action": 13,
@@ -167,6 +182,9 @@
     "pocket_pc_app4": 196,
     "soft1": 9,
     "soft2": 27,
-    "turbo": 114
+    "turbo": 114,
+    "center_tap": 4096,
+    "rotate_screen": 4097,
+    "screenshot": 4098
   }
 }

@@ -351,22 +351,10 @@ class GameActivity : AppCompatActivity() {
         getSystemService(android.hardware.input.InputManager::class.java)?.registerInputDeviceListener(steeringDeviceListener, mainHandler)
         (gameControls as? GizmondoControls)?.dpad?.deadZoneRadius = dpadDeadzone.radius
         val fixedGps = config.gpsFixedEnabled && NativeBridge.isColorsGame(rootDir, id)
-        rotationDegrees = if (isGizmondo) 0 else readRotationDegrees(rootDir, id)
+        rotationDegrees = readRotationDegrees(rootDir, id)
         glRenderer.setRotationDegrees(rotationDegrees)
         if (!gizmondoGame) {
-            findViewById<View>(R.id.btn_rotate_game).setOnClickListener {
-                releaseHeldInput()
-                // The phone sensor owns the layout. This button changes only
-                // guest-image presentation, using the same inverse input/SIP map.
-                cancelGrid()
-                rotationDegrees=(rotationDegrees+90)%360
-                glRenderer.setRotationDegrees(rotationDegrees)
-                if(session!=0L) NativeBridge.nativeSendInput(session,NativeBridge.INPUT_KEYBOARD_ROTATION,rotationDegrees/90,0)
-                val json=JSONObject(NativeBridge.readGameSettings(gameRoot,gameId))
-                json.put("rotation",when(rotationDegrees) {90->"cw90";180->"half";270->"ccw90";else->"none"})
-                NativeBridge.writeGameSettings(gameRoot,gameId,json.toString())
-                lastFrame?.let { frame->updatePocketPcDisplayGeometry(frame);glRenderer.submit(frame);surface.requestRender() }
-            }
+            findViewById<View>(R.id.btn_rotate_game).setOnClickListener { cycleRotation() }
         }
         BluetoothHost.initialize(this)
         CameraHost.initialize(this)
@@ -827,8 +815,24 @@ class GameActivity : AppCompatActivity() {
     private val hostLongCheck=Runnable {
         deckHosts.due(android.os.SystemClock.uptimeMillis(),gizmondoGame).forEach {performHostShortcut(it)}
     }
+    private fun cycleRotation() {
+        if (!::glRenderer.isInitialized || lastFrame == null) return
+        releaseHeldInput()
+        cancelGrid()
+        rotationDegrees=(rotationDegrees+90)%360
+        glRenderer.setRotationDegrees(rotationDegrees)
+        if(session!=0L) NativeBridge.nativeSendInput(session,NativeBridge.INPUT_KEYBOARD_ROTATION,rotationDegrees/90,0)
+        runCatching {
+            val json=JSONObject(NativeBridge.readGameSettings(gameRoot,gameId))
+            json.put("rotation",when(rotationDegrees) {90->"cw90";180->"half";270->"ccw90";else->"none"})
+            NativeBridge.writeGameSettings(gameRoot,gameId,json.toString())
+        }
+        lastFrame?.let { frame->updatePocketPcDisplayGeometry(frame);glRenderer.submit(frame);surface.requestRender() }
+    }
+
     private fun performHostShortcut(action:DeckInputPolicy.Action) {
         when(action) {
+            DeckInputPolicy.Action.ROTATION -> cycleRotation()
             DeckInputPolicy.Action.FULLSCREEN -> setControllerFullscreen(!glRenderer.controllerFullscreen)
             DeckInputPolicy.Action.EXIT -> finish()
             DeckInputPolicy.Action.NEXT_FILTER -> surface.queueEvent {
@@ -1124,6 +1128,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun sendGrid(touch:GridTouch) {
+        if (touch.phase == 0) cancelCenterTap()
         if(session==0L) return
         val frame=lastFrame ?: return
         val (x,y)=StylusGridConfig.guestPoint(touch.x,touch.y,rotationDegrees/90,frame.width,frame.height)
@@ -1147,7 +1152,43 @@ class GameActivity : AppCompatActivity() {
         releaseGuestKey(handle,vk)
     }
 
+    private val centerTap = CenterTapPulse()
+    private var centerTapSession = 0L
+    private val centerTapRelease = object : Runnable {
+        override fun run() {
+            val point = centerTap.releaseDue(android.os.SystemClock.uptimeMillis())
+            if (point != null) {
+                if (session != 0L && session == centerTapSession)
+                    NativeBridge.nativeSendInput(session,NativeBridge.INPUT_POINTER_UP,point.first,point.second)
+                centerTapSession = 0L
+                updateStylusAim()
+            } else if (centerTap.active) mainHandler.postDelayed(this,1)
+        }
+    }
+
+    private fun cancelCenterTap() {
+        mainHandler.removeCallbacks(centerTapRelease)
+        val point = centerTap.cancel()
+        if (point != null && session != 0L && session == centerTapSession)
+            NativeBridge.nativeSendInput(session,NativeBridge.INPUT_POINTER_UP,point.first,point.second)
+        centerTapSession = 0L
+        if (point != null) updateStylusAim()
+    }
+
+    private fun tapScreenCenter(handle: Long) {
+        if (gizmondoGame || handle == 0L || handle != session || surfacePointerDown || gridRouter?.active == true) return
+        val frame = lastFrame ?: return
+        val point = centerTap.press(android.os.SystemClock.uptimeMillis(),frame.width,frame.height) ?: return
+        centerTapSession = handle
+        updateStylusAim()
+        NativeBridge.nativeSendInput(handle,NativeBridge.INPUT_POINTER_DOWN,point.first,point.second)
+        mainHandler.postDelayed(centerTapRelease,CenterTapPulse.DURATION_MS)
+    }
+
     private fun acquireGuestKey(handle: Long, requestedVk: Int) {
+        if (requestedVk == DeckInputPolicy.ROTATION_COMMAND) { if (handle == session) cycleRotation(); return }
+        if (requestedVk == DeckInputPolicy.SCREENSHOT_COMMAND) return
+        if (requestedVk == CenterTapPulse.COMMAND) { tapScreenCenter(handle); return }
         val vk=rotatedDirection(requestedVk)
         val count = heldGuestKeys[vk] ?: 0
         heldGuestKeys[vk] = count + 1
@@ -1157,6 +1198,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun releaseGuestKey(handle: Long, requestedVk: Int) {
+        if (requestedVk == CenterTapPulse.COMMAND || requestedVk == DeckInputPolicy.ROTATION_COMMAND || requestedVk == DeckInputPolicy.SCREENSHOT_COMMAND) return
         val vk=rotatedDirection(requestedVk)
         val count = heldGuestKeys[vk] ?: return
         if (count <= 1) {
@@ -1173,7 +1215,7 @@ class GameActivity : AppCompatActivity() {
         val strengths=stylusTouch.copyOf()
         stylusKeys.values.forEach { strengths[it]=1f }
         stylusAxes.values.forEach { (i,v) -> strengths[i]=maxOf(strengths[i],v) }
-        val vector=if(!activityResumed || !hasWindowFocus() || surfacePointerDown || gridRouter?.active==true) 0 to 0
+        val vector=if(!activityResumed || !hasWindowFocus() || surfacePointerDown || centerTap.active || gridRouter?.active==true) 0 to 0
             else stylusBindings.velocity(strengths,rotationDegrees/90)
         if(vector!=stylusSent) {
             NativeBridge.nativeSendInput(session,NativeBridge.INPUT_STYLUS_AIM,vector.first,vector.second)
@@ -1182,6 +1224,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun releaseHeldInput() {
+        cancelCenterTap()
         inputGestures.clear()
         gestureAxes.clear()
         mainHandler.removeCallbacks(gestureTick)
@@ -1255,6 +1298,7 @@ class GameActivity : AppCompatActivity() {
             val mapped = if(pointerIndex>=0) frame?.let { mapTouchToGame(v, event, it,pointerIndex) } else null
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    cancelCenterTap()
                     val (gx, gy) = mapped ?: return@setOnTouchListener true
                     cancelGrid()
                     NativeBridge.nativeSendInput(handle, NativeBridge.INPUT_POINTER_DOWN, gx, gy)

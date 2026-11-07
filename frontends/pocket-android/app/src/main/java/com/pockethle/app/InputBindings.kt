@@ -26,6 +26,10 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
         else
             buttons[shortPress.optString(InputGestures.bindingKey(gizmondo ?: false, pad, input))]
                 ?.second
+                ?.takeUnless {
+                    it == DeckInputPolicy.SCREENSHOT_COMMAND ||
+                        (gizmondo == true && it == CenterTapPulse.COMMAND)
+                }
 
     val longPress =
         JSONObject(config.originalJson).optJSONObject("long_press_bindings") ?: JSONObject()
@@ -37,7 +41,11 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
                 (!pad && (DeckInputPolicy.reservedKey(input) || input == "Escape"))
         )
             return null
-        return buttons[longPress.optString(InputGestures.bindingKey(giz, pad, input))]?.second
+        return buttons[longPress.optString(InputGestures.bindingKey(giz, pad, input))]
+            ?.second
+            ?.takeUnless {
+                it == DeckInputPolicy.SCREENSHOT_COMMAND || (giz && it == CenterTapPulse.COMMAND)
+            }
     }
 
     fun keyboardName(name: String): Int? {
@@ -98,6 +106,9 @@ internal class InputBindings(config: LauncherConfig, private val gizmondo: Boole
                 "giz_piano4" to ("Geofence" to 0x73),
                 "giz_piano5" to ("Power" to 0x7a),
                 "turbo" to ("Turbo (PocketHLE)" to 0x72),
+                "center_tap" to ("Center tap" to CenterTapPulse.COMMAND),
+                "rotate_screen" to ("Rotation" to DeckInputPolicy.ROTATION_COMMAND),
+                "screenshot" to ("Screenshot" to DeckInputPolicy.SCREENSHOT_COMMAND),
             )
 
         fun defaultKeyboard() =

@@ -2,9 +2,12 @@ package com.pockethle.app
 
 /** Deck is the shared input reference. Policy is independent of Android events. */
 internal object DeckInputPolicy {
+    const val ROTATION_COMMAND = 0x1001
+    const val SCREENSHOT_COMMAND = 0x1002 // Portable config tag; unsupported on Android.
     const val HOLD_MS = 650L
 
     enum class Action {
+        ROTATION,
         FULLSCREEN,
         EXIT,
         NEXT_FILTER,
@@ -28,8 +31,15 @@ internal object DeckInputPolicy {
 
     fun guest(control: String, gizmondo: Boolean): String? {
         val name = InputBindings.controllerCanonical(control)
-        if (gizmondo) return if (name == "LeftTrigger") "giz_piano2" else null
+        if (gizmondo)
+            return when (name) {
+                "LeftTrigger" -> "giz_piano2"
+                "Misc1" -> "rotate_screen"
+                else -> null
+            }
         return when (name) {
+            "Misc1" -> "rotate_screen"
+            "Mode" -> "center_tap"
             "LeftTrigger" -> "pocket_pc_app1"
             "RightTrigger" -> "pocket_pc_app2"
             "LeftTrigger2" -> "pocket_pc_app3"
@@ -45,9 +55,14 @@ internal object DeckInputPolicy {
     }
 
     fun keyboardGuest(name: String, current: String?, gizmondo: Boolean): String? {
-        if (gizmondo) return current?.takeUnless { it == "turbo" || it.startsWith("pocket_pc_app") }
+        if (current == "screenshot") return null
+        if (gizmondo)
+            return current?.takeUnless {
+                it == "turbo" || it == "center_tap" || it.startsWith("pocket_pc_app")
+            }
         if (current?.startsWith("giz_piano") == true) return null
         return when {
+            name == "Tab" && current in listOf(null, "center_tap") -> "center_tap"
             name == "1" && current in listOf(null, "soft1", "pocket_pc_app1") -> "pocket_pc_app1"
             name == "2" && current in listOf(null, "soft2", "pocket_pc_app2") -> "pocket_pc_app2"
             name == "3" && current in listOf(null, "pocket_pc_app3") -> "pocket_pc_app3"
@@ -56,10 +71,12 @@ internal object DeckInputPolicy {
         }
     }
 
-    fun reservedKey(name: String) = name.uppercase() in listOf("F8", "F9", "F10", "F11", "F12")
+    fun reservedKey(name: String) =
+        name.uppercase() in listOf("F7", "F8", "F9", "F10", "F11", "F12")
 
     fun key(name: String): Action? =
         when (name.uppercase()) {
+            "F7" -> Action.ROTATION
             "F8" -> Action.EXIT
             "F9" -> Action.NEXT_FILTER
             "F12" -> Action.FULLSCREEN
@@ -68,6 +85,7 @@ internal object DeckInputPolicy {
 
     fun label(action: Action) =
         when (action) {
+            Action.ROTATION -> "Rotation"
             Action.FULLSCREEN -> "Fullscreen"
             Action.EXIT -> "Return to library"
             Action.NEXT_FILTER -> "Next filter"
@@ -77,6 +95,7 @@ internal object DeckInputPolicy {
         when (action) {
             Action.EXIT -> "Exit"
             Action.NEXT_FILTER -> "Filter"
+            Action.ROTATION -> "Rotate"
             Action.FULLSCREEN -> "Full"
         }
 

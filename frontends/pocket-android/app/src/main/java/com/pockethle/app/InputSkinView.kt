@@ -155,6 +155,8 @@ internal class InputSkinView(
                 }
                 val label =
                     when (target) {
+                        "center_tap" -> "Tap"
+                        "rotate_screen" -> "Rotate"
                         "stylus:0" -> "PenU"
                         "stylus:1" -> "PenD"
                         "stylus:2" -> "PenL"
@@ -261,8 +263,8 @@ internal class InputSkinView(
         fun color(target: String?) =
             when {
                 target == null -> Color.rgb(145, 149, 156)
-                target == "host" -> Color.rgb(176, 135, 231)
-                target.startsWith("stylus:") -> Color.rgb(93, 194, 162)
+                target == "host" || target == "rotate_screen" -> Color.rgb(176, 135, 231)
+                target == "center_tap" || target.startsWith("stylus:") -> Color.rgb(93, 194, 162)
                 else -> BLUE
             }
 

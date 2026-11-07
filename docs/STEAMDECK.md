@@ -15,7 +15,7 @@ UI frame after native state restoration. An explicit CLI display argument wins:
 0 means fullscreen; 1 means windowed. This does not enable automatic Deck
 identification in an ordinary desktop executable.
 
-## Reserved controls during gameplay
+## System gestures and customizable command defaults
 
 | Deck control | Action |
 | --- | --- |
@@ -23,9 +23,9 @@ identification in an ordinary desktop executable.
 | Menu, hold 650 ms | Start/stop video recording |
 | View, short press | Toggle fullscreen |
 | View, hold 650 ms | Return to library on both PocketPC and Gizmondo |
-| Extra/Misc1, short press (if delivered) | Unassigned on both profiles (assignable) |
+| Extra/Misc1, short press (if delivered) | Next rotation (customizable) |
 | Extra/Misc1, hold 650 ms (if delivered) | Unassigned by default |
-| Guide/Mode, short press (if delivered) | Screenshot by default; customizable, no default hold |
+| Guide/Mode, short press (if delivered) | PocketPC Center tap; Gizmondo unassigned (customizable) |
 
 These host gestures take precedence over an old default-binding migration note.
 They change emulator presentation/device controls, not SteamOS volume/brightness.
@@ -43,8 +43,9 @@ They change emulator presentation/device controls, not SteamOS volume/brightness
 
 P1-P4 are the buttons exposed by GAPI; Action/Enter is separate. A game that
 only lists GAPI buttons need not accept every keyboard key. Stick clicks and
-motion are independent. Guide/Mode taps screenshot when SDL receives it and has
-no long action. Extra/Misc1 is unassigned on both profiles.
+motion are independent. Guide/Mode taps the screen center on PocketPC when SDL receives it and has
+no default long action. Extra/Misc1 cycles rotation on both profiles. Screenshot
+is optional and assignable on desktop.
 View hold exits either device profile; it never sends Brightness.
 SteamOS may reserve these controls before they reach the application.
 
@@ -104,10 +105,11 @@ migration values with the reserved Menu gestures above.
 
 ## Physical keyboard host keys
 
-F8 returns to the library from gameplay or another launcher page. F9 advances
+F7 cycles the active game image rotation. F8 returns to the library from
+gameplay or another launcher page. F9 advances
 the same presentation-filter carousel as Menu. F10/F11 retain game capture and
 recording, and F12 toggles fullscreen/windowed even in binding pages and their
-assistant. F8–F12 cannot be assigned to guest commands, including through a
+assistant. F7–F12 cannot be assigned to guest commands, including through a
 legacy configuration or a touch grid; the keyboard skin outlines them in red.
 See [FRONTENDS.md](FRONTENDS.md#visual-input-editor--desktop-and-android) for
 menu behavior and draft persistence. These are physical host keys, independent
@@ -141,3 +143,13 @@ keeps F1–F5 for its piano keys, uses L1/R1 for its shoulder command names, and
 has no factory T-to-Brightness alias. PocketPC has no factory Gizmondo F-key
 actions. Number-row binding events ignore Shift via physical digit positions;
 AZERTY letter mappings and ordinary text entry retain their layout.
+
+F7 cycles the active game's presentation rotation and is reserved. Keyboard Tab
+and controller Guide default to a 60 ms Center tap only for PocketPC. Both
+Center tap and Extra's Rotation are assignable commands.
+
+Desktop launcher buttons are grouped into Game library, Settings, Features and
+About. D-pad/left stick navigate their actual two-row positions and reveal
+buttons outside the viewport on small windows; A activates and L3 switches
+toolbar/page. Filter and Rotation show the selected mode and cycle on activation.
+The recording button is red and labelled Stop video while recording.
