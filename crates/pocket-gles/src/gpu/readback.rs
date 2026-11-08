@@ -76,15 +76,20 @@ impl SharedReadback {
                     return Err("snapshot readback framebuffer incomplete".into());
                 }
                 (self.gl.PixelStorei)(0x0d05, 1);
-                (self.gl.ReadPixels)(
-                    0,
-                    0,
-                    w as i32,
-                    h as i32,
-                    GL_RGBA,
-                    GL_UNSIGNED_BYTE,
-                    self.native.as_mut_ptr().cast(),
-                );
+                {
+                    let _diagnostic = crate::graphics_diagnostic::Span::new(
+                        crate::graphics_diagnostic::Stage::ReadPixels,
+                    );
+                    (self.gl.ReadPixels)(
+                        0,
+                        0,
+                        w as i32,
+                        h as i32,
+                        GL_RGBA,
+                        GL_UNSIGNED_BYTE,
+                        self.native.as_mut_ptr().cast(),
+                    );
+                }
                 let error = (self.gl.GetError)();
                 if error != 0 {
                     return Err(format!("snapshot readback error 0x{error:04x}"));
@@ -247,15 +252,20 @@ impl SharedReadback {
                 } else {
                     (processor.gl.BindFramebuffer)(0x8d40, processor.fbo);
                     (processor.gl.PixelStorei)(0x0d05, 1);
-                    (processor.gl.ReadPixels)(
-                        0,
-                        0,
-                        width as i32,
-                        height as i32,
-                        GL_RGBA,
-                        GL_UNSIGNED_BYTE,
-                        self.pixels.as_mut_ptr().cast(),
-                    );
+                    {
+                        let _diagnostic = crate::graphics_diagnostic::Span::new(
+                            crate::graphics_diagnostic::Stage::ReadPixels,
+                        );
+                        (processor.gl.ReadPixels)(
+                            0,
+                            0,
+                            width as i32,
+                            height as i32,
+                            GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            self.pixels.as_mut_ptr().cast(),
+                        );
+                    }
                     processor.check()
                 }
             }

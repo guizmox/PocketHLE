@@ -237,6 +237,63 @@ mod native {
         source: SharedSource,
         _egl: Arc<Library>,
     }
+    /// Metadata lease for a root context whose native lifetime is owned by the
+    /// embedding frontend. Drop closes creation capability without issuing GL.
+    pub struct PersistentSharedContext {
+        source: SharedSource,
+        _egl: Arc<Library>,
+    }
+    impl PersistentSharedContext {
+        /// # Safety
+        /// Keep the captured native root and display alive until this lease and
+        /// every child renderer/readback have been released. The caller owns
+        /// destruction; this lease never destroys or makes the root current.
+        pub unsafe fn capture_current() -> Result<Self, String> {
+            let mut root = ExternalContext::capture_current()?;
+            let source = std::mem::replace(
+                &mut root.source,
+                SharedSource(Arc::new(Mutex::new(None)), Default::default()),
+            );
+            Ok(Self {
+                source,
+                _egl: root._egl.clone(),
+            })
+        }
+        pub fn source(&self) -> SharedSource {
+            self.source.clone()
+        }
+        /// # Safety
+        /// The current context must have been created sharing this root. Same
+        /// display alone does not prove sharing. Its owner must drop the returned
+        /// guard before destroying/replacing that current consumer context.
+        pub unsafe fn capture_consumer(&self) -> Result<ExternalContext, String> {
+            let root = self.source.0.lock().unwrap_or_else(|e| e.into_inner());
+            let display = root.as_ref().ok_or("persistent root has closed")?.0;
+            let mut ui = ExternalContext::capture_current()?;
+            if ui
+                .source
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|s| s.0)
+                != Some(display)
+            {
+                return Err("consumer and root use different EGL displays".into());
+            }
+            ui.source.1 = self.source.1.clone();
+            Ok(ui)
+        }
+    }
+    impl Drop for PersistentSharedContext {
+        fn drop(&mut self) {
+            self.source
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+        }
+    }
     impl ExternalContext {
         /// Capture EGL on the UI's GL thread, without changing its current API,
         /// context or surfaces. GLX/WGL-only threads return an error.
@@ -265,6 +322,27 @@ mod native {
             let display = get_display();
             if context.is_null() || display.is_null() {
                 return Err("UI thread has no current EGL context".into());
+            }
+            #[cfg(target_os = "android")]
+            {
+                let mut leases = displays().lock().unwrap_or_else(|e| e.into_inner());
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    leases.entry(display as usize)
+                {
+                    let p = egl.symbol(c"eglInitialize");
+                    if p.is_null() {
+                        return Err("EGL initialization unavailable".into());
+                    }
+                    let initialize: unsafe extern "system" fn(Ptr, *mut i32, *mut i32) -> u32 =
+                        std::mem::transmute(p);
+                    if initialize(display, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
+                        return Err("EGL display retention failed".into());
+                    }
+                    entry.insert(DisplayLease {
+                        users: 0,
+                        owned: true,
+                    });
+                }
             }
             let mut api = 0;
             if query(display, context, 0x3097, &mut api) == 0 || !matches!(api, 0x30a0 | 0x30a2) {
@@ -1403,5 +1481,7 @@ mod native {
     }
 }
 pub use native::ExternalContext;
+#[cfg(unix)]
+pub use native::PersistentSharedContext;
 pub use native::{Host, SavedCurrent};
 pub use native::{SharedConsumer, SharedSource};

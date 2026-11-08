@@ -282,6 +282,13 @@ class SettingsActivity : HostKeyActivity() {
                     true
                 }
             })
+            findPreference<SwitchPreferenceCompat>("android_graphics_diagnostics")?.apply {
+                isChecked = current.graphicsDiagnostics
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(graphicsDiagnostics = value as Boolean)
+                    writeConfig(); true
+                }
+            }
             findPreference<SeekBarPreference>("verbosity")?.apply {
                 value = current.verbosity
                 setOnPreferenceChangeListener { _, newValue ->

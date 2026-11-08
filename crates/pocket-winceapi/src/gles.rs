@@ -21,10 +21,13 @@ use std::sync::Mutex;
 
 use pocket_gles::context::{Context, GuestMemory};
 use pocket_gles::fixed::{word_to_f32, word_to_f32_bits};
+#[cfg(unix)]
+pub use pocket_gles::gpu::PersistentSharedContext;
 pub use pocket_gles::gpu::{
     with_shared_context_source, ExternalGpuContext, SharedConsumer, SharedContextSource,
     SharedFrame, SHARED_DISPLAY_FRAGMENT,
 };
+pub use pocket_gles::graphics_diagnostic;
 use pocket_gles::matrix::Matrix4;
 use pocket_gles::ordinals as gles_ord;
 use pocket_gles::{
@@ -897,6 +900,7 @@ fn gl_fogxv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 // ---- clear and current values ----------------------------------------------
 
 fn gl_clear(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let _diagnostic = graphics_diagnostic::Span::new(graphics_diagnostic::Stage::GuestClear);
     let mask = ctx.arg_u32(0)?;
     with_ctx(|c| c.clear(mask));
     Ok(VOID)
@@ -1596,6 +1600,7 @@ fn gl_tex_envxv(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 // ---- drawing ---------------------------------------------------------------
 
 fn gl_draw_arrays(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let _diagnostic = graphics_diagnostic::Span::new(graphics_diagnostic::Stage::GuestDraw);
     let (mode, first, count) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?);
     let mut mem = CpuMem(ctx.cpu);
     with_ctx(|c| c.draw_arrays(&mut mem, mode, first, count));
@@ -1603,6 +1608,7 @@ fn gl_draw_arrays(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 }
 
 fn gl_draw_elements(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let _diagnostic = graphics_diagnostic::Span::new(graphics_diagnostic::Stage::GuestDraw);
     let (mode, count, ty, ptr) = (
         ctx.arg_u32(0)?,
         ctx.arg_u32(1)?,
@@ -2653,6 +2659,7 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 /// Converts the RGBA8888 render target down to the kernel
 /// framebuffer's RGB565 and marks it dirty so the frontend picks it up.
 pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let _diagnostic = graphics_diagnostic::Span::new(graphics_diagnostic::Stage::Swap);
     if !egl_config_display(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }

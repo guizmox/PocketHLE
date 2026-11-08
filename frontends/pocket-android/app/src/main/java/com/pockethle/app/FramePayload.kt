@@ -10,6 +10,7 @@ internal data class FramePayload(
     val textureWidth: Int,
     val textureHeight: Int,
     val rgbaOffset: Int,
+    val sharedToken: Long = 0,
 )
 
 internal fun decodeFramePayload(raw: ByteArray): FramePayload? {
@@ -20,6 +21,16 @@ internal fun decodeFramePayload(raw: ByteArray): FramePayload? {
     var offset = 8
     var textureWidth = width
     var textureHeight = height
+    if (width == -2) {
+        if (raw.size != 28) return null
+        width = height; height = buffer.int
+        textureWidth = buffer.int; textureHeight = buffer.int
+        val token = buffer.long
+        if (width <= 0 || height <= 0 || token <= 0) return null
+        val scale = textureWidth / width
+        if (scale !in 1..4 || textureWidth.toLong() != width.toLong()*scale || textureHeight.toLong() != height.toLong()*scale) return null
+        return FramePayload(width,height,textureWidth,textureHeight,28,token)
+    }
     if (width == -1) {
         if (raw.size < 20) return null
         width = height

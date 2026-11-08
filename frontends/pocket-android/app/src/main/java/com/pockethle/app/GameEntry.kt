@@ -166,6 +166,7 @@ data class LauncherConfig(
     val schemaVersion: Int,
     val defaultCpuBackend: String,
     val verbosity: Int,
+    val graphicsDiagnostics: Boolean = false,
     val logUnimplementedApis: Boolean = true,
     val gpuRenderer: Boolean = true,
     val executableHeap: Boolean = true,
@@ -220,6 +221,7 @@ data class LauncherConfig(
         put("schema_version", schemaVersion)
         put("default_cpu_backend", defaultCpuBackend)
         put("verbosity", verbosity)
+        put("android_graphics_diagnostics", graphicsDiagnostics)
         put("log_unimplemented_apis", logUnimplementedApis)
         put("gpu_renderer", gpuRenderer)
         put("executable_heap", executableHeap)
@@ -272,6 +274,7 @@ data class LauncherConfig(
             schemaVersion = obj.optInt("schema_version", 1),
             defaultCpuBackend = obj.optString("default_cpu_backend", "unicorn"),
             verbosity = obj.optInt("verbosity", 1),
+            graphicsDiagnostics = obj.optBoolean("android_graphics_diagnostics", false),
             logUnimplementedApis = obj.optBoolean("log_unimplemented_apis", true),
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
             executableHeap = obj.optBoolean("executable_heap", true),

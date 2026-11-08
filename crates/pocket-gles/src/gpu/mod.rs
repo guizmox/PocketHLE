@@ -1,9 +1,12 @@
 //! OpenGL 2.1 / GLES 2 offscreen rasterizer. Guest pointers never reach a driver.
+mod diagnostic;
 mod platform;
 mod readback;
 mod resolve;
 mod shared;
 mod transfer;
+#[cfg(unix)]
+pub use platform::PersistentSharedContext;
 pub use platform::SharedConsumer;
 pub use readback::SharedReadback;
 pub use shared::{SharedFrame, SHARED_DISPLAY_FRAGMENT};
@@ -13,6 +16,8 @@ mod shared_display_tests;
 mod shared_present_ring_tests;
 #[cfg(all(test, unix))]
 mod shared_present_tests;
+#[cfg(all(test, unix))]
+mod shared_root_tests;
 use crate::{
     consts::*,
     matrix::{Matrix4, IDENTITY},
@@ -1305,6 +1310,7 @@ fn host_mipmap_levels(tex: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
 type ProgramState = (u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>);
 
 pub struct Renderer {
+    diagnostic: Option<std::rc::Rc<RefCell<diagnostic::Timer>>>,
     host: Host,
     gl: Gl,
     program: u32,
@@ -1514,7 +1520,9 @@ impl Renderer {
                 (gl.GetIntegerv)(GL_COMPRESSED_TEXTURE_FORMATS, formats.as_mut_ptr());
             }
             let compressed_formats = formats.into_iter().map(|n| n as u32).collect();
+            let diagnostic = diagnostic::Timer::new(&host, &gl);
             let mut r = Self {
+                diagnostic,
                 host,
                 gl,
                 program: 0,
@@ -2621,8 +2629,11 @@ impl Renderer {
         guest_indices: Option<&[u16]>,
         stream: Option<&VertexStream>,
     ) -> Result<(), String> {
+        let _diagnostic =
+            crate::graphics_diagnostic::Span::new(crate::graphics_diagnostic::Stage::Submit);
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
+        let _gpu_diagnostic = diagnostic::Timer::scope(&self.diagnostic);
         self.scratch.clear();
         // Packed guest streams already retain their native component count.
         // Only expanded vertices carrying nondefault r/q need a larger payload.
@@ -3557,15 +3568,20 @@ impl Renderer {
                 .resize((self.width * self.height * 4) as usize, 0);
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
             (self.gl.PixelStorei)(0x0d05, 1);
-            (self.gl.ReadPixels)(
-                0,
-                0,
-                self.width as i32,
-                self.height as i32,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                self.readback.as_mut_ptr().cast(),
-            );
+            {
+                let _diagnostic = crate::graphics_diagnostic::Span::new(
+                    crate::graphics_diagnostic::Stage::ReadPixels,
+                );
+                (self.gl.ReadPixels)(
+                    0,
+                    0,
+                    self.width as i32,
+                    self.height as i32,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    self.readback.as_mut_ptr().cast(),
+                );
+            }
             self.check()?;
             if gpu_resolved {
                 target
@@ -3664,6 +3680,9 @@ impl Drop for Renderer {
         }
         self.retire_shared_frames();
         unsafe {
+            if let Some(timer) = self.diagnostic.take() {
+                timer.borrow_mut().release();
+            }
             self.delete_transfers();
             if let Some(resolve) = self.logical_resolve.take() {
                 resolve.delete(&self.gl);

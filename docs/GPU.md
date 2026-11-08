@@ -168,3 +168,51 @@ row addressing, clipping, depth and projection. Hardcoded 320x240 or a 640-byte
 RGB565 row is evidence of an assumption, not sufficient proof by itself. A game
 may query the display but still render to a fixed private buffer. Increasing the
 reported framebuffer size alone cannot safely add internal rendering detail.
+
+## Android shared GLES presentation
+
+GPU-enabled Android sessions create an independently retained EGL root before
+starting any emulator process. Each replaceable GLSurfaceView context and each
+native GLES renderer shares that root. The root is destroyed only after all
+session/child jobs have joined. Native root metadata closes before Java destroys
+the root. Android's existing process-wide display initialization lease also covers
+borrowed contexts; the framework can release its own initialization without
+invalidating the native renderers. This relies on Android EGL's reference-counted
+initialization, not a portable EGL refcount assumption.
+
+A valid shared window publication is taken before the frame hook performs any
+CPU black scan, image-change scan or composition. The frontend transfers a
+28-byte geometry/token descriptor, not image pixels or a persistent GL name.
+Bounded latest/presented mailboxes retain immutable leases. A synchronous JNI
+callback samples the texture inside the existing SharedFrame consumer/fence
+scope; it does not retain the source name after returning.
+
+The UI performs the established RGB565/row-order/backlight conversion into its
+own texture on the GPU, using the same SHARED_DISPLAY_FRAGMENT as desktop, then
+applies its existing filters/rotation/display geometry. GPU-created images retain
+their physical density and logical guest size. CPU presentation remains for
+software rendering, xBRZ preprocessing, IPS measurement and real CPU/GDI/system
+video composition. Real guest reads still materialize pixels coherently.
+
+Surface destruction releases only the consumer guard and context-local objects;
+the independent root and last immutable image remain valid for surface recreation.
+Shared UI texture/program objects are deleted through the root before the old
+consumer context disappears, avoiding accumulation across recreations. If the
+optional sharing/conversion transport fails, a forced CPU refresh can republish
+the current image even when the guest is idle. It does not increment the guest
+publication or completed-presentation counters. GPU renderer failures retain
+their existing fatal reporting; this is not a software-renderer recovery scheme.
+
+The log distinguishes `PRESENTATION=GPU_SHARED (Android)` from `CPU_UPLOAD`.
+The diagnostic `shared_convert` stage times CPU submission of the GPU conversion;
+it is separate from CPU pixel preparation and from asynchronous GPU execution.
+No GL finish, CPU fence wait or unconditional readback is added. Snapshot pool
+pressure can still select the established CPU path.
+
+Local validation covers native GL/GLES pixel/backlight/row-order equivalence,
+a producer on another thread, three consumer recreations with retained-image
+readback, bounded mailboxes, static-image CPU recovery, wire decoding and the ARM
+runner regressions. Android UI/factory Kotlin sources are type-checked against
+Android API classes. A complete APK and Samsung/ANGLE runtime validation are
+still required; this is not a measured device FPS guarantee or recovery from a
+real device-wide EGL_CONTEXT_LOST event.

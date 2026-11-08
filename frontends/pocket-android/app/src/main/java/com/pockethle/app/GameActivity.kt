@@ -280,9 +280,10 @@ class GameActivity : AppCompatActivity() {
         content.addView(controllerFullscreenHost)
         gameControls = findViewById(R.id.game_controls)
         gameControls.alpha = controlsOpacity
-        (gameControls as? PocketPcControls)?.configure(config, runCatching {
+        val launchSettings = runCatching {
             GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(gameRoot, gameId)))
-        }.getOrDefault(GameSettings.default()))
+        }.getOrDefault(GameSettings.default())
+        (gameControls as? PocketPcControls)?.configure(config, launchSettings)
         (gameControls as? GizmondoControls)?.apply {
             bigDirectionalControls = config.gizmondoControlsSize == "big"
             maximizeScreen = config.gizmondoMaximizeScreen
@@ -302,9 +303,19 @@ class GameActivity : AppCompatActivity() {
         title = name
 
         surface = findViewById(R.id.surface)
-        glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, showFps, !gizmondoGame)
+        presentationHandle = NativeBridge.nativeCreatePresentation()
+        glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, showFps, !gizmondoGame, config.graphicsDiagnostics, presentationHandle) {
+            mainHandler.post {
+                presentationReady = true
+                presentationStart?.let { (root,id) -> presentationStart=null; startSession(root,id) }
+            }
+        }
+        sharedEglFactory = SharedEglContextFactory(presentationHandle, glRenderer, launchSettings.gpuRenderer ?: config.gpuRenderer)
+        glRenderer.sharedContextAvailable = { sharedEglFactory.isShared() }
         findViewById<View>(R.id.btn_fullscreen).setOnClickListener { setControllerFullscreen(true) }
         surface.setEGLContextClientVersion(3)
+        surface.setEGLContextFactory(sharedEglFactory)
+        surface.preserveEGLContextOnPause = launchSettings.gpuRenderer ?: config.gpuRenderer
         surface.setRenderer(glRenderer)
         surface.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         progress = findViewById(R.id.progress)
@@ -379,9 +390,15 @@ class GameActivity : AppCompatActivity() {
         } else startSession(rootDir, id)
     }
 
+    private var presentationHandle = 0L
+    private var presentationReady = false
+    private var presentationStart: Pair<String,String>? = null
+    private lateinit var sharedEglFactory: SharedEglContextFactory
+
     private fun startSession(rootDir: String, id: String) {
+        if (!presentationReady) { presentationStart = rootDir to id; return }
         if (isFinishing || isDestroyed) return
-        val handle = NativeBridge.nativeStartGame(rootDir, id)
+        val handle = NativeBridge.nativeStartGame(rootDir, id, presentationHandle)
         if (handle == 0L) {
             progress.visibility = View.GONE
             android.widget.Toast.makeText(this, "Could not start the game: see logcat", android.widget.Toast.LENGTH_LONG).show()
@@ -502,6 +519,10 @@ class GameActivity : AppCompatActivity() {
         GpsHost.closeAll()
         VibrationHost.closeAll()
         finishSession()
+        if (!joiningSession && ::sharedEglFactory.isInitialized) {
+            if (::glRenderer.isInitialized) glRenderer.stopPresentation()
+            sharedEglFactory.closeAfterJoin()
+        }
         mainHandler.removeCallbacksAndMessages(null)
         surface.onPause()
         getSystemService(android.hardware.input.InputManager::class.java)?.unregisterInputDeviceListener(steeringDeviceListener)
@@ -516,6 +537,7 @@ class GameActivity : AppCompatActivity() {
         val handle = session
         if (handle == 0L) return
         joiningSession = true
+        glRenderer.stopPresentation()
         fpsOverlay.visibility = View.GONE
         ipsOverlay.visibility = View.GONE
         CameraHost.closeAll()
@@ -534,6 +556,7 @@ class GameActivity : AppCompatActivity() {
             NativeBridge.nativeRequestStop(handle)
             audioToJoin.forEach { it.join() }
             val summary = NativeBridge.nativeFinishGame(handle)
+            sharedEglFactory.closeAfterJoin()
             mainHandler.post {
                 joiningSession = false
                 android.util.Log.i("PocketHLE", summary)
@@ -677,7 +700,7 @@ class GameActivity : AppCompatActivity() {
 
     private fun decodeFrame(raw: ByteArray): FrameSnapshot? {
         val frame = decodeFramePayload(raw) ?: return null
-        return FrameSnapshot(frame.width, frame.height, raw, frame.rgbaOffset, frame.textureWidth, frame.textureHeight)
+        return FrameSnapshot(frame.width, frame.height, raw, frame.rgbaOffset, frame.textureWidth, frame.textureHeight, frame.sharedToken)
     }
 
     private fun updateIpsOverlay() {
@@ -1531,6 +1554,7 @@ class GameActivity : AppCompatActivity() {
         val rgbaOffset: Int,
         val textureWidth: Int = width,
         val textureHeight: Int = height,
+        val sharedToken: Long = 0,
     )
 
     companion object {

@@ -197,7 +197,7 @@ impl SharedFrame {
         (self.0.width, self.0.height)
     }
 
-    /// Sample only through the original external UI context generation.
+    /// Sample through a current consumer in the original live share group.
     /// A completion fence is recorded even if the drawing closure unwinds.
     ///
     /// # Safety

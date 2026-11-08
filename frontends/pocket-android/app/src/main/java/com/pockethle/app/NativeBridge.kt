@@ -104,7 +104,7 @@ object NativeBridge {
      * [nativeFinishGame] is called, after which the handle is
      * invalid and **must not** be passed back in.
      */
-    @JvmStatic external fun nativeStartGame(libraryRoot: String, id: String): Long
+    @JvmStatic external fun nativeStartGame(libraryRoot: String, id: String, presentation: Long = 0): Long
 
     /** Changed images per second, or -1 before the first change. */
     @JvmStatic external fun nativePublishedImageIps(handle: Long): Float
@@ -117,6 +117,18 @@ object NativeBridge {
 
     @JvmStatic external fun nativeSystemMedia(handle: Long): String?
     @JvmStatic external fun nativeSystemMediaCommand(handle: Long, command: Int)
+
+    /** GL-thread only; query 0 probes support without reading a result. */
+    @JvmStatic external fun nativeCreatePresentation(): Long
+    @JvmStatic external fun nativeCapturePresentationRoot(id: Long): Boolean
+    @JvmStatic external fun nativeAttachPresentation(id: Long, cpuFilter: Boolean): Boolean
+    @JvmStatic external fun nativeDetachPresentation(id: Long)
+    @JvmStatic external fun nativeClosePresentation(id: Long)
+    @JvmStatic external fun nativePresentationCpuFilter(id: Long, required: Boolean)
+    @JvmStatic external fun nativeReleasePresentationFrame(id: Long)
+    @JvmStatic external fun nativeDrawPresentation(id: Long, renderer: Any): Boolean
+    @JvmStatic external fun nativeSharedDisplayShader(): String
+    @JvmStatic external fun nativeGpuQueryResult(query: Int): Long
 
     /**
      * Poll for the latest framebuffer the worker has produced.

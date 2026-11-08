@@ -28,6 +28,18 @@ class FramePayloadTest {
         }
     }
 
+    @Test fun sharedFramesCarryOnlyGeometryAndIdentity() {
+        for(scale in 1..4) {
+            val raw=payload(-2,320,240,320*scale,240*scale,42,0)
+            assertEquals(28,raw.size)
+            assertEquals(FramePayload(320,240,320*scale,240*scale,28,42),decodeFramePayload(raw))
+        }
+        assertNull(decodeFramePayload(payload(-2,320,240,320,240,0,0)))
+        assertNull(decodeFramePayload(payload(-2,320,240,320,240,1)))
+        assertNull(decodeFramePayload(payload(-2,320,240,640,240,1,0)))
+        assertNull(decodeFramePayload(payload(-2,320,240,320,240,1,0,pixelBytes=4)))
+    }
+
     @Test fun malformedAndTruncatedImagesAreRejected() {
         assertNull(decodeFramePayload(ByteArray(7)))
         assertNull(decodeFramePayload(payload(-1, 240)))

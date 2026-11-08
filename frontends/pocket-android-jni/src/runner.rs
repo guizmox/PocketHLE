@@ -3,7 +3,7 @@
 //! A worker owns the emulator, streams snapshots and accepts input. The UI
 //! never waits for the complete guest run before receiving its first frame.
 //!
-//! 1. Kotlin calls [`start`] with the library root and game id. We
+//! 1. Kotlin calls [`start_with_presentation`] with the library root and game id. We
 //!    spawn a worker thread that owns the [`Emulator`] and runs it
 //!    with a [`FrameHook`]. The worker shares a [`SessionState`]
 //!    with the UI thread:
@@ -69,6 +69,8 @@ pub struct FrameSnapshot {
     pub texture_width: u32,
     pub texture_height: u32,
     pub rgba: Vec<u8>,
+    pub shared: Option<pocket_core::winceapi::gles::SharedFrame>,
+    pub backlight: u32,
 }
 
 impl FrameSnapshot {
@@ -82,6 +84,8 @@ impl FrameSnapshot {
             texture_width: fb.presentation_size().0,
             texture_height: fb.presentation_size().1,
             rgba,
+            shared: None,
+            backlight: fb.backlight_level(),
         }
     }
 
@@ -94,6 +98,8 @@ impl FrameSnapshot {
             texture_width: fb.presentation_size().0,
             texture_height: fb.presentation_size().1,
             rgba: std::mem::take(scratch),
+            shared: None,
+            backlight: fb.backlight_level(),
         }
     }
 }
@@ -109,6 +115,7 @@ pub enum InputCommand {
 /// Shared between the worker thread and the UI thread for the
 /// lifetime of one game session.
 pub(crate) struct SessionState {
+    presentation: Option<Arc<crate::graphics::Presentation>>,
     system_media: Mutex<Option<SystemMediaStatus>>,
     stop_all: Arc<AtomicBool>,
     /// Latest framebuffer the guest produced. The polling loop on
@@ -135,6 +142,7 @@ pub(crate) struct SessionState {
 impl SessionState {
     fn new() -> Self {
         Self {
+            presentation: None,
             stop_all: Arc::new(AtomicBool::new(false)),
             latest_frame: Mutex::new(None),
             system_media: Mutex::new(None),
@@ -153,9 +161,27 @@ pub struct Session {
     state: Arc<SessionState>,
     input_tx: Sender<InputCommand>,
     worker: Option<JoinHandle<()>>,
+    diagnostic_enabled: bool,
+    diagnostic: Mutex<pocket_core::winceapi::gles::graphics_diagnostic::Profiler>,
 }
 
 impl Session {
+    pub(crate) fn presentation(&self) -> Option<Arc<crate::graphics::Presentation>> {
+        self.state.presentation.clone()
+    }
+    pub fn diagnostic_enabled(&self) -> bool {
+        self.diagnostic_enabled
+    }
+    pub fn record_jni(&self, elapsed: std::time::Duration) {
+        if self.diagnostic_enabled {
+            if let Ok(mut p) = self.diagnostic.lock() {
+                p.record(
+                    pocket_core::winceapi::gles::graphics_diagnostic::Stage::Jni,
+                    elapsed,
+                );
+            }
+        }
+    }
     pub fn system_media(&self) -> Option<SystemMediaStatus> {
         self.state.system_media.lock().ok()?.clone()
     }
@@ -235,22 +261,35 @@ impl Session {
 
 /// Spawn the worker thread that drives the emulator for a single
 /// game. The returned `Session` is the handle Kotlin holds.
+#[cfg(test)]
 pub fn start(library_root: PathBuf, game_id: String) -> anyhow::Result<Session> {
+    start_with_presentation(library_root, game_id, None)
+}
+pub(crate) fn start_with_presentation(
+    library_root: PathBuf,
+    game_id: String,
+    presentation: Option<Arc<crate::graphics::Presentation>>,
+) -> anyhow::Result<Session> {
     let lib = Library::open(&library_root).context("Library::open")?;
     let entry = lib
         .get(&game_id)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("unknown game id {game_id}"))?;
 
-    let state = Arc::new(SessionState::new());
+    let diagnostic_enabled = lib.config().android_graphics_diagnostics;
+    let mut state = SessionState::new();
+    state.presentation = presentation;
+    let state = Arc::new(state);
     let (input_tx, input_rx) = channel::<InputCommand>();
 
     let state_for_worker = Arc::clone(&state);
     let worker = std::thread::Builder::new()
         .name(format!("pockethle-emu-{game_id}"))
         .spawn(move || {
-            let summary =
-                run_game_to_completion(&library_root, &entry, &state_for_worker, input_rx);
+            let summary = pocket_core::winceapi::gles::graphics_diagnostic::with_enabled(
+                diagnostic_enabled,
+                || run_game_to_completion(&library_root, &entry, &state_for_worker, input_rx),
+            );
             if let Ok(mut slot) = state_for_worker.summary.lock() {
                 *slot = Some(summary);
             }
@@ -264,6 +303,13 @@ pub fn start(library_root: PathBuf, game_id: String) -> anyhow::Result<Session> 
         state,
         input_tx,
         worker: Some(worker),
+        diagnostic_enabled,
+        diagnostic: Mutex::new(
+            pocket_core::winceapi::gles::graphics_diagnostic::Profiler::new(
+                diagnostic_enabled,
+                "jni",
+            ),
+        ),
     })
 }
 
@@ -349,6 +395,37 @@ struct ChildJob {
 }
 
 fn run_process(
+    library_root: &std::path::Path,
+    entry: &GameEntry,
+    card_root: &std::path::Path,
+    guest_path: Option<&str>,
+    inherited_ram: Option<MemoryDivision>,
+    handle_context: Option<ProcessHandleContext>,
+    startup: Option<ProcessStartup>,
+    hook: &mut SessionHook,
+) -> (String, u32) {
+    let bridge = hook.state.presentation.clone();
+    let source = bridge.as_ref().and_then(|p| p.source());
+    let enabled = bridge
+        .as_ref()
+        .map(|p| p.enabled.clone())
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    pocket_core::winceapi::gles::with_shared_context_source(source, || {
+        pocket_core::winceapi::gles::with_shared_frame_export(enabled, || {
+            run_process_inner(
+                library_root,
+                entry,
+                card_root,
+                guest_path,
+                inherited_ram,
+                handle_context,
+                startup,
+                hook,
+            )
+        })
+    })
+}
+fn run_process_inner(
     library_root: &std::path::Path,
     entry: &GameEntry,
     card_root: &std::path::Path,
@@ -526,6 +603,19 @@ fn run_process(
         2 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     });
+    if pocket_core::winceapi::gles::graphics_diagnostic::enabled() {
+        log::info!(
+            "GPU_DIAG session_start game={} requested_gpu={} internal_policy={} filter={} measure_ips={}",
+            entry.id,
+            entry
+                .settings
+                .gpu_renderer
+                .unwrap_or(launcher_config.gpu_renderer),
+            launcher_config.gles_internal_resolution,
+            launcher_config.upscale_filter,
+            launcher_config.show_ips
+        );
+    }
     let hardware = (
         launcher_config.bluetooth_enabled,
         launcher_config.camera_enabled,
@@ -855,9 +945,12 @@ pub(crate) fn push_frame(state: &Arc<SessionState>, frame: FrameSnapshot) {
     if let Ok(mut stats) = state.presentation_stats.lock() {
         *stats = Some(frame.presentation_stats.clone());
     }
-    if let Ok(mut slot) = state.latest_frame.lock() {
-        *slot = Some(frame);
-    }
+    let old = state
+        .latest_frame
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.replace(frame));
+    drop(old);
 }
 
 /// Bridges the UI thread (Kotlin) and the running emulator on the
@@ -877,6 +970,7 @@ struct SessionHook {
     last_frame: u64,
     input_disconnected: bool,
     last_emit_at: Option<Instant>,
+    last_shared: Option<bool>,
     scratch: Vec<u8>,
     saw_non_black: bool,
 }
@@ -1146,6 +1240,7 @@ impl SessionHook {
             last_frame: 0,
             input_disconnected: false,
             last_emit_at: None,
+            last_shared: None,
             scratch: Vec::new(),
             saw_non_black: false,
         }
@@ -1215,42 +1310,114 @@ impl FrameHook for SessionHook {
             }
         }
         let counter = kernel.framebuffer.frame_counter;
-        if self.foreground.load(Ordering::Acquire) == self.pid && counter != self.last_frame {
+        let cpu_refresh = self
+            .state
+            .presentation
+            .as_ref()
+            .is_some_and(|p| p.cpu_refresh.load(Ordering::Acquire));
+        if self.foreground.load(Ordering::Acquire) == self.pid
+            && (counter != self.last_frame || cpu_refresh)
+        {
             let now = Instant::now();
             if let Some(phase) = presentation_phase(self.last_emit_at, now) {
-                let black = match kernel.framebuffer.cpu() {
-                    Ok(frame) => frame.is_all_black(),
-                    Err(error) => {
-                        log::error!("framebuffer read failed: {error}");
-                        kernel.should_stop = true;
-                        return FrameAction::Stop;
-                    }
+                let forced_cpu_refresh = self
+                    .state
+                    .presentation
+                    .as_ref()
+                    .is_some_and(|p| p.cpu_refresh.swap(false, Ordering::AcqRel));
+                let export = self
+                    .state
+                    .presentation
+                    .as_ref()
+                    .is_some_and(|p| p.enabled.load(Ordering::Acquire));
+                let shared = if forced_cpu_refresh
+                    || !export
+                    || kernel.framebuffer.has_system_video()
+                    || kernel.shell_keyboard.visible
+                    || kernel.gdi.shell_menus.tracking.is_some()
+                {
+                    None
+                } else {
+                    pocket_core::winceapi::gles::take_shared_window_frame(&kernel.framebuffer)
                 };
-                if black && self.saw_non_black && !kernel.framebuffer.has_system_video() {
-                    return if stop_requested {
-                        kernel.should_stop = true;
-                        FrameAction::Stop
-                    } else {
-                        FrameAction::Continue
+                let is_shared = shared.is_some();
+                if self.last_shared != Some(is_shared) {
+                    log::info!(
+                        "PRESENTATION={} (Android)",
+                        if is_shared {
+                            "GPU_SHARED"
+                        } else {
+                            "CPU_UPLOAD"
+                        }
+                    );
+                    self.last_shared = Some(is_shared);
+                }
+                if let Some(shared) = shared {
+                    let size = shared.size();
+                    self.saw_non_black = true;
+                    self.last_frame = counter;
+                    self.last_emit_at = Some(phase);
+                    push_frame(
+                        &self.state,
+                        FrameSnapshot {
+                            presentation_stats: kernel.framebuffer.presentation_stats.clone(),
+                            width: kernel.framebuffer.width,
+                            height: kernel.framebuffer.height,
+                            texture_width: size.0,
+                            texture_height: size.1,
+                            rgba: Vec::new(),
+                            backlight: kernel.framebuffer.backlight_level(),
+                            shared: Some(shared),
+                        },
+                    );
+                } else {
+                    let materialize = pocket_core::winceapi::gles::graphics_diagnostic::Span::new(
+                        pocket_core::winceapi::gles::graphics_diagnostic::Stage::Materialize,
+                    );
+                    let black = match kernel.framebuffer.cpu() {
+                        Ok(frame) => frame.is_all_black(),
+                        Err(error) => {
+                            log::error!("framebuffer read failed: {error}");
+                            kernel.should_stop = true;
+                            return FrameAction::Stop;
+                        }
                     };
-                }
-                self.saw_non_black = !black;
-
-                self.last_frame = counter;
-                self.last_emit_at = Some(phase);
-                if !kernel.gx_explicit_present {
-                    kernel.framebuffer.observe_ips();
-                }
-                let presentation = match kernel.presentation_framebuffer() {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        log::error!("presentation read failed: {error}");
-                        kernel.should_stop = true;
-                        return FrameAction::Stop;
+                    if black
+                        && self.saw_non_black
+                        && !kernel.framebuffer.has_system_video()
+                        && !forced_cpu_refresh
+                    {
+                        return if stop_requested {
+                            kernel.should_stop = true;
+                            FrameAction::Stop
+                        } else {
+                            FrameAction::Continue
+                        };
                     }
-                };
-                let frame = FrameSnapshot::from_framebuffer_into(&presentation, &mut self.scratch);
-                push_frame(&self.state, frame);
+                    self.saw_non_black = !black;
+
+                    self.last_frame = counter;
+                    self.last_emit_at = Some(phase);
+                    if !kernel.gx_explicit_present {
+                        kernel.framebuffer.observe_ips();
+                    }
+                    let presentation = match kernel.presentation_framebuffer() {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            log::error!("presentation read failed: {error}");
+                            kernel.should_stop = true;
+                            return FrameAction::Stop;
+                        }
+                    };
+                    drop(materialize);
+                    let pack = pocket_core::winceapi::gles::graphics_diagnostic::Span::new(
+                        pocket_core::winceapi::gles::graphics_diagnostic::Stage::Pack,
+                    );
+                    let frame =
+                        FrameSnapshot::from_framebuffer_into(&presentation, &mut self.scratch);
+                    drop(pack);
+                    push_frame(&self.state, frame);
+                }
             }
         }
 
@@ -1538,6 +1705,38 @@ mod deferred_read_tests {
             &pocket_core::kernel::NullDispatcher,
         )
         .unwrap()
+    }
+    #[test]
+    fn cpu_fallback_refreshes_a_static_image_without_new_guest_publication() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let bridge = Arc::new(crate::graphics::Presentation::new());
+        let mut state = SessionState::new();
+        state.presentation = Some(bridge.clone());
+        let state = Arc::new(state);
+        let mut hook = SessionHook::new(state.clone(), rx);
+        let mut process = process();
+        let kernel = &mut process.state;
+        kernel.framebuffer.resize(3, 2);
+        let source = Arc::new(Image {
+            reads: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+        });
+        kernel.framebuffer.publish_gpu(source.clone()).unwrap();
+        hook.last_frame = kernel.framebuffer.frame_counter;
+        let revision = kernel.framebuffer.frame_counter;
+        bridge.cpu_refresh.store(true, Ordering::Release);
+        assert!(matches!(hook.on_frame(kernel), FrameAction::Continue));
+        assert_eq!(source.reads.load(Ordering::Relaxed), 1);
+        assert_eq!(kernel.framebuffer.frame_counter, revision);
+        assert!(!bridge.cpu_refresh.load(Ordering::Acquire));
+        assert!(state
+            .latest_frame
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .shared
+            .is_none());
     }
     #[test]
     fn throttled_frames_never_read_gpu_and_due_read_failures_stop_without_stale_pixels() {

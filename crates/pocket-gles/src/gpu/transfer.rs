@@ -199,15 +199,20 @@ impl Renderer {
             .resize(width as usize * height as usize * 4, 0);
         (self.gl.BindFramebuffer)(0x8d40, fbo);
         (self.gl.PixelStorei)(0x0d05, 1);
-        (self.gl.ReadPixels)(
-            0,
-            0,
-            width as i32,
-            height as i32,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            self.packed_readback.as_mut_ptr().cast(),
-        );
+        {
+            let _diagnostic = crate::graphics_diagnostic::Span::new(
+                crate::graphics_diagnostic::Stage::ReadPixels,
+            );
+            (self.gl.ReadPixels)(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                self.packed_readback.as_mut_ptr().cast(),
+            );
+        }
         let result = self.check();
         (self.gl.BindFramebuffer)(0x8d40, self.fbo);
         result?;
@@ -243,15 +248,20 @@ impl Renderer {
             .resize(self.width as usize * self.height as usize * 4, 0);
         (self.gl.BindFramebuffer)(0x8d40, fbo);
         (self.gl.PixelStorei)(0x0d05, 1);
-        (self.gl.ReadPixels)(
-            0,
-            0,
-            self.width as i32,
-            self.height as i32,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            self.readback.as_mut_ptr().cast(),
-        );
+        {
+            let _diagnostic = crate::graphics_diagnostic::Span::new(
+                crate::graphics_diagnostic::Stage::ReadPixels,
+            );
+            (self.gl.ReadPixels)(
+                0,
+                0,
+                self.width as i32,
+                self.height as i32,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                self.readback.as_mut_ptr().cast(),
+            );
+        }
         let result = self.check();
         (self.gl.BindFramebuffer)(0x8d40, self.fbo);
         result?;

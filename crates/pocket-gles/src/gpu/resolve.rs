@@ -192,15 +192,20 @@ impl Renderer {
                 (self.gl.DrawArrays)(GL_TRIANGLE_STRIP, 0, 4);
                 if read_pixels {
                     (self.gl.PixelStorei)(0x0d05, 1);
-                    (self.gl.ReadPixels)(
-                        0,
-                        0,
-                        width as i32,
-                        height as i32,
-                        GL_RGBA,
-                        GL_UNSIGNED_BYTE,
-                        r.pixels.as_mut_ptr().cast(),
-                    );
+                    {
+                        let _diagnostic = crate::graphics_diagnostic::Span::new(
+                            crate::graphics_diagnostic::Stage::ReadPixels,
+                        );
+                        (self.gl.ReadPixels)(
+                            0,
+                            0,
+                            width as i32,
+                            height as i32,
+                            GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            r.pixels.as_mut_ptr().cast(),
+                        );
+                    }
                 }
                 self.check()
             })();

@@ -1033,6 +1033,9 @@ fn identity_revision() -> u8 {
 /// `<library_root>/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherConfig {
+    /// Android timing diagnostics; opt-in, applied at next launch.
+    #[serde(default)]
+    pub android_graphics_diagnostics: bool,
     #[serde(default = "default_executable_heap")]
     pub executable_heap: bool,
     /// Default presentation ceiling for games that inherit emulator settings.
@@ -1368,6 +1371,7 @@ fn default_executable_heap() -> bool {
 impl Default for LauncherConfig {
     fn default() -> Self {
         Self {
+            android_graphics_diagnostics: false,
             executable_heap: default_executable_heap(),
             frame_rate_limit: FrameRateLimit::Fps60,
             desktop_vsync: true,
@@ -4964,12 +4968,15 @@ mod tests {
     fn save_and_reload_round_trips() {
         let root = tmpdir("roundtrip");
         let mut lib = Library::open(&root).unwrap();
+        assert!(!lib.config().android_graphics_diagnostics);
+        lib.config_mut().android_graphics_diagnostics = true;
         lib.config_mut().verbosity = 2;
         lib.config_mut().show_fps = false;
         lib.config_mut().upscale_filter = "smaa_soft".into();
         lib.save().unwrap();
 
         let lib2 = Library::open(&root).unwrap();
+        assert!(lib2.config().android_graphics_diagnostics);
         assert_eq!(lib2.config().verbosity, 2);
         assert!(!lib2.config().show_fps);
         assert_eq!(lib2.config().upscale_filter, "smaa_soft");

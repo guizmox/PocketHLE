@@ -3,6 +3,7 @@
  <PreferenceScreen android:key="emulator_options" android:title="Emulator Settings">
   <PreferenceCategory android:key="graphics_options" android:title="Graphics" android:order="10"/>
   <PreferenceCategory android:key="diagnostic_options" android:title="Diagnostics" android:order="20">
+  <SwitchPreferenceCompat android:key="android_graphics_diagnostics" android:title="Graphics diagnostics" android:summary="CPU, transfer and asynchronous GPU timings in the log. Apply at next game launch; disable after testing." android:defaultValue="false"/>
   <SeekBarPreference android:key="verbosity" android:title="Log verbosity" android:max="3" app:min="0" app:showSeekBarValue="true"/>
   </PreferenceCategory>
   <PreferenceCategory android:key="misc_options" android:title="Misc" android:order="30">

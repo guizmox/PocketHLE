@@ -24,6 +24,7 @@ mod bluetooth;
 mod camera;
 mod colors_trace;
 mod gps;
+mod graphics;
 mod internet;
 mod managed_game;
 mod power;
@@ -604,6 +605,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
     _class: JClass<'local>,
     library_root: JString<'local>,
     id: JString<'local>,
+    presentation: jlong,
 ) -> jlong {
     init_logger();
     if let Err(e) = bluetooth::install(&mut env, &_class) {
@@ -645,7 +647,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'loca
         }
     };
     let mut sessions = LIBRARY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    match runner::start(root, id) {
+    match runner::start_with_presentation(root, id, graphics::get(presentation)) {
         Ok(session) => {
             *sessions += 1;
             Box::into_raw(Box::new(session)) as jlong
@@ -723,45 +725,72 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollFrame<'loca
         // showing the previous content of the SurfaceView.
         return std::ptr::null_mut();
     };
-    // Native (1x) keeps the original eight-byte wire header. High resolution
-    // has a negative marker, logical dimensions and physical texture dimensions.
-    let words = if (frame.width, frame.height) == (frame.texture_width, frame.texture_height) {
-        vec![frame.width, frame.height]
-    } else {
-        vec![
-            u32::MAX,
+    if frame.shared.is_some() {
+        let Some(bridge) = session.presentation() else {
+            return std::ptr::null_mut();
+        };
+        let words = [
+            u32::MAX - 1,
             frame.width,
             frame.height,
             frame.texture_width,
             frame.texture_height,
-        ]
-    };
-    let header: Vec<i8> = words
-        .iter()
-        .flat_map(|word| word.to_le_bytes().map(|byte| byte as i8))
-        .collect();
-    let total = header.len().saturating_add(frame.rgba.len());
-    let Ok(total) = i32::try_from(total) else {
-        return std::ptr::null_mut();
-    };
-    let array = match env.new_byte_array(total) {
-        Ok(array) => array,
-        Err(e) => {
-            log::error!("could not allocate jbyteArray: {e}");
+        ];
+        let mut header: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let token = bridge.publish(frame);
+        header.extend_from_slice(&token.to_le_bytes());
+        return env
+            .byte_array_from_slice(&header)
+            .map(|a| a.into_raw())
+            .unwrap_or(std::ptr::null_mut());
+    }
+    let started = session.diagnostic_enabled().then(std::time::Instant::now);
+    let result = (|| {
+        // Native (1x) keeps the original eight-byte wire header. High resolution
+        // has a negative marker, logical dimensions and physical texture dimensions.
+        let words = if (frame.width, frame.height) == (frame.texture_width, frame.texture_height) {
+            vec![frame.width, frame.height]
+        } else {
+            vec![
+                u32::MAX,
+                frame.width,
+                frame.height,
+                frame.texture_width,
+                frame.texture_height,
+            ]
+        };
+        let header: Vec<i8> = words
+            .iter()
+            .flat_map(|word| word.to_le_bytes().map(|byte| byte as i8))
+            .collect();
+        let total = header.len().saturating_add(frame.rgba.len());
+        let Ok(total) = i32::try_from(total) else {
+            return std::ptr::null_mut();
+        };
+        let array = match env.new_byte_array(total) {
+            Ok(array) => array,
+            Err(e) => {
+                log::error!("could not allocate jbyteArray: {e}");
+                return std::ptr::null_mut();
+            }
+        };
+        let rgba = unsafe {
+            std::slice::from_raw_parts(frame.rgba.as_ptr() as *const i8, frame.rgba.len())
+        };
+        if env.set_byte_array_region(&array, 0, &header).is_err()
+            || env
+                .set_byte_array_region(&array, header.len() as i32, rgba)
+                .is_err()
+        {
+            log::error!("could not fill jbyteArray");
             return std::ptr::null_mut();
         }
-    };
-    let rgba =
-        unsafe { std::slice::from_raw_parts(frame.rgba.as_ptr() as *const i8, frame.rgba.len()) };
-    if env.set_byte_array_region(&array, 0, &header).is_err()
-        || env
-            .set_byte_array_region(&array, header.len() as i32, rgba)
-            .is_err()
-    {
-        log::error!("could not fill jbyteArray");
-        return std::ptr::null_mut();
+        array.into_raw()
+    })();
+    if let Some(start) = started {
+        session.record_jni(start.elapsed());
     }
-    array.into_raw()
+    result
 }
 
 /// `nativeAudioFormat` — the guest PCM format packed as
@@ -1110,4 +1139,44 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollDependencyN
     env.new_string(message)
         .map(|s| s.into_raw())
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// Android exposes timer queries through EGL, but its Java GLES facade has no
+/// 64-bit query-result entry point. The GL-thread caller checks availability.
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeGpuQueryResult(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    query: jint,
+) -> jlong {
+    #[cfg(target_os = "android")]
+    {
+        type GetResult = unsafe extern "system" fn(u32, u32, *mut u64);
+        #[link(name = "EGL")]
+        unsafe extern "C" {
+            fn eglGetProcAddress(name: *const std::ffi::c_char) -> *const std::ffi::c_void;
+        }
+        static GET: std::sync::OnceLock<Option<GetResult>> = std::sync::OnceLock::new();
+        let get = GET.get_or_init(|| unsafe {
+            let p = eglGetProcAddress(c"glGetQueryObjectui64vEXT".as_ptr());
+            if p.is_null() {
+                None
+            } else {
+                Some(std::mem::transmute::<*const std::ffi::c_void, GetResult>(p))
+            }
+        });
+        if let Some(get) = get {
+            if query == 0 {
+                return 0;
+            }
+            let mut ns = 0;
+            unsafe {
+                get(query as u32, 0x8866, &mut ns);
+            }
+            return i64::try_from(ns).unwrap_or(-1);
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = query;
+    -1
 }
