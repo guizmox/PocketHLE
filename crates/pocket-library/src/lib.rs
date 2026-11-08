@@ -28,6 +28,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+pub mod add_data;
 pub mod backup;
 pub mod center_tap;
 pub mod colors_save;

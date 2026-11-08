@@ -99,7 +99,7 @@ fn pack<W: Write + std::io::Seek>(zip: &mut ZipWriter<W>, root: &Path, dir: &Pat
 }
 
 /// Accept only portable relative paths, independently of the host platform.
-fn safe_path(name: &str) -> Result<PathBuf> {
+pub(crate) fn safe_path(name: &str) -> Result<PathBuf> {
     let name = name.strip_suffix('/').unwrap_or(name);
     if name.is_empty() || name.contains(['\\', ':', '\0']) {
         bail!("Invalid backup path: {name:?}");

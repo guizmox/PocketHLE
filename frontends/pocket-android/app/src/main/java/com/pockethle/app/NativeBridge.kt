@@ -75,6 +75,11 @@ object NativeBridge {
     @JvmStatic external fun splitDemoCard(libraryRoot: String, id: String): String
 
     /** Returns `{"ok":true}` on success or `{"ok":false,"error":...}`. */
+    /** Stage only; commit requires explicit overwrite consent if conflicts is nonempty. */
+    @JvmStatic external fun prepareGameData(libraryRoot: String, id: String, source: String, name: String, extract: Boolean): String
+    @JvmStatic external fun commitGameData(libraryRoot: String, token: Long, overwrite: Boolean, executable: String): String
+    @JvmStatic external fun cancelGameData(libraryRoot: String, token: Long)
+
     @JvmStatic external fun removeGame(libraryRoot: String, id: String): String
 
     /** Returns the launcher config as JSON. */

@@ -7,11 +7,85 @@ import org.json.JSONObject
 
 /** Per-game settings sheet. */
 class GameSettingsActivity : HostKeyActivity() {
+    private lateinit var addDataModel: AddDataModel
+    private var dataDialog: AddDataDialog? = null
+    private val addDataPicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) addDataModel.select(uri, intent.getStringExtra(EXTRA_GAME_ID).orEmpty())
+    }
+
+    fun pickData() {
+        if (addDataModel.step.value == AddDataModel.Step.Idle) addDataPicker.launch(arrayOf("*/*"))
+    }
+
+    private fun showDataStep(step: AddDataModel.Step) {
+        dataDialog?.dismiss()
+        dataDialog = null
+        if (step == AddDataModel.Step.Idle) return
+        val dialog = AddDataDialog(this, ::handleHostKeyEvent)
+        dataDialog = dialog
+        dialog.setCanceledOnTouchOutside(false)
+        when (step) {
+            AddDataModel.Step.Busy -> {
+                dialog.setTitle("Add Data")
+                dialog.setMessage("Please wait…")
+                dialog.setCancelable(false)
+                dialog.controllerCancel = false
+            }
+            is AddDataModel.Step.Zip -> {
+                dialog.setTitle("Add Data — ZIP archive")
+                dialog.setMessage("Extract the ZIP contents into the game folder, or copy the ZIP file unchanged?")
+                dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Extract contents") { _, _ -> addDataModel.chooseZip(true) }
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEUTRAL, "Copy ZIP unchanged") { _, _ -> addDataModel.chooseZip(false) }
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
+            }
+            is AddDataModel.Step.Executable -> {
+                dialog.setTitle("Choose game executable")
+                val choices = listOf("Keep current executable") + step.paths
+                val list = android.widget.ListView(this).apply {
+                    adapter = android.widget.ArrayAdapter(this@GameSettingsActivity, android.R.layout.simple_list_item_1, choices)
+                    setOnItemClickListener { _, _, position, _ -> addDataModel.chooseExecutable(if (position == 0) null else step.paths[position - 1]) }
+                }
+                val container = android.widget.FrameLayout(this).apply {
+                    addView(list, android.widget.FrameLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.45f).toInt()))
+                }
+                dialog.setView(container)
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
+                dialog.setOnShowListener { list.requestFocus(); list.setSelection(0) }
+            }
+            is AddDataModel.Step.Overwrite -> {
+                dialog.setTitle("Replace existing data?")
+                dialog.setMessage("Existing files or folders will be replaced. No files have been copied into the game folder yet.\n\n" + step.paths.joinToString("\n"))
+                dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Yes") { _, _ -> addDataModel.confirmOverwrite() }
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
+            }
+            is AddDataModel.Step.Notice -> {
+                dialog.setTitle(if (step.success) "Add Data complete" else "Add Data failed")
+                dialog.setMessage(step.message)
+                dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Close") { _, _ -> addDataModel.cancel() }
+            }
+            AddDataModel.Step.Idle -> return
+        }
+        dialog.setOnCancelListener { addDataModel.cancel() }
+        dialog.show()
+        applyHostFullscreen(dialog.window!!)
+        dialog.getButton(if (step is AddDataModel.Step.Overwrite) android.content.DialogInterface.BUTTON_NEGATIVE else android.content.DialogInterface.BUTTON_POSITIVE)?.requestFocus()
+    }
+
+    override fun onDestroy() {
+        dataDialog?.dismiss()
+        dataDialog = null
+        super.onDestroy()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        addDataModel = androidx.lifecycle.ViewModelProvider(this)[AddDataModel::class.java]
         setContentView(R.layout.activity_settings)
         setSupportActionBar(findViewById<Toolbar>(R.id.toolbar))
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        addDataModel.step.observe(this) { showDataStep(it) }
         title = intent.getStringExtra(EXTRA_GAME_NAME)
             ?: getString(R.string.game_settings_title)
         if (savedInstanceState == null) {
@@ -46,6 +120,10 @@ class GameSettingsActivity : HostKeyActivity() {
             gameId = arguments?.getString(EXTRA_GAME_ID).orEmpty()
             current = readGameSettings() ?: GameSettings.default()
             setPreferencesFromResource(R.xml.preferences_game, rootKey)
+            findPreference<androidx.preference.Preference>("add_data")?.setOnPreferenceClickListener {
+                (requireActivity() as GameSettingsActivity).pickData()
+                true
+            }
             findPreference<ListPreference>("screen")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
             findPreference<androidx.preference.PreferenceCategory>("device_identity_category")?.isVisible =

@@ -10,6 +10,7 @@ use std::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
     Import,
+    AddData,
     RestoreBackup,
     SaveBackup,
 }
@@ -17,11 +18,15 @@ impl Purpose {
     fn title(self) -> &'static str {
         match self {
             Self::Import => "Import a game",
+            Self::AddData => "Add Data — select a file",
             Self::RestoreBackup => "Open PocketHLE backup",
             Self::SaveBackup => "Save PocketHLE backup",
         }
     }
     fn accepts(self, path: &Path) -> bool {
+        if self == Self::AddData {
+            return true;
+        }
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let extensions: &[&str] = match self {
             Self::Import => &["rar", "cab", "zip", "exe", "dll"],
@@ -604,7 +609,7 @@ impl FileDialog {
                     ui.spacing_mut().text_edit_width = (ui.available_width() - 185.0).max(80.0);
                     track(&mut zones, 2, pad::text_edit(ui, &mut self.filename, "Select a file"));
                     if track(&mut zones, 2, pad::button(ui, "Cancel")).clicked() { self.finished = Some(Outcome::Cancelled(self.purpose)); }
-                    let label = match self.purpose { Purpose::SaveBackup => "Save backup", Purpose::RestoreBackup => "Open backup", Purpose::Import => "Import" };
+                    let label = match self.purpose { Purpose::SaveBackup => "Save backup", Purpose::RestoreBackup => "Open backup", Purpose::Import => "Import", Purpose::AddData => "Add Data" };
                     if track(&mut zones, 2, pad::add_enabled(ui, !self.loading && (!self.filename.is_empty() || self.selected.is_some()), egui::Button::new(label))).clicked() {
                         if self.purpose == Purpose::SaveBackup {
                             match backup_filename(&self.filename) { Ok(name) => self.choose(self.directory.join(name)), Err(error) => self.error = Some(error) }
@@ -719,6 +724,9 @@ mod tests {
         assert!(Purpose::Import.accepts(&dir.path().join("Game.ZIP")));
         assert!(!Purpose::RestoreBackup.accepts(Path::new("game.cab")));
         assert!(!Purpose::Import.accepts(Path::new("notes.txt")));
+        assert!(Purpose::AddData.accepts(Path::new("notes.txt")));
+        assert!(Purpose::AddData.accepts(Path::new("DATA.ZIP")));
+        assert!(Purpose::AddData.accepts(Path::new("data_without_extension")));
     }
     #[test]
     fn backup_names_cannot_escape_folder_and_zip_suffix_is_not_duplicated() {

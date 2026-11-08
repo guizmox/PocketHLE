@@ -2,6 +2,11 @@
 
 #[path = "stylus_controls_ui.rs"]
 mod stylus_controls_ui;
+#[path = "add_data_ui.rs"]
+mod add_data_ui;
+#[path = "add_data_prompt.rs"]
+mod add_data_prompt;
+use add_data_prompt::DataPrompt;
 #[path = "title_scroll.rs"]
 mod title_scroll;
 use pocket_library::stylus_grid::{ControlsMode, GridRouter, HostInput};
@@ -288,6 +293,8 @@ pub struct PocketLauncher {
     recordings_gallery: crate::recordings_gallery::Gallery,
     rename_draft: Option<(String, String, bool)>,
     remove_game: Option<crate::remove_game::Prompt>,
+    add_data: Option<DataPrompt>,
+    data_game: Option<String>,
     demo_import: Option<(String, String)>,
     pending_import: Option<PreparedImport>,
     pocketpc_import_options: std::collections::VecDeque<(String, bool)>,
@@ -737,6 +744,8 @@ impl HeldButtons {
 
 #[derive(Debug)]
 pub enum UiEvent {
+    DataPrepared(Result<pocket_library::add_data::PreparedData, String>),
+    DataFinished(Result<String, String>),
     BackupFinished(Result<String, String>),
     ColorsUnlocked(Result<String, String>),
     ReleaseAvailable(pocket_library::updates::Update),
@@ -927,6 +936,8 @@ impl PocketLauncher {
             deck_nav_repeat: None,
             rename_draft: None,
             remove_game: None,
+            add_data: None,
+            data_game: None,
             demo_import: None,
             pending_import: None,
             pocketpc_import_options: Default::default(),
@@ -1062,6 +1073,44 @@ impl PocketLauncher {
         }
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
+                UiEvent::DataPrepared(result) => {
+                    self.controller_ui.stop_repeat();
+                    self.library_busy = false;
+                    // Returning to the library during preparation cancels the
+                    // staged operation, including its automatic no-conflict commit.
+                    if self.data_game.take().is_none() {
+                        self.status = "Add Data cancelled.".into();
+                        continue;
+                    }
+                    match result {
+                        Ok(pending) if !pending.executables().is_empty() => {
+                            self.add_data = Some(DataPrompt::Executable(pending));
+                        }
+                        Ok(pending) => self.confirm_data(pending),
+                        Err(message) => {
+                            self.add_data = Some(DataPrompt::Notice {
+                                title: "Add Data failed",
+                                message,
+                            });
+                        }
+                    }
+                }
+                UiEvent::DataFinished(result) => {
+                    self.controller_ui.stop_repeat();
+                    self.library_busy = false;
+                    let (title, message) = match result {
+                        Ok(message) => {
+                            self.analysis_cache.clear();
+                            self.game_card_metadata.clear();
+                            self.screen_cache.clear();
+                            self.icon_cache.clear();
+                            self.reload_library();
+                            ("Add Data complete", message)
+                        }
+                        Err(message) => ("Add Data failed", message),
+                    };
+                    self.add_data = Some(DataPrompt::Notice { title, message });
+                }
                 UiEvent::BackupFinished(result) => {
                     self.library_busy = false;
                     match result {
@@ -1673,6 +1722,8 @@ impl PocketLauncher {
 
     fn return_to_library(&mut self, ctx: &egui::Context) {
         self.remove_game = None;
+        self.add_data = None;
+        self.data_game = None;
         self.deck_library_actions.clear();
         self.pending_run = None;
         self.release_all_keys();
@@ -2920,6 +2971,12 @@ impl PocketLauncher {
         let mut save_clicked = false;
         let mut cancel_clicked = false;
         ui.heading(format!("Settings: {display_name}"));
+        ui.add_enabled_ui(self.running_game.is_none() && self.pending_run.is_none(), |ui| {
+            if crate::controller_ui::button(ui, "Add Data").clicked() {
+                self.data_game = Some(id.clone());
+                self.open_file_dialog(crate::file_dialog::Purpose::AddData, None, String::new());
+            }
+        });
         ui.add_space(8.0);
         ui.separator();
         ui.heading("Controls");
@@ -4501,6 +4558,8 @@ impl PocketLauncher {
                     self.set_fullscreen(ctx, !full);
                 } else {
                     self.remove_game = None;
+                    self.add_data = None;
+                    self.data_game = None;
                     self.deck_library_actions.clear();
                     self.config_draft = None;
                     self.bindings_visual = Default::default();
@@ -4523,7 +4582,7 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
-                    if self.file_dialog.is_some() || self.restore_archive.is_some() {
+                    if self.file_dialog.is_some() || self.restore_archive.is_some() || self.add_data.is_some() {
                         continue;
                     }
                     if Some(device) == self.gamepad_selected
@@ -4563,7 +4622,7 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
-                    if self.file_dialog.is_some() || self.restore_archive.is_some() {
+                    if self.file_dialog.is_some() || self.restore_archive.is_some() || self.add_data.is_some() {
                         continue;
                     }
                     if Some(device) == self.gamepad_selected
@@ -4696,7 +4755,7 @@ impl PocketLauncher {
                         continue;
                     }
                     if Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) && self.route_long_press(true,device,&control,down) {continue;}
-                    if (self.file_dialog.is_some() || self.restore_archive.is_some())
+                    if (self.file_dialog.is_some() || self.restore_archive.is_some() || self.add_data.is_some())
                         && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -5105,6 +5164,8 @@ impl PocketLauncher {
                 egui::Key::F7 => self.cycle_rotation(ctx),
                 egui::Key::F8 => {
                     self.remove_game = None;
+                    self.add_data = None;
+                    self.data_game = None;
                     self.deck_library_actions.clear();
                     self.bindings_visual.clear_live();
                     self.config_draft = None;
@@ -5363,7 +5424,17 @@ impl PocketLauncher {
         match outcome {
             Outcome::Cancelled(_) => {
                 self.library_busy = false;
+                self.data_game = None;
                 self.status = "File selection cancelled.".into();
+            }
+            Outcome::Selected(Purpose::AddData, path) => {
+                if let Some(id) = self.data_game.take() {
+                    if pocket_library::add_data::is_zip(&path.to_string_lossy()) {
+                        self.add_data = Some(DataPrompt::Zip { id, path });
+                    } else {
+                        self.prepare_data(id, path, false);
+                    }
+                }
             }
             Outcome::Selected(Purpose::Import, path) => self.import_selected_file(path),
             Outcome::Selected(Purpose::RestoreBackup, path) => {
@@ -5973,6 +6044,12 @@ impl eframe::App for PocketLauncher {
         if self.file_dialog.is_some() {
             self.update_gamepad_input(ctx);
             self.ui_file_dialog(ctx);
+            return;
+        }
+        if self.add_data.is_some() {
+            self.update_gamepad_input(ctx);
+            self.ui_add_data(ctx);
+            self.controller_ui.show(ctx);
             return;
         }
         if self.restore_archive.is_some() {

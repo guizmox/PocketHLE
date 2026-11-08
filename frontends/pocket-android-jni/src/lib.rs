@@ -348,6 +348,106 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_cancelPreparedImport<
     }
 }
 
+// A prepared addition owns its staged files until explicit Yes or Cancel.
+static PREPARED_DATA: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<u64, (PathBuf, pocket_library::add_data::PreparedData)>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn take_prepared_data(
+    root: &Path,
+    token: u64,
+) -> anyhow::Result<pocket_library::add_data::PreparedData> {
+    let mut pending = PREPARED_DATA.lock().unwrap_or_else(|e| e.into_inner());
+    anyhow::ensure!(
+        pending.get(&token).is_some_and(|(owner, _)| owner == root),
+        "Unknown data token or wrong library"
+    );
+    Ok(pending.remove(&token).unwrap().1)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_prepareGameData<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    id: JString<'local>,
+    source: JString<'local>,
+    name: JString<'local>,
+    extract: jni::sys::jboolean,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("Missing library root")?;
+        let id = jstring_to_string(&mut env, id).context("Missing game id")?;
+        let source = jstring_to_path(&mut env, source).context("Missing source")?;
+        let name = jstring_to_string(&mut env, name).context("Missing filename")?;
+        let sessions = LIBRARY_SESSIONS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Library lock unavailable"))?;
+        anyhow::ensure!(*sessions == 0, "Stop the running game before adding data");
+        let pending = pocket_library::add_data::prepare(
+            &Library::open(&root)?,
+            &id,
+            &source,
+            &name,
+            extract != 0,
+        )?;
+        let token = NEXT_IMPORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let json = serde_json::json!({"ok": true, "token": token.to_string(), "conflicts": pending.conflicts(), "executables": pending.executables()}).to_string();
+        PREPARED_DATA
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token, (root, pending));
+        Ok(json)
+    })();
+    new_jstring(
+        &env,
+        result.unwrap_or_else(|e| error_json(&format!("{e:#}"))),
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitGameData<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    token: jlong,
+    overwrite: jni::sys::jboolean,
+    executable: JString<'local>,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("Missing library root")?;
+        let mut pending = take_prepared_data(&root, token as u64)?;
+        let executable =
+            jstring_to_string(&mut env, executable).context("Missing executable choice")?;
+        pending.choose_executable((!executable.is_empty()).then_some(executable.as_str()))?;
+        let sessions = LIBRARY_SESSIONS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Library lock unavailable"))?;
+        anyhow::ensure!(*sessions == 0, "Stop the running game before adding data");
+        let destination = pending.destination().display().to_string();
+        pending.apply(&mut Library::open(&root)?, overwrite != 0)?;
+        Ok(serde_json::json!({"ok": true, "destination": destination}).to_string())
+    })();
+    new_jstring(
+        &env,
+        result.unwrap_or_else(|e| error_json(&format!("{e:#}"))),
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_cancelGameData<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    token: jlong,
+) {
+    if let Some(root) = jstring_to_path(&mut env, library_root) {
+        let _ = take_prepared_data(&root, token as u64);
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_removeGame<'local>(
     mut env: JNIEnv<'local>,

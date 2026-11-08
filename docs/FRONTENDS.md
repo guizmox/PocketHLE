@@ -15,6 +15,47 @@ See [OPTIMIZATIONS.md](OPTIMIZATIONS.md). GPU/software renderer selection is a
 separate supported choice. Frame-limit inheritance and filters are defined in
 [GPU.md](GPU.md), not duplicated here.
 
+## Adding data to an installed game
+
+Every PocketPC and Gizmondo game has **Add Data** in its per-game settings on
+desktop and Android. The file picker accepts any single file. Non-ZIP files are
+copied with their original filename to `games/<id>/extracted/`. For ZIP files,
+the user chooses **Extract contents** or **Copy ZIP unchanged**. Extraction keeps
+the archive's directory structure, including wrapper directories; it does not
+reimport the game or guess an installation layout.
+
+Preparation reads into a private staging directory, leaving installed content
+untouched. Existing directories are merged; unrelated contents remain. Before
+any installed file is replaced, a **Yes / Cancel** confirmation lists conflicting
+paths, including file/directory type conflicts. Cancel abandons the entire
+addition, including non-conflicting files. Replacements use the existing host
+filename's casing to respect the guest's case-insensitive filesystem on Linux
+and Android as well as Windows. Unsafe paths, duplicate ZIP names, symbolic
+links and special files are rejected. A changed conflict set requires a fresh
+selection rather than extending prior overwrite consent.
+
+If a copied file is an EXE, or an extracted ZIP contains EXEs, a separate choice
+allows **Keep current executable** or selection of one added EXE (with its full
+relative path). Keeping the current EXE does not cancel the data addition. A ZIP
+copied unchanged does not offer its internal EXEs. Choosing a replacement updates
+both `game.json` and `library.json` after the data is published. Files and manifest
+changes share rollback on an operation error; rollback failure retains recovery
+files and reports their location. This is not a crash/power-loss transaction.
+
+All choices, Cancel and the final notice support keyboard and external controller
+navigation, without consulting gameplay bindings. Android uses native focus plus
+controller D-pad/left-stick navigation and confirm/back input; desktop uses the
+launcher-owned picker and controller widgets. Reserved host shortcuts still work.
+After success, a modal notice displays the exact destination directory. Android
+retains the pending choice across Activity recreation and releases staged data
+when it is cancelled or the settings Activity is finished.
+
+Data additions are refused while a game session is running or stopping. Android
+holds the session gate during preparation and commit and checks again after a
+confirmation; desktop prevents starting a game during the operation. Existing
+saves, settings and catalogue entries are retained. This action changes game data
+only at the user's request; it is not an emulator compatibility workaround.
+
 ## Removing library games
 
 Desktop and Android require confirmation before removing a game from the library,
