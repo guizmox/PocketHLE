@@ -41,7 +41,7 @@ Output: `tools/hardware-diag/suites/vfs/dist/PocketHLE-VFSTEST.zip`.
 The native regression executes ARM twice and checks cleanup and RAM accounting:
 
 ```text
-cargo test -p pocket-core --no-default-features --features unicorn --test ram_guest native_arm_vfs -- --nocapture
+cargo test -p pocket-core --no-default-features --features arm-diagnostics --test ram_guest native_arm_vfs -- --nocapture
 ```
 
 Reference WinCE contracts:

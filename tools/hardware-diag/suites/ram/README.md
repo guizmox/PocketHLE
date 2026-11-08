@@ -79,7 +79,7 @@ exports. `dist/GZRT999999` binaries are also integration fixtures; rebuild after
 changing C sources.
 
 ```sh
-cargo test -p pocket-core --no-default-features --features unicorn --test ram_guest -- --nocapture
+cargo test -p pocket-core --no-default-features --features arm-diagnostics --test ram_guest -- --nocapture
 ```
 
 The test mounts SD read-only and Flash Disk writable, executes the EXE through

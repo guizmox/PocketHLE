@@ -29,4 +29,4 @@ suites/manual games, not fully exercised by this guest program.
 
 Build the integrated tool: `python3 tools/hardware-diag/build.py --clang clang --lld ld.lld`.
 The suite-local build remains a private regression fixture.
-Native integration: `cargo test -p pocket-core --no-default-features --features unicorn --test ram_guest native_arm_timing -- --nocapture`.
+Native integration: `cargo test -p pocket-core --no-default-features --features arm-diagnostics --test ram_guest native_arm_timing -- --nocapture`.

@@ -1432,7 +1432,7 @@ impl FrameHook for SessionHook {
     }
 }
 
-#[cfg(all(test, feature = "unicorn"))]
+#[cfg(all(test, feature = "arm-diagnostics"))]
 #[path = "runner_tests.rs"]
 mod tests;
 

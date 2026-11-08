@@ -1218,3 +1218,16 @@ Validation: isolated original ARM routines for a supplied purchased game;
 156 library tests, 591 API tests (4 GL tests ignored), and process-local identity
 persistence regression. Full Android/desktop native builds and device gameplay
 remain to be checked. No build dependencies or lockfile changes.
+
+
+## Optional executable ARM diagnostics
+
+The `arm-diagnostics` feature on pocket-core, pocket-desktop and
+pocket-android-jni enables fixture-dependent HARDWARE DIAG integration tests.
+It implies Unicorn but is not implied by Unicorn, default builds or CI.
+Generate fixtures explicitly with `python3 tools/hardware-diag/build.py`, then
+run the desired package with `cargo test -p <package> --features arm-diagnostics`.
+CI retains unit tests, production CPU builds, native recording validation and
+the downloadable HARDWARE DIAG ZIP. It does not execute diagnostic ARM suites,
+run diagnostic Python ARM smoke tests, or ship fixtures between build jobs.
+Synthetic unit tests of CPU/API contracts remain ordinary unit tests.

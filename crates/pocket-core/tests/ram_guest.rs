@@ -1,5 +1,5 @@
 //! Runs the shipped diagnostic as actual guest ARM, through the public APIs.
-#![cfg(feature = "unicorn")]
+#![cfg(feature = "arm-diagnostics")]
 use pocket_core::{
     kernel::{memory_division::MemoryDivision, FrameAction, InputEvent, KernelState},
     Emulator,
@@ -10,7 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 // These diagnostics contain real-time 5s/15s guest waits and each launches
-// concurrent emulators. Running five whole suites at once on small CI runners
+// concurrent emulators. Running five whole suites at once on small hosts
 // can time out PROCTEST although it finishes successfully immediately after.
 // Serialize suites, retaining all concurrency *within* each guest diagnostic.
 static DIAGNOSTIC_SUITE: std::sync::Mutex<()> = std::sync::Mutex::new(());

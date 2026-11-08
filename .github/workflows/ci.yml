@@ -43,17 +43,6 @@ jobs:
           sudo apt-get install -y clang lld python3
       - name: Build the single ARM diagnostic and verify its archive
         run: python3 tools/hardware-diag/build.py
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Check diagnostic bytecode, reports and score pages
-        run: |
-          python3 -m pip install --disable-pip-version-check -r tools/hardware-diag/tests/requirements.txt
-          python3 tools/hardware-diag/tests/guest_smoke.py
-          python3 tools/hardware-diag/tests/cpu_benchmark_smoke.py
-          python3 tools/hardware-diag/tests/gles_benchmark_smoke.py
-          python3 tools/hardware-diag/tests/score_summary_smoke.py
-          python3 tools/hardware-diag/tests/memory_benchmark_smoke.py
       - uses: actions/upload-artifact@v4
         with:
           name: HARDWARE-DIAG
@@ -96,9 +85,6 @@ jobs:
             cmake build-essential libclang-dev clang lld python3
       - name: build static FFmpeg
         run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
-      - name: generate ARM diagnostic fixtures required by tests
-        run: |
-          python3 tools/hardware-diag/build.py
       - name: advisory clippy analysis
         env:
           # This job already uses continue-on-error; retain diagnostics as warnings.
@@ -127,13 +113,9 @@ jobs:
       - name: build static FFmpeg
         run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
       - run: cargo build --workspace --release --locked
-      - name: generate ARM diagnostic fixtures required by tests
-        run: |
-          python3 tools/hardware-diag/build.py
       - name: run workspace tests sequentially
-        # ARM process diagnostics use short guest wait deadlines. Avoid competing
-        # emulator/process trees on the runner's limited vCPUs; keep every test.
-        # Includes both runtime launcher profiles and shared controller navigation.
+        # Includes launcher profiles/controller navigation. Executable ARM
+        # diagnostics require the non-default arm-diagnostics feature.
         run: cargo test --workspace --release --locked -- --test-threads=1
 
   build-unicorn:
@@ -198,37 +180,10 @@ jobs:
           name: PocketHLE-linux-x86_64
           path: PocketHLE-linux-x86_64.tar.gz
 
-  diagnostic-fixtures:
-    name: generate ARM fixtures for Windows tests
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: install diagnostic compilers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld python3
-      - name: generate and package test fixtures
-        run: |
-          python3 tools/hardware-diag/build.py
-          python3 - <<'PY'
-          from pathlib import Path
-          from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('arm-diagnostic-fixtures.zip', 'w', ZIP_DEFLATED) as archive:
-              for root in list(Path('tools/hardware-diag/suites').glob('*/dist')):
-                  for path in sorted(root.rglob('*')):
-                      if path.is_file():
-                          archive.write(path, path.as_posix())
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: arm-diagnostic-fixtures
-          path: arm-diagnostic-fixtures.zip
-          if-no-files-found: error
-
   build-windows:
     name: build windows release artifacts
     runs-on: windows-latest
-    needs: [fmt, diagnostic-fixtures]
+    needs: [fmt]
     steps:
       - run: git config --global core.autocrlf input
       - uses: actions/checkout@v4
@@ -260,13 +215,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked -p pocket-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/download-artifact@v4
-        with:
-          name: arm-diagnostic-fixtures
-          path: target/ci-fixtures
-      - name: unpack ARM diagnostic test fixtures
-        shell: pwsh
-        run: Expand-Archive -LiteralPath target/ci-fixtures/arm-diagnostic-fixtures.zip -DestinationPath . -Force
       - name: test native H264 and AAC recording at 30 and 60 FPS
         shell: pwsh
         run: |

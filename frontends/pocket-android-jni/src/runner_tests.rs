@@ -88,6 +88,24 @@ fn android_runner_ramtest_processes_and_orphan_complete() {
         .id
         .clone();
     run_diagnostic(&files.0, &id);
+    // Print every ARM report before asserting the parent result. Otherwise a
+    // parent process-suite failure hides PROCTEST/ORPHANTEST's actual cause.
+    let mut reports: Vec<_> = fs::read_dir(files.0.join("flash"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+        })
+        .collect();
+    reports.sort();
+    for path in reports {
+        match fs::read_to_string(&path) {
+            Ok(text) => println!("{}:\n{text}", path.display()),
+            Err(error) => println!("{}: report read failed: {error}", path.display()),
+        }
+    }
     for (name, result) in [
         (
             "RAMTEST.TXT",
@@ -99,7 +117,6 @@ fn android_runner_ramtest_processes_and_orphan_complete() {
         ("DEPTEST.TXT", "DEPTEST_RESULT PASS"),
     ] {
         let text = report(&files.0, name);
-        println!("{text}");
         assert!(text.contains(result) && !text.contains("FAIL"), "{text}");
     }
 }

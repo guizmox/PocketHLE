@@ -17,6 +17,8 @@ name = "hardware-diag-bluetooth-host"
 path = "../../tools/hardware-diag/suites/bluetooth/host-radio.rs"
 
 [features]
+# Explicitly opt in to executable HARDWARE DIAG integration tests.
+arm-diagnostics = ["unicorn"]
 # Default builds include the real ARM CPU (unicorn-engine) and
 # real-time audio (cpal). Without `unicorn` the stub CPU is
 # trace-only and cannot actually run a game; without `audio-cpal`

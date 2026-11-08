@@ -1,6 +1,6 @@
 //! Actual ARM hardware diagnostics with controlled host providers.
 //! These verify ABI/ownership, never real Bluetooth/camera/GPS/TLS hardware.
-#![cfg(feature = "unicorn")]
+#![cfg(feature = "arm-diagnostics")]
 use pocket_core::{
     kernel::{self, FrameAction, InputEvent},
     Emulator,

@@ -135,7 +135,7 @@ it a menu of unrelated diagnostic executables.
 ```sh
 python tools/hardware-diag/build.py
 python tools/hardware-diag/run.py --guest
-cargo test -p pocket-android-jni --no-default-features --features unicorn --lib
+cargo test -p pocket-android-jni --no-default-features --features arm-diagnostics --lib
 ```
 
 Follow that tool's current README for fixture generation. Keep native ABIs and
@@ -143,3 +143,19 @@ APK in sync. Run destructive quota/lifecycle probes in an isolated test library;
 never erase a gameplay library to obtain a clean diagnostic result. A failed
 probe may deliberately retain its private data for inspection.
 Host ARM regressions do not certify APK, physical storage or sensor behavior.
+
+When an opt-in `android_runner_ramtest_processes_and_orphan_complete` run fails, inspect
+all printed ARM reports, especially PROCTEST.TXT and ORPHANTEST.TXT. The test
+prints every available text report before asserting RAMTEST's summary, so a
+parent-suite failure does not hide the child process's progress or exit details.
+A passing rerun does not explain an intermittent failure. Keep the real
+process/handle/RAM assertions and their deadlines; do not suppress the failing
+checks or increase waits without identifying the underlying cause. The Linux
+workspace test job is separate from Windows artifact compilation: identify the
+failing job and step before changing a platform's build workflow.
+
+Executable HARDWARE DIAG tests are opt-in through `arm-diagnostics`, which also
+enables Unicorn. Ordinary `cargo test`, including CI builds with Unicorn, does
+not compile or run these fixture-dependent suites. CI still builds the diagnostic
+ZIP for download but does not execute its Python ARM smoke/benchmark tests.
+Normal unit tests and native recording validation remain enabled.

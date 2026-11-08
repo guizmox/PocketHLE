@@ -12,6 +12,8 @@ name = "pockethle_jni"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+# Explicitly opt in to executable HARDWARE DIAG integration tests.
+arm-diagnostics = ["unicorn"]
 # Default builds include the real ARM CPU (unicorn-engine). The Android
 # cross-compile from an x86_64 Linux host to aarch64-linux-android /
 # armv7-linux-androideabi works only when `cargo ndk` is invoked with

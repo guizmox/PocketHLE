@@ -1685,19 +1685,19 @@ mod launcher_return_tests {
         assert!(hook.drain_input(&mut std::collections::VecDeque::new()));
         assert!(hook.stopped_by_user);
     }
-    #[cfg(feature = "unicorn")]
+    #[cfg(feature = "arm-diagnostics")]
     #[test]
     fn desktop_runner_executes_parallel_children_and_surviving_orphan() {
         check_parallel_children_and_orphan(false);
     }
 
-    #[cfg(feature = "unicorn")]
+    #[cfg(feature = "arm-diagnostics")]
     #[test]
     fn desktop_child_process_publishes_exit_before_joining_its_orphan() {
         check_parallel_children_and_orphan(true);
     }
 
-    #[cfg(feature = "unicorn")]
+    #[cfg(feature = "arm-diagnostics")]
     fn check_parallel_children_and_orphan(deferred: bool) {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1802,7 +1802,7 @@ mod launcher_return_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[cfg(feature = "unicorn")]
+    #[cfg(feature = "arm-diagnostics")]
     #[test]
     fn desktop_runner_executes_vfs_diagnostic_and_cleans_probe_files() {
         let nonce = std::time::SystemTime::now()

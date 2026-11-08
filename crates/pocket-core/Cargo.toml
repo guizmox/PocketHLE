@@ -8,6 +8,8 @@ authors.workspace = true
 description = "PocketHLE top-level Emulator: glues loader, CPU, kernel and API stubs."
 
 [features]
+# Explicitly opt in to executable HARDWARE DIAG integration tests.
+arm-diagnostics = ["unicorn"]
 default = []
 unicorn = ["pocket-cpu/unicorn"]
 # Real-time audio output via cpal. Forwards to the same feature on
