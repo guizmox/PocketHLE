@@ -147,6 +147,9 @@ Android uses a separate frontend and is not covered by the eframe correction.
 
 ## Validation and compatibility boundaries
 
+For Android performance investigations, use the current
+[graphics log collection guide](ANDROID-GRAPHICS-DIAGNOSTICS.md).
+
 HARDWARE DIAG samples costly paths; it is not exhaustive OpenGL ES conformance.
 Compare software/GPU geometry, lighting, alpha, textures/mips, HUD, offscreen
 surfaces, read/copy operations, child/parent return, rotation and captures.

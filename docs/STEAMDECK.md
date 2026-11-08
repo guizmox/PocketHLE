@@ -73,10 +73,10 @@ SteamOS may reserve these controls before they reach the application.
 | Deck control | Guest action |
 | --- | --- |
 | D-pad / left stick | Directions |
-| A / Y / B / X | Action / A / B / C |
+| A / Y / B / X | Play / Stop / Forward / Rewind |
 | L1 | Volume (Piano 2) |
 | R1 | Home (Piano 1) |
-| L2 / R2 | Gizmondo L / R |
+| L2 / R2 | Gizmondo L1 / R1 |
 
 These are defaults, not locked guest controls: explicit profile assignments can
 rebind them, including L1 volume. Reserved host gestures remain protected. Game-only
@@ -90,7 +90,8 @@ L3 switches between page and toolbar; use the toolbar to open settings.
 Menu remains the reserved filter shortcut, including in the library. L1/L2 move to the previous tab and R1/R2 to the next,
 wrapping through Gizmondo, PocketPC and Recordings. Selection stays in view.
 
-The game menu includes Information, Play, Rename, Settings and Remove. A accepts;
+The game menu contains Information, Play, Rename, Settings, Add/Replace Data,
+Remove and Game ID. A accepts;
 B returns to the parent menu, then closes it. In settings, up/down moves focus,
 left/right adjusts sliders and A activates the selected control. Dropdowns use
 up/down, A to accept and B to cancel. Pages scroll to keep focus visible.
@@ -106,9 +107,14 @@ Colors startup uses directions for language, A to launch and B to cancel. Its
 explicit unlock action uses X; see [COLORS.md](COLORS.md).
 
 The runtime Deck profile uses config-steamdeck.json; standard desktop uses config.json.
-The game catalogue and per-game data remain shared. Old Deck factory-binding
+The game catalogue and per-game data remain shared within the same library root. Old Deck factory-binding
 migrations have been removed; saved settings are read without those rewrites.
-They may share a library. **Keyboard bindings** and **External controller bindings**
+Under Proton, the default Documents/PocketHLE location may be inside the shortcut's
+Windows prefix. Another shortcut/prefix can therefore resolve to another library.
+For updates, keep the existing shortcut and back up the entire PocketHLE library
+outside the Proton prefix before replacing program files.
+
+**Keyboard bindings** and **External controller bindings**
 are separate settings entries. In the controller entry, clicking both sticks
 (**L3 + R3**) starts **Assign an input…**; the keyboard entry uses **Ctrl+Enter**.
 Both shortcuts are shown on their buttons. Release the combination before

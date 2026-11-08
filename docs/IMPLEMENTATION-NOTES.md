@@ -5316,6 +5316,12 @@ the host-only pixel density.
 
 #### Steam Deck startup
 
+**Historical and superseded.** The following describes the retired dedicated
+build, Cargo feature and fullscreen default. Current PC/Deck use the common
+Windows executable with `--steam-deck`, a normal 1280x800 startup window capped
+to smaller monitors, and a shared Windows update package. See
+[STEAMDECK.md](STEAMDECK.md) and [FRONTENDS.md](FRONTENDS.md).
+
 The dedicated Steam Deck build starts fullscreen even when the previous desktop
 configuration was windowed. It requests fullscreen in the initial native window
 builder and once on the first UI frame, after native window-state restoration.

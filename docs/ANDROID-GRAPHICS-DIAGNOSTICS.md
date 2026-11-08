@@ -1,26 +1,23 @@
 # Android graphics diagnostics
 
-Baseline: e68ff5f0885dfda587753688c70dc86f51018f8e (deck - pc single build with args).
+Use this guide to collect graphics timings from the current Android build.
+Rendering and presentation contracts are maintained in [GPU.md](GPU.md);
+build the complete app with matching Rust JNI and Kotlin code as described in
+[ANDROID-BUILD.md](ANDROID-BUILD.md). No old diagnostic or cumulative patch ZIP
+is needed.
 
-The cumulative RGB565 delivery includes the previous shared-presentation fix.
-CPU-origin logical 16-bit images now use packed RGB565 transport and GPU integer
-conversion/backlight. Look for `format=RGB565 conversion=GPU`. xBRZ and a failed
-integer shader explicitly use CPU conversion; alternate render images keep RGBA.
-The test of all 65,536 colors across brightness levels and odd-width rows passes
-through native ES3. The opt-in `shared_snapshot_wall` stage is also included to
-help localize the separately reported 1x/2x discrepancy; no cause or device FPS
-improvement for that discrepancy is claimed without the logs.
+Shared GLES presentation reports `PRESENTATION=GPU_SHARED (Android)` when active.
+CPU-origin logical RGB565 images use packed transport and GPU integer conversion:
+look for `format=RGB565 conversion=GPU`. xBRZ or an unavailable integer conversion
+uses the CPU fallback; alternate render images retain their RGBA transport.
+Real guest reads and CPU composition can legitimately require readback.
 
-The cumulative shared-presentation patch supersedes the initial diagnostic ZIP.
-After applying it and rebuilding the complete APK (Rust JNI and Kotlin together),
-repeat only the GPU Toy Golf run: about 20 seconds of intro and 20 seconds of play.
-Keep reconstruction/native resolution and **Show IPS off**. Look for
-`PRESENTATION=GPU_SHARED (Android)`. Normal shared images should no longer have
-per-frame `read_pixels_wall`, Java pixel copies or texture-byte uploads; real
-guest reads/CPU composition can still require readback. The UI now reports
-`shared_convert` instead of CPU pixel preparation for these images. A brief
-background/resume within the same run checks the surface lifecycle on the device.
-The original two-run procedure below remains useful for a new unprofiled device.
+For comparisons, keep the same game, scene, internal resolution and filter.
+Disable Show IPS and recording so they do not change the presentation path.
+Collect software and GPU runs as described below. For a specific sharing or
+surface-lifecycle issue, a targeted GPU run plus background/resume is useful.
+Neither the log's presence nor an older benchmark establishes a device-wide FPS
+improvement. Earlier implementation/validation records below are historical.
 
 Enable **Emulator Settings > Diagnostics > Graphics diagnostics**, keep **Log
 verbosity = 1**, then start a game. The switch defaults to off and applies at
@@ -106,7 +103,14 @@ still has overhead (clocks, aggregated logs and sampled GPU queries). Default-of
 execution issues no diagnostic GL queries, takes no diagnostic JNI lock and does
 not create diagnostic timestamps.
 
-The ZIP contains source changes and this guide, not an APK. Validation includes
+## Historical delivery validation
+
+The following records describe earlier source-patch deliveries and their local
+checks, not requirements for installing the current release or current CI test
+selection. Executable ARM diagnostics are now manual/opt-in; see
+[ANDROID-BUILD.md](ANDROID-BUILD.md#diagnostics-and-runner-regression-tests).
+
+The original ZIP contained source changes and this guide, not an APK. Validation includes
 Rust formatting, GLES and Android-runner unit tests, config persistence, query
 pool/disjoint tests and Kotlin aggregation/config tests. The Android renderer
 sources were additionally type-checked against Android API classes with app
@@ -130,7 +134,7 @@ Local checks on this change:
 No complete APK build, device benchmark or physical GPU timer validation is
 claimed by these checks. Existing hardware tests remain excluded here.
 
-Merge audit for the current baseline:
+Historical merge audit:
 
 - Applied the implementation as a three-way delta onto 9cfdcd1, with the
   pre-merge source/patch retained independently.
@@ -141,7 +145,7 @@ Merge audit for the current baseline:
 - The AndroidFrameRenderer conflict was resolved by retaining GPU transport,
   timing and resource cleanup while keeping screenshot code removed.
 
-## e68ff5f rebase and complete file audit
+## Historical e68ff5f rebase and file audit
 
 All 30 entries in the previous ZIP were compared, not just selected source
 files. Only pocket-library/src/lib.rs and patch-files.txt overlap the new commit;
