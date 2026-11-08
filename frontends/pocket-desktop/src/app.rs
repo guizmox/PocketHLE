@@ -269,8 +269,6 @@ pub struct PocketLauncher {
     deck_menu_press: Option<(usize, Instant)>,
     deck_view_press: Option<(usize, Instant)>,
     /// PocketPC only: additional Steam / Quick Access FN buttons, when exposed by SDL.
-    upscale_window_size: Option<Vec2>,
-    console_fit_pending: bool,
     library_viewport: LibraryViewport,
     library_restore_pending: Option<LibraryViewport>,
     game_viewport_active: bool,
@@ -907,8 +905,6 @@ impl PocketLauncher {
             control_notice: None,
             deck_menu_press: None,
             deck_view_press: None,
-            upscale_window_size: None,
-            console_fit_pending: false,
             library_viewport: LibraryViewport::capture(&cc.egui_ctx),
             library_restore_pending: None,
             game_viewport_active: false,
@@ -1305,7 +1301,6 @@ impl PocketLauncher {
                 frame.texture_height,
             ))
         {
-            self.console_fit_pending = true;
             if self
                 .last_frame_snapshot
                 .as_ref()
@@ -1391,13 +1386,6 @@ impl PocketLauncher {
             self.send_input(InputEvent::PointerUp { x, y });
         }
         self.upscale_x2 = enabled;
-        self.console_fit_pending = true;
-        if enabled {
-            self.upscale_window_size =
-                ctx.input(|input| input.viewport().inner_rect.map(|r| r.size()));
-        } else if let Some(size) = self.upscale_window_size.take() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-        }
         if let Some(frame) = self.last_frame_snapshot.clone() {
             self.refresh_frame_texture(ctx, &frame);
         }
@@ -1735,12 +1723,10 @@ impl PocketLauncher {
         if let Some(tx) = self.input_tx.as_ref() {
             let _ = tx.send(InputCommand::Stop);
         }
-        // Reset game-only sizing without emitting an InnerSize while native
+        // Reset image zoom without emitting an InnerSize while native
         // fullscreen may still be active. Restore from the library snapshot.
         self.upscale_x2 = false;
-        self.upscale_window_size = None;
         self.fullscreen_window_size = None;
-        self.console_fit_pending = false;
         self.library_restore_pending = Some(self.library_viewport);
         self.game_viewport_active = false;
         self.screen = Screen::Library;
@@ -3230,70 +3216,12 @@ impl PocketLauncher {
         }
     }
 
-    fn fit_console_window(&mut self, ui: &egui::Ui) {
-        if !self.console_fit_pending || self.library_restore_pending.is_some() {
-            return;
-        }
-        let (inner, fullscreen, maximized) = ui.ctx().input(|input| {
-            let viewport = input.viewport();
-            (
-                viewport.inner_rect.map(|r| r.size()),
-                viewport.fullscreen.unwrap_or(false),
-                viewport.maximized.unwrap_or(false),
-            )
-        });
-        if fullscreen || maximized {
-            return;
-        }
-        if let Some(inner) = inner {
-            // Command-line launches can precede the first native viewport info.
-            self.library_viewport.size.get_or_insert(inner);
-            let body = if self.running_is_gizmondo {
-                let native = self
-                    .last_frame_snapshot
-                    .as_ref()
-                    .map_or([320, 240], |f| [f.texture_width, f.texture_height]);
-                let body = crate::gizmondo_layout::window_body(
-                    native,
-                    if self.upscale_x2 { 2 } else { 1 },
-                    ui.ctx().pixels_per_point(),
-                );
-                Vec2::new(body[0], body[1])
-            } else {
-                let Some(frame) = self.last_frame_snapshot.as_ref() else {
-                    return;
-                };
-                let screen = if self.game_rotation.is_quarter_turn() {
-                    Vec2::new(frame.texture_height as f32, frame.texture_width as f32)
-                } else {
-                    Vec2::new(frame.texture_width as f32, frame.texture_height as f32)
-                };
-                let body = crate::fullscreen_layout::pocket_pc_window_body(
-                    [screen.x as u32, screen.y as u32],
-                    if self.upscale_x2 { 2 } else { 1 },
-                    ui.ctx().pixels_per_point(),
-                );
-                Vec2::new(body[0], body[1])
-            };
-            // Keep only the measured top/status bars around the console.
-            // Measuring avoids fixed guesses about title bars or display DPI.
-            let chrome = inner - ui.available_size();
-            let target = body + chrome;
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
-                    target.x.ceil(),
-                    target.y.ceil(),
-                )));
-            self.console_fit_pending = false;
-        }
-    }
-
     fn set_fullscreen(&mut self, ctx: &egui::Context, enabled: bool) {
         self.release_all_keys();
         if let Some((x, y)) = self.pointer_down_at.take() {
             self.send_input(InputEvent::PointerUp { x, y });
         }
-        if enabled {
+        if enabled && !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
             self.fullscreen_window_size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enabled));
@@ -3581,11 +3509,9 @@ impl PocketLauncher {
 
     fn ui_run(&mut self, ui: &mut egui::Ui) {
         if self.running_is_gizmondo {
-            self.fit_console_window(ui);
             self.ui_gizmondo(ui);
             return;
         }
-        self.fit_console_window(ui);
         self.ui_pocketpc(ui);
     }
 
@@ -5133,9 +5059,6 @@ impl PocketLauncher {
         let next = RotationPref::ALL[(usize::from(rotation_turns(self.game_rotation)) + 1) % 4];
         self.game_rotation = next;
         self.persist_rotation(next);
-        if !self.running_is_gizmondo {
-            self.console_fit_pending = true;
-        }
         ctx.request_repaint();
     }
 
@@ -5802,7 +5725,6 @@ impl PocketLauncher {
         self.stylus_pointer=Default::default();
         self.stylus_tick=Instant::now();
         self.running_stylus_grid = game.settings.pocketpc_stylus_grid.clone();
-        self.console_fit_pending = true;
         let (frame_tx, frame_rx) = crate::latest_frame::channel();
         let (input_tx, input_rx) = mpsc::channel();
         let (dependency_notice_tx, dependency_notice_rx) = mpsc::channel();
@@ -6004,6 +5926,9 @@ impl eframe::App for PocketLauncher {
         }
         // One-shot startup override, after egui/native window state restoration.
         if let Some(fullscreen) = self.startup_fullscreen.take() {
+            if fullscreen && !observed.fullscreen {
+                self.fullscreen_window_size = observed.size;
+            }
             self.library_viewport.fullscreen = fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
         }
@@ -6251,13 +6176,11 @@ impl eframe::App for PocketLauncher {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if fullscreen != self.display_fullscreen {
             self.display_fullscreen = fullscreen;
-            if !fullscreen && self.screen == Screen::Run && self.library_restore_pending.is_none() {
-                if let Some(size) = self.fullscreen_window_size.take() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                    self.console_fit_pending = false;
-                } else {
-                    self.console_fit_pending = true;
-                }
+            if !fullscreen && self.library_restore_pending.is_none() {
+                let size = self.fullscreen_window_size.take()
+                    .or(self.library_viewport.size)
+                    .unwrap_or(Vec2::new(1280.0, 600.0));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             }
             if let Some(frame) = self.last_frame_snapshot.clone() {
                 self.refresh_frame_texture(ctx, &frame);
@@ -6266,7 +6189,6 @@ impl eframe::App for PocketLauncher {
         if let Some(saved) = self.library_restore_pending {
             if saved.restore(ctx) {
                 self.library_restore_pending = None;
-                self.console_fit_pending = self.screen == Screen::Run;
             }
         }
         let console_only = fullscreen && self.screen == Screen::Run;

@@ -36,19 +36,6 @@ pub struct Layout {
     pub dpad: BoxRect,
     pub actions: [BoxRect; 4], // Stop,Rewind,Forward,Play
 }
-pub fn window_body(native: [u32; 2], factor: u32, dpi: f32) -> [f32; 2] {
-    let dpi = dpi.max(0.25);
-    // Two physical pixels prevent fractional DPI rounding from losing a zoom step.
-    let screen_w = native[0] as f32 * factor.max(1) as f32 / dpi + 2.0 / dpi;
-    let screen_h = native[1] as f32 * factor.max(1) as f32 / dpi + 2.0 / dpi;
-    [
-        ((screen_w + 2.0 * GAP) / 0.58)
-            .min(screen_w + 2.0 * (280.0 + GAP))
-            .max(720.0),
-        (screen_h + HEADER + GAP).max(480.0),
-    ]
-}
-
 pub fn calculate(
     size: [f32; 2],
     native: [u32; 2],
@@ -198,17 +185,7 @@ mod tests {
         }
     }
     #[test]
-    fn window_zoom_uses_rendered_pixels_and_round_hitboxes_reject_corners() {
-        for native in [[320, 240], [640, 480]] {
-            for factor in [1, 2] {
-                for dpi in [1.0, 1.5, 2.0] {
-                    let body = window_body(native, factor, dpi);
-                    let g = calculate(body, native, dpi, Some(factor));
-                    assert_eq!((g.screen.w * dpi).round() as u32, native[0] * factor);
-                    assert_eq!((g.screen.h * dpi).round() as u32, native[1] * factor);
-                }
-            }
-        }
+    fn round_hitboxes_reject_corners() {
         let a = calculate([1280., 800.], [320, 240], 1., None).actions[0];
         assert!(a.contains(a.center(), true));
         assert!(!a.contains([a.x + 0.1, a.y + 0.1], true));

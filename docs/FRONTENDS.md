@@ -87,7 +87,12 @@ including native game exit, host EXIT, shortcuts and an emulator error return.
 Keep fullscreen and maximized state, and restore windowed size/outer position.
 Wait for native fullscreen/maximize acknowledgements before applying geometry;
 never resize a still-fullscreen surface to the library's windowed dimensions.
-Discard game-only zoom/F12 restore sizes so they cannot override this snapshot.
+Discard temporary fullscreen restore sizes so they cannot override this snapshot.
+Desktop window dimensions are independent of guest resolution, rotation and
+image zoom. Starting a game or changing these settings never resizes the native
+window. Leaving fullscreen restores the previous windowed size after the native
+mode acknowledgement; startup fullscreen retains the initial windowed size,
+with the launcher size (1280x600 logical points by default) as fallback.
 Ending a game while its options are visible uses the same session cleanup. A
 queued game-to-game launch retains the original library snapshot.
 
