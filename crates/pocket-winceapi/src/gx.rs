@@ -254,6 +254,7 @@ fn gx_begin_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     }
     ctx.kernel.gx_draw_active = true;
+    ctx.kernel.gx_draw_thread = ctx.kernel.current_thread;
     let origin = if pocket_kernel::gapi_uses_columns(ctx.kernel) {
         SYNTHETIC_FB_BASE + ctx.kernel.framebuffer.height.saturating_sub(1) * 2
     } else {
@@ -287,14 +288,17 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 /// GAPI exposes display memory, which remains visible while held. A voluntary
-/// main-thread sleep or message-pump poll is a presentation boundary for direct writers that retain
+/// drawing-thread sleep or message-pump poll is a presentation boundary for direct writers that retain
 /// that pointer across frames. Unlimited keeps the existing immediate readback.
 /// A user cap paces changed frames at this boundary, never individual writes or
 /// unchanged message polls. CPU slice preemption never exposes a partial draw.
 pub(crate) fn publish_held_framebuffer(
     ctx: &mut CallCtx<'_>,
 ) -> Result<Option<DispatchOutcome>, KernelError> {
-    if ctx.kernel.current_thread == 0 && ctx.kernel.fb_mapped && ctx.kernel.gx_draw_active {
+    if ctx.kernel.gx_draw_thread == ctx.kernel.current_thread
+        && ctx.kernel.fb_mapped
+        && ctx.kernel.gx_draw_active
+    {
         if ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some() {
             read_guest_framebuffer(ctx)?;
             if ctx.kernel.gx_readback_scratch
@@ -314,7 +318,7 @@ pub(crate) fn publish_held_framebuffer(
                 // A repaint/worker may have made the pending snapshot redundant.
                 // Do not leave a stale deadline or throttle idle/input polling.
                 let key = (
-                    0,
+                    ctx.kernel.current_thread,
                     ctx.thunk.thunk_va,
                     ctx.cpu.read_reg(pocket_cpu::regs::ArmReg::Sp)?,
                 );
@@ -579,6 +583,7 @@ pub(crate) mod tests {
             dib_decode_scratch: Vec::new(),
             gx_last_pushed_counter: 0,
             gx_draw_active: false,
+            gx_draw_thread: 0,
             gx_explicit_present: false,
             gx_guest_signature: None,
             gles_strings: std::collections::HashMap::new(),
@@ -800,6 +805,39 @@ pub(crate) mod tests {
         // Region must be readable.
         let bytes = c.cpu.read_mem(SYNTHETIC_FB_BASE, 4).unwrap();
         assert_eq!(bytes.len(), 4);
+    }
+
+    #[test]
+    fn main_message_poll_does_not_publish_another_threads_incomplete_gapi_draw() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        gx_open_display(&mut ctx).unwrap();
+        ctx.kernel.current_thread = 1;
+        gx_begin_draw(&mut ctx).unwrap();
+        ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
+        let before = ctx.kernel.framebuffer.cpu().unwrap().pixels.clone();
+        ctx.kernel.current_thread = 0;
+        assert_eq!(publish_held_framebuffer(&mut ctx).unwrap(), None);
+        assert_eq!(ctx.kernel.framebuffer.cpu().unwrap().pixels, before);
+        ctx.kernel.current_thread = 1;
+        // A worker retaining its pointer can still publish at its own yield.
+        assert_eq!(publish_held_framebuffer(&mut ctx).unwrap(), None);
+        assert_eq!(
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
+            &[0x1f, 0xf8]
+        );
+        ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0xe0, 0x07]).unwrap();
+        gx_end_draw(&mut ctx).unwrap();
+        assert_eq!(
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..2],
+            &[0xe0, 0x07]
+        );
     }
 
     #[test]

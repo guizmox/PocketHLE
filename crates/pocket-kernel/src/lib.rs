@@ -1248,6 +1248,9 @@ pub struct KernelState {
     /// GXBeginDraw owns guest pixels until GXEndDraw publishes the frame.
     /// Raw framebuffer polling must not expose an unfinished GAPI draw.
     pub gx_draw_active: bool,
+    /// Thread that acquired the active GAPI display pointer. Another thread
+    /// yielding cannot declare its unfinished draw complete.
+    pub gx_draw_thread: usize,
     /// This display session has declared explicit GXEndDraw frame boundaries.
     pub gx_explicit_present: bool,
     /// Signature of sampled guest framebuffer rows from the last sync.
@@ -4421,6 +4424,7 @@ impl Process {
                 dib_decode_scratch: Vec::new(),
                 gx_last_pushed_counter: 0,
                 gx_draw_active: false,
+                gx_draw_thread: 0,
                 gx_explicit_present: false,
                 gx_guest_signature: None,
                 gles_strings: HashMap::new(),

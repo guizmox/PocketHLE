@@ -291,3 +291,38 @@ failure. After these common fixes it reaches the character-slot screen through G
 a scheduled pointer tap opens class selection/name entry. Further gameplay and
 device-specific behavior require separate validation.
 No game executable, image asset or registration check is modified.
+
+## GDI nearest-color queries
+
+`GetNearestColor` is a read-only query of the requested DC. PALETTEINDEX resolves
+through its selected logical palette (the stock palette by default); RGB and
+PALETTERGB resolve directly on the current non-palettized RGB565 device. The
+result is an ordinary COLORREF with the renderer's RGB565 bit expansion, not a
+palette index or an unconditional zero. Invalid DCs or unresolved palette entries
+return CLR_INVALID. No drawing, pixel readback or frame publication is required.
+The shared handler applies to desktop and Android and the existing ordinal 952
+mapping. This does not add a hardware palette or change the drawing APIs' color
+resolution. Other surface formats/palette realization remain separate contracts.
+
+A synthetic regression covers stock/custom per-DC palettes, direct/PALETTERGB
+colors, quantization, invalid handles/indices and unchanged publication count.
+A missing query can affect a caller's color conversion or transparency setup,
+but implementing it alone is not evidence that a reported gameplay artifact is
+fixed; compare the same scene before and after.
+
+## GAPI drawing threads and retained-pointer publication
+
+GXBeginDraw records the acquiring thread. A message-pump poll or nonzero Sleep may
+publish a retained display pointer only on the thread that acquired that active
+draw, including a worker retaining its pointer. A main-thread yield does not complete another thread's drawing;
+GXEndDraw still publishes the finished image. CPU-slice polling remains suppressed
+while a draw is active, and the existing main-owned retained-pointer path remains
+available, including a transition from explicit EndDraw frames to retained access.
+This is thread ownership, not a game-specific wait or a change to GAPI pitches,
+colors, frame pacing, input polling or GPU authority.
+
+EverQuest's native graphics path reproduces intermediate menu frames with
+silhouettes missing when main-thread message polling publishes a worker's draw.
+The issue remains with GetNearestColor implemented. A synthetic worker-draw/main-
+poll regression and the existing retained-GAPI tests cover the ownership guard.
+Device-specific presentation and later gameplay still need separate validation.

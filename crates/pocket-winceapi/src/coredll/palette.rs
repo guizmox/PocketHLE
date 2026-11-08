@@ -98,11 +98,80 @@ pub(super) fn realize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+/// Resolve COLORREF against the selected logical palette, then report the
+/// representable color of our true-color RGB565 device. This query must not
+/// acquire pixel write authority or publish a frame.
+pub(super) fn nearest_color(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hdc = ctx.arg_u32(0)?;
+    let color = ctx.arg_u32(1)?;
+    let Some(dc) = ctx.kernel.gdi.dc(hdc) else {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    };
+    let rgb = if color >> 24 == 1 {
+        let Some(entry) = ctx
+            .kernel
+            .gdi
+            .palette(dc.selected_palette)
+            .and_then(|entries| entries.get((color & 0xffff) as usize))
+        else {
+            return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+        };
+        u32::from(entry[0]) | (u32::from(entry[1]) << 8) | (u32::from(entry[2]) << 16)
+    } else {
+        // RGB and PALETTERGB both resolve directly on a non-palettized device.
+        color & 0x00ff_ffff
+    };
+    let (r, g, b) = rgb565_to_888(colorref_to_rgb565(rgb));
+    Ok(DispatchOutcome::ReturnedR0(
+        u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::coredll::tests::{dummy_thunk, fresh_kernel};
     use pocket_cpu::{stub::StubCpu, Cpu};
+    #[test]
+    fn nearest_color_resolves_selected_palette_and_rgb565_without_drawing() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let memory_dc = kernel.gdi.create_memory_dc();
+        let custom = kernel
+            .gdi
+            .create_palette(vec![[255, 0, 255, 0], [33, 66, 99, 0]]);
+        kernel.gdi.dc_mut(memory_dc).unwrap().selected_palette = custom;
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let frame_counter = ctx.kernel.framebuffer.frame_counter;
+        for (dc, input, expected) in [
+            (GDI_SCREEN_DC, 0x0100_0006, 0x0084_8200),
+            (memory_dc, 0x0100_0000, 0x00ff_00ff),
+            (memory_dc, 0x0100_0001, 0x0063_4121),
+            (GDI_SCREEN_DC, 0x0063_4221, 0x0063_4121),
+            (GDI_SCREEN_DC, 0x0263_4221, 0x0063_4121),
+            (GDI_SCREEN_DC, 0x00ff_ffff, 0x00ff_ffff),
+            (memory_dc, 0x0100_0002, u32::MAX),
+            (0, 0, u32::MAX),
+        ] {
+            ctx.cpu.write_reg(ArmReg::R0, dc).unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, input).unwrap();
+            assert_eq!(
+                nearest_color(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+        }
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, frame_counter);
+        assert_eq!(
+            ctx.kernel.gdi.dc(memory_dc).unwrap().selected_palette,
+            custom
+        );
+    }
+
     #[test]
     fn logical_palette_entries_are_owned_bounded_and_selected_per_dc() {
         let mut cpu = StubCpu::new();

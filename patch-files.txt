@@ -9,6 +9,8 @@ crates\pocket-library\src\backup.rs
 crates\pocket-library\src\lib.rs
 crates\pocket-winceapi\Cargo.toml
 crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\coredll\palette.rs
+crates\pocket-winceapi\src\gx.rs
 crates\pocket-winceapi\src\zlib.rs
 docs\FRONTENDS.md
 docs\GPU.md

@@ -594,6 +594,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetPaletteEntries", palette::get_entries);
     d.register_handler(dll, "SetPaletteEntries", palette::set_entries);
     d.register_handler(dll, "SelectPalette", palette::select);
+    d.register_handler(dll, "GetNearestColor", palette::nearest_color);
     d.register_handler(dll, "SetWindowTextW", set_window_text_w);
     d.register_handler(dll, "SetWindowTextA", set_window_text_a);
     d.register_handler(dll, "GetWindowTextW", get_window_text_w);
@@ -2814,8 +2815,16 @@ pub(crate) fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         return Ok(outcome);
     }
     let ms = ctx.arg_u32(0)?;
-    if ms != 0 && ctx.kernel.current_thread == 0 {
-        let key = (0, thunk_va, ctx.cpu.read_reg(ArmReg::Sp)?);
+    if ms != 0
+        && (ctx.kernel.current_thread == 0
+            || (ctx.kernel.gx_draw_active
+                && ctx.kernel.gx_draw_thread == ctx.kernel.current_thread))
+    {
+        let key = (
+            ctx.kernel.current_thread,
+            thunk_va,
+            ctx.cpu.read_reg(ArmReg::Sp)?,
+        );
         // A capped retained-GAPI frame and Sleep overlap rather than adding
         // their durations. Preserve Sleep's deadline when the display wait
         // retires its own continuation (which has the same thunk/SP key).
@@ -2839,14 +2848,23 @@ pub(crate) fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         }
     }
     if let Some(index) = ctx.kernel.current_thread.checked_sub(1) {
+        let display_sleep_deadline = ctx.kernel.wait_deadlines.remove(&(
+            ctx.kernel.current_thread,
+            thunk_va,
+            ctx.cpu.read_reg(ArmReg::Sp)?,
+        ));
         if let Some(thread) = ctx.kernel.threads.get_mut(index) {
             // Sleep(0) yields immediately. Positive sleeps remain ineligible
             // until host monotonic time advances; no host thread is blocked.
-            thread.sleep_until_ms = if ms == u32::MAX {
-                u64::MAX
-            } else {
-                monotonic_ms().saturating_add(u64::from(ms))
-            };
+            // A retained-GAPI display wait has already paid part of Sleep.
+            // Retire its API continuation when transferring to worker scheduling.
+            thread.sleep_until_ms = display_sleep_deadline.unwrap_or_else(|| {
+                if ms == u32::MAX {
+                    u64::MAX
+                } else {
+                    monotonic_ms().saturating_add(u64::from(ms))
+                }
+            });
         }
     }
     if let Some(outcome) = park_worker(ctx, 0)? {
@@ -31964,6 +31982,7 @@ mod tests {
             dib_decode_scratch: Vec::new(),
             gx_last_pushed_counter: 0,
             gx_draw_active: false,
+            gx_draw_thread: 0,
             gx_explicit_present: false,
             gx_guest_signature: None,
             gles_strings: std::collections::HashMap::new(),
@@ -38503,6 +38522,41 @@ mod tests {
         ctx.kernel.wait_deadlines.insert(key, monotonic_ms());
         assert_eq!(sleep(&mut ctx).unwrap(), DispatchOutcome::ReturnedR0(0));
         assert!(ctx.kernel.wait_deadlines.is_empty());
+    }
+
+    #[test]
+    fn retained_gapi_worker_sleep_preserves_deadline_without_leaking_continuation() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.map_region(
+            SYNTHETIC_FRAMEBUFFER_BASE,
+            0x26000,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
+        kernel.fb_mapped = true;
+        kernel.gx_draw_active = true;
+        kernel.gx_draw_thread = 1;
+        kernel.current_thread = 1;
+        kernel.framebuffer.directdraw.frame_rate_limit = Some(60);
+        let mut worker = GuestThread::new(
+            0x10000, 0, 0x20000, 0x1000, 0x30000, 0x40000, 0xdead7c00, [0; 17],
+        );
+        worker.started = true;
+        kernel.threads.push(worker);
+        let deadline = monotonic_ms() + 5000;
+        let key = (1, thunk.thunk_va, 0);
+        kernel.wait_deadlines.insert(key, deadline);
+        cpu.write_reg(ArmReg::R0, 60000).unwrap();
+        sleep(&mut CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        })
+        .unwrap();
+        assert_eq!(kernel.threads[0].sleep_until_ms, deadline);
+        assert!(!kernel.wait_deadlines.contains_key(&key));
     }
 
     #[test]
