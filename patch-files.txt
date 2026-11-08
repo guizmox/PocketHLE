@@ -1,14 +1,2 @@
-crates\pocket-library\src\add_data.rs
-crates\pocket-library\src\backup.rs
-crates\pocket-library\src\lib.rs
-docs\FRONTENDS.md
-frontends\pocket-android-jni\src\lib.rs
-frontends\pocket-android\app\src\main\java\com\pockethle\app\AddDataDialog.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\AddDataModel.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\NativeBridge.kt
-frontends\pocket-android\app\src\main\res\xml\preferences_game.xml
-frontends\pocket-desktop\src\add_data_prompt.rs
-frontends\pocket-desktop\src\add_data_ui.rs
-frontends\pocket-desktop\src\app.rs
-frontends\pocket-desktop\src\file_dialog.rs
+.github\workflows\ci.yml
+README.md

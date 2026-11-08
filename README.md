@@ -317,7 +317,7 @@ rustup default 1.90.0
 sudo apt install -y cmake build-essential pkg-config libclang-dev \
   libgtk-3-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
   libxrandr-dev libxinerama-dev libxi-dev libxcursor-dev \
-  libxdamage-dev libxext-dev libxfixes-dev libasound2-dev libssl-dev clang lld python3
+  libxdamage-dev libxext-dev libxfixes-dev libxss-dev libasound2-dev libssl-dev clang lld python3
 
 # Prepare the default static video dependency
 bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
