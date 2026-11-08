@@ -11,7 +11,7 @@ internal fun displayRect(viewW: Int, viewH: Int, shownW: Int, shownH: Int): Disp
     return DisplayRect((viewW-w)/2,(viewH-h)/2,w,h)
 }
 
-/** PocketPC presentation steps use the logical LCD, independent of GLES density.
+/** PocketPC standard-aspect presentation steps use QVGA, independent of native LCD or GLES density.
  * The produced high-density texture is sampled directly at the chosen size.
  * Fullscreen retains aspect fit; Gizmondo retains produced-image integer fitting.
  */
@@ -22,7 +22,11 @@ internal fun renderedDisplayRect(viewW:Int,viewH:Int,nativeW:Int,nativeH:Int,ren
     if(fullscreen) return aspectDisplayRect(viewW,viewH,w,h)
     val logicalW=if(quarter) nativeH else nativeW
     val logicalH=if(quarter) nativeW else nativeH
-    return if(pocketPc) displayRect(viewW,viewH,logicalW,logicalH)
+    val standardLandscape=logicalW.toLong()*3==logicalH.toLong()*4
+    val standardPortrait=logicalW.toLong()*4==logicalH.toLong()*3
+    val stepW=if(standardLandscape)320 else if(standardPortrait)240 else logicalW
+    val stepH=if(standardLandscape)240 else if(standardPortrait)320 else logicalH
+    return if(pocketPc) displayRect(viewW,viewH,stepW,stepH)
         else displayRect(viewW,viewH,w,h)
 }
 internal fun displayPointToGuest(x: Float,y: Float,viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,turn: Int,pocketPc: Boolean=false,fullscreen: Boolean=false,renderW:Int=nativeW,renderH:Int=nativeH): Pair<Int,Int>? {

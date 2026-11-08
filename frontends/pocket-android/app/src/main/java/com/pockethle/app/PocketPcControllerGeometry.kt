@@ -41,12 +41,12 @@ internal object PocketPcControllerGeometry {
         val unit = minOf(density.coerceAtLeast(.1f) * .8f, w / minWidth, h / minHeight)
         fun px(value: Float) = (value * unit).roundToInt().coerceAtLeast(1)
         val margin = px(edge); var pW = px(pWidth); val pH = px(76f)
-        val pGap = px(12f); val safety = px(24f)
+        val pGap = px(12f)
         var pad = px(normalPad * if (big) 4f / 3f else 1f)
         var stick = pad
         var diameter = px(diamondDiameter); var delta = px(diamondOffset)
         val toolH = px(24f)
-        val toolY = px(8f)
+        val toolY = if (portrait) h - margin - toolH else px(8f)
         val top = toolY + toolH + px(4f)
         if (!portrait && w / density.coerceAtLeast(.1f) < 800f) {
             val normalBank=maxOf(px(normalPad),2*pW+pGap,2*delta+diameter)
@@ -68,16 +68,34 @@ internal object PocketPcControllerGeometry {
         val faceX = w - margin - delta - diameter / 2
         val bottom = h - px(16f)
         val stickX: Int
+        val stickY: Int
         val axisY: Int
         val pY: Int
         val dpadY: Int
         if (portrait) {
-            // The enlarged stick is centred below the other controls. Keep
-            // complete vertical clearance for the square D-pad hit target.
+            // Stagger the central stick slightly below the side banks. Big
+            // needs additional clearance, computed from the actual hit shapes.
             stickX = w / 2
-            axisY = bottom - stick - px(12f) - maxOf(pad / 2, delta + diameter / 2)
+            val dpadX = margin + maxOf(pad, 2 * pW + pGap) / 2
+            val gap = px(6f)
+            fun clearance(radius: Int, horizontal: Int): Int =
+                if (horizontal >= radius) 0 else kotlin.math.ceil(kotlin.math.sqrt(
+                    radius.toDouble() * radius - horizontal.toDouble() * horizontal)).toInt()
+            val horizontal = (stickX - (dpadX + pad / 2)).coerceAtLeast(0)
+            var offset = px(32f)
+            if (horizontal < stick / 2 + gap) {
+                offset = maxOf(offset, pad / 2 + clearance(stick / 2 + gap, horizontal))
+            }
+            for ((cx, dy) in listOf(faceX to -delta, faceX + delta to 0,
+                faceX to delta, faceX - delta to 0)) {
+                val dx = kotlin.math.abs(stickX - cx)
+                val radii = stick / 2 + diameter / 2 + gap
+                if (dx < radii) offset = maxOf(offset, dy + clearance(radii, dx))
+            }
+            stickY = toolY - gap - stick / 2
+            axisY = stickY - offset
             dpadY = axisY
-            pY = axisY - maxOf(pad / 2, delta + diameter / 2) - safety - pH
+            pY = axisY - maxOf(pad / 2, delta + diameter / 2) - pGap - pH
         } else {
             // P keys keep their size but move to the top corners; the action
             // diamond has its own raised axis, independent of the centred pad.
@@ -86,9 +104,9 @@ internal object PocketPcControllerGeometry {
             val stickRoom = bottom - (axisY + delta + diameter / 2) - px(12f)
             stick = minOf(pad, stickRoom.coerceAtLeast(1))
             stickX = minOf(faceX, w - margin - stick / 2)
+            stickY = bottom - stick / 2
             dpadY = (h / 2).coerceIn(pY + pH + px(12f) + pad / 2, bottom - pad / 2)
         }
-        val stickY = bottom - stick / 2
         val pLeft1 = ControlRect(margin, pY, pW, pH)
         val pLeft2 = ControlRect(margin + pW + pGap, pY, pW, pH)
         val pRight2 = ControlRect(w - margin - pW, pY, pW, pH)
@@ -113,7 +131,7 @@ internal object PocketPcControllerGeometry {
                 toolY, toolW, toolH)
         }
         val screen = if (portrait) {
-            ControlRect(margin, top, (w - 2 * margin).coerceAtLeast(1), (pY - px(16f) - top).coerceAtLeast(1))
+            ControlRect(0, 0, w, (pY - px(6f)).coerceAtLeast(1))
         } else {
             val left = maxOf(pLeft2.x + pW, dpad.x + dpad.w) + px(gutter)
             val right = minOf(pRight1.x, action.x, stylus.x) - px(gutter)

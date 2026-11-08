@@ -78,10 +78,11 @@ shares its rectangle with inverse input mapping. Prefer the applicable integer
 presentation grid when enlarging; proportionally downscale an oversized produced
 image instead of clipping it. Do not promise identical zoom labels/policies for
 all Android control modes and desktop/Deck layouts. Android display size is
-automatic. PocketPC uses all fitting integer multiples of the logical LCD,
+automatic. PocketPC uses all fitting integer multiples of 240x320 or 320x240 for standard-aspect images,
 independent of internal rendering resolution (for example, a 320x240 guest
-rendered at 1280x960 can display directly at 960x720). Native VGA retains its
-640x480 logical grid. Gizmondo keeps produced-image integer fitting; fullscreen
+rendered at 1280x960 can display directly at 960x720). Native VGA uses that same QVGA presentation grid. Reducing the available area
+drops to the previous integer step; only areas smaller than one QVGA step need
+proportional downscaling. Nonstandard aspect ratios retain their native grid. Gizmondo keeps produced-image integer fitting; fullscreen
 keeps aspect fit. The removed Display scale setting has no backend configuration
 field or manual-zoom path. See [frontend geometry](FRONTENDS.md#image-geometry-and-input).
 

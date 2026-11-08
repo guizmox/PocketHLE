@@ -113,12 +113,14 @@ must not be treated as interchangeable zoom definitions.
 
 Android display size is automatic: the former Display scale preference and its
 configuration field have been removed. PocketPC chooses the largest whole-number
-multiple of its logical LCD dimensions that fits the reserved game area, regardless
+multiple of 240x320 (portrait) or 320x240 (landscape) for standard-aspect images that fits the reserved game area, regardless
 of the internal GLES rendering resolution. All fitting integer steps are allowed,
 without a four-step cap. Thus a 320x240 guest can display at 960x720 whether GLES
 produces 320x240, 640x480, 960x720 or 1280x960. Sample the high-density texture
-directly; never first resolve it to QVGA. A genuinely native VGA guest retains its
-640x480 logical grid. If even one logical image does not fit, downscale proportionally.
+directly; never first resolve it to QVGA. Native VGA uses the same presentation
+steps. If space decreases, drop to the previous integer step. Only viewports too
+small for one QVGA step use proportional downscaling; nonstandard aspect ratios
+retain their native grid.
 Gizmondo retains automatic produced-image integer fitting, and controller fullscreen
 retains its own aspect-fit geometry. Rendering, pointer overlays and inverse input
 mapping use the same shared rectangle; internal density never changes guest hitboxes.
@@ -216,10 +218,10 @@ Controller reuses the existing input IDs and functions with this arrangement:
   diameter. On short viewports its diameter is capped to keep the targets apart;
   P-key/action sizes do not shrink just to enlarge the stick.
 * Portrait: the stylus stick is centred at the bottom and exactly matches the
-  D-pad diameter in both Normal and Big. The other controls move up as necessary
-  to preserve complete separation of their hit targets. The guest display stays
-  above this bottom bank and uses the available space; Big can therefore reduce
-  its automatically fitted zoom.
+  D-pad diameter in both Normal and Big. The stick sits slightly below the D-pad/action axis, with geometric clearance
+  for the square D-pad and circular action targets. All portrait controls, including
+  the auxiliary toolbar, anchor the bottom. The display uses the full width above
+  the bank; Big can reduce it to a lower integer presentation step.
 * Transparent oval corners reject a new DOWN before input listeners run;
   accepted touches retain ownership through release or cancellation.
 * The auxiliary toolbar stays separate, with smaller targets and fitted text.
@@ -230,8 +232,9 @@ goes to the game viewport rather than stretching these keys. Portrait reserves
 a bottom bank and landscape reserves side banks. This changes host layout only,
 not guest framebuffer dimensions, mappings or the inverse touch transform.
 
-Classic preserves the exact existing phone rectangles, including fractional
-density and Normal/Big. On viewports whose smaller dimension is at least 600dp,
+Classic preserves the existing landscape phone rectangles, including fractional
+density and Normal/Big. Its portrait toolbar also anchors the bottom, freeing
+the area above the control bank for the game. On viewports whose smaller dimension is at least 600dp,
 its landscape action banks have a bounded height and remain just above the thumb
 controls; portrait action cells have a bounded width and stay in two side groups.
 This avoids stretched tablet banks without changing the phone arrangement used
@@ -251,7 +254,7 @@ Validation covers all three landscape ratios, portrait, six display densities,
 both layouts and both size modes: target bounds, non-overlap of hit rectangles,
 top P banks, landscape D-pad centring, portrait stick centring/equal diameter,
 safety gaps and bounded tablet group dimensions.
-Phone snapshots verify unchanged Classic rectangles. Existing display scaling,
+Phone snapshots verify stable landscape Classic rectangles and bottom-anchored portrait tools. Existing display scaling,
 fullscreen input and multitouch-routing tests are retained. Rust and Android
 configuration tests cover old files and independent layout/size persistence.
 No full Android APK build or physical device validation is claimed.

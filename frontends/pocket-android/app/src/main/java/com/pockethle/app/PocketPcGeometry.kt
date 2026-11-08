@@ -58,8 +58,9 @@ internal data class PocketPcGeometry(
             // Exchange axes so the thumb size remains stable after rotation.
             val pad=if(bigDirectionalControls) minOf(normalPad*4/3,(h-6*gap)/4,(w*.44f).toInt()).coerceAtLeast(normalPad) else normalPad
             val deckH=maxOf(pad,dp(108f))
-            val deckY=h-gap-deckH
             val rowH=minOf(dp(44f),h/14).coerceAtLeast(1)
+            val toolbarY=h-gap-rowH
+            val deckY=toolbarY-gap-deckH
             val actionY=deckY-safety-2*rowH-gap
             val fullWidth=((w-5*gap)/4).coerceAtLeast(1)
             val cellW=if(tablet) minOf(fullWidth,dp(84f)) else fullWidth
@@ -70,15 +71,14 @@ internal data class PocketPcGeometry(
                 val x=if(tablet && column>=2) w-gap-(4-column)*cellW-(3-column)*gap else gap+column*(cellW+gap)
                 actions[index]=ControlRect(x,actionY+(i/4)*(rowH+gap),cellW,rowH)
             }
-            // Portrait tools stay above the display; separate host actions
+            // Portrait tools anchor the bottom edge; separate host actions
             // from the three guest keys by at least three ordinary gaps.
             val toolbarH=rowH
             val bw=minOf(dp(64f),((w-9*gap)/6).coerceAtLeast(1))
-            val aux=(0..2).map { ControlRect(gap+it*(bw+gap),gap,bw,toolbarH) } +
-                listOf(ControlRect(w-3*gap-3*bw,gap,bw,toolbarH),ControlRect(w-2*gap-2*bw,gap,bw,toolbarH),ControlRect(w-gap-bw,gap,bw,toolbarH))
-            val screenY=toolbarH+2*gap
-            return PocketPcGeometry(ControlRect(0,screenY,w,(actionY-gap-screenY).coerceAtLeast(1)),actions,aux,
-                ControlRect(gap,h-gap-pad,pad,pad),ControlRect(w-gap-pad,h-gap-pad,pad,pad))
+            val aux=(0..2).map { ControlRect(gap+it*(bw+gap),toolbarY,bw,toolbarH) } +
+                listOf(ControlRect(w-3*gap-3*bw,toolbarY,bw,toolbarH),ControlRect(w-2*gap-2*bw,toolbarY,bw,toolbarH),ControlRect(w-gap-bw,toolbarY,bw,toolbarH))
+            return PocketPcGeometry(ControlRect(0,0,w,(actionY-gap).coerceAtLeast(1)),actions,aux,
+                ControlRect(gap,toolbarY-gap-pad,pad,pad),ControlRect(w-gap-pad,toolbarY-gap-pad,pad,pad))
         }
     }
 }
