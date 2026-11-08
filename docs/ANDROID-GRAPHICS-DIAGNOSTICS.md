@@ -153,3 +153,23 @@ diagnostic configuration field/default and persistence assertions. The runtime
 Standard/SteamDeck profiles and their config routing remain exactly upstream.
 The manifest is regenerated for this cumulative ZIP; desktop/CI/profile files
 outside the library source are not overwritten by the patch.
+
+
+## RGB565 shared-snapshot copy correction
+
+The Toy Golf device trace reports `Shared frame export unavailable` with
+`0x0502`, then CPU presentation, for both 1x and 2x with IPS disabled. The
+snapshot pool previously allocated RGBA8 destinations for RGB565 render targets.
+GLES/ANGLE copy validation rejects this source/destination combination. Keep
+RGB565 snapshots in a sized RGB565 texture (RGB / UNSIGNED_SHORT_5_6_5), and
+reallocate a reusable slot when the source format changes, even at equal sizes.
+RGBA sources keep their existing allocation. Conversion to display RGBA still
+happens in the consumer shader; no new CPU conversion/readback is introduced.
+
+A native desktop GL + GLES test checks the actual snapshot attachment's
+5/6/5/0 component bits and sampled pixels. The test fails against the old
+allocation (8/8/8/8), passes after the correction. All four native shared-pool
+tests and 234 ordinary GLES tests pass; aarch64 Android Rust checking passes.
+Mesa accepts the former copy, so these checks do not reproduce ANGLE's runtime
+error. Confirm `PRESENTATION=GPU_SHARED` on the affected device; no Samsung
+performance result or complete APK build is claimed.

@@ -354,6 +354,7 @@ impl FramePool {
             }
         };
         let slot = Arc::get_mut(&mut self.slots[index]).unwrap();
+        let format_changed = slot.rgb565 != r.rgb565;
         slot.rgb565 = r.rgb565;
         let s = slot.sync.get_mut().unwrap_or_else(|e| e.into_inner());
         if s.poisoned {
@@ -367,16 +368,22 @@ impl FramePool {
         (r.gl.BindFramebuffer)(0x8d40, r.fbo);
         (r.gl.ActiveTexture)(GL_TEXTURE0);
         (r.gl.BindTexture)(GL_TEXTURE_2D, slot.texture);
-        if (slot.width, slot.height) != (r.width, r.height) {
+        if format_changed || (slot.width, slot.height) != (r.width, r.height) {
             (r.gl.TexImage2D)(
                 GL_TEXTURE_2D,
                 0,
-                GL_RGBA as i32,
+                // GLES copies require compatible source/destination formats.
+                // In particular ANGLE rejects RGB565 -> RGBA8 snapshots.
+                if r.rgb565 { 0x8d62 } else { GL_RGBA as i32 },
                 r.width as i32,
                 r.height as i32,
                 0,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
+                if r.rgb565 { GL_RGB } else { GL_RGBA },
+                if r.rgb565 {
+                    GL_UNSIGNED_SHORT_5_6_5
+                } else {
+                    GL_UNSIGNED_BYTE
+                },
                 std::ptr::null(),
             );
             r.params(
@@ -697,6 +704,54 @@ mod tests {
                 (pixel, texture)
             })
             .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires shared native OpenGL/GLES3"]
+    fn rgb565_snapshot_preserves_source_color_format() {
+        for es in [false, true] {
+            let ui = if es {
+                Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            let mut external = unsafe { ExternalGpuContext::capture_current().unwrap() };
+            let source = external.source();
+            let mut producer = Renderer::new_shared(&source, 8, 8).unwrap();
+            producer.set_surface_rgb565(true).unwrap();
+            let state = PipelineState {
+                viewport: (0, 0, 8, 8),
+                ..Default::default()
+            };
+            producer
+                .clear(8, 8, &state, [1., 0., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                .unwrap();
+            let frame = producer.snapshot_shared_frame().unwrap().unwrap();
+            ui.host.make_current().unwrap();
+            unsafe {
+                frame
+                    .with_texture(&mut external, |texture| {
+                        (ui.gl.BindFramebuffer)(0x8d40, ui.fbo);
+                        (ui.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, texture, 0);
+                        let query: unsafe extern "system" fn(u32, u32, u32, *mut i32) =
+                            std::mem::transmute(
+                                ui.host.load(c"glGetFramebufferAttachmentParameteriv"),
+                            );
+                        let mut bits = [0; 4];
+                        for (i, value) in bits.iter_mut().enumerate() {
+                            query(0x8d40, 0x8ce0, 0x8212 + i as u32, value);
+                        }
+                        assert_eq!(bits, [5, 6, 5, 0], "snapshot must match RGB565 source");
+                        (ui.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, ui.color, 0);
+                        ui.check().unwrap();
+                    })
+                    .unwrap();
+            }
+            assert_eq!(
+                unsafe { read_sample(&ui, &mut external, &frame) }.0,
+                [255, 0, 0, 255]
+            );
+        }
     }
 
     #[test]
