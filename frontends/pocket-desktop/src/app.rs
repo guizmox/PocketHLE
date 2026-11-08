@@ -274,7 +274,7 @@ pub struct PocketLauncher {
     game_viewport_active: bool,
     menu_host_press: std::collections::HashMap<(usize, String), Instant>,
     display_fullscreen: bool,
-    startup_fullscreen: Option<bool>,
+    startup_window: Option<bool>,
     fullscreen_window_size: Option<Vec2>,
     reconstruction: Option<std::sync::Arc<std::sync::Mutex<crate::reconstruction::Reconstruction>>>,
     screenshot: crate::screenshot::SharedScreenshot,
@@ -312,7 +312,6 @@ pub struct PocketLauncher {
     colors_startup_notice: Option<(String, String)>,
     screen: Screen,
     about_parent: Screen,
-    startup_toolbar_fit: bool,
     runner: Runner,
     shared_gpu_context: Option<pocket_core::winceapi::gles::ExternalGpuContext>,
     run_thread: Option<std::thread::JoinHandle<()>>,
@@ -910,7 +909,7 @@ impl PocketLauncher {
             game_viewport_active: false,
             menu_host_press: Default::default(),
             display_fullscreen: false,
-            startup_fullscreen: None,
+            startup_window: None,
             fullscreen_window_size: None,
             reconstruction: cc.gl.as_ref().and_then(|gl| {
                 match crate::reconstruction::Reconstruction::new(
@@ -948,7 +947,6 @@ impl PocketLauncher {
             colors_startup_prompt: None,
             screen: Screen::Library,
             about_parent: Screen::Library,
-            startup_toolbar_fit: true,
             runner,
             shared_gpu_context,
             run_thread: None,
@@ -1567,34 +1565,6 @@ impl PocketLauncher {
             rotation: self.game_rotation.degrees(),
         };
         let output = crate::toolbar_ui::show(ui, &state);
-        if self.startup_toolbar_fit
-            && self.screen == Screen::Library
-            && self.library_restore_pending.is_none()
-        {
-            let viewport = ui.ctx().input(|i| i.viewport().clone());
-            if viewport.fullscreen.unwrap_or(false) || viewport.maximized.unwrap_or(false) {
-                self.startup_toolbar_fit = false;
-            } else if let (Some(inner), Some(monitor)) =
-                (viewport.inner_rect, viewport.monitor_size)
-            {
-                self.startup_toolbar_fit = false;
-                let decorations = viewport
-                    .outer_rect
-                    .map_or(0.0, |outer| (outer.width() - inner.width()).max(0.0));
-                if let Some(width) = crate::toolbar_ui::opening_width(
-                    inner.width(),
-                    output.horizontal_overflow,
-                    monitor.x,
-                    decorations,
-                ) {
-                    let size = Vec2::new(width, inner.height());
-                    self.library_viewport.size = Some(size);
-                    ui.ctx()
-                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                    ui.ctx().request_repaint();
-                }
-            }
-        }
         if let Some(action) = output.action {
             self.handle_toolbar_action(ui.ctx(), action);
         }
@@ -1629,7 +1599,7 @@ impl PocketLauncher {
             | Action::PocketPc
             | Action::Gizmondo => {
                 self.release_all_keys();
-                self.config_draft = Some(self.settings_draft());
+                self.config_draft = Some(self.settings_draft(ctx));
                 self.screen = match action {
                     Action::Emulator => Screen::Settings,
                     Action::PocketPc => Screen::PocketPcOptions,
@@ -1733,8 +1703,9 @@ impl PocketLauncher {
         ctx.request_repaint();
     }
 
-    fn settings_draft(&mut self) -> LauncherConfig {
+    fn settings_draft(&mut self, ctx: &egui::Context) -> LauncherConfig {
         let mut draft = self.library.config().clone();
+        draft.fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
         for (file, platform) in [
             ("registry-pocketpc.json", &mut draft.device_platform_id),
             ("registry-gizmondo.json", &mut draft.gizmondo_platform_id),
@@ -5467,8 +5438,8 @@ impl PocketLauncher {
         self.status = "Importing...".to_string();
     }
 
-    pub fn request_startup_fullscreen(&mut self, fullscreen: bool) {
-        self.startup_fullscreen = Some(fullscreen);
+    pub fn request_startup_window(&mut self, fullscreen: bool) {
+        self.startup_window = Some(fullscreen);
     }
 
     pub fn launch_from_command_line(&mut self, game: &GameEntry, filter: Option<usize>) {
@@ -5924,13 +5895,34 @@ impl eframe::App for PocketLauncher {
             self.library_viewport.size = observed.size;
             self.library_viewport.position = observed.position;
         }
-        // One-shot startup override, after egui/native window state restoration.
-        if let Some(fullscreen) = self.startup_fullscreen.take() {
-            if fullscreen && !observed.fullscreen {
-                self.fullscreen_window_size = observed.size;
+        // Apply startup mode after native restoration, then size a normal window
+        // using a fixed physical target capped to the actual monitor, never a game.
+        if let Some(fullscreen) = self.startup_window {
+            let target = LibraryViewport { fullscreen, maximized: false, size: None, position: None };
+            if target.restore(ctx) {
+                if fullscreen {
+                    self.startup_window = None;
+                } else {
+                    let geometry = ctx.input(|input| {
+                        let viewport = input.viewport();
+                        let monitor = viewport.monitor_size?;
+                        let borders = viewport.inner_rect.zip(viewport.outer_rect)
+                            .map_or(Vec2::ZERO, |(inner, outer)| outer.size() - inner.size());
+                        crate::launch_args::startup_window_size([monitor.x, monitor.y], [borders.x, borders.y], input.pixels_per_point)
+                    });
+                    if let Some(size) = geometry {
+                        let size = Vec2::from(size);
+                        let minimum = Vec2::new(640.0, 420.0) / ctx.pixels_per_point();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(minimum.min(size)));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                        self.fullscreen_window_size = Some(size);
+                        self.library_viewport = LibraryViewport { size: Some(size), ..target };
+                        self.startup_window = None;
+                    } else {
+                        ctx.request_repaint_after(Duration::from_millis(16));
+                    }
+                }
             }
-            self.library_viewport.fullscreen = fullscreen;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
         }
 
         crate::controller_ui::begin_frame(ctx);
@@ -6176,10 +6168,10 @@ impl eframe::App for PocketLauncher {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if fullscreen != self.display_fullscreen {
             self.display_fullscreen = fullscreen;
-            if !fullscreen && self.library_restore_pending.is_none() {
+            if !fullscreen && self.library_restore_pending.is_none() && self.startup_window.is_none() {
                 let size = self.fullscreen_window_size.take()
                     .or(self.library_viewport.size)
-                    .unwrap_or(Vec2::new(1280.0, 600.0));
+                    .unwrap_or(Vec2::new(1280.0, 800.0));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             }
             if let Some(frame) = self.last_frame_snapshot.clone() {

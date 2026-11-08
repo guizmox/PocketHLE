@@ -14,8 +14,11 @@ a Gamepad Steam Input layout, and put this in Steam's launch options:
 --steam-deck
 ```
 
-This selects `config-steamdeck.json`, fullscreen startup and the controller
-profile previously used by the dedicated build. Under Wine/Proton, SDL uses the
+This selects `config-steamdeck.json` and the controller profile previously used
+by the dedicated build. Both PC and Deck start in a normal, non-maximized window:
+1280x800 physical pixels including borders, capped to a smaller monitor. DPI and
+measured decorations determine its client dimensions. Saved fullscreen/viewport
+state cannot override startup; fullscreen remains available through the UI. Under Wine/Proton, SDL uses the
 existing XInput hints; no Proton version-name or controller-brand detection is
 added. On native Linux the flag also selects the settings/fullscreen profile,
 but does not force the Windows XInput driver. Its updates use the Linux package.

@@ -14,6 +14,7 @@ crates\pocket-winceapi\src\gx.rs
 crates\pocket-winceapi\src\zlib.rs
 docs\FRONTENDS.md
 docs\GPU.md
+docs\STEAMDECK.md
 frontends\pocket-android-jni\src\lib.rs
 frontends\pocket-android\app\src\main\java\com\pockethle\app\AddDataDialog.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\AddDataModel.kt
@@ -25,6 +26,9 @@ frontends\pocket-android\app\src\main\res\xml\preferences_game.xml
 frontends\pocket-desktop\src\add_data_prompt.rs
 frontends\pocket-desktop\src\add_data_ui.rs
 frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\desktop_main.rs
 frontends\pocket-desktop\src\file_dialog.rs
 frontends\pocket-desktop\src\fullscreen_layout.rs
 frontends\pocket-desktop\src\gizmondo_layout.rs
+frontends\pocket-desktop\src\launch_args.rs
+frontends\pocket-desktop\src\toolbar_ui.rs

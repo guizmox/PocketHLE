@@ -91,8 +91,13 @@ Discard temporary fullscreen restore sizes so they cannot override this snapshot
 Desktop window dimensions are independent of guest resolution, rotation and
 image zoom. Starting a game or changing these settings never resizes the native
 window. Leaving fullscreen restores the previous windowed size after the native
-mode acknowledgement; startup fullscreen retains the initial windowed size,
-with the launcher size (1280x600 logical points by default) as fallback.
+mode acknowledgement. Both PC and Deck default to a normal, non-maximized
+1280x800 physical-pixel outer window, capped independently on each axis to the
+current monitor. Measured decorations are subtracted for the client area and DPI
+is applied once. Startup waits for native fullscreen/maximize restoration to end
+before sizing. Saved fullscreen/window geometry does not override this policy;
+an explicit CLI display argument of 0 can still request fullscreen. Later manual
+resizing and fullscreen controls remain available.
 Ending a game while its options are visible uses the same session cleanup. A
 queued game-to-game launch retains the original library snapshot.
 
@@ -641,12 +646,9 @@ PocketPC Center tap, but not Screenshot.
 The former Game library, Settings and About dropdown hierarchy is replaced by
 direct buttons in four separated groups: Game library, Settings, Features,
 About. Each group has at most two rows; small windows scroll horizontally
-instead of shrinking labels. The initial desktop width is 1280 logical points;
-at the first library display a one-shot fit also widens an older restored window
-using the measured toolbar overflow. It preserves height, caps width to the
-monitor (with decoration/margin allowance), skips maximized/fullscreen windows,
-and does not constrain later manual resizing. Controller focus reveals the
-selected button.
+instead of shrinking labels. Startup uses the fixed 1280x800 outer-window policy
+above; the old toolbar-overflow startup widening and its state/helpers are removed.
+Controller focus reveals the selected button.
 Directions use button geometry within the toolbar; L3 switches between toolbar
 and page, and A activates the focused button. The footer lists these controls.
 The former F6 section-switch shortcut, interception and help were removed.
@@ -764,8 +766,8 @@ config.json or config-steamdeck.json without process-global state; catalogue and
 per-game manifests remain shared. CLI and Android callers of Library::open keep
 the Standard profile. Backups continue to include both existing settings files.
 
-The Deck profile requests fullscreen on startup unless a positional CLI display
-argument overrides it. Under Wine/Proton (currently Proton Experimental for the
+Both desktop profiles start windowed at 1280x800 physical pixels, capped to the
+monitor; only an explicit positional CLI display argument of 0 requests fullscreen. Under Wine/Proton (currently Proton Experimental for the
 user's Deck), it preserves the existing XInput hints. Native Linux is not forced
 to use XInput. Windows Deck-profile updates choose the Deck archive; native Linux
 chooses the Linux archive. Windows and Deck archives contain the same executable

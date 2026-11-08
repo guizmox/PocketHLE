@@ -5,7 +5,7 @@ pub struct LaunchArgs {
     pub fullscreen: Option<bool>,
     pub filter: Option<usize>,
 }
-pub const HELP: &str = "Usage: pockethle-gui [--steam-deck] [\"Game name or ID\" [0|1 [filter-index]]]\n\n0 = fullscreen, 1 = windowed. Omitted options keep saved preferences (Deck profile starts fullscreen).\nFilters: 0 no filter, 1 reconstruction, 2 SMAA, 3 SMAA Soft,\n4 xBRZ, 5 bicubic, 6 Lanczos, 7 bilinear, 8 nearest.\n--steam-deck selects the Proton/Deck profile, separate settings and fullscreen by default.";
+pub const HELP: &str = "Usage: pockethle-gui [--steam-deck] [\"Game name or ID\" [0|1 [filter-index]]]\n\n0 = fullscreen, 1 = windowed. Omitted display mode opens a normal 1280x800 window (capped to the screen).\nFilters: 0 no filter, 1 reconstruction, 2 SMAA, 3 SMAA Soft,\n4 xBRZ, 5 bicubic, 6 Lanczos, 7 bilinear, 8 nearest.\n--steam-deck selects the Proton/Deck profile, separate settings.";
 
 #[derive(Debug, PartialEq)]
 pub struct StartupArgs {
@@ -44,8 +44,22 @@ pub fn parse(mut args: Vec<String>) -> Result<StartupArgs, String> {
 }
 
 /// Startup policy is applied after native-window restoration as well as in its builder.
-pub fn startup_fullscreen(deck: bool, saved: bool, explicit: Option<bool>) -> bool {
-    explicit.unwrap_or(deck || saved)
+pub fn startup_fullscreen(explicit: Option<bool>) -> bool {
+    explicit.unwrap_or(false)
+}
+
+/// Cap the physical outer window at 1280x800, or the monitor when smaller.
+/// Native viewport geometry is logical: convert the fixed pixel target once,
+/// then subtract measured logical decorations to obtain the client size.
+pub fn startup_window_size(monitor: [f32; 2], decorations: [f32; 2], pixels_per_point: f32) -> Option<[f32; 2]> {
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0
+        || monitor.iter().chain(decorations.iter()).any(|v| !v.is_finite())
+        || monitor.iter().any(|v| *v <= 0.0) { return None; }
+    let size = [
+        monitor[0].min(1280.0 / pixels_per_point) - decorations[0].max(0.0),
+        monitor[1].min(800.0 / pixels_per_point) - decorations[1].max(0.0),
+    ];
+    size.iter().all(|v| *v > 0.0).then_some(size)
 }
 
 fn parse_launch(args: Vec<String>) -> Result<Option<LaunchArgs>, String> {
@@ -190,12 +204,20 @@ mod tests {
 mod startup_tests {
     use super::*;
     #[test]
-    fn deck_starts_fullscreen_with_an_old_windowed_preference_but_cli_wins() {
-        for saved in [false, true] {
-            assert!(startup_fullscreen(true, saved, None));
-            assert!(!startup_fullscreen(true, saved, Some(false)));
-            assert!(startup_fullscreen(true, saved, Some(true)));
-            assert_eq!(startup_fullscreen(false, saved, None), saved);
-        }
+    fn normal_screen_sized_window_is_default_but_explicit_cli_mode_wins() {
+        assert!(!startup_fullscreen(None));
+        assert!(!startup_fullscreen(Some(false)));
+        assert!(startup_fullscreen(Some(true)));
+    }
+    #[test]
+    fn fixed_physical_size_is_capped_to_monitor_and_subtracts_borders() {
+        assert_eq!(startup_window_size([1280.,800.],[0.,0.],1.),Some([1280.,800.]));
+        assert_eq!(startup_window_size([1920.,1080.],[16.,39.],1.),Some([1264.,761.]));
+        assert_eq!(startup_window_size([1024.,600.],[8.,24.],1.),Some([1016.,576.]));
+        assert_eq!(startup_window_size([1280.,720.],[8.,24.],2.),Some([632.,376.]));
+        assert_eq!(startup_window_size([600.,400.],[8.,24.],2.),Some([592.,376.]));
+        assert_eq!(startup_window_size([0.,800.],[0.,0.],1.),None);
+        assert_eq!(startup_window_size([f32::NAN,800.],[0.,0.],1.),None);
+        assert_eq!(startup_window_size([1280.,800.],[0.,0.],0.),None);
     }
 }

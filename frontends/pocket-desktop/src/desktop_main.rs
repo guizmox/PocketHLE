@@ -186,11 +186,7 @@ fn run_launcher() -> Result<()> {
         })
         .transpose()?;
     let explicit_fullscreen = launch.as_ref().and_then(|a| a.fullscreen);
-    let fullscreen = launch_args::startup_fullscreen(
-        steam_deck,
-        library.config().fullscreen,
-        explicit_fullscreen,
-    );
+    let fullscreen = launch_args::startup_fullscreen(explicit_fullscreen);
 
     let icon = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
         .context("decoding PocketHLE logo")?
@@ -209,7 +205,8 @@ fn run_launcher() -> Result<()> {
                 rgba: icon.into_raw(),
             }))
             .with_app_id("PocketHLE")
-            .with_inner_size([1280.0, 600.0])
+            .with_inner_size([1280.0, 800.0])
+            .with_maximized(false)
             .with_min_inner_size([640.0, 420.0])
             .with_fullscreen(fullscreen)
             .with_title(title),
@@ -227,9 +224,7 @@ fn run_launcher() -> Result<()> {
             }
             // Reapply after native window creation/restoration. Do this once;
             // the user can subsequently leave fullscreen using the normal controls.
-            if steam_deck || explicit_fullscreen.is_some() {
-                app.request_startup_fullscreen(fullscreen);
-            }
+            app.request_startup_window(fullscreen);
             Box::new(app) as Box<dyn eframe::App>
         }),
     )

@@ -167,19 +167,6 @@ pub const NAV_HINT: &str = "D-pad / left stick: navigate   {South}: open   {East
 
 pub struct Output {
     pub action: Option<Action>,
-    pub horizontal_overflow: f32,
-}
-
-/// Startup sizing uses measured toolbar overflow in logical points, not a
-/// duplicated estimate of button widths. Never shrink an existing window.
-pub fn opening_width(current: f32, overflow: f32, monitor: f32, decorations: f32) -> Option<f32> {
-    if overflow <= 1.0 || monitor <= 0.0 {
-        return None;
-    }
-    let target = (current + overflow + 2.0)
-        .ceil()
-        .min((monitor - decorations.max(0.0) - 24.0).max(0.0));
-    (target > current + 1.0).then_some(target)
 }
 
 pub fn show(ui: &mut Ui, state: &State<'_>) -> Output {
@@ -192,7 +179,7 @@ pub fn show(ui: &mut Ui, state: &State<'_>) -> Output {
         }
     });
     ui.add_space(3.0);
-    let scroll = egui::ScrollArea::horizontal()
+    egui::ScrollArea::horizontal()
         .id_source("main_toolbar_buttons")
         .auto_shrink([false, true])
         .show(ui, |ui| {
@@ -231,10 +218,7 @@ pub fn show(ui: &mut Ui, state: &State<'_>) -> Output {
             });
         });
     ui.separator();
-    Output {
-        action,
-        horizontal_overflow: (scroll.content_size.x - scroll.inner_rect.width()).max(0.0),
-    }
+    Output { action }
 }
 
 #[cfg(test)]
@@ -331,42 +315,6 @@ mod tests {
             vec![egui::Event::PointerMoved(point), event(true)],
         );
         frame(ctx, nav, state, 1280.0, vec![event(false)]).1
-    }
-
-    #[test]
-    fn startup_width_fits_the_measured_toolbar_and_respects_small_monitors() {
-        assert_eq!(opening_width(960.0, 200.0, 1920.0, 16.0), Some(1162.0));
-        assert_eq!(opening_width(960.0, 200.0, 1024.0, 16.0), Some(984.0));
-        assert_eq!(opening_width(1280.0, 0.0, 1920.0, 16.0), None);
-        assert_eq!(opening_width(1280.0, 200.0, 1024.0, 16.0), None);
-        assert_eq!(opening_width(960.0, 200.0, 0.0, 16.0), None);
-        let ctx = egui::Context::default();
-        let state = state();
-        let mut width = 960.0;
-        let mut overflow = 0.0;
-        for pass in 0..3 {
-            let _ = ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        Vec2::new(width, 400.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::TopBottomPanel::top("opening_width_test")
-                        .show(ctx, |ui| overflow = show(ui, &state).horizontal_overflow);
-                },
-            );
-            if pass == 0 {
-                assert!(overflow > 0.0);
-                width = opening_width(width, overflow, 1920.0, 16.0).unwrap();
-            }
-        }
-        assert!(
-            overflow <= 1.0,
-            "the measured startup resize must show the entire toolbar"
-        );
     }
 
     #[test]
