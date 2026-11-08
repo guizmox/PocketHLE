@@ -1651,6 +1651,62 @@ fn fill_output_u16(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "audio-cpal")]
+    #[test]
+    fn voice_groups_pause_resume_and_stop_independently_without_a_host_device() {
+        let engine = AudioEngine::new();
+        let format = GuestFormat {
+            sample_rate: 22050,
+            channels: 1,
+            bits_per_sample: 16,
+        };
+        for (group, samples) in [(11, [1000i16; 4]), (22, [2000i16; 4])] {
+            engine.play_voice_with(
+                &samples,
+                format,
+                VoiceParams {
+                    group,
+                    looped: true,
+                    volume: 1.0,
+                },
+            );
+        }
+        // Use the same mixer as CPAL, without starting a hardware output worker
+        // or racing a second consumer against a host callback.
+        let render = || {
+            let mut output = [0f32; 32];
+            engine
+                .shared
+                .lock()
+                .unwrap()
+                .render_frames(&mut output, 22050, 1);
+            output
+        };
+        engine.pause_voice_group(11, true);
+        assert!(
+            render().iter().all(|s| *s > 0.0),
+            "the other group remains audible"
+        );
+        engine.pause_voice_group(22, true);
+        assert!(render().iter().all(|s| *s == 0.0), "both groups are paused");
+        engine.pause_voice_group(11, false);
+        assert!(
+            render().iter().all(|s| *s > 0.0),
+            "one group resumes independently"
+        );
+        engine.stop_voice_group(22);
+        assert!(
+            render().iter().all(|s| *s > 0.0),
+            "stopping a different group preserves output"
+        );
+        engine.stop_voice_group(11);
+        assert!(
+            render().iter().all(|s| *s == 0.0),
+            "stopping the final group silences output"
+        );
+        assert!(engine.worker.is_none());
+    }
+
     #[test]
     fn wave_volume_updates_queued_loop_and_future_streams_without_stopping_cursors() {
         let engine = AudioEngine::new();
