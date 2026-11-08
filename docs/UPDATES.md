@@ -1,6 +1,6 @@
 # Startup release checks
 
-The desktop launcher (Windows/Linux and the dedicated Steam Deck edition) and
+The desktop launcher (Windows/Linux and the runtime Steam Deck profile) and
 Android catalogue check the latest published stable release of
 `guizmox/PocketHLE` once at startup. They use the public GitHub Releases API,
 not Actions artifacts or commits. No GitHub account/token is required.
@@ -21,8 +21,8 @@ new distributed APK.
 
 On desktop, the prompt waits until the catalogue is available, outside imports,
 gameplay and other launch prompts. Download opens the system browser; Later
-dismisses it for this launch. Enter/A downloads and Escape/B dismisses, including
-on Steam Deck without a mouse. Android uses a dismissible catalogue Snackbar
+dismisses it for this launch. Enter/controller South downloads and Escape/controller East dismisses.
+The UI shows the active controller's reported labels, including on Deck. Android uses a dismissible catalogue Snackbar
 with Download, deferred until the activity is resumed and imports are finished.
 Activity recreation reuses the process result instead of starting more requests.
 
@@ -31,8 +31,8 @@ The matching release asset is selected when unique:
 | Edition | Release asset |
 | --- | --- |
 | Windows | Windows ZIP, excluding Steam Deck |
-| Steam Deck | Dedicated steamdeck/steam-deck ZIP |
-| Linux | Linux ZIP or tar.gz |
+| Windows under Proton, --steam-deck | steamdeck/steam-deck ZIP containing the common Windows executable |
+| Linux, either launch profile | Linux ZIP or tar.gz |
 | Android | APK |
 
 Absent or ambiguous assets open that release's page. Download URLs must belong

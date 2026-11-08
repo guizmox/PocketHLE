@@ -54,7 +54,6 @@ pub fn calculate(
     native: [u32; 2],
     dpi: f32,
     maximum: Option<u32>,
-    _deck: bool,
 ) -> Layout {
     let w = size[0].max(1.0);
     let h = size[1].max(1.0);
@@ -159,7 +158,7 @@ mod tests {
             for native in [[320, 240], [640, 480], [1280, 960]] {
                 for dpi in [1.0, 1.25, 1.5, 2.0] {
                     for maximum in [None, Some(1), Some(2)] {
-                        let g = calculate(size, native, dpi, maximum, true);
+                        let g = calculate(size, native, dpi, maximum);
                         let controls = g
                             .functions
                             .iter()
@@ -204,13 +203,13 @@ mod tests {
             for factor in [1, 2] {
                 for dpi in [1.0, 1.5, 2.0] {
                     let body = window_body(native, factor, dpi);
-                    let g = calculate(body, native, dpi, Some(factor), false);
+                    let g = calculate(body, native, dpi, Some(factor));
                     assert_eq!((g.screen.w * dpi).round() as u32, native[0] * factor);
                     assert_eq!((g.screen.h * dpi).round() as u32, native[1] * factor);
                 }
             }
         }
-        let a = calculate([1280., 800.], [320, 240], 1., None, true).actions[0];
+        let a = calculate([1280., 800.], [320, 240], 1., None).actions[0];
         assert!(a.contains(a.center(), true));
         assert!(!a.contains([a.x + 0.1, a.y + 0.1], true));
         assert!(a.contains([a.x + 0.1, a.y + 0.1], false));

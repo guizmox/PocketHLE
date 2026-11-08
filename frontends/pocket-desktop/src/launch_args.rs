@@ -5,14 +5,50 @@ pub struct LaunchArgs {
     pub fullscreen: Option<bool>,
     pub filter: Option<usize>,
 }
-pub const HELP: &str = "Usage: pockethle-gui [\"Game name or ID\" [0|1 [filter-index]]]\n\n0 = fullscreen, 1 = windowed. Omitted options keep saved preferences (Steam Deck starts fullscreen).\nFilters: 0 reconstruction, 1 SMAA + reconstruction, 2 SMAA + bilinear,\n3 xBRZ, 4 bicubic, 5 Lanczos, 6 bilinear, 7 nearest.\nThe Steam Deck executable accepts the same arguments.";
+pub const HELP: &str = "Usage: pockethle-gui [--steam-deck] [\"Game name or ID\" [0|1 [filter-index]]]\n\n0 = fullscreen, 1 = windowed. Omitted options keep saved preferences (Deck profile starts fullscreen).\nFilters: 0 no filter, 1 reconstruction, 2 SMAA, 3 SMAA Soft,\n4 xBRZ, 5 bicubic, 6 Lanczos, 7 bilinear, 8 nearest.\n--steam-deck selects the Proton/Deck profile, separate settings and fullscreen by default.";
+
+#[derive(Debug, PartialEq)]
+pub struct StartupArgs {
+    pub profile: pocket_library::LauncherProfile,
+    pub help: bool,
+    pub launch: Option<LaunchArgs>,
+}
+
+pub fn parse(mut args: Vec<String>) -> Result<StartupArgs, String> {
+    use pocket_library::LauncherProfile;
+    let mut profile = LauncherProfile::Standard;
+    let mut help = false;
+    while let Some(arg) = args.first() {
+        match arg.as_str() {
+            "--steam-deck" if profile == LauncherProfile::Standard => {
+                profile = LauncherProfile::SteamDeck
+            }
+            "--help" | "-h" => help = true,
+            "--" => {
+                args.remove(0);
+                break;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("Unknown or duplicate option: {value}\n{HELP}"))
+            }
+            _ => break,
+        }
+        args.remove(0);
+    }
+    let launch = if help { None } else { parse_launch(args)? };
+    Ok(StartupArgs {
+        profile,
+        help,
+        launch,
+    })
+}
 
 /// Startup policy is applied after native-window restoration as well as in its builder.
 pub fn startup_fullscreen(deck: bool, saved: bool, explicit: Option<bool>) -> bool {
     explicit.unwrap_or(deck || saved)
 }
 
-pub fn parse(args: Vec<String>) -> Result<Option<LaunchArgs>, String> {
+fn parse_launch(args: Vec<String>) -> Result<Option<LaunchArgs>, String> {
     if args.is_empty() {
         return Ok(None);
     }
@@ -34,8 +70,8 @@ pub fn parse(args: Vec<String>) -> Result<Option<LaunchArgs>, String> {
         .map(|s| {
             s.parse::<usize>()
                 .ok()
-                .filter(|n| *n < 8)
-                .ok_or_else(|| format!("Invalid filter index: use 0 to 7.\n{HELP}"))
+                .filter(|n| *n < 9)
+                .ok_or_else(|| format!("Invalid filter index: use 0 to 8.\n{HELP}"))
         })
         .transpose()?;
     Ok(Some(LaunchArgs {
@@ -79,34 +115,65 @@ mod tests {
         a.iter().map(|s| (*s).into()).collect()
     }
     #[test]
+    fn runtime_profile_can_launch_the_library_or_a_game() {
+        use pocket_library::LauncherProfile;
+        let standard = super::parse(vec![]).unwrap();
+        assert_eq!(standard.profile, LauncherProfile::Standard);
+        assert!(standard.launch.is_none());
+        let deck = super::parse(args(&["--steam-deck"])).unwrap();
+        assert_eq!(deck.profile, LauncherProfile::SteamDeck);
+        assert!(deck.launch.is_none());
+        let game = super::parse(args(&["--steam-deck", "Game", "1", "7"])).unwrap();
+        assert_eq!(game.launch.unwrap().fullscreen, Some(false));
+        assert!(super::parse(args(&["--steam-deck", "--steam-deck"])).is_err());
+        assert!(super::parse(args(&["--unknown"])).is_err());
+        assert!(
+            super::parse(args(&["--steam-deck", "--help"]))
+                .unwrap()
+                .help
+        );
+    }
+    #[test]
     fn no_args_preserves_launcher() {
-        assert_eq!(parse(vec![]).unwrap(), None);
+        assert_eq!(parse_launch(vec![]).unwrap(), None);
     }
     #[test]
     fn display_modes_and_optional_filter() {
-        let p = parse(args(&["Sim City", "0", "7"])).unwrap().unwrap();
+        let p = parse_launch(args(&["Sim City", "0", "7"]))
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (p.game.as_str(), p.fullscreen, p.filter),
             ("Sim City", Some(true), Some(7))
         );
         assert_eq!(
-            parse(args(&["Game", "1"])).unwrap().unwrap().fullscreen,
+            parse_launch(args(&["Game", "1"]))
+                .unwrap()
+                .unwrap()
+                .fullscreen,
             Some(false)
         );
-        let p = parse(args(&["Game"])).unwrap().unwrap();
+        assert_eq!(
+            parse_launch(args(&["Game", "0", "8"]))
+                .unwrap()
+                .unwrap()
+                .filter,
+            Some(8)
+        );
+        let p = parse_launch(args(&["Game"])).unwrap().unwrap();
         assert_eq!((p.fullscreen, p.filter), (None, None));
     }
     #[test]
     fn rejects_invalid_arguments() {
         for a in [
             &["Game", "2"][..],
-            &["Game", "0", "8"],
+            &["Game", "0", "9"],
             &["Game", "0", "-1"],
             &["Game", "0", "x"],
             &["Game", "0", "0", "extra"],
             &[""],
         ] {
-            assert!(parse(args(a)).is_err());
+            assert!(parse_launch(args(a)).is_err());
         }
     }
     #[test]

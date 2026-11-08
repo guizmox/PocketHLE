@@ -339,15 +339,15 @@ game after saving. Desktop physical routing reads the saved launcher config.
 
 ### Storage, precedence and runtime timing
 
-The Deck layout is the common factory reference on desktop, dedicated Deck and
+The Deck layout is the common factory reference on desktop, the runtime Deck profile and
 Android, including Pocket PC shoulder/face/thumb mappings and Gizmondo L1 volume.
 `deck-input-defaults.json` is checked against Rust and Android defaults by tests.
-Library loading migrates recognized legacy factory maps without rewriting custom
-tables. Legacy keyboard/controller and keyboard stylus tables remain shared between device
+Standard-profile library loading migrates the recognized old PC factory map
+without rewriting custom tables. Deck-specific legacy binding migrations are removed. Legacy keyboard/controller and keyboard stylus tables remain shared between device
 profiles; new explicit command overrides are profile-specific.
 
 `short_press_bindings` and `long_press_bindings` are optional maps in the launcher
-configuration (`config.json`, or `config-steamdeck.json` for the dedicated edition).
+configuration (`config.json`, or `config-steamdeck.json` for the runtime Deck profile).
 Keys are `pocketpc:keyboard:x` or `gizmondo:controller:South`, using canonical
 punctuation/lowercase keyboard names and canonical SDL controller names. Short
 values are assignable device-button or host-command IDs, or null for explicit
@@ -705,3 +705,25 @@ Android does not bundle desktop SDL3. Historical SDL2 guest-ABI references and
 orbclient's target-specific transitive SDL2 dependency are unrelated to the
 removed desktop backend and must not be deleted as if they were dead frontend
 code.
+
+## Desktop runtime launch profiles
+
+One `pockethle-gui` executable supports the standard profile and `--steam-deck`.
+There is no Steam Deck Cargo feature or second main file. The argument is parsed
+before opening the library, initializing SDL or selecting updates. A runtime
+LauncherProfile belongs to each Library handle, including clones, staging
+imports, background reload/import jobs and the game runner/children. It chooses
+config.json or config-steamdeck.json without process-global state; catalogue and
+per-game manifests remain shared. CLI and Android callers of Library::open keep
+the Standard profile. Backups continue to include both existing settings files.
+
+The Deck profile requests fullscreen on startup unless a positional CLI display
+argument overrides it. Under Wine/Proton (currently Proton Experimental for the
+user's Deck), it preserves the existing XInput hints. Native Linux is not forced
+to use XInput. Windows Deck-profile updates choose the Deck archive; native Linux
+chooses the Linux archive. Windows and Deck archives contain the same executable
+built once by CI. Colors controller help is shown whenever a controller is
+connected, independent of launch profile. The unused layout argument and old
+Deck-specific migration functions/tests are removed. See STEAMDECK.md for Steam
+shortcut setup; old executable targets must be changed to pockethle-gui.exe with
+--steam-deck. There is no executable-name compatibility shim.

@@ -12,11 +12,6 @@ description = "Cross-platform desktop launcher GUI for PocketHLE (Linux + Window
 name = "pockethle-gui"
 path = "src/main.rs"
 
-[[bin]]
-name = "pockethle-steamdeck"
-path = "src/steamdeck_main.rs"
-required-features = ["steam-deck"]
-
 [[example]]
 name = "hardware-diag-bluetooth-host"
 path = "../../tools/hardware-diag/suites/bluetooth/host-radio.rs"
@@ -32,8 +27,6 @@ unicorn = ["pocket-core/unicorn"]
 audio-cpal = ["pocket-core/audio-cpal"]
 
 video-static = ["pocket-core/video-static"]
-# Dedicated Windows build for Steam Deck under Proton.
-steam-deck = ["pocket-library/steam-deck"]
 
 [dependencies]
 anyhow.workspace = true

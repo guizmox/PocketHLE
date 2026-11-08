@@ -145,7 +145,8 @@ fn main() -> Result<()> {
 
 fn run_launcher() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+    let startup = launch_args::parse(args).map_err(anyhow::Error::msg)?;
+    if startup.help {
         println!("{}", launch_args::HELP);
         #[cfg(windows)]
         rfd::MessageDialog::new()
@@ -154,8 +155,10 @@ fn run_launcher() -> Result<()> {
             .show();
         return Ok(());
     }
-    let launch = launch_args::parse(args).map_err(anyhow::Error::msg)?;
-    let title = if cfg!(feature = "steam-deck") {
+    let profile = startup.profile;
+    let steam_deck = profile == pocket_library::LauncherProfile::SteamDeck;
+    let launch = startup.launch;
+    let title = if steam_deck {
         "PocketHLE — Steam Deck"
     } else {
         "PocketHLE"
@@ -166,7 +169,7 @@ fn run_launcher() -> Result<()> {
     if let Some(path) = log_path {
         log::info!("Logging to {}", path.display());
     }
-    let library = Library::open(&library_root).context("opening PocketHLE library")?;
+    let library = Library::open_with_profile(&library_root, profile).context("opening PocketHLE library")?;
 
     let launch_game = launch
         .as_ref()
@@ -184,7 +187,7 @@ fn run_launcher() -> Result<()> {
         .transpose()?;
     let explicit_fullscreen = launch.as_ref().and_then(|a| a.fullscreen);
     let fullscreen = launch_args::startup_fullscreen(
-        cfg!(feature = "steam-deck"),
+        steam_deck,
         library.config().fullscreen,
         explicit_fullscreen,
     );
@@ -224,7 +227,7 @@ fn run_launcher() -> Result<()> {
             }
             // Reapply after native window creation/restoration. Do this once;
             // the user can subsequently leave fullscreen using the normal controls.
-            if cfg!(feature = "steam-deck") || explicit_fullscreen.is_some() {
+            if steam_deck || explicit_fullscreen.is_some() {
                 app.request_startup_fullscreen(fullscreen);
             }
             Box::new(app) as Box<dyn eframe::App>

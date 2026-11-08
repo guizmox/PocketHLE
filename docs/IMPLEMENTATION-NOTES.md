@@ -3212,14 +3212,13 @@ and unchanged. MSR reads bmBits and explicitly widens 555 before its colour
 lookup: supplying 565 produces a red index up to63 for a32-entry table.
 Tests cover public bits, padding, bottom-up rows and cache consistency.
 
-The standard desktop launcher now uses the same in-game controller overrides
-and host View/Menu gestures as the Deck executable. Do not gate controller
-behavior on steam-deck; that feature still selects release/config identity
-and Deck display fitting. Startup migrates exact old factory maps only via
-migrate_desktop_gamepad_layout; customized maps and Android defaults are
-preserved. The shared preset remains explicitly selectable in controller
-settings. SDL already normalizes by physical position, including Switch Pro:
-South=Switch B/Xbox A; East=Switch A/Xbox B.
+Desktop launch profiles share in-game controller overrides, host View/Menu
+gestures and display fitting. A single executable selects the Deck settings,
+fullscreen startup, Proton hints and update archive through --steam-deck.
+There is no Deck Cargo feature. The old PC factory-map upgrade remains limited
+to the Standard profile; old Deck binding/fullscreen migrations are removed.
+The shared preset is still selectable in controller settings. SDL3 normalizes
+physical inputs and provides UI labels for the opened gamepad.
 
 PocketPC Android portrait uses the landscape thumb size with exchanged screen
 axes: min(140dp, portraitHeight/5, portraitWidth/3). Keep both D-pad and aim
@@ -3895,16 +3894,17 @@ patch, registration change, game name or unconditional success is used.
 
 #### Desktop direct library launch (2026-10-28)
 
-Both desktop_main.rs entrypoints accept game name/ID, display mode 0=fullscreen
-1=windowed, and filter index 0..7 in UpscaleFilter::ALL menu order. No arguments
+The single desktop entrypoint accepts --steam-deck before the optional game
+name/ID, display mode 0=fullscreen / 1=windowed, and filter index 0..8 in
+UpscaleFilter::ALL menu order. No arguments
 retain the launcher. Resolve exact ID first then unique case-insensitive display
 name; ambiguity/errors fail explicitly before opening the game. --help documents
 the syntax. Reuse spawn_run and its startup/dependency prompts, not a second runner.
 Initial CLI display/filter overrides do not write saved preferences. Existing
 interactive settings actions retain their normal behavior. The existing CLI
-package executable named pockethle remains distinct; GUI binaries are still
-pockethle-gui and pockethle-steamdeck. Four pure argument/lookup tests pass;
-no full native desktop build is claimed.
+package executable named pockethle remains distinct; the GUI binary is
+pockethle-gui, with an explicit runtime profile flag. Argument/profile/lookup tests cover the current parser; build and device
+validation remain separate.
 
 
 

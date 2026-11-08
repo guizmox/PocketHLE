@@ -47,6 +47,7 @@ fn presentation_phase(
 
 #[derive(Debug, Clone)]
 pub struct Runner {
+    library_profile:pocket_library::LauncherProfile,
     inner: Arc<Mutex<()>>,
     missing_api_logging: Arc<AtomicBool>,
     shared_context_source: Arc<Mutex<Option<pocket_core::winceapi::gles::SharedContextSource>>>,
@@ -56,6 +57,7 @@ pub struct Runner {
 impl Default for Runner {
     fn default() -> Self {
         Self {
+            library_profile:Default::default(),
             inner: Default::default(),
             missing_api_logging: Arc::new(AtomicBool::new(true)),
             shared_context_source: Default::default(),
@@ -64,8 +66,8 @@ impl Default for Runner {
     }
 }
 impl Runner {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(library_profile:pocket_library::LauncherProfile) -> Self {
+        Self {library_profile,..Self::default()}
     }
 
     pub fn set_shared_context_source(
@@ -222,7 +224,7 @@ impl Runner {
         // [`pocket_library::Library::migrate_legacy_entries`], which
         // covers users who downgrade or who have a stale
         // `library.json` from before that migration existed.
-        let launcher_config = pocket_library::Library::open(library_root)
+        let launcher_config = pocket_library::Library::open_with_profile(library_root,self.library_profile)
             .map(|l| l.config().clone())
             .unwrap_or_default();
         let requested_backend = game.settings.cpu_backend;
@@ -1576,7 +1578,7 @@ mod child_card_tests {
         std::fs::write(card.join("autorun.exe"), b"card game").unwrap();
         game.settings.storage_card_dir = Some(card.clone());
         test(LaunchContext {
-            runner: Runner::new(),
+            runner: Runner::new(Default::default()),
             library_root: root.clone(),
             game,
             card_root: card,
@@ -1770,7 +1772,7 @@ mod launcher_return_tests {
         let table = context.as_ref().map(|context| context.table.clone());
         let mut hook = RunHook::new(None, None);
         let (outcome, code) =
-            Runner::new().run_process(&root, &game, &card, None, None, context, None, &mut hook);
+            Runner::new(Default::default()).run_process(&root, &game, &card, None, None, context, None, &mut hook);
         assert_eq!(code, 77, "{}", outcome.summary);
         if let Some(table) = table {
             assert_eq!(table.exit_code(table.process_id(), None), Some(77));
@@ -1866,7 +1868,7 @@ mod launcher_return_tests {
         });
         let mut hook = RunHook::new(None, Some(rx));
         let (outcome, code) =
-            Runner::new().run_process(&root, &game, &card, None, None, None, None, &mut hook);
+            Runner::new(Default::default()).run_process(&root, &game, &card, None, None, None, None, &mut hook);
         completed.store(true, Ordering::Release);
         input.join().unwrap();
         assert_eq!(code, 0, "{}", outcome.summary);
@@ -2119,7 +2121,7 @@ mod deferred_read_tests {
             pocket_core::winceapi::gles::ExternalGpuContext::capture_current().unwrap()
         });
         let source = owner.as_ref().unwrap().source();
-        let runner = Runner::new();
+        let runner = Runner::new(Default::default());
         runner.set_shared_context_source(Some(source.clone()));
         let policy = runner.shared_export_policy();
         policy.store(true, Ordering::Release);

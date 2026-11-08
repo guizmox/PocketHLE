@@ -1,6 +1,9 @@
 .github\workflows\ci.yml
 Cargo.lock
+crates\pocket-library\Cargo.toml
 crates\pocket-library\src\analysis.rs
+crates\pocket-library\src\backup.rs
+crates\pocket-library\src\keybindings.rs
 crates\pocket-library\src\lib.rs
 crates\pocket-library\src\stylus.rs
 crates\pocket-library\src\stylus_grid.rs
@@ -10,6 +13,7 @@ docs\GIZMONDO.md
 docs\GPU.md
 docs\IMPLEMENTATION-NOTES.md
 docs\STEAMDECK.md
+docs\UPDATES.md
 frontends\pocket-android-jni\Cargo.toml
 frontends\pocket-android-jni\src\lib.rs
 frontends\pocket-android-jni\src\runner.rs
@@ -60,8 +64,12 @@ frontends\pocket-desktop\src\controller_ui.rs
 frontends\pocket-desktop\src\desktop_main.rs
 frontends\pocket-desktop\src\file_dialog.rs
 frontends\pocket-desktop\src\gamepad.rs
+frontends\pocket-desktop\src\gamepad_host.rs
+frontends\pocket-desktop\src\gizmondo_layout.rs
+frontends\pocket-desktop\src\launch_args.rs
 frontends\pocket-desktop\src\recordings_gallery.rs
 frontends\pocket-desktop\src\remove_game.rs
+frontends\pocket-desktop\src\runner.rs
 frontends\pocket-desktop\src\stylus_controls_ui.rs
 frontends\pocket-desktop\src\toolbar_ui.rs
 tools\make-gtshell-profile.py

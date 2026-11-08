@@ -8,7 +8,6 @@ authors.workspace = true
 description = "Game library / configuration management for PocketHLE GUI frontends."
 
 [features]
-steam-deck = []
 release-updates = ["dep:ureq", "dep:rustls", "dep:rustls-native-certs", "dep:webpki-roots"]
 
 [dependencies]

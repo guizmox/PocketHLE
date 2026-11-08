@@ -346,13 +346,14 @@ fn worker(
     selected: &AtomicUsize,
     enabled: &AtomicBool,
     commands: &Receiver<crate::rumble::Command>,
+    steam_deck: bool,
 ) -> Result<(), String> {
     // egui's window is not an SDL window. SDL must receive reports even with
     // no SDL keyboard focus; guest input is still gated by egui's real focus.
     sdl3::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     sdl3::hint::set("SDL_JOYSTICK_HIDAPI", "1");
     sdl3::hint::set("SDL_JOYSTICK_HIDAPI_SWITCH", "1");
-    if cfg!(feature = "steam-deck") && crate::gamepad_host::is_wine() {
+    if steam_deck && crate::gamepad_host::is_wine() {
         // Apply after normal defaults and before opening any SDL device.
         // Explicit environment overrides remain available for advanced setups.
         for (name, value) in crate::gamepad_host::PROTON_HINTS {
@@ -683,7 +684,7 @@ impl Drop for Monitor {
         }
     }
 }
-pub fn start(ctx: egui::Context) -> Monitor {
+pub fn start(ctx: egui::Context, steam_deck: bool) -> Monitor {
     let (tx, rx) = mpsc::channel();
     let alive = Arc::new(AtomicBool::new(true));
     let worker_alive = alive.clone();
@@ -708,6 +709,7 @@ pub fn start(ctx: egui::Context) -> Monitor {
                 &worker_selected,
                 &worker_enabled,
                 &command_rx,
+                steam_deck,
             ) {
                 let _ = publish(&tx, &ctx, Event::Error(error), false);
             }

@@ -822,19 +822,7 @@ pub(crate) fn filtered_snapshot_image(
     ))
 }
 impl PocketLauncher {
-    pub fn new(cc: &eframe::CreationContext<'_>, mut library: Library) -> Self {
-        let migrated = {
-            let config = library.config_mut();
-            pocket_library::keybindings::migrate_desktop_gamepad_layout(
-                &mut config.gamepad_bindings,
-                &mut config.gamepad_fullscreen,
-            )
-        };
-        if migrated {
-            if let Err(error) = library.save() {
-                log::warn!("Could not save controller layout migration: {error}");
-            }
-        }
+    pub fn new(cc: &eframe::CreationContext<'_>, library: Library) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::from_rgb(23, 25, 30);
         visuals.window_fill = Color32::from_rgb(41, 45, 54);
@@ -845,14 +833,17 @@ impl PocketLauncher {
         visuals.override_text_color = Some(Color32::from_rgb(230, 232, 237));
         cc.egui_ctx.set_visuals(visuals);
         let (tx, rx) = mpsc::channel();
+        let profile = library.profile();
         let updates_tx = tx.clone();
         let updates_ctx = cc.egui_ctx.clone();
         std::thread::spawn(move || {
             use pocket_library::updates::{self, Platform};
-            let platform = if cfg!(feature = "steam-deck") {
-                Platform::SteamDeck
-            } else if cfg!(windows) {
-                Platform::Windows
+            let platform = if cfg!(windows) {
+                if profile == pocket_library::LauncherProfile::SteamDeck {
+                    Platform::SteamDeck
+                } else {
+                    Platform::Windows
+                }
             } else {
                 Platform::Linux
             };
@@ -874,7 +865,7 @@ impl PocketLauncher {
         } else {
             None
         };
-        let runner = Runner::new();
+        let runner = Runner::new(profile);
         runner.set_shared_context_source(shared_gpu_context.as_ref().map(|c| c.source()));
         runner.set_missing_api_logging(library.config().log_unimplemented_apis);
         let upscale_filter = UpscaleFilter::from_id(&library.config().upscale_filter);
@@ -964,7 +955,7 @@ impl PocketLauncher {
             system_media: SystemMediaView::default(),
             media_keys_down: [false; 2],
             held: HeldButtons::default(),
-            gamepad_rx: crate::gamepad::start(cc.egui_ctx.clone()),
+            gamepad_rx: crate::gamepad::start(cc.egui_ctx.clone(), profile == pocket_library::LauncherProfile::SteamDeck),
             gamepad_devices: Vec::new(),
             gamepad_selected: None,
             gamepad_error: None,
@@ -1482,7 +1473,7 @@ impl PocketLauncher {
     }
 
     fn reload_library(&mut self) {
-        match Library::open(self.library.root()) {
+        match Library::open_with_profile(self.library.root(), self.library.profile()) {
             Ok(lib) => {
                 self.library = lib;
                 self.analysis_cache.clear();
@@ -2256,11 +2247,12 @@ impl PocketLauncher {
         }
         if pending.updates().is_empty() {
             let pending = self.pending_import.take().unwrap();
+            let profile = self.library.profile();
             let root = self.library.root().to_path_buf();
             let tx = self.events_tx.clone();
             self.status = "Importing...".into();
             std::thread::spawn(move || {
-                let result = Library::open(root)
+                let result = Library::open_with_profile(root, profile)
                     .and_then(|mut lib| {
                         let entries = lib.apply_prepared_import(pending, false)?;
                         Ok(ImportedGames::analyze(entries, &lib, &[]))
@@ -2306,12 +2298,13 @@ impl PocketLauncher {
             self.status = "Import cancelled.".into();
         } else if update {
             let pending = self.pending_import.take().unwrap();
+            let profile = self.library.profile();
             let root = self.library.root().to_path_buf();
             let tx = self.events_tx.clone();
             self.updating_import = true;
             self.status = "Updating game files...".into();
             std::thread::spawn(move || {
-                let result = Library::open(root)
+                let result = Library::open_with_profile(root, profile)
                     .and_then(|mut lib| {
                         let existing_ids: Vec<_> =
                             lib.games().iter().map(|game| game.id.clone()).collect();
@@ -2395,10 +2388,11 @@ impl PocketLauncher {
             self.demo_import = None;
             self.library_busy = true;
             self.status = "Separating demo card games…".into();
+            let profile = self.library.profile();
             let root = self.library.root().to_path_buf();
             let tx = self.events_tx.clone();
             std::thread::spawn(move || {
-                let result = Library::open(root)
+                let result = Library::open_with_profile(root, profile)
                     .and_then(|mut library| library.split_demo_card(&id))
                     .map_err(|e| e.to_string());
                 let _ = tx.send(UiEvent::DemoSplitFinished(id, result));
@@ -3808,7 +3802,6 @@ impl PocketLauncher {
             } else {
                 Some(if self.upscale_x2 { 2 } else { 1 })
             },
-            cfg!(feature = "steam-deck"),
         );
         let rect = |r: crate::gizmondo_layout::BoxRect| {
             Rect::from_min_size(bounds.min + Vec2::new(r.x, r.y), Vec2::new(r.w, r.h))
@@ -5452,11 +5445,12 @@ impl PocketLauncher {
     }
 
     fn import_selected_file(&mut self, path: std::path::PathBuf) {
+        let profile = self.library.profile();
         let library_root = self.library.root().to_path_buf();
         let tx = self.events_tx.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<Option<ImportedGames>, String> {
-                let mut lib = Library::open(&library_root).map_err(|e| e.to_string())?;
+                let mut lib = Library::open_with_profile(&library_root, profile).map_err(|e| e.to_string())?;
                 let parent = path
                     .parent()
                     .map(|p| p.to_path_buf())
@@ -5587,7 +5581,7 @@ impl PocketLauncher {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
-                if cfg!(feature = "steam-deck") {
+                if !self.gamepad_devices.is_empty() {
                     ui.label(crate::controller_labels::text(ctx, "{South}: Start • {East}: Back • {West}: Unlock Turf Wars + Tag Editor • D-pad / stick: language"));
                 }
                 if languages.len() > 1 {

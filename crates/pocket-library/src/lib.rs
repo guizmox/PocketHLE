@@ -6,7 +6,8 @@
 //! ```text
 //! <library_root>/
 //!     library.json     # registry of installed games (this crate)
-//!     config.json      # global launcher settings (this crate)
+//!     config.json      # Standard launcher settings (CLI/Android/desktop)
+//!     config-steamdeck.json # optional runtime Deck settings
 //!     games/
 //!         <id>/
 //!             game.json    # per-game manifest (this crate)
@@ -1443,6 +1444,7 @@ pub enum PocketPcControlsSize {
 /// registry; mutations are written through to disk immediately.
 #[derive(Debug, Clone)]
 pub struct Library {
+    profile: LauncherProfile,
     root: PathBuf,
     library: LibraryFile,
     config: LauncherConfig,
@@ -1454,6 +1456,7 @@ pub struct Library {
 pub struct PreparedImport {
     staging: tempfile::TempDir,
     target_root: PathBuf,
+    profile: LauncherProfile,
     zip_source: bool,
     entries: Vec<GameEntry>,
     updates: Vec<GameEntry>,
@@ -1485,8 +1488,8 @@ impl PreparedImport {
             .iter()
             .find(|c| c.index == index)
             .ok_or_else(|| LibraryError::InvalidId("Unknown installer cabinet selection".into()))?;
-        let target = Library::open(&self.target_root)?;
-        let mut provisional = Library::open(self.staging.path())?;
+        let target = Library::open_with_profile(&self.target_root, self.profile)?;
+        let mut provisional = Library::open_with_profile(self.staging.path(), self.profile)?;
         provisional.config = target.config.clone();
         import_installer_choice(&mut provisional, choice)?;
         let entries = provisional.games().to_vec();
@@ -1549,12 +1552,24 @@ struct LibraryFile {
     games: Vec<GameEntry>,
 }
 
-/// Deck settings are isolated while the imported catalogue remains shared.
-pub const CONFIG_FILE_NAME: &str = if cfg!(feature = "steam-deck") {
-    "config-steamdeck.json"
-} else {
-    "config.json"
-};
+/// Standard clients (including Android/CLI) use this default config file.
+pub const CONFIG_FILE_NAME: &str = "config.json";
+
+/// A per-library runtime profile; never a process-global or Cargo feature.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LauncherProfile {
+    #[default]
+    Standard,
+    SteamDeck,
+}
+impl LauncherProfile {
+    pub fn config_file_name(self) -> &'static str {
+        match self {
+            Self::Standard => CONFIG_FILE_NAME,
+            Self::SteamDeck => "config-steamdeck.json",
+        }
+    }
+}
 
 /// Resolve the default library root, in the order the desktop
 /// launcher has always used:
@@ -1591,7 +1606,7 @@ impl Library {
         let staging = tempfile::Builder::new()
             .prefix(".pending-import-")
             .tempdir_in(self.root.join("games"))?;
-        let mut provisional = Library::open(staging.path())?;
+        let mut provisional = Library::open_with_profile(staging.path(), self.profile)?;
         provisional.config = self.config.clone();
         let mut signature = [0; 4];
         let count = fs::File::open(path)?.read(&mut signature)?;
@@ -1616,6 +1631,7 @@ impl Library {
         if let Some(choices) = installer_cabinets.as_ref().filter(|c| c.len() > 1) {
             return Ok(PreparedImport {
                 target_root: self.root.clone(),
+                profile: self.profile,
                 zip_source: false,
                 entries: Vec::new(),
                 updates: Vec::new(),
@@ -1656,6 +1672,7 @@ impl Library {
         Ok(PreparedImport {
             staging,
             target_root: self.root.clone(),
+            profile: self.profile,
             zip_source,
             entries,
             updates,
@@ -1675,9 +1692,9 @@ impl Library {
                 "Choose an installer cabinet before importing".into(),
             ));
         }
-        if pending.target_root != self.root {
+        if pending.target_root != self.root || pending.profile != self.profile {
             return Err(LibraryError::InvalidId(
-                "import belongs to another library".into(),
+                "import belongs to another library or profile".into(),
             ));
         }
         let mut prepared = Vec::new();
@@ -1712,38 +1729,45 @@ impl Library {
     /// Open the library rooted at `root`, creating the directory and
     /// default `library.json` / `config.json` if they don't exist.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, LibraryError> {
+        Self::open_with_profile(root, LauncherProfile::Standard)
+    }
+
+    /// Open one settings profile while sharing the game catalogue.
+    pub fn open_with_profile(
+        root: impl Into<PathBuf>,
+        profile: LauncherProfile,
+    ) -> Result<Self, LibraryError> {
         let root = root.into();
+        let config_file = root.join(profile.config_file_name());
         fs::create_dir_all(&root)?;
         fs::create_dir_all(root.join("games"))?;
 
         let library = read_or_default::<LibraryFile>(&root.join("library.json"))?;
-        let mut config = read_or_default::<LauncherConfig>(&root.join(CONFIG_FILE_NAME))?;
+        let mut config = read_or_default::<LauncherConfig>(&config_file)?;
         // A fresh Android/PC library must support Merge backup restore before
         // its first game import. Restore reads the on-disk catalogue, while
         // read_or_default alone only supplies an in-memory empty library.
         if !root.join("library.json").exists() {
             write_json(&root.join("library.json"), &library)?;
         }
-        if !root.join(CONFIG_FILE_NAME).exists() {
-            write_json(&root.join(CONFIG_FILE_NAME), &config)?;
+        if !config_file.exists() {
+            write_json(&config_file, &config)?;
         }
         if config.gizmondo_identity_revision == 0 {
             config.gizmondo_platform_id = default_gizmondo_platform_id();
             config.gizmondo_identity_revision = identity_revision();
-            write_json(&root.join(CONFIG_FILE_NAME), &config)?;
+            write_json(&config_file, &config)?;
         }
-        if keybindings::migrate_desktop_gamepad_layout(
-            &mut config.gamepad_bindings,
-            &mut config.gamepad_fullscreen,
-        ) {
-            write_json(&root.join(CONFIG_FILE_NAME), &config)?;
+        if profile == LauncherProfile::Standard
+            && keybindings::migrate_legacy_pc_gamepad_layout(
+                &mut config.gamepad_bindings,
+                &mut config.gamepad_fullscreen,
+            )
+        {
+            write_json(&config_file, &config)?;
         }
-        keybindings::migrate_steam_deck_gamepad_bindings(&mut config.gamepad_bindings);
-        if keybindings::migrate_steam_deck_fullscreen(&mut config.gamepad_fullscreen) {
-            write_json(&root.join(CONFIG_FILE_NAME), &config)?;
-        }
-
         let mut this = Self {
+            profile,
             root,
             library,
             config,
@@ -1848,10 +1872,21 @@ impl Library {
             }
         }
         if config_changed {
-            if let Err(e) = write_json(&self.root.join(CONFIG_FILE_NAME), &self.config) {
-                log::warn!("could not save migrated config.json: {e}");
+            if let Err(e) = write_json(
+                &self.root.join(self.profile.config_file_name()),
+                &self.config,
+            ) {
+                log::warn!(
+                    "could not save migrated {}: {e}",
+                    self.profile.config_file_name()
+                );
             }
         }
+    }
+
+    /// Runtime settings profile used by this handle and its background work.
+    pub fn profile(&self) -> LauncherProfile {
+        self.profile
     }
 
     /// Library root directory.
@@ -1874,10 +1909,13 @@ impl Library {
         self.library.games.iter_mut().find(|g| g.id == id)
     }
 
-    /// Persist the current `library.json` and `config.json` to disk.
+    /// Persist the catalogue and this handle's selected settings file.
     pub fn save(&self) -> Result<(), LibraryError> {
         write_json(&self.root.join("library.json"), &self.library)?;
-        write_json(&self.root.join(CONFIG_FILE_NAME), &self.config)?;
+        write_json(
+            &self.root.join(self.profile.config_file_name()),
+            &self.config,
+        )?;
         Ok(())
     }
 
@@ -4411,21 +4449,90 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn edition_settings_save_without_replacing_the_other_edition() {
+    fn runtime_profiles_keep_settings_separate_and_share_the_catalogue() {
         let root = tempfile::tempdir().unwrap();
-        let other = if cfg!(feature = "steam-deck") {
-            "config.json"
-        } else {
-            "config-steamdeck.json"
-        };
-        let original = br#"{"schema_version":1,"colors_language":"fr","fullscreen":true}"#;
-        fs::write(root.path().join(other), original).unwrap();
-        let mut library = Library::open(root.path()).unwrap();
-        library.config_mut().fullscreen = false;
-        library.save().unwrap();
-        assert_eq!(fs::read(root.path().join(other)).unwrap(), original);
-        assert!(root.path().join(CONFIG_FILE_NAME).is_file());
+        let mut standard = Library::open(root.path()).unwrap();
+        standard.config_mut().fullscreen = false;
+        standard.config_mut().colors_language = "en".into();
+        standard.save().unwrap();
+        let original = fs::read(root.path().join(CONFIG_FILE_NAME)).unwrap();
+        let mut deck = Library::open_with_profile(root.path(), LauncherProfile::SteamDeck).unwrap();
+        deck.config_mut().fullscreen = true;
+        deck.config_mut().colors_language = "fr".into();
+        deck.save().unwrap();
+        assert_eq!(
+            fs::read(root.path().join(CONFIG_FILE_NAME)).unwrap(),
+            original
+        );
+        assert!(
+            Library::open_with_profile(root.path(), LauncherProfile::SteamDeck)
+                .unwrap()
+                .config()
+                .fullscreen
+        );
         assert!(!Library::open(root.path()).unwrap().config().fullscreen);
+        // Handles retain the selected profile across later saves and reloads.
+        standard.config_mut().colors_language = "de".into();
+        standard.save().unwrap();
+        assert_eq!(
+            Library::open_with_profile(root.path(), LauncherProfile::SteamDeck)
+                .unwrap()
+                .config()
+                .colors_language,
+            "fr"
+        );
+        assert_eq!(standard.root(), deck.root());
+        assert_eq!(standard.games().len(), deck.games().len());
+    }
+
+    #[test]
+    fn deck_profile_preserves_saved_bindings() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = LauncherConfig::default();
+        config
+            .gamepad_bindings
+            .insert("West".into(), GuestButton::ButtonA);
+        config.gamepad_fullscreen = Some("West".into());
+        write_json(
+            &root
+                .path()
+                .join(LauncherProfile::SteamDeck.config_file_name()),
+            &config,
+        )
+        .unwrap();
+        let deck = Library::open_with_profile(root.path(), LauncherProfile::SteamDeck).unwrap();
+        assert_eq!(deck.config().gamepad_bindings, config.gamepad_bindings);
+        assert_eq!(deck.config().gamepad_fullscreen, config.gamepad_fullscreen);
+        assert!(!root.path().join(CONFIG_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn prepared_import_retains_runtime_profile_without_touching_standard_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = update_fixture(root.path(), b"profile import");
+        let target = root.path().join("library");
+        let mut deck = Library::open_with_profile(&target, LauncherProfile::SteamDeck).unwrap();
+        deck.config_mut().colors_language = "fr".into();
+        deck.save().unwrap();
+        let pending = deck.prepare_import(archive).unwrap();
+        assert_eq!(pending.profile, LauncherProfile::SteamDeck);
+        assert!(pending
+            .staging
+            .path()
+            .join(LauncherProfile::SteamDeck.config_file_name())
+            .exists());
+        assert!(!pending.staging.path().join(CONFIG_FILE_NAME).exists());
+        let games = deck.apply_prepared_import(pending, false).unwrap();
+        assert!(!target.join(CONFIG_FILE_NAME).exists());
+        let standard = Library::open(&target).unwrap();
+        assert!(standard.get(&games[0].id).is_some());
+        assert_eq!(
+            Library::open_with_profile(&target, LauncherProfile::SteamDeck)
+                .unwrap()
+                .config()
+                .colors_language,
+            "fr"
+        );
     }
 
     #[test]

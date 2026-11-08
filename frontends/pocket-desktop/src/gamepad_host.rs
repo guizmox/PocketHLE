@@ -1,4 +1,4 @@
-//! Controller defaults for the native Windows build and Wine/Proton.
+//! Controller defaults for native Windows and the --steam-deck runtime profile under Wine/Proton.
 //! Steam Deck testing confirmed that the XInput profile receives all controls;
 //! the default SDL driver selection only delivered the triggers in that run.
 

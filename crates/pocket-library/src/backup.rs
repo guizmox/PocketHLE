@@ -210,7 +210,11 @@ fn validate_library(root: &Path) -> Result<()> {
             )?;
         }
     }
-    for config in ["config.json", "config-steamdeck.json"] {
+    for profile in [
+        super::LauncherProfile::Standard,
+        super::LauncherProfile::SteamDeck,
+    ] {
+        let config = profile.config_file_name();
         if root.join(config).exists() {
             let _: super::LauncherConfig = serde_json::from_reader(File::open(root.join(config))?)?;
         }

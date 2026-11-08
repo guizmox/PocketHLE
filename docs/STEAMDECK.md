@@ -1,24 +1,35 @@
-# PocketHLE — Steam Deck edition
+# PocketHLE — Steam Deck profile
 
-This edition is the dedicated Windows build for SteamOS through Proton.
-It is distinct from the native Linux desktop build.
+The desktop uses one executable. The Steam Deck profile is selected at launch
+with `--steam-deck`; it is not a separate Cargo feature or executable.
 
 ## CI artifact and startup
 
-Download **PocketHLE-steamdeck-x86_64** from a successful CI run and extract
-`PocketHLE-steamdeck-x86_64.zip`. Point the existing Steam shortcut at
-`pockethle-steamdeck.exe`, enable Proton and select a Gamepad Steam Input layout.
-The SDL Proton profile is built in; launch options can remain empty.
-Desktop now uses bundled SDL3. The A/B/X/Y names below describe Deck markings.
-For external controllers, UI prompts use SDL's reported button labels while
-keeping the same positional actions and saved bindings. Unknown labels fall
-back to explicit position names; no brand/name guessing is used.
+Download **PocketHLE-steamdeck-x86_64** and extract its ZIP, or use the Windows
+archive: both contain the same `pockethle-gui.exe` from the single Windows build.
+Point the existing Steam shortcut at that executable, select **Proton Experimental** and
+a Gamepad Steam Input layout, and put this in Steam's launch options:
 
+```text
+--steam-deck
+```
 
-The dedicated edition requests fullscreen at window creation and on its first
-UI frame after native state restoration. An explicit CLI display argument wins:
-0 means fullscreen; 1 means windowed. This does not enable automatic Deck
-identification in an ordinary desktop executable.
+This selects `config-steamdeck.json`, fullscreen startup and the controller
+profile previously used by the dedicated build. Under Wine/Proton, SDL uses the
+existing XInput hints; no Proton version-name or controller-brand detection is
+added. On native Linux the flag also selects the settings/fullscreen profile,
+but does not force the Windows XInput driver. Its updates use the Linux package.
+
+SDL3 supplies button labels. The A/B/X/Y names below describe Deck markings;
+external controller UI prompts use SDL's labels, or explicit positions if unknown.
+No hardware identity is inferred from the executable's filename or a device name.
+
+An explicit CLI display argument still wins: `0` means fullscreen and `1` means
+windowed. For example:
+
+```text
+pockethle-gui.exe --steam-deck "Game name or ID" 1
+```
 
 ## System gestures and customizable command defaults
 
@@ -91,7 +102,9 @@ and Windows command-line help before a working launcher viewport exists.
 Colors startup uses directions for language, A to launch and B to cancel. Its
 explicit unlock action uses X; see [COLORS.md](COLORS.md).
 
-The Deck edition uses config-steamdeck.json; standard desktop uses config.json.
+The runtime Deck profile uses config-steamdeck.json; standard desktop uses config.json.
+The game catalogue and per-game data remain shared. Old Deck factory-binding
+migrations have been removed; saved settings are read without those rewrites.
 They may share a library. **Keyboard bindings** and **External controller bindings**
 are separate settings entries. In the controller entry, clicking both sticks
 (**L3 + R3**) starts **Assign an input…**; the keyboard entry uses **Ctrl+Enter**.
@@ -108,8 +121,7 @@ for precedence, timing and the configuration schema.
 **Apply Steam Deck preset** action. Each resets its guest table and explicit
 short/long overrides across the two device profiles; controller reset also
 restores View as the additional fullscreen shortcut. Stylus configuration is
-not reset. Save is required. Do not confuse historical Start=Home/Volume
-migration values with the reserved Menu gestures above.
+not reset. Save is required. Menu remains reserved regardless of stored guest assignments.
 
 ## Physical keyboard host keys
 
@@ -133,13 +145,14 @@ no fixed list of sharing destinations is fabricated.
 ## Build
 
 ```text
-cargo build --release --locked -p pocket-desktop --features steam-deck --bin pockethle-steamdeck
+cargo build --release --locked -p pocket-desktop
 ```
 
-Output is target/release/pockethle-steamdeck.exe, or the CI's configured target
-folder. The standard desktop and Android use the same factory binding reference;
-the dedicated edition has its own startup behavior and configuration filename. Native services and
-physical Deck behavior require device validation; build success alone is not it.
+The Windows output is `target/release/pockethle-gui.exe` (or the configured Cargo
+target directory). CI compiles it once, then packages the identical executable
+in the Windows and Steam Deck archives. There is no second Deck compilation.
+The desktop and Android keep the same factory binding reference. Physical
+Proton/controller behavior still requires device validation.
 
 The small top-left View/Select (Full) and top-right Menu/Start (Filter) buttons
 are reserved for PocketHLE, including their holds. Their mapping outlines are
