@@ -769,9 +769,9 @@ the Standard profile. Backups continue to include both existing settings files.
 Both desktop profiles start windowed at 1280x800 physical pixels, capped to the
 monitor; only an explicit positional CLI display argument of 0 requests fullscreen. Under Wine/Proton (currently Proton Experimental for the
 user's Deck), it preserves the existing XInput hints. Native Linux is not forced
-to use XInput. Windows Deck-profile updates choose the Deck archive; native Linux
-chooses the Linux archive. Windows and Deck archives contain the same executable
-built once by CI. Colors controller help is shown whenever a controller is
+to use XInput. Windows Deck-profile updates under Proton choose the Windows archive; native
+Linux chooses the Linux archive. There is no separate Deck package or update
+platform. Colors controller help is shown whenever a controller is
 connected, independent of launch profile. The unused layout argument and old
 Deck-specific migration functions/tests are removed. See STEAMDECK.md for Steam
 shortcut setup; old executable targets must be changed to pockethle-gui.exe with

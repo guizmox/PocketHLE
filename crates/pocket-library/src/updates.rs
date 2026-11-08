@@ -8,7 +8,6 @@ const RELEASES: &str = "https://github.com/guizmox/PocketHLE/releases/";
 pub enum Platform {
     Windows,
     Linux,
-    SteamDeck,
     Android,
 }
 
@@ -57,7 +56,6 @@ pub fn from_json(json: &str, installed: &str, platform: Platform) -> Option<Upda
             let deck = name.contains("steamdeck") || name.contains("steam-deck");
             let suitable = match platform {
                 Platform::Android => name.ends_with(".apk"),
-                Platform::SteamDeck => deck && name.ends_with(".zip"),
                 Platform::Windows => name.contains("windows") && !deck && name.ends_with(".zip"),
                 Platform::Linux => {
                     name.contains("linux") && (name.ends_with(".tar.gz") || name.ends_with(".zip"))
@@ -193,7 +191,6 @@ mod tests {
         let json = release("v0.4.0", assets);
         for (p, suffix) in [
             (Platform::Windows, "windows.zip"),
-            (Platform::SteamDeck, "deck.zip"),
             (Platform::Android, "android.apk"),
         ] {
             assert!(from_json(&json, "0.3.1", p).unwrap().url.ends_with(suffix));

@@ -229,6 +229,7 @@ jobs:
           cp target/cargo/release/pockethle.exe dist/PocketHLE-windows/
           cp target/cargo/release/pockethle-gui.exe dist/PocketHLE-windows/
           cp README.md dist/PocketHLE-windows/
+          cp docs/STEAMDECK.md dist/PocketHLE-windows/README-SteamDeck.md
           cp -f README.ru.md dist/PocketHLE-windows/ 2>/dev/null || true
       - name: zip artifacts
         shell: pwsh
@@ -238,24 +239,6 @@ jobs:
         with:
           name: PocketHLE-windows-x86_64
           path: PocketHLE-windows-x86_64.zip
-      - name: stage Steam Deck profile archive (same Windows executable)
-        shell: bash
-        run: |
-          mkdir -p dist/PocketHLE-steamdeck
-          cp -R frontends/pocket-desktop/licenses dist/PocketHLE-steamdeck/
-          cp LICENSE LICENSE-APACHE LICENSE-MIT dist/PocketHLE-steamdeck/
-          cp target/cargo/release/pockethle-gui.exe dist/PocketHLE-steamdeck/
-          cp docs/STEAMDECK.md dist/PocketHLE-steamdeck/README-SteamDeck.md
-      - name: zip Steam Deck artifacts
-        shell: pwsh
-        run: |
-          Compress-Archive -Path dist/PocketHLE-steamdeck/* -DestinationPath PocketHLE-steamdeck-x86_64.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PocketHLE-steamdeck-x86_64
-          path: PocketHLE-steamdeck-x86_64.zip
-          if-no-files-found: error
-
   build-android:
     name: build android APK
     runs-on: ubuntu-24.04

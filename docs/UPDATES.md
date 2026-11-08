@@ -30,8 +30,7 @@ The matching release asset is selected when unique:
 
 | Edition | Release asset |
 | --- | --- |
-| Windows | Windows ZIP, excluding Steam Deck |
-| Windows under Proton, --steam-deck | steamdeck/steam-deck ZIP containing the common Windows executable |
+| Windows PC and Windows under Proton with --steam-deck | Windows ZIP |
 | Linux, either launch profile | Linux ZIP or tar.gz |
 | Android | APK |
 
@@ -46,7 +45,7 @@ download, automatic installation, EXE replacement or APK installation request.
    displayed `versionName` appropriate for the release.
 2. Build and validate the packages from that commit with CI.
 3. Publish a stable GitHub Release with the matching tag, for example `v0.3.3`.
-   Attach the Windows, Linux and Steam Deck packages and the Android APK as
+   Attach the Windows and Linux packages and the Android APK as
    release assets. Actions artifacts alone do not trigger a release notification.
 
 The checker does not publish releases or change repository settings. An installed version must not offer an equal-version tag as an update. The

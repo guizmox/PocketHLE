@@ -5,9 +5,9 @@ with `--steam-deck`; it is not a separate Cargo feature or executable.
 
 ## CI artifact and startup
 
-Download **PocketHLE-steamdeck-x86_64** and extract its ZIP, or use the Windows
-archive: both contain the same `pockethle-gui.exe` from the single Windows build.
-Point the existing Steam shortcut at that executable, select **Proton Experimental** and
+Download **PocketHLE-windows-x86_64** and extract its ZIP. The Deck uses the
+standard `pockethle-gui.exe`; there is no separate Deck archive.
+Point the existing Steam shortcut at that executable, select **Proton** or **Proton Experimental** and
 a Gamepad Steam Input layout, and put this in Steam's launch options:
 
 ```text
@@ -20,7 +20,7 @@ by the dedicated build. Both PC and Deck start in a normal, non-maximized window
 measured decorations determine its client dimensions. Saved fullscreen/viewport
 state cannot override startup; fullscreen remains available through the UI. Under Wine/Proton, SDL uses the
 existing XInput hints; no Proton version-name or controller-brand detection is
-added. On native Linux the flag also selects the settings/fullscreen profile,
+added. On native Linux the flag also selects the settings/controller profile,
 but does not force the Windows XInput driver. Its updates use the Linux package.
 
 SDL3 supplies button labels. The A/B/X/Y names below describe Deck markings;
@@ -152,8 +152,8 @@ cargo build --release --locked -p pocket-desktop
 ```
 
 The Windows output is `target/release/pockethle-gui.exe` (or the configured Cargo
-target directory). CI compiles it once, then packages the identical executable
-in the Windows and Steam Deck archives. There is no second Deck compilation.
+target directory). CI compiles it once and publishes the Windows archive for both PC and Deck.
+Deck-profile updates under Proton select that same Windows archive.
 The desktop and Android keep the same factory binding reference. Physical
 Proton/controller behavior still requires device validation.
 

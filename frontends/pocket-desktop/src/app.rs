@@ -848,11 +848,7 @@ impl PocketLauncher {
         std::thread::spawn(move || {
             use pocket_library::updates::{self, Platform};
             let platform = if cfg!(windows) {
-                if profile == pocket_library::LauncherProfile::SteamDeck {
-                    Platform::SteamDeck
-                } else {
-                    Platform::Windows
-                }
+                Platform::Windows
             } else {
                 Platform::Linux
             };

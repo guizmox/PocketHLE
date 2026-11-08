@@ -304,6 +304,24 @@ pockethle run /tmp/pockethle/Asphalt4.exe --cpu unicorn
 
 The CLI also supports `.exe` and `.zip` inputs. Use `--cpu stub` for trace-only and loader tests; it does not execute real game instructions.
 
+
+### Steam Deck (Proton)
+
+Use the **Windows archive** (`PocketHLE-windows-x86_64.zip`) on Steam Deck.
+Add `pockethle-gui.exe` as a non-Steam game, choose **Proton** or
+**Proton Experimental** in the shortcut's Compatibility settings, and add this
+to its **Launch Options**:
+
+```text
+--steam-deck
+```
+
+The Deck uses the same executable and update package as Windows; there is no
+separate Steam Deck download. The argument selects the Deck controller/settings
+profile. For updates, keep the existing Steam shortcut and back up your library
+before replacing program files: its data may live inside the Proton prefix.
+See the [Steam Deck guide](docs/STEAMDECK.md) for details.
+
 ## Build
 
 ### Linux
