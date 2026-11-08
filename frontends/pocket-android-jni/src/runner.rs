@@ -258,12 +258,7 @@ impl Session {
     }
 }
 
-/// Spawn the worker thread that drives the emulator for a single
-/// game. The returned `Session` is the handle Kotlin holds.
-#[cfg(test)]
-pub fn start(library_root: PathBuf, game_id: String) -> anyhow::Result<Session> {
-    start_with_presentation(library_root, game_id, None)
-}
+/// Spawn the worker thread that drives one game and returns its session handle.
 pub(crate) fn start_with_presentation(
     library_root: PathBuf,
     game_id: String,

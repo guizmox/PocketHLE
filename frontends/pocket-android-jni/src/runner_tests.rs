@@ -34,7 +34,7 @@ fn report(root: &Path, name: &str) -> String {
     fs::read_to_string(path).unwrap()
 }
 fn run_diagnostic(root: &Path, id: &str) {
-    let session = start(root.to_path_buf(), id.to_string()).unwrap();
+    let session = start_with_presentation(root.to_path_buf(), id.to_string(), None).unwrap();
     let deadline = Instant::now() + Duration::from_secs(90);
     while session.is_running() && Instant::now() < deadline {
         // Dismiss only the diagnostic's final modal; input is routed by the runner.
