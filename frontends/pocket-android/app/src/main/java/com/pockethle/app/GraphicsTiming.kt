@@ -2,7 +2,7 @@ package com.pockethle.app
 
 /** Per-renderer aggregate; called only on the GL thread. Timings are inclusive. */
 internal class GraphicsTiming(private val enabled: Boolean, private val emit: (String) -> Unit) {
-    enum class Stage { PREPARE, UPLOAD, FILTER, DRAW, DRAW_GAP, PRESENT_GPU, SHARED_CONVERT, SHARED_HANDOFF, GPU_SKIPPED, GPU_DISJOINT, GPU_OVERFLOW }
+    enum class Stage { PREPARE, UPLOAD, FILTER, DRAW, DRAW_GAP, PRESENT_GPU, SHARED_CONVERT, SHARED_HANDOFF, RGB565_CONVERT, GPU_SKIPPED, GPU_DISJOINT, GPU_OVERFLOW }
     private val calls = LongArray(Stage.entries.size)
     private val total = LongArray(Stage.entries.size)
     private val maximum = LongArray(Stage.entries.size)

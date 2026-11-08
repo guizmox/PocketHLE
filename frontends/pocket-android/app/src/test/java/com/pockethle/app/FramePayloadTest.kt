@@ -40,6 +40,15 @@ class FramePayloadTest {
         assertNull(decodeFramePayload(payload(-2,320,240,320,240,1,0,pixelBytes=4)))
     }
 
+    @Test fun packedFramesKeepTwoBytesPerPixelAndBacklight() {
+        val raw=payload(-3,3,1,21,pixelBytes=6)
+        assertEquals(FramePayload(3,1,3,1,16,rgb565=true,backlight=21),decodeFramePayload(raw))
+        assertEquals(11,decodeFramePayload(payload(-3,1,1,0,pixelBytes=2))!!.backlight)
+        assertNull(decodeFramePayload(payload(-3,3,1,21,pixelBytes=5)))
+        assertNull(decodeFramePayload(payload(-3,3,1,21,pixelBytes=8)))
+        assertNull(decodeFramePayload(payload(-3,0,1,21)))
+        assertNull(decodeFramePayload(payload(-3,Int.MAX_VALUE,Int.MAX_VALUE,21)))
+    }
     @Test fun malformedAndTruncatedImagesAreRejected() {
         assertNull(decodeFramePayload(ByteArray(7)))
         assertNull(decodeFramePayload(payload(-1, 240)))

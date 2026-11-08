@@ -216,3 +216,41 @@ runner regressions. Android UI/factory Kotlin sources are type-checked against
 Android API classes. A complete APK and Samsung/ANGLE runtime validation are
 still required; this is not a measured device FPS guarantee or recovery from a
 real device-wide EGL_CONTEXT_LOST event.
+
+## Android packed CPU-origin images
+
+Logical GAPI/GX/GDI images can keep their native little-endian RGB565 bytes all
+the way through JNI. A versioned `-3` header carries logical dimensions and a
+frozen backlight value, followed by exactly two bytes per pixel. No guest drawing
+is moved to the GPU: the game/HLE still writes CPU memory, and publication/IPS
+boundaries are unchanged. The optimization is host presentation preparation.
+
+The ES3 presenter uploads the bits as an R16UI texture and performs exact integer
+5/6/5 bit expansion and backlight arithmetic into its ordinary RGBA8 texture.
+SMAA/reconstruction/rotation then use their existing path. This avoids relying
+on normalized RGB565 sampling's rounding and keeps filtering after brightness,
+as on the former CPU-conversion path. Row zero remains the logical top row.
+
+`Framebuffer::presentation_rgb565_unadjusted` exposes only a complete native
+logical image with a valid 16-bit byte layout. The existing desktop
+presentation_rgb565 method retains its neutral-brightness-only contract.
+Alternate/high-density render images keep their previous RGBA transport, without
+losing physical resolution. xBRZ explicitly expands packed pixels on the CPU;
+an unavailable/failing integer conversion also falls back to CPU expansion.
+The GLES shared-texture transport remains separate and unchanged.
+
+The UI logs `format=RGB565 conversion=GPU` for packed uploads, and explicitly
+reports RGBA/CPU fallback. The input/output textures and programs follow the
+same surface/share-group teardown rules as the shared presenter. Diagnostics
+remain default-off; `rgb565_convert` measures CPU submission of this GPU pass.
+The new opt-in `shared_snapshot_wall` span covers native shared snapshot export,
+so another 1x/2x capture can distinguish export cost from explicit pixel readback.
+It is inclusive of host activation/copy/fence submission, not GPU busy time.
+
+Validation compares all 65,536 colors for backlight 1..31, neutral fallback
+values and odd-width rows against integer CPU results through native ES3 on
+Mesa. Snapshot tests verify immutable packed bytes/brightness and unchanged
+logical/high-resolution geometry; protocol and xBRZ-expansion tests preserve
+legacy packets. Full APK/device validation remains pending. This extension is
+not a claim to have resolved the separately reported 8 FPS at 1x versus 20 FPS
+at 2x; those runs still need their presentation/readback diagnostics correlated.

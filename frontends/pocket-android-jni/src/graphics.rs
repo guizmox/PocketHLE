@@ -361,3 +361,13 @@ mod tests {
         assert!(!p.enabled.load(Ordering::Acquire));
     }
 }
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeRgb565DisplayShader(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    env.new_string(gles::RGB565_DISPLAY_FRAGMENT)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}

@@ -128,6 +128,7 @@ object NativeBridge {
     @JvmStatic external fun nativeReleasePresentationFrame(id: Long)
     @JvmStatic external fun nativeDrawPresentation(id: Long, renderer: Any): Boolean
     @JvmStatic external fun nativeSharedDisplayShader(): String
+    @JvmStatic external fun nativeRgb565DisplayShader(): String
     @JvmStatic external fun nativeGpuQueryResult(query: Int): Long
 
     /**

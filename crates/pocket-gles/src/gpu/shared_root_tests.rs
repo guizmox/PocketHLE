@@ -93,3 +93,99 @@ fn android_conversion_program_links_with_the_actual_vertex_shader() {
         assert_eq!((ui.gl.GetError)(), 0);
     }
 }
+
+#[test]
+#[ignore = "requires native EGL GLES3 integer textures"]
+fn packed_rgb565_shader_matches_all_colors_backlights_and_odd_rows() {
+    for (w, h) in [(256, 256), (3, 2)] {
+        let ui = Renderer::new_es_for_test(w, h).unwrap();
+        let prefix = "#version 300 es\nprecision highp float;\nprecision highp int;\n";
+        let vertex = include_str!(
+            "../../../../frontends/pocket-android/app/src/main/assets/shaders/reconstruction.vert"
+        );
+        let source: Vec<u8> = (0..w * h).flat_map(|i| (i as u16).to_le_bytes()).collect();
+        unsafe {
+            let vs = ui.shader(0x8b31, &format!("{prefix}{vertex}")).unwrap();
+            let fs = ui
+                .shader(0x8b30, &format!("{prefix}{RGB565_DISPLAY_FRAGMENT}"))
+                .unwrap();
+            let program = (ui.gl.CreateProgram)();
+            (ui.gl.AttachShader)(program, vs);
+            (ui.gl.AttachShader)(program, fs);
+            (ui.gl.LinkProgram)(program);
+            let mut linked = 0;
+            (ui.gl.GetProgramiv)(program, 0x8b82, &mut linked);
+            assert_eq!(linked, 1);
+            let mut input = 0;
+            (ui.gl.GenTextures)(1, &mut input);
+            (ui.gl.ActiveTexture)(0x84c0);
+            (ui.gl.BindTexture)(GL_TEXTURE_2D, input);
+            (ui.gl.TexParameteri)(GL_TEXTURE_2D, 0x2801, 0x2600);
+            (ui.gl.TexParameteri)(GL_TEXTURE_2D, 0x2800, 0x2600);
+            (ui.gl.PixelStorei)(0x0cf5, 1);
+            (ui.gl.TexImage2D)(
+                GL_TEXTURE_2D,
+                0,
+                0x8234,
+                w as i32,
+                h as i32,
+                0,
+                0x8d94,
+                0x1403,
+                source.as_ptr().cast(),
+            );
+            (ui.gl.BindFramebuffer)(0x8d40, ui.fbo);
+            (ui.gl.Viewport)(0, 0, w as i32, h as i32);
+            (ui.gl.UseProgram)(program);
+            (ui.gl.Uniform1i)((ui.gl.GetUniformLocation)(program, c"u_source".as_ptr()), 0);
+            let light = (ui.gl.GetUniformLocation)(program, c"u_backlight".as_ptr());
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            for level in (0..=31).chain([99]) {
+                (ui.gl.Uniform1i)(light, level);
+                (ui.gl.DrawArrays)(GL_TRIANGLES, 0, 3);
+                (ui.gl.ReadPixels)(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    pixels.as_mut_ptr().cast(),
+                );
+                assert_eq!((ui.gl.GetError)(), 0);
+                let l = if (1..=31).contains(&level) {
+                    level as u32
+                } else {
+                    11
+                };
+                for (i, pixel) in pixels.chunks_exact(4).enumerate() {
+                    let p = i as u16;
+                    let r = ((p >> 11) & 31) as u32;
+                    let g = ((p >> 5) & 63) as u32;
+                    let b = (p & 31) as u32;
+                    let adjust = |v: u32| {
+                        if l <= 11 {
+                            v - v * (11 - l) / 50
+                        } else {
+                            v + (255 - v) * (l - 11) / 240
+                        }
+                    };
+                    let expected = [
+                        adjust((r << 3) | (r >> 2)) as u8,
+                        adjust((g << 2) | (g >> 4)) as u8,
+                        adjust((b << 3) | (b >> 2)) as u8,
+                        255,
+                    ];
+                    assert_eq!(
+                        pixel, expected,
+                        "color {p:04x}, backlight {level}, size {w}x{h}"
+                    );
+                }
+            }
+            (ui.gl.DeleteTextures)(1, &input);
+            (ui.gl.DeleteShader)(vs);
+            (ui.gl.DeleteShader)(fs);
+            (ui.gl.DeleteProgram)(program);
+        }
+    }
+}

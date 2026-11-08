@@ -16,8 +16,9 @@ pub enum Stage {
     GpuDisjoint,
     GuestClear,
     Swap,
+    SharedSnapshot,
 }
-const NAMES: [&str; 11] = [
+const NAMES: [&str; 12] = [
     "guest_draw_cpu",
     "submit_cpu",
     "read_pixels_wall",
@@ -29,6 +30,7 @@ const NAMES: [&str; 11] = [
     "gpu_disjoint",
     "guest_clear_cpu",
     "egl_swap_wall",
+    "shared_snapshot_wall",
 ];
 #[derive(Clone, Copy, Default)]
 struct Sample {

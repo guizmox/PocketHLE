@@ -748,7 +748,9 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollFrame<'loca
     let result = (|| {
         // Native (1x) keeps the original eight-byte wire header. High resolution
         // has a negative marker, logical dimensions and physical texture dimensions.
-        let words = if (frame.width, frame.height) == (frame.texture_width, frame.texture_height) {
+        let words = if frame.rgb565 {
+            vec![u32::MAX - 2, frame.width, frame.height, frame.backlight]
+        } else if (frame.width, frame.height) == (frame.texture_width, frame.texture_height) {
             vec![frame.width, frame.height]
         } else {
             vec![

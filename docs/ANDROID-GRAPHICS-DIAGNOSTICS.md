@@ -2,6 +2,15 @@
 
 Baseline: e68ff5f0885dfda587753688c70dc86f51018f8e (deck - pc single build with args).
 
+The cumulative RGB565 delivery includes the previous shared-presentation fix.
+CPU-origin logical 16-bit images now use packed RGB565 transport and GPU integer
+conversion/backlight. Look for `format=RGB565 conversion=GPU`. xBRZ and a failed
+integer shader explicitly use CPU conversion; alternate render images keep RGBA.
+The test of all 65,536 colors across brightness levels and odd-width rows passes
+through native ES3. The opt-in `shared_snapshot_wall` stage is also included to
+help localize the separately reported 1x/2x discrepancy; no cause or device FPS
+improvement for that discrepancy is claimed without the logs.
+
 The cumulative shared-presentation patch supersedes the initial diagnostic ZIP.
 After applying it and rebuilding the complete APK (Rust JNI and Kotlin together),
 repeat only the GPU Toy Golf run: about 20 seconds of intro and 20 seconds of play.
@@ -51,12 +60,14 @@ across threads. Stage counts are diagnostic calls, never FPS or IPS.
 | emulation / submit_cpu | Native draw implementation, including context activation, texture/vertex preparation, shader work on the CPU and GL submission |
 | emulation / read_pixels_wall | Existing native glReadPixels calls, including any driver wait charged to the call |
 | emulation / materialize_wall | Frame hook's CPU materialization, black-image check and presentation composition |
-| emulation / frame_pack_cpu | Building the RGBA snapshot sent to Android |
+| emulation / frame_pack_cpu | Copying packed RGB565 or preparing alternate RGBA pixels for Android |
+| emulation / shared_snapshot_wall | Shared image export, including native copy/fence submission; nested inside swap when applicable |
 | jni / jni_copy_wall | Allocating/filling the Java frame array after a snapshot was obtained |
 | guest_gpu / guest_draw_gpu_sample | GPU elapsed-query samples around native draw submissions, one attempted sample per 16 draws |
 | android / shared_handoff | Whole synchronized JNI consumer callback, including fence submission and nested GL work; do not add it to shared_convert/draw |
 | android / shared_convert | CPU submission of RGB565/row/backlight conversion of a shared GPU image, without pixel download |
-| android / prepare | Pixel-array copy, optional xBRZ and creation of the upload ByteBuffer |
+| android / prepare | Packed/RGBA byte copy, optional CPU expansion/xBRZ and creation of the upload ByteBuffer |
+| android / rgb565_convert | CPU submission of integer RGB565 expansion/backlight on the GPU |
 | android / upload | CPU elapsed time submitting glTexImage2D |
 | android / filter | CPU elapsed time submitting optional SMAA passes |
 | android / draw | CPU elapsed time preparing/submitting the final fullscreen draw |
@@ -105,12 +116,12 @@ and the Samsung device remain necessary for APK/runtime validation.
 Local checks on this change:
 
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
-- GLES: 234 passed, 72 native graphics tests ignored by default. Eight shared-texture native GL/EGL tests were also run explicitly on Mesa, all passed.
+- GLES: 234 passed, 73 native graphics tests ignored by default. Nine shared-texture/packed-conversion native GL/EGL tests were also run explicitly on Mesa, all passed.
 - WinCE API: 713 passed, 13 hardware tests ignored by default.
-- Android runner with Unicorn: 19 passed (the upstream cleanup removed the old base64 example test), including ARM RAM/process/VFS probes
+- Android runner with Unicorn: 20 passed, including ARM RAM/process/VFS probes
   after generating the repository's diagnostic fixtures.
 - Library setting persistence: passed.
-- Kotlin aggregation/configuration and frame protocol: 7 passed with Kotlin 2.1.21.
+- Kotlin aggregation/configuration, frame protocol and RGB565 CPU fallback: 10 passed with Kotlin 2.1.21.
 - GLES Rust code checked for aarch64-linux-android; the exact new JNI timer
   function also checked separately for that target against the real JNI crate.
 - Renderer/timer Kotlin sources type-checked against Android 15 API classes,

@@ -700,7 +700,7 @@ class GameActivity : AppCompatActivity() {
 
     private fun decodeFrame(raw: ByteArray): FrameSnapshot? {
         val frame = decodeFramePayload(raw) ?: return null
-        return FrameSnapshot(frame.width, frame.height, raw, frame.rgbaOffset, frame.textureWidth, frame.textureHeight, frame.sharedToken)
+        return FrameSnapshot(frame.width, frame.height, raw, frame.rgbaOffset, frame.textureWidth, frame.textureHeight, frame.sharedToken, frame.rgb565, frame.backlight)
     }
 
     private fun updateIpsOverlay() {
@@ -1555,6 +1555,8 @@ class GameActivity : AppCompatActivity() {
         val textureWidth: Int = width,
         val textureHeight: Int = height,
         val sharedToken: Long = 0,
+        val rgb565: Boolean = false,
+        val backlight: Int = 11,
     )
 
     companion object {

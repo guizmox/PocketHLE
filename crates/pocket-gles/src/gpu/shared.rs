@@ -1,6 +1,8 @@
 //! Bounded native snapshots. No GL operation runs from a frame token's Drop.
 use super::*;
-/// Modern GLSL body for a pre-filter pass into top-down RGB565 display pixels.
+/// Exact integer conversion for packed top-down CPU uploads.
+pub const RGB565_DISPLAY_FRAGMENT: &str = include_str!("shaders/rgb565_display.frag");
+/// Pre-filter conversion from native GL rows to top-down display pixels.
 pub const SHARED_DISPLAY_FRAGMENT: &str = include_str!("shaders/shared_display.frag");
 use std::sync::{Arc, Mutex};
 
@@ -617,6 +619,9 @@ impl Renderer {
     /// Snapshot without readback. Returns None when all bounded pipeline slots are leased.
     /// This alone does not make a window swap visible or update guest memory.
     pub fn snapshot_shared_frame(&mut self) -> Result<Option<SharedFrame>, String> {
+        let _diagnostic = crate::graphics_diagnostic::Span::new(
+            crate::graphics_diagnostic::Stage::SharedSnapshot,
+        );
         self.host.make_current()?;
         let mut pool = match self.shared_frames.take() {
             Some(p) => p,

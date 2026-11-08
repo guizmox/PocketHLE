@@ -25,7 +25,7 @@ use pocket_gles::fixed::{word_to_f32, word_to_f32_bits};
 pub use pocket_gles::gpu::PersistentSharedContext;
 pub use pocket_gles::gpu::{
     with_shared_context_source, ExternalGpuContext, SharedConsumer, SharedContextSource,
-    SharedFrame, SHARED_DISPLAY_FRAGMENT,
+    SharedFrame, RGB565_DISPLAY_FRAGMENT, SHARED_DISPLAY_FRAGMENT,
 };
 pub use pocket_gles::graphics_diagnostic;
 use pocket_gles::matrix::Matrix4;

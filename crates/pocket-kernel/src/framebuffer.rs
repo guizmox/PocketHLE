@@ -388,14 +388,19 @@ impl Framebuffer {
 
     /// Native pixels when no alternate image or brightness conversion is needed.
     pub fn presentation_rgb565(&self) -> Option<&[u8]> {
+        (self.backlight_level == 11)
+            .then(|| self.presentation_rgb565_unadjusted())
+            .flatten()
+    }
+
+    /// Packed little-endian logical pixels for a host that applies backlight
+    /// itself. Alternate high-density images keep their established path.
+    pub fn presentation_rgb565_unadjusted(&self) -> Option<&[u8]> {
         let bytes = (self.width as usize)
             .checked_mul(self.height as usize)?
             .checked_mul(2)?;
-        (self.render_presentation.is_none()
-            && self.bpp == 16
-            && self.backlight_level == 11
-            && bytes == self.pixels.len())
-        .then_some(self.pixels.as_slice())
+        (self.render_presentation.is_none() && self.bpp == 16 && bytes == self.pixels.len())
+            .then_some(self.pixels.as_slice())
     }
 
     pub fn snapshot_presentation_rgba8888_into(&self, out: &mut Vec<u8>) {
@@ -658,6 +663,20 @@ fn clip_rect(x: i32, y: i32, w: i32, h: i32, max_w: u32, max_h: u32) -> (u32, u3
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raw_rgb565_keeps_backlight_metadata_and_preserves_neutral_only_legacy_view() {
+        let mut fb = Framebuffer::new(3, 1);
+        fb.pixels.copy_from_slice(&[0, 248, 224, 7, 31, 0]);
+        assert_eq!(fb.presentation_rgb565(), Some(&fb.pixels[..]));
+        fb.set_backlight_level(21);
+        assert!(fb.presentation_rgb565().is_none());
+        assert_eq!(
+            fb.presentation_rgb565_unadjusted(),
+            Some(&[0, 248, 224, 7, 31, 0][..])
+        );
+        fb.set_render_presentation(6, 2, vec![0; 24]);
+        assert!(fb.presentation_rgb565_unadjusted().is_none());
+    }
     #[test]
     fn rgba_presentation_matches_rgb565_for_every_color_and_backlight() {
         let mut old = Framebuffer::new(128, 128);

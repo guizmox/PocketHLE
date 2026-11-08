@@ -16,8 +16,11 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
     private val timing = GraphicsTiming(diagnostics) { Log.i("PocketHLE", it) }
     private var gpuTimer: AndroidGpuTimer? = null
     private var previousDraw = 0L
+    private var uploadKind = 0
     var sharedContextAvailable: () -> Boolean = { false }
     @Volatile private var stopped = false
+    private var packedProgram = 0
+    private var packedTexture = 0
     private var sharedProgram = 0
     private var sharedFbo = 0
     private var sharedFrame: GameActivity.FrameSnapshot? = null
@@ -55,14 +58,17 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
         failed = false; uploaded = null; textureW = 0; textureH = 0
         // Context recreation destroys old GL names; do not try to delete them in the new context.
         smaa = null
-        sharedProgram=0;sharedFbo=0;sharedFrame=null
+        sharedProgram=0;sharedFbo=0;sharedFrame=null;packedProgram=0;packedTexture=0
         if (diagnostics) Log.i("PocketHLE", "GPU_DIAG domain=android renderer=${glGetString(GL_RENDERER)} vendor=${glGetString(GL_VENDOR)} version=${glGetString(GL_VERSION)}")
         gpuTimer = if (diagnostics) AndroidGpuTimer(timing) else null
-        previousDraw = 0L
+        previousDraw = 0L;uploadKind=0
         try {
             program = compileProgram(asset("reconstruction.vert"), asset("reconstruction.frag"))
             val names = IntArray(1); glGenVertexArrays(1,names,0); vao=names[0]; glBindVertexArray(vao)
             texture = createTexture(1,1,GL_RGBA8,GL_RGBA,null)
+            runCatching { compileProgram(asset("reconstruction.vert"), NativeBridge.nativeRgb565DisplayShader()) }
+                .onSuccess { packedProgram=it }
+                .onFailure { Log.w("PocketHLE","RGB565 conversion uses CPU fallback: shader unavailable",it) }
             if (sharedContextAvailable()) {
                 runCatching { compileProgram(asset("reconstruction.vert"), NativeBridge.nativeSharedDisplayShader()) }
                     .onSuccess { sharedProgram=it;NativeBridge.nativeAttachPresentation(presentation,filter=="xbrz") }
@@ -112,20 +118,33 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
                     timing.end(GraphicsTiming.Stage.SHARED_CONVERT,convert)
                 } else {
                     val prepare = timing.start()
-                    var bytes = frame.rgba.copyOfRange(frame.rgbaOffset, frame.rgbaOffset+frame.textureWidth*frame.textureHeight*4)
-                    textureW=frame.textureWidth;textureH=frame.textureHeight
+                    val packed = frame.rgb565 && packedProgram!=0 && filter!="xbrz"
+                    var bytes = if(frame.rgb565 && !packed) expandRgb565(frame.rgba,frame.rgbaOffset,frame.textureWidth,frame.textureHeight,frame.backlight)
+                        else frame.rgba.copyOfRange(frame.rgbaOffset,frame.rgbaOffset+frame.textureWidth*frame.textureHeight*(if(packed) 2 else 4))
+                    val uploadW=frame.textureWidth*(if(filter=="xbrz") 3 else 1)
+                    val uploadH=frame.textureHeight*(if(filter=="xbrz") 3 else 1)
                     if (filter == "xbrz") {
                         bytes = NativeBridge.upscaleXbrz(bytes,frame.textureWidth,frame.textureHeight) ?: error("xBRZ failed")
-                        textureW *= 3; textureH *= 3
                     }
                     val pixels = direct(bytes)
                     timing.end(GraphicsTiming.Stage.PREPARE, prepare)
                     gpuTimer?.begin()
-                    val upload = timing.start()
-                    glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,texture)
-                    glPixelStorei(GL_UNPACK_ALIGNMENT,1)
-                    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,textureW,textureH,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels)
-                    timing.end(GraphicsTiming.Stage.UPLOAD, upload)
+                    if (packed) {
+                        try { uploadRgb565(pixels,uploadW,uploadH,frame.backlight) }
+                        catch(e:Exception) {
+                            Log.w("PocketHLE","RGB565 conversion uses CPU fallback after upload failure",e)
+                            glDeleteProgram(packedProgram);packedProgram=0
+                            if(packedTexture!=0) glDeleteTextures(1,intArrayOf(packedTexture),0)
+                            packedTexture=0
+                            val rgba=expandRgb565(frame.rgba,frame.rgbaOffset,frame.textureWidth,frame.textureHeight,frame.backlight)
+                            uploadRgba(direct(rgba),uploadW,uploadH)
+                        }
+                    } else uploadRgba(pixels,uploadW,uploadH)
+                    val kind=if(packed && packedProgram!=0) 1 else if(frame.rgb565) 2 else 3
+                    if(uploadKind!=kind) {
+                        Log.i("PocketHLE",if(kind==1) "PRESENTATION=CPU_UPLOAD format=RGB565 conversion=GPU" else if(kind==2) "PRESENTATION=CPU_UPLOAD format=RGBA8 conversion=CPU" else "PRESENTATION=CPU_UPLOAD format=RGBA8 conversion=prepared")
+                        uploadKind=kind
+                    }
                     NativeBridge.nativeReleasePresentationFrame(presentation)
                 }
                 val filterStart = timing.start()
@@ -158,6 +177,15 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
     }
     private fun convertSharedTexture(source:Int,w:Int,h:Int,backlight:Int) {
         check(source != texture && glIsTexture(source)) { "Shared texture is not visible in the consumer context" }
+        bindConversionTarget(w,h)
+        glViewport(0,0,w,h);glUseProgram(sharedProgram)
+        glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,source)
+        glUniform1i(glGetUniformLocation(sharedProgram,"u_source"),0)
+        glUniform2f(glGetUniformLocation(sharedProgram,"u_size"),w.toFloat(),h.toFloat())
+        glUniform1i(glGetUniformLocation(sharedProgram,"u_backlight"),backlight)
+        glDrawArrays(GL_TRIANGLES,0,3)
+    }
+    private fun bindConversionTarget(w:Int,h:Int) {
         if (textureW!=w || textureH!=h) {
             glActiveTexture(GL_TEXTURE0)
             glBindTexture(GL_TEXTURE_2D,texture)
@@ -168,20 +196,45 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
         glBindFramebuffer(GL_FRAMEBUFFER,sharedFbo)
         glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0)
         check(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE) { "Shared conversion framebuffer incomplete" }
-        glViewport(0,0,w,h);glUseProgram(sharedProgram)
-        glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,source)
-        glUniform1i(glGetUniformLocation(sharedProgram,"u_source"),0)
-        glUniform2f(glGetUniformLocation(sharedProgram,"u_size"),w.toFloat(),h.toFloat())
-        glUniform1i(glGetUniformLocation(sharedProgram,"u_backlight"),backlight)
+    }
+    private fun uploadRgba(pixels:ByteBuffer,w:Int,h:Int) {
+        val upload=timing.start();textureW=w;textureH=h
+        glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,texture)
+        glPixelStorei(GL_UNPACK_ALIGNMENT,1)
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels)
+        timing.end(GraphicsTiming.Stage.UPLOAD,upload)
+    }
+    private fun uploadRgb565(pixels:ByteBuffer,w:Int,h:Int,backlight:Int) {
+        val upload=timing.start()
+        glActiveTexture(GL_TEXTURE0)
+        if(packedTexture==0) {
+            val names=IntArray(1);glGenTextures(1,names,0);packedTexture=names[0]
+            glBindTexture(GL_TEXTURE_2D,packedTexture)
+            for(param in listOf(GL_TEXTURE_MIN_FILTER,GL_TEXTURE_MAG_FILTER)) glTexParameteri(GL_TEXTURE_2D,param,GL_NEAREST)
+            for(param in listOf(GL_TEXTURE_WRAP_S,GL_TEXTURE_WRAP_T)) glTexParameteri(GL_TEXTURE_2D,param,GL_CLAMP_TO_EDGE)
+        } else glBindTexture(GL_TEXTURE_2D,packedTexture)
+        glPixelStorei(GL_UNPACK_ALIGNMENT,1)
+        glTexImage2D(GL_TEXTURE_2D,0,GL_R16UI,w,h,0,GL_RED_INTEGER,GL_UNSIGNED_SHORT,pixels)
+        check(glGetError()==GL_NO_ERROR) { "Integer RGB565 upload failed" }
+        timing.end(GraphicsTiming.Stage.UPLOAD,upload)
+        val convert=timing.start()
+        bindConversionTarget(w,h)
+        glViewport(0,0,w,h);glUseProgram(packedProgram)
+        glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,packedTexture)
+        glUniform1i(glGetUniformLocation(packedProgram,"u_source"),0)
+        glUniform1i(glGetUniformLocation(packedProgram,"u_backlight"),backlight)
         glDrawArrays(GL_TRIANGLES,0,3)
+        timing.end(GraphicsTiming.Stage.RGB565_CONVERT,convert)
     }
     /** Root is current and shares the old UI namespace; never delete its local FBO/VAO/query names. */
     fun releaseSharedObjects() {
         if(texture!=0) glDeleteTextures(1,intArrayOf(texture),0)
         if(program!=0) glDeleteProgram(program)
         if(sharedProgram!=0) glDeleteProgram(sharedProgram)
+        if(packedProgram!=0) glDeleteProgram(packedProgram)
+        if(packedTexture!=0) glDeleteTextures(1,intArrayOf(packedTexture),0)
         smaa?.releaseSharedObjects()
-        texture=0;program=0;sharedProgram=0;smaa=null;uploaded=null
+        texture=0;program=0;sharedProgram=0;packedProgram=0;packedTexture=0;smaa=null;uploaded=null
     }
     private fun fail(e: Exception) {
         failed=true;Log.e("PocketHLE","Android presentation failed ($filter)",e)

@@ -68,29 +68,27 @@ pub struct FrameSnapshot {
     pub height: u32,
     pub texture_width: u32,
     pub texture_height: u32,
+    /// Transport pixels: packed RGB565 when rgb565 is true, RGBA otherwise.
     pub rgba: Vec<u8>,
+    pub rgb565: bool,
     pub shared: Option<pocket_core::winceapi::gles::SharedFrame>,
     pub backlight: u32,
 }
 
 impl FrameSnapshot {
     pub(crate) fn from_framebuffer(fb: &pocket_core::kernel::Framebuffer) -> Self {
-        let mut rgba = Vec::new();
-        fb.snapshot_presentation_rgba8888_into(&mut rgba);
-        Self {
-            presentation_stats: fb.presentation_stats.clone(),
-            width: fb.width,
-            height: fb.height,
-            texture_width: fb.presentation_size().0,
-            texture_height: fb.presentation_size().1,
-            rgba,
-            shared: None,
-            backlight: fb.backlight_level(),
-        }
+        Self::from_framebuffer_into(fb, &mut Vec::new())
     }
 
     fn from_framebuffer_into(fb: &pocket_core::kernel::Framebuffer, scratch: &mut Vec<u8>) -> Self {
-        fb.snapshot_presentation_rgba8888_into(scratch);
+        let rgb565 = if let Some(pixels) = fb.presentation_rgb565_unadjusted() {
+            scratch.clear();
+            scratch.extend_from_slice(pixels);
+            true
+        } else {
+            fb.snapshot_presentation_rgba8888_into(scratch);
+            false
+        };
         Self {
             presentation_stats: fb.presentation_stats.clone(),
             width: fb.width,
@@ -98,6 +96,7 @@ impl FrameSnapshot {
             texture_width: fb.presentation_size().0,
             texture_height: fb.presentation_size().1,
             rgba: std::mem::take(scratch),
+            rgb565,
             shared: None,
             backlight: fb.backlight_level(),
         }
@@ -1366,6 +1365,7 @@ impl FrameHook for SessionHook {
                             texture_width: size.0,
                             texture_height: size.1,
                             rgba: Vec::new(),
+                            rgb565: false,
                             backlight: kernel.framebuffer.backlight_level(),
                             shared: Some(shared),
                         },
@@ -1628,6 +1628,20 @@ mod geofence_refresh_tests {
 mod internal_resolution_tests {
     use super::FrameSnapshot;
     #[test]
+    fn packed_snapshot_freezes_bytes_and_brightness_without_expansion() {
+        let mut fb = pocket_core::kernel::Framebuffer::new(3, 1);
+        fb.pixels.copy_from_slice(&[0, 248, 224, 7, 31, 0]);
+        fb.set_backlight_level(21);
+        let frame = FrameSnapshot::from_framebuffer(&fb);
+        assert!(frame.rgb565);
+        assert_eq!(frame.rgba, [0, 248, 224, 7, 31, 0]);
+        assert_eq!(frame.backlight, 21);
+        fb.pixels.fill(0);
+        fb.set_backlight_level(1);
+        assert_eq!(frame.rgba, [0, 248, 224, 7, 31, 0]);
+        assert_eq!(frame.backlight, 21);
+    }
+    #[test]
     fn physical_texture_does_not_change_logical_input_or_zoom_dimensions() {
         let mut fb = pocket_core::kernel::Framebuffer::new(2, 1);
         fb.set_render_presentation(4, 2, vec![255; 4 * 2 * 2]);
@@ -1635,10 +1649,12 @@ mod internal_resolution_tests {
         assert_eq!((frame.width, frame.height), (2, 1));
         assert_eq!((frame.texture_width, frame.texture_height), (4, 2));
         assert_eq!(frame.rgba.len(), 4 * 2 * 4);
+        assert!(!frame.rgb565);
         fb.mark_dirty();
         let frame = FrameSnapshot::from_framebuffer(&fb);
         assert_eq!((frame.texture_width, frame.texture_height), (2, 1));
-        assert_eq!(frame.rgba.len(), 2 * 1 * 4);
+        assert_eq!(frame.rgba.len(), 2 * 1 * 2);
+        assert!(frame.rgb565);
     }
 }
 
@@ -1767,7 +1783,8 @@ mod deferred_read_tests {
         assert!(kernel.framebuffer.cpu_resident());
         assert_eq!(
             &state.latest_frame.lock().unwrap().as_ref().unwrap().rgba[..4],
-            &[255, 0, 0, 255]
+            &[0, 248, 0, 248]
         );
+        assert!(state.latest_frame.lock().unwrap().as_ref().unwrap().rgb565);
     }
 }
