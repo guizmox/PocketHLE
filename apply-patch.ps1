@@ -12,4 +12,4 @@ foreach ($relative in (Get-Content -LiteralPath (Join-Path $root 'patch-files.tx
     }
     (Get-Item -LiteralPath $path).LastWriteTime = Get-Date
 }
-Write-Host 'CI patch timestamps updated.'
+Write-Host 'Add Data patch timestamps updated.'

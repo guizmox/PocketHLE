@@ -97,6 +97,9 @@ enum UpscaleFilter {
     Bilinear,
     Nearest,
 }
+const GAME_MENU_LABELS: [&str; 7] = [
+    "Information", "Play", "Rename...", "Settings", "Add game data", "Remove", "Game ID",
+];
 const EXECUTABLE_HEAP_HELP: &str = "Some games need this setting to start or run correctly. It can slow down other games. If a game runs slowly, try turning it off in that game’s settings.";
 
 impl UpscaleFilter {
@@ -1075,11 +1078,12 @@ impl PocketLauncher {
             match ev {
                 UiEvent::DataPrepared(result) => {
                     self.controller_ui.stop_repeat();
+                    self.deck_library_actions.clear();
                     self.library_busy = false;
                     // Returning to the library during preparation cancels the
                     // staged operation, including its automatic no-conflict commit.
                     if self.data_game.take().is_none() {
-                        self.status = "Add Data cancelled.".into();
+                        self.status = "Add game data cancelled.".into();
                         continue;
                     }
                     match result {
@@ -1089,7 +1093,7 @@ impl PocketLauncher {
                         Ok(pending) => self.confirm_data(pending),
                         Err(message) => {
                             self.add_data = Some(DataPrompt::Notice {
-                                title: "Add Data failed",
+                                title: "Add game data failed",
                                 message,
                             });
                         }
@@ -1097,6 +1101,7 @@ impl PocketLauncher {
                 }
                 UiEvent::DataFinished(result) => {
                     self.controller_ui.stop_repeat();
+                    self.deck_library_actions.clear();
                     self.library_busy = false;
                     let (title, message) = match result {
                         Ok(message) => {
@@ -1105,9 +1110,9 @@ impl PocketLauncher {
                             self.screen_cache.clear();
                             self.icon_cache.clear();
                             self.reload_library();
-                            ("Add Data complete", message)
+                            ("Add game data complete", message)
                         }
-                        Err(message) => ("Add Data failed", message),
+                        Err(message) => ("Add game data failed", message),
                     };
                     self.add_data = Some(DataPrompt::Notice { title, message });
                 }
@@ -1871,7 +1876,7 @@ impl PocketLauncher {
                         }
                         direction => {
                             if let Some(next) =
-                                crate::deck_navigation::menu_index(*selection, direction, 6)
+                                crate::deck_navigation::menu_index(*selection, direction, GAME_MENU_LABELS.len())
                             {
                                 *selection = next;
                             }
@@ -2048,19 +2053,11 @@ impl PocketLauncher {
             let mut chosen = None;
             egui::popup_below_widget(ui, popup_id, &menu_response, |ui| {
                 ui.set_min_width(170.0);
-                for (index, label) in [
-                    "Information",
-                    "Play",
-                    "Rename...",
-                    "Settings",
-                    "Remove",
-                    "Game ID",
-                ]
-                .into_iter()
-                .enumerate()
+                for (index, label) in GAME_MENU_LABELS.into_iter().enumerate()
                 {
-                    if ui.selectable_label(index == selection, label).clicked()
-                        || (activate && index == selection)
+                    let enabled = index != 4 || (self.running_game.is_none() && self.pending_run.is_none());
+                    if (ui.add_enabled(enabled, egui::SelectableLabel::new(index == selection, label)).clicked()
+                        || (activate && index == selection)) && enabled
                     {
                         chosen = Some(index);
                     }
@@ -2086,13 +2083,17 @@ impl PocketLauncher {
                         self.screen = Screen::GameSettings;
                     }
                     4 => {
+                        self.data_game = Some(game.id.clone());
+                        self.open_file_dialog(crate::file_dialog::Purpose::AddData, None, String::new());
+                    }
+                    5 => {
                         self.remove_game=Some(crate::remove_game::Prompt {id:game.id.clone(),name:game.display_name.clone()});
                         self.deck_library_actions.clear();
                         self.deck_nav_repeat=None;
                         self.game_menu=None;
                         self.game_menu_parent=None;
                     }
-                    5 => {
+                    6 => {
                         ui.ctx().output_mut(|o| o.copied_text = game.id.clone());
                         self.game_id_popup = Some(game.id.clone());
                     }
@@ -2971,12 +2972,6 @@ impl PocketLauncher {
         let mut save_clicked = false;
         let mut cancel_clicked = false;
         ui.heading(format!("Settings: {display_name}"));
-        ui.add_enabled_ui(self.running_game.is_none() && self.pending_run.is_none(), |ui| {
-            if crate::controller_ui::button(ui, "Add Data").clicked() {
-                self.data_game = Some(id.clone());
-                self.open_file_dialog(crate::file_dialog::Purpose::AddData, None, String::new());
-            }
-        });
         ui.add_space(8.0);
         ui.separator();
         ui.heading("Controls");

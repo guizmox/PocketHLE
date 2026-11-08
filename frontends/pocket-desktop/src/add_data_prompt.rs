@@ -30,7 +30,7 @@ impl DataPrompt {
         let mut executable_choice: Option<Option<String>> = None;
         let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let title = match self {
-            DataPrompt::Zip { .. } => "Add Data — ZIP archive",
+            DataPrompt::Zip { .. } => "Add game data — ZIP archive",
             DataPrompt::Executable(_) => "Choose game executable",
             DataPrompt::Overwrite(_) => "Replace existing data?",
             DataPrompt::Notice { title, .. } => title,
@@ -143,7 +143,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut nav = Navigation::default();
         let prompt = DataPrompt::Notice {
-            title: "Add Data complete",
+            title: "Add game data complete",
             message: "Files were placed in: /games/test/extracted".into(),
         };
         assert_eq!(frame(&ctx, &mut nav, &prompt), None);

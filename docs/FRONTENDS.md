@@ -17,8 +17,9 @@ separate supported choice. Frame-limit inheritance and filters are defined in
 
 ## Adding data to an installed game
 
-Every PocketPC and Gizmondo game has **Add Data** in its per-game settings on
-desktop and Android. The file picker accepts any single file. Non-ZIP files are
+Every PocketPC and Gizmondo game has **Add game data** in its library tile
+overflow menu (between Settings and Remove) on desktop and Android. It is not a
+per-game settings entry. The file picker accepts any single file. Non-ZIP files are
 copied with their original filename to `games/<id>/extracted/`. For ZIP files,
 the user chooses **Extract contents** or **Copy ZIP unchanged**. Extraction keeps
 the archive's directory structure, including wrapper directories; it does not
@@ -48,7 +49,7 @@ controller D-pad/left-stick navigation and confirm/back input; desktop uses the
 launcher-owned picker and controller widgets. Reserved host shortcuts still work.
 After success, a modal notice displays the exact destination directory. Android
 retains the pending choice across Activity recreation and releases staged data
-when it is cancelled or the settings Activity is finished.
+when it is cancelled or the library Activity is finished.
 
 Data additions are refused while a game session is running or stopping. Android
 holds the session gate during preparation and commit and checks again after a

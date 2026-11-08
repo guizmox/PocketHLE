@@ -33,6 +33,85 @@ import org.json.JSONObject
  */
 class MainActivity : HostKeyActivity() {
 
+    private lateinit var addDataModel: AddDataModel
+    private var dataDialog: AddDataDialog? = null
+    private val addDataPicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        val id = pendingDataGameId
+        pendingDataGameId = null
+        if (uri != null && id != null) addDataModel.select(uri, id)
+    }
+
+    private var pendingDataGameId: String? = null
+
+    private fun pickData(entry: GameEntry) {
+        if (!libraryBusy && addDataModel.step.value == AddDataModel.Step.Idle) {
+            pendingDataGameId = entry.id
+            addDataPicker.launch(arrayOf("*/*"))
+        }
+    }
+
+    private fun showDataStep(step: AddDataModel.Step) {
+        dataDialog?.dismiss()
+        dataDialog = null
+        if (step == AddDataModel.Step.Idle) {
+            refreshLibrary()
+            showReleaseUpdate()
+            return
+        }
+        val dialog = AddDataDialog(this, ::handleHostKeyEvent)
+        dataDialog = dialog
+        dialog.setCanceledOnTouchOutside(false)
+        when (step) {
+            AddDataModel.Step.Busy -> {
+                dialog.setTitle("Add game data")
+                dialog.setMessage("Please wait…")
+                dialog.setCancelable(false)
+                dialog.controllerCancel = false
+            }
+            is AddDataModel.Step.Zip -> {
+                dialog.setTitle("Add game data — ZIP archive")
+                dialog.setMessage("Extract the ZIP contents into the game folder, or copy the ZIP file unchanged?")
+                dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Extract contents") { _, _ -> addDataModel.chooseZip(true) }
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEUTRAL, "Copy ZIP unchanged") { _, _ -> addDataModel.chooseZip(false) }
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
+            }
+            is AddDataModel.Step.Executable -> {
+                dialog.setTitle("Choose game executable")
+                val choices = listOf("Keep current executable") + step.paths
+                val list = android.widget.ListView(this).apply {
+                    adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_1, choices)
+                    setOnItemClickListener { _, _, position, _ -> addDataModel.chooseExecutable(if (position == 0) null else step.paths[position - 1]) }
+                }
+                val container = android.widget.FrameLayout(this).apply {
+                    addView(list, android.widget.FrameLayout.LayoutParams(android.view.ViewGroup.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.45f).toInt()))
+                }
+                dialog.setView(container)
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
+                dialog.setOnShowListener { list.requestFocus(); list.setSelection(0) }
+            }
+            is AddDataModel.Step.Overwrite -> {
+                dialog.setTitle("Replace existing data?")
+                dialog.setMessage("Existing files or folders will be replaced. No files have been copied into the game folder yet.\n\n" + step.paths.joinToString("\n"))
+                dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Yes") { _, _ -> addDataModel.confirmOverwrite() }
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
+            }
+            is AddDataModel.Step.Notice -> {
+                dialog.setTitle(if (step.success) "Add game data complete" else "Add game data failed")
+                dialog.setMessage(step.message)
+                dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Close") { _, _ -> addDataModel.cancel() }
+            }
+            AddDataModel.Step.Idle -> return
+        }
+        dialog.setOnCancelListener { addDataModel.cancel() }
+        dialog.show()
+        applyHostFullscreen(dialog.window!!)
+        dialog.getButton(if (step is AddDataModel.Step.Overwrite) android.content.DialogInterface.BUTTON_NEGATIVE else android.content.DialogInterface.BUTTON_POSITIVE)?.requestFocus()
+    }
+
+
+
     private lateinit var adapter: GameAdapter
     private var gizmondoTab = true
     private var libraryGames: List<GameEntry> = emptyList()
@@ -118,6 +197,8 @@ class MainActivity : HostKeyActivity() {
         setSupportActionBar(findViewById<Toolbar>(R.id.toolbar))
 
         rootDir = LibraryPaths.root(this)
+        pendingDataGameId = savedInstanceState?.getString("add_data_game_id")
+        addDataModel = androidx.lifecycle.ViewModelProvider(this)[AddDataModel::class.java]
         emptyState = findViewById(R.id.empty_state)
         recycler = findViewById(R.id.recycler)
         adapter = GameAdapter(
@@ -129,6 +210,7 @@ class MainActivity : HostKeyActivity() {
                         .putExtra(GameSettingsActivity.EXTRA_GAME_NAME, entry.displayName),
                 )
             },
+            onAddData = { entry -> pickData(entry) },
             onRemove = { entry -> confirmRemove(entry) },
             onRename = { entry -> renameGame(entry) },
             onInformation = { entry -> showInformation(entry) },
@@ -136,6 +218,7 @@ class MainActivity : HostKeyActivity() {
         )
         recycler.layoutManager = GridLayoutManager(this, gridSpanCount())
         recycler.adapter = adapter
+        addDataModel.step.observe(this) { showDataStep(it) }
         gizmondoTab = savedInstanceState?.getBoolean("gizmondo_tab", true) ?: true
         val tabs = findViewById<com.google.android.material.tabs.TabLayout>(R.id.platform_tabs)
         tabs.addTab(tabs.newTab().setText("Gizmondo"), gizmondoTab)
@@ -165,7 +248,7 @@ class MainActivity : HostKeyActivity() {
 
     private fun showReleaseUpdate() {
         val update = pendingReleaseUpdate ?: return
-        if (ReleaseUpdates.announced || libraryBusy || isFinishing || isDestroyed ||
+        if (ReleaseUpdates.announced || libraryBusy || dataDialog?.isShowing == true || isFinishing || isDestroyed ||
             !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         ReleaseUpdates.announced = true
         pendingReleaseUpdate = null
@@ -214,6 +297,7 @@ class MainActivity : HostKeyActivity() {
     }
 
     override fun onSaveInstanceState(out: Bundle) {
+        out.putString("add_data_game_id", pendingDataGameId)
         out.putBoolean("gizmondo_tab", gizmondoTab); super.onSaveInstanceState(out)
     }
 
@@ -293,6 +377,8 @@ class MainActivity : HostKeyActivity() {
     }
 
     override fun onDestroy() {
+        dataDialog?.dismiss()
+        dataDialog = null
         busyDialog?.dismiss()
         busyDialog = null
         pendingImportToken?.let { NativeBridge.cancelPreparedImport(rootDir, it) }
