@@ -2,9 +2,9 @@
 //!
 //! HSS is a freeware C++ audio mixer bundled with a great many Pocket PC
 //! games. Unlike `waveOut`, where the guest hands us PCM it has already
-//! decoded, HSS games hand us a *filename* and expect the library to do
-//! the decoding — so this module owns a decoder for both formats HSS
-//! accepts: PCM `.wav` for effects and Protracker modules for music
+//! decoded, HSS games hand us a filename, memory buffer or PE resource and
+//! expect the library to do the decoding. This module handles WAV effects
+//! and Protracker modules for music
 //! (see [`pocket_kernel::tracker`]).
 //!
 //! The API is C++ methods, so every handler takes `this` in `r0`. The
@@ -32,7 +32,6 @@ pub fn register(d: &mut WinCeDispatcher) {
         "??0hssSpeaker@@QAA@XZ",
         "??1hssSound@@UAA@XZ",
         "??1hssMusic@@UAA@XZ",
-        "??1hssSpeaker@@UAA@XZ",
     ];
     for f in identity_stubs {
         d.register_handler(dll, f, this_returning);
@@ -46,6 +45,12 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "?load@hssSound@@QAAHPAX_N@Z", load_sound);
     d.register_handler(dll, "?load@hssMusic@@QAAHPBG@Z", load_music);
     d.register_handler(dll, "?load@hssMusic@@QAAHPAX_N@Z", load_music);
+    d.register_handler(dll, "?load@hssSound@@QAAHPAUHINSTANCE__@@K@Z", load_sound);
+    d.register_handler(dll, "?load@hssMusic@@QAAHPAUHINSTANCE__@@K@Z", load_music);
+    d.register_handler(dll, "?suspend@hssSpeaker@@QAAXXZ", suspend_speaker);
+    d.register_handler(dll, "?resume@hssSpeaker@@QAAXXZ", resume_speaker);
+    d.register_handler(dll, "?close@hssSpeaker@@QAAHXZ", close_speaker);
+    d.register_handler(dll, "??1hssSpeaker@@UAA@XZ", close_speaker);
 
     d.register_handler(dll, "?loop@hssSound@@QAAX_N@Z", set_loop);
     d.register_handler(dll, "?loop@hssMusic@@QAAX_N@Z", set_loop);
@@ -233,7 +238,7 @@ fn channel_method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     );
     ctx.kernel
         .audio
-        .pause_voice_group(state.group, state.paused);
+        .pause_voice_group(state.group, state.paused || state.suspended);
     Ok(DispatchOutcome::ReturnedR0(result))
 }
 
@@ -241,8 +246,8 @@ fn channel_method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 const HSS_MAX_VOLUME: u32 = 64;
 
 /// `int hssSound::load(const wchar_t* path)` and the `void*, bool`
-/// overload. Returns non-zero on success, which is what the guest
-/// checks before it bothers calling `playSound`.
+/// overload. Native HSS returns zero on success and negative error codes;
+/// playback returns a channel index (also possibly zero), not a boolean.
 fn load_sound(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     load_clip(ctx, "hssSound")
 }
@@ -255,18 +260,25 @@ fn load_music(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn load_clip(ctx: &mut CallCtx<'_>, kind: &str) -> Result<DispatchOutcome, KernelError> {
     let this = ctx.arg_u32(0)?;
     let arg = ctx.arg_u32(1)?;
-    if this == 0 || arg == 0 {
-        return Ok(DispatchOutcome::ReturnedR0(0));
+    if this == 0 {
+        return Ok(DispatchOutcome::ReturnedR0((-10i32) as u32));
     }
-
+    // Native loads release the previous clip even when replacement fails.
+    ctx.kernel.hss.clips.remove(&this);
+    let resource = matches!(&ctx.thunk.binding, pocket_pe::ImportBinding::Name(name) if name.contains("PAUHINSTANCE__"));
+    if arg == 0 && !resource {
+        return Ok(DispatchOutcome::ReturnedR0((-10i32) as u32));
+    }
     let memory = matches!(&ctx.thunk.binding, pocket_pe::ImportBinding::Name(name) if name.contains("PAX_N"));
-    let path = if memory {
+    let path = if resource {
+        format!("resource:{arg:08x}:{}:{}", kind, ctx.arg_u32(2)? & 0xffff)
+    } else if memory {
         format!("memory:{arg:08x}")
     } else {
         crate::coredll::read_guest_wstr_lossy(ctx, arg, 260)?
     };
     // Guest memory may be freed/reused after load; never cache by its address.
-    let cached = if memory {
+    let cached = if memory || resource {
         None
     } else {
         ctx.kernel.hss.decoded.get(&path).cloned()
@@ -274,24 +286,26 @@ fn load_clip(ctx: &mut CallCtx<'_>, kind: &str) -> Result<DispatchOutcome, Kerne
     let (format, samples) = match cached {
         Some(hit) => hit,
         None => {
-            let bytes = if memory {
+            let bytes = if resource {
+                read_resource_clip(ctx, arg, kind)?
+            } else if memory {
                 read_memory_clip(ctx, arg)?
             } else {
                 crate::coredll::read_guest_file_for(ctx, &path)
             };
             let Some(bytes) = bytes else {
                 log::debug!("{kind}::load({path:?}): no readable WAV/MOD container");
-                return Ok(DispatchOutcome::ReturnedR0(0));
+                return Ok(DispatchOutcome::ReturnedR0((-200i32) as u32));
             };
             let Some((format, samples)) = decode_clip(&bytes) else {
                 log::debug!(
                     "{kind}::load({path:?}): unsupported/corrupt audio; header={:02x?}",
                     &bytes[..bytes.len().min(48)]
                 );
-                return Ok(DispatchOutcome::ReturnedR0(0));
+                return Ok(DispatchOutcome::ReturnedR0((-100i32) as u32));
             };
             let entry = (format, Arc::new(samples));
-            if !memory {
+            if !memory && !resource {
                 ctx.kernel.hss.decoded.insert(path.clone(), entry.clone());
             }
             entry
@@ -314,7 +328,42 @@ fn load_clip(ctx: &mut CallCtx<'_>, kind: &str) -> Result<DispatchOutcome, Kerne
             path,
         },
     );
-    Ok(DispatchOutcome::ReturnedR0(1))
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+/// Match the native resource overload: WAVE effects, PTMOD music and a
+/// low-word resource ID, within the supplied module (never another DLL).
+fn read_resource_clip(
+    ctx: &mut CallCtx<'_>,
+    module: u32,
+    kind: &str,
+) -> Result<Option<Vec<u8>>, KernelError> {
+    use pocket_pe::resources::ResourceKey;
+    if module != 0
+        && module != pocket_kernel::PROCESS_INSTANCE_HANDLE
+        && module != ctx.kernel.image_base
+        && ctx.kernel.module_by_handle(module).is_none()
+    {
+        return Ok(None);
+    }
+    let id = ctx.arg_u32(2)? & 0xffff;
+    let ty = if kind == "hssMusic" { "PTMOD" } else { "WAVE" };
+    let (entries, base) = ctx.kernel.resource_scope(module);
+    let Some(entry) = entries.iter().find(|e| {
+        e.name == ResourceKey::Id(id)
+            && matches!(&e.ty, ResourceKey::Name(name) if name.eq_ignore_ascii_case(ty))
+    }) else {
+        return Ok(None);
+    };
+    if entry.size == 0 || entry.size > 32 * 1024 * 1024 {
+        return Ok(None);
+    }
+    let Some(address) = base.checked_add(entry.data_rva) else {
+        return Ok(None);
+    };
+    ctx.cpu
+        .check_guest_access(address, entry.size, pocket_cpu::Prot::READ)?;
+    Ok(Some(ctx.cpu.read_mem(address, entry.size)?))
 }
 
 /// Memory overloads contain the same self-describing WAV/MOD bytes as files.
@@ -432,6 +481,11 @@ fn get_clip_volume(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 /// The guest picks the mixer format here; we adopt it so the engine
 /// resamples everything to the rate the game expects to hear.
 fn open_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let speaker = ctx.arg_u32(0)?;
+    // Native HSS rejects a second open without replacing the existing mixer.
+    if ctx.kernel.hss.speakers.contains_key(&speaker) {
+        return Ok(DispatchOutcome::ReturnedR0((-2i32) as u32));
+    }
     let rate = ctx.arg_u32(1)?;
     let bits = ctx.arg_u32(2)?;
     let stereo = ctx.arg_u32(3)? != 0;
@@ -484,13 +538,9 @@ fn play(ctx: &mut CallCtx<'_>, group: u32) -> Result<DispatchOutcome, KernelErro
     let clip_this = ctx.arg_u32(1)?;
     let speaker = ctx.arg_u32(0)?;
     let requested = ctx.arg_u32(2)?;
-    let (sounds, musics) = ctx
-        .kernel
-        .hss
-        .speakers
-        .get(&speaker)
-        .copied()
-        .unwrap_or((16, 1));
+    let Some((sounds, musics)) = ctx.kernel.hss.speakers.get(&speaker).copied() else {
+        return Ok(DispatchOutcome::ReturnedR0((-1000i32) as u32));
+    };
     let (start, count) = if group == HSS_MUSIC_GROUP {
         (0, musics)
     } else {
@@ -548,12 +598,13 @@ fn play(ctx: &mut CallCtx<'_>, group: u32) -> Result<DispatchOutcome, KernelErro
     channel.offset = 0;
     channel.stopped = false;
     channel.paused = requested & 0x2000_0000 != 0;
+    channel.suspended = ctx.kernel.hss.suspended_speakers.contains(&speaker);
     channel.looped = looped;
     channel.volume = clip.volume;
     channel.master = master as f32 / 64.0;
     channel.music = group == HSS_MUSIC_GROUP;
     let channel_group = channel.group;
-    let paused = channel.paused;
+    let paused = channel.paused || channel.suspended;
     ctx.kernel.audio.play_voice_with(
         &samples,
         format,
@@ -616,6 +667,55 @@ fn get_music_volume(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     Ok(DispatchOutcome::ReturnedR0(ctx.kernel.hss.music_volume))
 }
 
+fn suspend_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    set_speaker_suspended(ctx, true)
+}
+fn resume_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    set_speaker_suspended(ctx, false)
+}
+fn set_speaker_suspended(
+    ctx: &mut CallCtx<'_>,
+    suspended: bool,
+) -> Result<DispatchOutcome, KernelError> {
+    let speaker = ctx.arg_u32(0)?;
+    if !ctx.kernel.hss.speakers.contains_key(&speaker) {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if suspended {
+        ctx.kernel.hss.suspended_speakers.insert(speaker);
+    } else {
+        ctx.kernel.hss.suspended_speakers.remove(&speaker);
+    }
+    for ((owner, _), channel) in &mut ctx.kernel.hss.channels {
+        if *owner != speaker || channel.suspended == suspended {
+            continue;
+        }
+        channel.offset = channel.position();
+        channel.started = std::time::Instant::now();
+        channel.suspended = suspended;
+        ctx.kernel
+            .audio
+            .pause_voice_group(channel.group, channel.paused || suspended);
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+fn close_speaker(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let speaker = ctx.arg_u32(0)?;
+    for ((owner, _), channel) in &mut ctx.kernel.hss.channels {
+        if *owner == speaker {
+            channel.stopped = true;
+            channel.suspended = false;
+            ctx.kernel.audio.stop_voice_group(channel.group);
+        }
+    }
+    // Keep channel handles/group IDs reserved so another speaker cannot alias
+    // a live voice group when this speaker closes and later reopens.
+    ctx.kernel.hss.speakers.remove(&speaker);
+    ctx.kernel.hss.suspended_speakers.remove(&speaker);
+    ctx.kernel.hss.opened = !ctx.kernel.hss.speakers.is_empty();
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
 fn pause(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel.audio.set_paused(true);
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -654,6 +754,306 @@ fn this_returning(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_overloads_use_wave_or_ptmod_and_return_native_status_codes() {
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_cpu::Cpu;
+        use pocket_pe::resources::{ResourceEntry, ResourceKey};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        let wave = tiny_wav();
+        let module = tiny_module();
+        kernel.image_base = 0x1000;
+        cpu.write_mem(0x1800, &wave).unwrap();
+        cpu.write_mem(0x2000, &module).unwrap();
+        kernel.resources = vec![
+            ResourceEntry {
+                ty: ResourceKey::Name("WAVE".into()),
+                name: ResourceKey::Id(7),
+                data_rva: 0x800,
+                size: wave.len() as u32,
+                codepage: 0,
+            },
+            ResourceEntry {
+                ty: ResourceKey::Name("PTMOD".into()),
+                name: ResourceKey::Id(7),
+                data_rva: 0x1000,
+                size: module.len() as u32,
+                codepage: 0,
+            },
+        ];
+        let sound = "?load@hssSound@@QAAHPAUHINSTANCE__@@K@Z";
+        let music = "?load@hssMusic@@QAAHPAUHINSTANCE__@@K@Z";
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                sound,
+                &[0x9000, 0, 0x10007]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(*kernel.hss.clips[&0x9000].samples, vec![1000, -1000]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                music,
+                &[0x9100, pocket_kernel::PROCESS_INSTANCE_HANDLE, 7]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert!(kernel.hss.clips[&0x9100].samples.iter().any(|s| *s != 0));
+        assert!(
+            kernel.hss.decoded.is_empty(),
+            "resource addresses must not be cached like filenames"
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                sound,
+                &[0x9000, 0, 8]
+            ),
+            DispatchOutcome::ReturnedR0((-200i32) as u32)
+        );
+        assert!(
+            !kernel.hss.clips.contains_key(&0x9000),
+            "failed reload releases the old clip"
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                sound,
+                &[0x9000, 0xdead, 7]
+            ),
+            DispatchOutcome::ReturnedR0((-200i32) as u32)
+        );
+        // The same numeric ID in a satellite must not resolve to the EXE.
+        let mut satellite_wave = wave.clone();
+        satellite_wave[44..46].copy_from_slice(&2000i16.to_le_bytes());
+        cpu.write_mem(0x3100, &satellite_wave).unwrap();
+        kernel.modules.push(pocket_kernel::LoadedModule {
+            dependencies: vec![],
+            attached: false,
+            satellites: vec![],
+            resident_regions: vec![],
+            handle: 0x3000,
+            name: "audio-fixture.dll".into(),
+            base: 0x3000,
+            image_size: 0x1000,
+            image_entry: 0,
+            refcount: 1,
+            resources: vec![ResourceEntry {
+                ty: ResourceKey::Name("WAVE".into()),
+                name: ResourceKey::Id(7),
+                data_rva: 0x100,
+                size: wave.len() as u32,
+                codepage: 0,
+            }],
+        });
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                sound,
+                &[0x9300, 0x3000, 7]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(kernel.hss.clips[&0x9300].samples[0], 2000);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                music,
+                &[0x9400, 0x3000, 7]
+            ),
+            DispatchOutcome::ReturnedR0((-200i32) as u32)
+        );
+        satellite_wave[44..46].copy_from_slice(&3000i16.to_le_bytes());
+        cpu.write_mem(0x3100, &satellite_wave).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                sound,
+                &[0x9300, 0x3000, 7]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            kernel.hss.clips[&0x9300].samples[0], 3000,
+            "resource reload must read current bytes"
+        );
+        kernel.resources[0].size = 0x4000000;
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                sound,
+                &[0x9000, 0, 7]
+            ),
+            DispatchOutcome::ReturnedR0((-200i32) as u32)
+        );
+    }
+
+    #[test]
+    fn speaker_reopen_suspend_resume_and_close_preserve_other_speakers_and_pauses() {
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_cpu::Cpu;
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        let open = "?open@hssSpeaker@@QAAHII_NII@Z";
+        for speaker in [0x2200, 0x2400] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "hss.dll",
+                    open,
+                    &[speaker, 22050, 16, 0, 1, 8]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+        }
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                open,
+                &[0x2200, 11025, 8, 1, 3, 64]
+            ),
+            DispatchOutcome::ReturnedR0((-2i32) as u32)
+        );
+        assert_eq!(kernel.hss.format.sample_rate, 22050);
+        assert_eq!(kernel.hss.speakers[&0x2200], (8, 1));
+        cpu.write_mem(0x1200, &tiny_wav()).unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            "?load@hssSound@@QAAHPAX_N@Z",
+            &[0x2300, 0x1200, 1],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            "?loop@hssSound@@QAAX_N@Z",
+            &[0x2300, 1],
+        );
+        let play = "?playSound@hssSpeaker@@QAAHPAVhssSound@@I@Z";
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            play,
+            &[0x2200, 0x2300, 0x20000000],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            play,
+            &[0x2400, 0x2300, 0],
+        );
+        let tap = kernel.audio.tap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            "?suspend@hssSpeaker@@QAAXXZ",
+            &[0x2200],
+        );
+        assert!(kernel.hss.channels[&(0x2200, 1)].suspended);
+        assert!(!kernel.hss.channels[&(0x2400, 1)].suspended);
+        let mut output = [0i16; 64];
+        tap.drain_into(&mut output);
+        assert!(
+            output.iter().any(|s| *s != 0),
+            "another speaker must remain audible"
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            play,
+            &[0x2200, 0x2300, 1],
+        );
+        assert!(kernel.hss.channels[&(0x2200, 2)].suspended);
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            "?resume@hssSpeaker@@QAAXXZ",
+            &[0x2200],
+        );
+        assert!(
+            kernel.hss.channels[&(0x2200, 1)].paused,
+            "individual pause survives speaker resume"
+        );
+        assert!(!kernel.hss.channels[&(0x2200, 2)].suspended);
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "hss.dll",
+            "?close@hssSpeaker@@QAAHXZ",
+            &[0x2200],
+        );
+        assert!(kernel.hss.channels[&(0x2200, 2)].stopped);
+        assert!(kernel.hss.channels[&(0x2400, 1)].active());
+        assert!(!kernel.hss.speakers.contains_key(&0x2200));
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                play,
+                &[0x2200, 0x2300, 0]
+            ),
+            DispatchOutcome::ReturnedR0((-1000i32) as u32)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "hss.dll",
+                open,
+                &[0x2200, 11025, 8, 0, 1, 8]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
 
     /// A one-sample 22050 Hz mono PCM WAV.
     fn tiny_wav() -> Vec<u8> {
@@ -765,7 +1165,7 @@ mod tests {
 
         assert_eq!(
             load(&mut cpu, &mut kernel, 0x1111),
-            DispatchOutcome::ReturnedR0(1)
+            DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(kernel.hss.decoded.len(), 1, "first load should cache");
 
@@ -774,7 +1174,7 @@ mod tests {
         std::fs::remove_file(dir.join("song.tkm")).expect("remove module");
         assert_eq!(
             load(&mut cpu, &mut kernel, 0x2222),
-            DispatchOutcome::ReturnedR0(1),
+            DispatchOutcome::ReturnedR0(0),
             "second load should be served from the decode cache"
         );
 
@@ -916,7 +1316,7 @@ mod tests {
                 "?load@hssSound@@QAAHPAX_N@Z",
                 &[0x2300, 0x1200, 1]
             ),
-            DispatchOutcome::ReturnedR0(1)
+            DispatchOutcome::ReturnedR0(0)
         );
         assert!(!kernel.hss.clips[&0x2300].samples.is_empty());
         call(

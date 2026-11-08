@@ -568,6 +568,7 @@ pub struct HssChannel {
     pub offset: u64,
     pub stopped: bool,
     pub paused: bool,
+    pub suspended: bool,
     pub looped: bool,
     pub music: bool,
 }
@@ -586,16 +587,19 @@ impl HssChannel {
             offset: 0,
             stopped: true,
             paused: false,
+            suspended: false,
             looped: false,
             music: false,
         }
     }
     pub fn position(&self) -> u64 {
-        let position = self.offset.saturating_add(if self.paused || self.stopped {
-            0
-        } else {
-            (self.started.elapsed().as_secs_f64() * self.rate as f64) as u64
-        });
+        let position =
+            self.offset
+                .saturating_add(if self.paused || self.suspended || self.stopped {
+                    0
+                } else {
+                    (self.started.elapsed().as_secs_f64() * self.rate as f64) as u64
+                });
         if self.looped && self.frames != 0 {
             position % self.frames
         } else {
@@ -605,7 +609,7 @@ impl HssChannel {
     pub fn active(&self) -> bool {
         !self.stopped
             && self.frames > 0
-            && (self.looped || self.paused || self.position() < self.frames)
+            && (self.looped || self.paused || self.suspended || self.position() < self.frames)
     }
 }
 
@@ -614,6 +618,7 @@ impl HssChannel {
 pub struct HssState {
     pub channels: HashMap<(u32, u32), HssChannel>,
     pub speakers: HashMap<u32, (u32, u32)>,
+    pub suspended_speakers: std::collections::HashSet<u32>,
     /// Loaded clips, keyed by the `this` pointer of the `hssSound` /
     /// `hssMusic` object that owns them.
     pub clips: HashMap<u32, HssClip>,
@@ -640,6 +645,7 @@ impl Default for HssState {
         Self {
             channels: HashMap::new(),
             speakers: HashMap::new(),
+            suspended_speakers: std::collections::HashSet::new(),
             clips: HashMap::new(),
             decoded: HashMap::new(),
             format: GuestFormat::default(),

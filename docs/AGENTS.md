@@ -579,12 +579,36 @@ deeper stack, and only SP back at the saved value less
 move SP out from under the running callback.
 
 **HSS (`hss.dll`).** Hekkus Sound System is a freeware C++ mixer bundled
-with a great many Pocket PC games. The guest hands over a *filename* and
-expects the library to decode it, so `crates/pocket-winceapi/src/hss.rs`
+with a great many Pocket PC games. The guest hands over a filename, memory
+buffer or PE resource and expects the library to decode it, so `crates/pocket-winceapi/src/hss.rs`
 owns a decoder for both formats HSS accepts: PCM `.wav` for effects and
 Protracker modules for music. Games commonly rename modules to `.tkm`, so
 `decode_clip` tries both decoders against the *content* — the extension
 is not load-bearing on a device and it isn't here either.
+
+Native HSS `open` and successful `load` return zero, not a boolean. A second
+`open` on the same live speaker returns -2 and preserves the existing mixer.
+Failed loads return negative errors and release the previous clip; playback
+returns a channel index, including zero for the first music channel. Do not
+change these conventions to accommodate a caller's mistaken boolean check.
+
+The HINSTANCE/resource-ID load overloads select named WAVE (effects) or PTMOD
+(music) in that module, using the low 16 bits of the resource ID. Missing IDs
+must fail rather than selecting a nearby resource or searching another module.
+Resource and memory loads do not cache decoded bytes by mutable addresses.
+Speaker suspend/resume affects only that speaker's voice groups and freezes
+channel position without losing individual pauses; new voices also respect
+suspension. Close/destruction stops only that speaker and permits reopening.
+These paths share the existing WAV/ADPCM and MOD decoders and host mixer on
+Android and desktop; they do not globally pause unrelated waveOut playback.
+
+The supplied Yeti OGL EXE retries a successful zero-return open; rejecting that
+second open with the real -2 lets it proceed to its resource loads. Its PTMOD
+102 exists and starts music. Its requested WAVE IDs 112..120 are absent from
+that EXE (the actual WAVE IDs are 101, 102 and 104..110). This is not an emulator
+license to remap IDs or modify the game: missing effects still require matching
+application resources. Use the original binary and verify actual mixed PCM,
+not just a successful load or a CLI built without an audio device.
 
 HSS is C++ methods, so every handler takes `this` in `r0`. The guest-side
 object is opaque: whatever the real `hss.dll` would have written there, we
