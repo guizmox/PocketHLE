@@ -61,7 +61,6 @@ class GameActivity : AppCompatActivity() {
     private var activityResumed = false
     private lateinit var gameControls: View
     private lateinit var glRenderer: AndroidFrameRenderer
-    private var displayScale = 0
     private lateinit var bindings: InputBindings
 
     /** Cached handle from `nativeStartGame` (`0` once we've finished). */
@@ -204,7 +203,7 @@ class GameActivity : AppCompatActivity() {
         mediaButtons[3].isEnabled = seekable
         val rect = renderedDisplayRect(
             surface.width, surface.height, frame.width, frame.height, frame.textureWidth,
-            frame.textureHeight, rotationDegrees, displayScale, !gizmondoGame,
+            frame.textureHeight, rotationDegrees, !gizmondoGame,
             controllerFullscreenHost.active,
         )
         val screen = IntArray(2).also { surface.getLocationInWindow(it) }
@@ -271,7 +270,6 @@ class GameActivity : AppCompatActivity() {
         stylusBindings = StylusBindings(config)
         showFps = config.showFps
         showIps = config.showIps
-        displayScale = config.displayScale
         controlsOpacity = config.controlsOpacity
         gameId = intent.getStringExtra(EXTRA_GAME_ID) ?: ""
         gameRoot = LibraryPaths.root(this)
@@ -308,7 +306,7 @@ class GameActivity : AppCompatActivity() {
         title = name
 
         surface = findViewById(R.id.surface)
-        glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, displayScale, showFps, !gizmondoGame)
+        glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, showFps, !gizmondoGame)
         findViewById<View>(R.id.btn_fullscreen).setOnClickListener { setControllerFullscreen(true) }
         surface.setEGLContextClientVersion(3)
         surface.setRenderer(glRenderer)
@@ -751,8 +749,7 @@ class GameActivity : AppCompatActivity() {
         if (gizmondoGame) return
         val width=if(quarter) frame.height else frame.width
         val height=if(quarter) frame.width else frame.height
-        (findViewById<View>(R.id.game_root) as? PocketPcLayout)?.setDisplaySize(width,height,
-            if(displayScale<=0) 4 else displayScale.coerceIn(1,4),renderW,renderH)
+        (findViewById<View>(R.id.game_root) as? PocketPcLayout)?.setDisplaySize(width,height,renderW,renderH)
     }
 
     private fun rotatedDirection(vk:Int):Int {
@@ -1239,7 +1236,7 @@ class GameActivity : AppCompatActivity() {
                 val f=lastFrame ?: return
                 val p=stylusPointer.position() ?: return
                 if(!stylusPointer.pointer || gizmondoGame) return
-                val rect=renderedDisplayRect(width,height,f.width,f.height,f.textureWidth,f.textureHeight,rotationDegrees,displayScale,true,controllerFullscreenHost.active)
+                val rect=renderedDisplayRect(width,height,f.width,f.height,f.textureWidth,f.textureHeight,rotationDegrees,true,controllerFullscreenHost.active)
                 val w=f.width.toFloat();val h=f.height.toFloat();val x=p.first.toFloat();val y=p.second.toFloat()
                 val uv=when(rotationDegrees) {90->(h-1-y)/h to x/w;180->(w-1-x)/w to (h-1-y)/h;270->y/h to (w-1-x)/w;else->x/w to y/h}
                 val cx=rect.left+uv.first*rect.width;val cy=rect.top+uv.second*rect.height
@@ -1265,7 +1262,7 @@ class GameActivity : AppCompatActivity() {
         stylusKeys.values.forEach { strengths[it]=1f }
         stylusAxes.values.forEach { (i,v) -> strengths[i]=maxOf(strengths[i],v) }
         var vector=if(!activityResumed || !hasWindowFocus() || surfacePointerDown || centerTap.active || gridRouter?.active==true) 0 to 0
-            else stylusBindings.velocity(strengths,rotationDegrees/90)
+            else lastFrame?.let { stylusBindings.velocityForSize(strengths,rotationDegrees/90,it.width,it.height) } ?: (0 to 0)
         val now=android.os.SystemClock.uptimeMillis()
         val active=activityResumed && hasWindowFocus() && !surfacePointerDown && gridRouter?.active!=true
         lastFrame?.let { frame -> stylusPointer.advance(vector,if(stylusPointerTick==0L) 0f else (now-stylusPointerTick)/1000f,frame.width,frame.height) }
@@ -1528,7 +1525,7 @@ class GameActivity : AppCompatActivity() {
         frame: FrameSnapshot,
         pointerIndex: Int = 0,
     ): Pair<Int, Int>? {
-        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,displayScale,!gizmondoGame,controllerFullscreenHost.active,frame.textureWidth,frame.textureHeight)
+        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,!gizmondoGame,controllerFullscreenHost.active,frame.textureWidth,frame.textureHeight)
     }
 
     data class FrameSnapshot(

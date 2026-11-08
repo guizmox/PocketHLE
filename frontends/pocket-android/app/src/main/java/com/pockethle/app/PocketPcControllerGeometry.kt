@@ -10,6 +10,8 @@ internal object PocketPcControllerGeometry {
         val portrait = w <= h
         val pWidth = if (portrait) 76f else 94f
         val normalPad = 156f
+        // Preserve the previous density fit envelope for P/face key sizes.
+        // The actual stick below is now sized from the D-pad and free space.
         val normalStick = if (portrait) 104f else 100f
         val maxPad = normalPad * 4f / 3f
         val maxStick = normalStick * 4f / 3f
@@ -18,7 +20,7 @@ internal object PocketPcControllerGeometry {
         // Their bounding rectangles can overlap at empty corners safely.
         val diamondOffset = 50f
         val stickDrop = if (portrait) 124f else 140f
-        // Portrait needs lateral clearance for the larger stick below Act/C.
+        // Historical fit-envelope clearance, retained to keep key dimensions.
         val stickSideGap = 50f
         val edge = if (portrait) 16f else 8f
         val gutter = if (portrait) 16f else 6f
@@ -41,7 +43,7 @@ internal object PocketPcControllerGeometry {
         val margin = px(edge); var pW = px(pWidth); val pH = px(76f)
         val pGap = px(12f); val safety = px(24f)
         var pad = px(normalPad * if (big) 4f / 3f else 1f)
-        val stick = px(normalStick * if (big) 4f / 3f else 1f)
+        var stick = pad
         var diameter = px(diamondDiameter); var delta = px(diamondOffset)
         val toolH = px(24f)
         val toolY = px(8f)
@@ -64,21 +66,36 @@ internal object PocketPcControllerGeometry {
             }
         }
         val faceX = w - margin - delta - diameter / 2
-        val stickX = if (portrait) faceX - diameter / 2 - px(stickSideGap)
-            else faceX
-        val stickY = h - px(16f) - stick / 2
-        // One shared horizontal axis for the D-pad and all four action keys.
-        val drop = if (portrait) px(stickDrop) else
-            maxOf(px(stickDrop),delta+diameter/2+stick/2+px(12f))
-        val axisY = stickY - drop
-        val pY = axisY - maxOf(pad / 2, delta + diameter / 2) - safety - pH
+        val bottom = h - px(16f)
+        val stickX: Int
+        val axisY: Int
+        val pY: Int
+        val dpadY: Int
+        if (portrait) {
+            // The enlarged stick is centred below the other controls. Keep
+            // complete vertical clearance for the square D-pad hit target.
+            stickX = w / 2
+            axisY = bottom - stick - px(12f) - maxOf(pad / 2, delta + diameter / 2)
+            dpadY = axisY
+            pY = axisY - maxOf(pad / 2, delta + diameter / 2) - safety - pH
+        } else {
+            // P keys keep their size but move to the top corners; the action
+            // diamond has its own raised axis, independent of the centred pad.
+            pY = toolY
+            axisY = pY + pH + px(12f) + delta + diameter / 2
+            val stickRoom = bottom - (axisY + delta + diameter / 2) - px(12f)
+            stick = minOf(pad, stickRoom.coerceAtLeast(1))
+            stickX = minOf(faceX, w - margin - stick / 2)
+            dpadY = (h / 2).coerceIn(pY + pH + px(12f) + pad / 2, bottom - pad / 2)
+        }
+        val stickY = bottom - stick / 2
         val pLeft1 = ControlRect(margin, pY, pW, pH)
         val pLeft2 = ControlRect(margin + pW + pGap, pY, pW, pH)
         val pRight2 = ControlRect(w - margin - pW, pY, pW, pH)
         val pRight1 = ControlRect(pRight2.x - pGap - pW, pY, pW, pH)
         fun centred(x: Int, y: Int, size: Int) = ControlRect(x - size / 2, y - size / 2, size, size)
         val dpadX = margin + maxOf(pad, 2 * pW + pGap) / 2
-        val dpad = centred(dpadX, axisY, pad)
+        val dpad = centred(dpadX, dpadY, pad)
         val stylus = centred(stickX, stickY, stick)
         val a = centred(faceX, axisY - delta, diameter)
         val b = centred(faceX + delta, axisY, diameter)

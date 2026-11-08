@@ -59,6 +59,6 @@ internal class StylusPointer {
     }
 
     companion object {
-        const val DOUBLE_MS = 300L
+        const val DOUBLE_MS = 200L
     }
 }

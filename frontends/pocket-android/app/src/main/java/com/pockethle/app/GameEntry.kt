@@ -21,6 +21,7 @@ data class GameEntry(
     val screenHeight: Int = 320,
     val graphicsApi: String? = null,
     val customSettings: Boolean = false,
+    val isGizmondo: Boolean = false,
 ) {
     companion object {
         fun fromJson(obj: JSONObject): GameEntry {
@@ -30,6 +31,7 @@ data class GameEntry(
                 screenWidth = obj.optInt("screen_width",240),
                 screenHeight = obj.optInt("screen_height",320),
                 customSettings = obj.optBoolean("custom_settings", false),
+                isGizmondo = obj.optBoolean("is_gizmondo", false),
                 graphicsApi = obj.optString("graphics_api").takeIf { !obj.isNull("graphics_api") && it.isNotBlank() },
                 displayName = obj.getString("display_name"),
                 titleId = obj.optString("title_id").takeIf { !obj.isNull("title_id") && it.isNotEmpty() },
@@ -185,7 +187,6 @@ data class LauncherConfig(
     val gpsFixedLatitude: Double = 0.0,
     val gpsFixedLongitude: Double = 0.0,
     val upscaleFilter: String = "reconstruction",
-    val displayScale: Int = 0,
     val originalJson: String = "{}",
     val gprsEnabled: Boolean = true,
     val colorsServerUrl: String = "https://vps-50cdd0fc.vps.ovh.ca",
@@ -211,6 +212,7 @@ data class LauncherConfig(
     val keybindingsJson: String?,
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
+        remove("android_display_scale") // Discard the removed manual presentation preference.
         remove("optimizations")
         remove("anisotropic_filtering")
         optJSONObject("stylus_stick")?.apply { remove("enabled");remove("controller") }
@@ -237,7 +239,6 @@ data class LauncherConfig(
         put("gps_fixed_latitude", gpsFixedLatitude)
         put("gps_fixed_longitude", gpsFixedLongitude)
         put("upscale_filter", upscaleFilter)
-        put("android_display_scale", displayScale)
         put("gprs_enabled", gprsEnabled)
         put("colors_server_url", colorsServerUrl)
         put("colors_terminal_id", colorsTerminalId)
@@ -291,7 +292,6 @@ data class LauncherConfig(
             gpsFixedLatitude = obj.optDouble("gps_fixed_latitude", 0.0),
             gpsFixedLongitude = obj.optDouble("gps_fixed_longitude", 0.0),
             upscaleFilter = obj.optString("upscale_filter", "reconstruction"),
-            displayScale = obj.optInt("android_display_scale", 0).coerceIn(0,4),
             originalJson = obj.toString(),
             gprsEnabled = obj.optBoolean("gprs_enabled", true),
             colorsServerUrl = obj.optString("colors_server_url", "").ifBlank { "https://vps-50cdd0fc.vps.ovh.ca" },

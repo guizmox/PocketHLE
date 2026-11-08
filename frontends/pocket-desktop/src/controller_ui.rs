@@ -27,11 +27,18 @@ struct Widgets {
     last_page: Option<Id>,
     reveal_focus: Option<Id>,
     modal_input: bool,
+    navigation_focus: bool,
 }
 #[derive(Clone)]
 struct Popup {
     owner: Id,
     items: Vec<Id>,
+}
+// Mouse focus is descriptive: it must not scroll a distant navigation owner
+// back into view. Only keyboard/controller navigation requests automatic reveal.
+fn reveal_gained_focus(ui: &Ui, response: &Response) -> bool {
+    response.gained_focus()
+        && (widgets(ui.ctx()).navigation_focus || widgets(ui.ctx()).collecting.is_some())
 }
 fn widgets(ctx: &egui::Context) -> Widgets {
     ctx.data_mut(|d| d.get_temp::<Widgets>(state_id()).unwrap_or_default())
@@ -230,6 +237,9 @@ impl Navigation {
                 *next = Instant::now() + Duration::from_millis(120);
             }
             ctx.request_repaint_after(Duration::from_millis(30));
+        }
+        if !self.pending.is_empty() {
+            edit_widgets(ctx, |w| w.navigation_focus = true);
         }
         for control in std::mem::take(&mut self.pending) {
             if self.keyboard.is_some() {
@@ -518,7 +528,7 @@ pub fn text_edit(ui: &mut Ui, value: &mut String, hint: &str) -> Response {
         w.text.insert(response.id, value.clone());
     });
     register_page_widget(ui, &response);
-    if response.gained_focus() {
+    if reveal_gained_focus(ui, &response) {
         response.scroll_to_me(Some(egui::Align::Center));
     }
     response
@@ -570,7 +580,7 @@ impl ComboBox {
         } else if old.is_some_and(|p| p.owner == response.response.id) {
             edit_widgets(&ctx, |w| w.popup = None);
         }
-        if response.response.gained_focus() {
+        if reveal_gained_focus(ui, &response.response) {
             response.response.scroll_to_me(Some(egui::Align::Center));
         }
         response
@@ -592,7 +602,7 @@ pub fn selectable_value<T: PartialEq>(
                 entries.push((response.id, selected));
             }
         });
-        if response.gained_focus() {
+        if reveal_gained_focus(ui, &response) {
             response.scroll_to_me(Some(egui::Align::Center));
         }
         if response.clicked() {
@@ -620,9 +630,37 @@ pub fn claim_modal_input(ctx: &egui::Context) {
 }
 
 pub fn begin_frame(ctx: &egui::Context) {
+    let pointer = ctx.input(|i| {
+        i.pointer.any_pressed()
+            || i.pointer.any_released()
+            || i.raw_scroll_delta != egui::Vec2::ZERO
+    });
+    let keyboard = ctx.input(|i| {
+        i.events.iter().any(|e| {
+            matches!(
+                e,
+                Event::Key {
+                    key: Key::Tab
+                        | Key::ArrowUp
+                        | Key::ArrowDown
+                        | Key::ArrowLeft
+                        | Key::ArrowRight
+                        | Key::Enter,
+                    pressed: true,
+                    ..
+                }
+            )
+        })
+    });
     let open = ctx.memory(|m| m.any_popup_open());
     edit_widgets(ctx, |w| {
         w.modal_input = false;
+        if pointer {
+            w.navigation_focus = false;
+            w.reveal_focus = None;
+        } else if keyboard {
+            w.navigation_focus = true;
+        }
         w.text.clear();
         w.page_seen = false;
         w.toolbar_seen = false;
@@ -680,9 +718,10 @@ pub fn page_scope<R>(ui: &mut Ui, id: impl Hash, contents: impl FnOnce(&mut Ui) 
     let focused = ui.memory(|m| m.focused());
     if !ui.memory(|m| m.any_popup_open())
         && (entering
-            || !focused.is_some_and(|id| {
-                state.page_items.contains(&id) || state.toolbar_items.contains(&id)
-            }))
+            || (state.navigation_focus
+                && !focused.is_some_and(|id| {
+                    state.page_items.contains(&id) || state.toolbar_items.contains(&id)
+                })))
     {
         if let Some(first) = state.page_items.first() {
             ui.memory_mut(|m| m.request_focus(*first));
@@ -730,7 +769,7 @@ pub fn scroll_focus(ui: &Ui) {
         .memory(|m| m.focused())
         .and_then(|id| ui.ctx().read_response(id))
     {
-        if response.gained_focus() {
+        if reveal_gained_focus(ui, &response) {
             response.scroll_to_me(Some(egui::Align::Center));
         }
     }
@@ -776,6 +815,70 @@ mod tests {
             assert!(nav.pending.is_empty());
             assert!(nav.held.is_none());
         });
+    }
+    #[test]
+    fn clicking_unregistered_diagram_input_does_not_jump_to_page_start_after_scrolling() {
+        let ctx = egui::Context::default();
+        ctx.style_mut(|s| s.animation_time = 0.0);
+        let mut offset = 0.;
+        let mut target = egui::Rect::NOTHING;
+        let mut draw = |events: Vec<Event>, forced: Option<f32>| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640., 480.),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    begin_frame(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        page_scope(ui, "diagram_scroll", |ui| {
+                            let mut scroll = egui::ScrollArea::vertical()
+                                .id_source("diagram_scroll_body")
+                                .max_height(140.);
+                            if let Some(value) = forced {
+                                scroll = scroll.vertical_scroll_offset(value);
+                            }
+                            let out = scroll.show(ui, |ui| {
+                                button(ui, "Assign an input");
+                                ui.add_space(440.);
+                                // Skin hotspots use real egui focus, outside the tab list.
+                                target = ui.button("Diagram input").rect;
+                                ui.add_space(440.);
+                            });
+                            offset = out.state.offset.y;
+                        })
+                    });
+                },
+            );
+            (offset, target.center())
+        };
+        draw(vec![], None);
+        draw(vec![], None);
+        let (before, point) = draw(vec![], Some(430.));
+        assert!(before > 400.);
+        for pressed in [true, false] {
+            draw(
+                vec![
+                    Event::PointerMoved(point),
+                    Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+                None,
+            );
+        }
+        let (after, _) = draw(vec![], None);
+        assert!(
+            (after - before).abs() < 1.,
+            "click changed scroll offset: {before} -> {after}"
+        );
     }
     #[test]
     fn controller_reveals_offscreen_rows_in_nested_settings_scroll_area() {
@@ -1181,7 +1284,7 @@ fn register(ui: &Ui, response: &Response, close: bool) {
             }
         });
     }
-    if response.gained_focus() {
+    if reveal_gained_focus(ui, &response) {
         response.scroll_to_me(Some(egui::Align::Center));
     }
     if close && response.clicked() && widgets(ui.ctx()).collecting.is_some() {
@@ -1202,7 +1305,7 @@ pub fn button(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
 /// Register custom focusable widgets without changing their appearance/behavior.
 pub fn track_focus(ui: &Ui, response: &Response) {
     register_page_widget(ui, response);
-    if response.gained_focus() {
+    if reveal_gained_focus(ui, &response) {
         response.scroll_to_me(Some(egui::Align::Center));
     }
 }

@@ -2346,9 +2346,13 @@ impl PocketLauncher {
             return false;
         };
         self.deck_nav_repeat = None;
+        let mut open_settings = self.deck_library_actions.iter().any(|c| c == "East")
+            || ctx.input(|i| i.key_pressed(egui::Key::B));
+        let mut dismiss = self.deck_library_actions.iter().any(|c| c == "South")
+            || ctx.input(|i| i.key_pressed(egui::Key::A));
         self.deck_library_actions.clear();
-        let mut open_settings = false;
-        let mut dismiss = false;
+        self.controller_ui.stop_repeat();
+        crate::controller_ui::claim_modal_input(ctx);
         egui::CentralPanel::default().show(ctx, |_| {});
         egui::Window::new("PocketPC display settings")
             .collapsible(false)
@@ -2363,8 +2367,8 @@ impl PocketLauncher {
                 }
                 ui.label("Would you like to open the launch settings now?");
                 ui.horizontal(|ui| {
-                    open_settings = crate::controller_ui::button(ui, "Open Launch Settings").clicked();
-                    dismiss = crate::controller_ui::button(ui, "Not Now").clicked();
+                    dismiss |= crate::controller_ui::button(ui, "Not Now (A)").clicked();
+                    open_settings |= crate::controller_ui::button(ui, "Settings (B)").clicked();
                 });
             });
         if open_settings {
@@ -4157,7 +4161,14 @@ impl PocketLauncher {
             && !self.stylus_grid_router.active()
             && !self.center_tap.borrow().active()
         {
-            config.velocity(strengths, rotation_turns(self.game_rotation))
+            self.last_frame_snapshot.as_ref().map_or((0, 0), |frame| {
+                config.velocity_for_size(
+                    strengths,
+                    rotation_turns(self.game_rotation),
+                    frame.width,
+                    frame.height,
+                )
+            })
         } else {
             (0, 0)
         };
@@ -4681,6 +4692,11 @@ impl PocketLauncher {
                         if control == "RightThumb" && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
                             self.stylus_button(down);
                         }
+                        continue;
+                    }
+                    if self.screen==Screen::Library && !self.library_busy && !self.pocketpc_import_options.is_empty() && self.rename_draft.is_none()
+                        && self.file_dialog.is_none() && Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) {
+                        if down && matches!(control.as_str(),"South"|"East") {self.deck_library_actions.push(control.clone());ctx.request_repaint();}
                         continue;
                     }
                     if Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) && self.route_long_press(true,device,&control,down) {continue;}

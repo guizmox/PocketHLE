@@ -24,8 +24,8 @@ fun main() {
                 val oldActionY=h-gap-maxOf(oldPad,(108*density).toInt())-(18*density).toInt()-2*rowH-gap
                 check(g.actions.minOf { it.y }<oldActionY) { "buttons must move upward" }
                 for(native in listOf(240 to 320,480 to 640)) {
-                    val fit=pocketPcDisplayRect(g.screen.w,g.screen.h,native.first,native.second,4)
-                    val point=displayPointToGuest(fit.left+fit.width/2f,fit.top+fit.height/2f,g.screen.w,g.screen.h,native.first,native.second,0,4,true)
+                    val fit=displayRect(g.screen.w,g.screen.h,native.first,native.second)
+                    val point=displayPointToGuest(fit.left+fit.width/2f,fit.top+fit.height/2f,g.screen.w,g.screen.h,native.first,native.second,0,true)
                     check(point!=null && kotlin.math.abs(point.first-native.first/2)<=1 && kotlin.math.abs(point.second-native.second/2)<=1)
                 }
             }

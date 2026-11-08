@@ -1115,9 +1115,6 @@ pub struct LauncherConfig {
     /// Desktop smoothing filter, remembered across sessions.
     #[serde(default = "default_upscale_filter")]
     pub upscale_filter: String,
-    /// Android presentation scale: 0 = fit, 1..4 = native multiple (clamped to fit).
-    #[serde(default)]
-    pub android_display_scale: u32,
     /// Last folder the user picked a `.cab` from. Used to remember
     /// the file dialog start directory.
     #[serde(default)]
@@ -1400,7 +1397,6 @@ impl Default for LauncherConfig {
             colors_terminal_id: String::new(),
             colors_language: default_colors_language(),
             upscale_filter: default_upscale_filter(),
-            android_display_scale: 0,
             last_import_dir: None,
             show_fps: default_show_fps(),
             show_ips: false,

@@ -92,7 +92,7 @@ def build_profile(args):
     config = {
         "schema_version": 1, "default_cpu_backend": "unicorn", "verbosity": 1,
         "log_unimplemented_apis": True, "gpu_renderer": False, "fullscreen": False,
-        "upscale_filter": "nearest", "android_display_scale": 0,
+        "upscale_filter": "nearest",
         "gps_enabled": False, "gprs_enabled": False, "camera_enabled": False, "bluetooth_enabled": False,
     }
     output.parent.mkdir(parents=True, exist_ok=True)

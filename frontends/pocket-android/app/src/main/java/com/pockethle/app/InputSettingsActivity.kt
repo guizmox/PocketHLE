@@ -19,6 +19,7 @@ class InputSettingsActivity : HostKeyActivity() {
     }
     private val livePictures = mutableListOf<InputSkinView>()
     private val liveRows = mutableMapOf<String, Button>()
+    private var selectionSummary: LinearLayout? = null
     private var listening = false
     private val inputListener =
         object : android.hardware.input.InputManager.InputDeviceListener {
@@ -288,8 +289,19 @@ class InputSettingsActivity : HostKeyActivity() {
         return result
     }
 
+    private fun selectInput(pad: Boolean, input: String) {
+        selected[pad] = input
+        // A selection does not change the layout. Rebuilding the Activity here
+        // flashed scrollY=0 for one frame before the old position was restored.
+        livePictures.filter { it.pad == pad }.forEach { it.selected = input; it.invalidate() }
+        if (pad) liveRows.forEach { (name, row) -> row.isSelected = name == input }
+        selectionSummary?.let { panel -> panel.removeAllViews(); summary(panel, pad) }
+    }
+
     private fun bindingText(input: String, label: String): CharSequence {
         if (input == "Misc1") return "Extra (desktop)"
+        if (input == "RightThumb" && !gizmondo)
+            return spans(listOf("$label: ${state.shortFor(input,true,false)}" to InputSkinView.GREEN))
         if (state.assignment(input, true, gizmondo) != "host")
             return spans(
                 listOf(
@@ -352,6 +364,7 @@ class InputSettingsActivity : HostKeyActivity() {
     private fun render() {
         livePictures.clear()
         liveRows.clear()
+        selectionSummary = null
         val oldY = scroll?.scrollY ?: 0
         val oldX = keyboardScroll?.scrollX ?: 0
         val root =
@@ -442,10 +455,20 @@ class InputSettingsActivity : HostKeyActivity() {
             }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
-        scroll?.post {
-            scroll?.scrollTo(0, oldY)
-            keyboardScroll?.scrollTo(oldX, 0)
-        }
+        val vertical = scroll ?: return
+        val horizontal = keyboardScroll
+        // Structural changes still rebuild views. Restore offsets after layout
+        // before the first visible frame, without a posted restore racing it.
+        vertical.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                vertical.viewTreeObserver.removeOnPreDrawListener(this)
+                val beforeY = vertical.scrollY
+                val beforeX = horizontal?.scrollX ?: 0
+                vertical.scrollTo(0, oldY)
+                horizontal?.scrollTo(oldX, 0)
+                return beforeY == vertical.scrollY && beforeX == (horizontal?.scrollX ?: 0)
+            }
+        })
     }
 
     private fun section(body: LinearLayout, pad: Boolean) {
@@ -456,8 +479,7 @@ class InputSettingsActivity : HostKeyActivity() {
         body.addView(text(if (pad) "Controller" else "Keyboard", 20f))
         val diagram =
             InputSkinView(this, pad, state, gizmondo, selected[pad], liveInput) { input ->
-                selected[pad] = input
-                render()
+                selectInput(pad, input)
             }
         livePictures.add(diagram)
         if (pad) {
@@ -484,8 +506,7 @@ class InputSettingsActivity : HostKeyActivity() {
                 val row = LinearLayout(this)
                 for (control in pair) row.addView(
                     button(bindingText(control.input!!, control.label)) {
-                            selected[true] = control.input!!
-                            render()
+                            selectInput(true, control.input!!)
                         }
                         .apply {
                             liveRows[control.input!!] = this
@@ -542,7 +563,10 @@ class InputSettingsActivity : HostKeyActivity() {
                 render()
             }
         )
-        summary(body, pad)
+        val summaryPanel = column()
+        selectionSummary = summaryPanel
+        body.addView(summaryPanel)
+        summary(summaryPanel, pad)
         val inputs = (diagram.controls.mapNotNull { it.input } + state.savedInputs(pad)).distinct()
         val missing =
             state.visibleButtons(gizmondo).filter { !pad || it!="stylus_click" }.filter { target ->

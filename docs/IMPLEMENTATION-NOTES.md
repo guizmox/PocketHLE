@@ -1254,8 +1254,12 @@ its configured guest dimensions and presentation rotation. Android DTO saves pre
 the entire incoming JSON alongside edited fields, including PC controller/logging fields.
 Rename uses Library::rename_game and never changes IDs, paths or save locations.
 
-Display scale android_display_scale defaults to 0 (fit); 1..4 are native pixel multiples,
-clamped to the available center surface. Never change guest dimensions for zoom.
+Android display size is automatic; the former manual Display scale setting and
+configuration field are removed. PocketPC uses every fitting integer multiple of
+the logical LCD, independently of GLES internal density. Gizmondo uses automatic
+produced-image integer fitting; controller fullscreen uses aspect fit. If even one
+logical PocketPC image cannot fit, downscale proportionally. Never change guest
+dimensions for presentation sizing.
 DisplayGeometry supplies the same integer rectangle to GL, stylus mapping and readback.
 All eight desktop filter IDs are used: exact reconstruction/bicubic/Lanczos shader,
 reference three-pass SMAA and lookup textures, xbrz-rs 0.1.0 at internal x3, bilinear,
@@ -5178,14 +5182,18 @@ build their existing private diagnostic fixtures for integration tests.
 
 #### Rendered resolution and display zoom
 
-The source image for display zoom is the actual GPU-rendered image. For example,
-320x240 logical + internal 2x = 640x480 rendered; display 2x then targets
-1280x960 where the viewport permits it. Portrait is 480x640 then 960x1280.
-The display renderer, PocketPC reserved surface, desktop window sizing/filtering
-and inverse touch mapping use that same rendered size. Input still returns
-logical guest coordinates. Existing native-resolution behavior, including the
-legacy native-VGA PocketPC policy and controller fullscreen aspect fit, remains.
-GDI, GAPI and software-rendered games do not gain extra internal geometry detail.
+The source image for presentation is the actual GPU-rendered image. Desktop
+manual display zoom remains relative to that produced image: a 320x240 logical
+guest rendered internally at 640x480 and zoomed 2x targets 1280x960 where it fits.
+Android has no manual Display scale setting: PocketPC automatically chooses the
+largest fitting whole-number multiple of its logical LCD, independently of the
+GLES density. A 320x240 guest therefore fits at 960x720 even if GLES produces
+640x480 or 1280x960. All fitting integer steps are allowed. Native VGA uses its
+own 640x480 logical grid; Gizmondo uses automatic produced-image integer fitting.
+Controller fullscreen retains aspect fit. Sample the full-density texture directly.
+The Android renderer, reserved PocketPC surface and inverse touch mapping share
+the same rectangle. Input still returns logical guest coordinates. GDI, GAPI and
+software-rendered games do not gain extra internal geometry detail.
 
 #### Applying and retesting
 

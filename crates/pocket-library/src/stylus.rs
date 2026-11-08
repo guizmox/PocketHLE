@@ -16,6 +16,26 @@ impl Default for StylusBindings {
     }
 }
 impl StylusBindings {
+    /// Speed is expressed in QVGA reference pixels; scale uniformly with the
+    /// short display edge so QVGA and VGA traverse the same fraction per second.
+    pub fn velocity_for_size(
+        &self,
+        strengths: [f32; 4],
+        turns: u8,
+        width: u32,
+        height: u32,
+    ) -> (i16, i16) {
+        let (x, y) = self.velocity(strengths, turns);
+        let scale = width.min(height).max(1) as f32 / 240.0;
+        (
+            (f32::from(x) * scale)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+            (f32::from(y) * scale)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
+        )
+    }
     pub fn velocity(&self, strengths: [f32; 4], turns: u8) -> (i16, i16) {
         let x = (strengths[3] - strengths[2]).clamp(-1.0, 1.0);
         let y = (strengths[1] - strengths[0]).clamp(-1.0, 1.0);
@@ -32,6 +52,18 @@ impl StylusBindings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn speed_tracks_resolution_without_changing_direction_or_rotation() {
+        let b = StylusBindings::default();
+        for turns in 0..4 {
+            for strengths in [[0., 0., 0., 1.], [1., 0., 0., 1.]] {
+                let q = b.velocity_for_size(strengths, turns, 240, 320);
+                let v = b.velocity_for_size(strengths, turns, 480, 640);
+                assert_eq!(v, (q.0 * 2, q.1 * 2));
+                assert_eq!(q, b.velocity_for_size(strengths, turns, 320, 240));
+            }
+        }
+    }
     #[test]
     fn old_defaults_are_independent_and_vectors_rotate_and_normalize() {
         let b: StylusBindings = serde_json::from_str("{}").unwrap();
@@ -70,7 +102,7 @@ pub struct StylusPointer {
     second: bool,
 }
 impl StylusPointer {
-    pub const DOUBLE_MS: u64 = 300;
+    pub const DOUBLE_MS: u64 = 200;
     pub fn button(&mut self, down: bool, now: u64) -> bool {
         if down {
             if self.held {
@@ -149,9 +181,9 @@ mod pointer_tests {
         assert!(p.pointer);
         p.button(true, 900);
         p.button(false, 910);
-        assert_eq!(p.take_tap(1209), None);
-        assert_eq!(p.take_tap(1210), Some((120, 160)));
-        assert_eq!(p.take_tap(1211), None);
+        assert_eq!(p.take_tap(1109), None);
+        assert_eq!(p.take_tap(1110), Some((120, 160)));
+        assert_eq!(p.take_tap(1111), None);
         p.button(true, 1300);
         p.button(false, 1310);
         p.button(true, 1400);

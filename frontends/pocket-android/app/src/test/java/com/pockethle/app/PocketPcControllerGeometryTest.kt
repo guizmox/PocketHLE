@@ -37,13 +37,16 @@ class PocketPcControllerGeometryTest {
                 val p = listOf(3, 1, 6, 4).map { g.actions[it] }
                 assertEquals("P1-P4 line $context", 1, p.map { it.y }.distinct().size)
                 assertEquals(1, p.map { it.h }.distinct().size)
-                for (index in listOf(2, 7))
-                    assertTrue("D-pad/action axis $context", abs(centreY2(g.actions[index]) - centreY2(g.dpad)) <= 1)
-                assertTrue(abs((centreY2(g.actions[0]) + centreY2(g.actions[5])) / 2 - centreY2(g.dpad)) <= 1)
+                if(w<h) {
+                    assertEquals(g.dpad.w,g.stick.w)
+                    assertTrue(abs(2*g.stick.x+g.stick.w-w)<=1)
+                } else {
+                    assertTrue(abs(centreY2(g.dpad)-h)<=1)
+                    assertTrue(p[0].y < h/12)
+                    assertTrue(centreY2(g.actions[2]) < centreY2(g.dpad))
+                    assertTrue(g.stick.w<=g.dpad.w)
+                }
                 assertTrue("P row safety $context", p[0].y + p[0].h < minOf(g.dpad.y, g.actions[0].y))
-                assertTrue(g.stick.w < g.dpad.w)
-                if (w < h) assertTrue(g.stick.x + g.stick.w / 2 < g.actions[0].x + g.actions[0].w / 2)
-                else assertEquals(g.actions[0].x + g.actions[0].w / 2, g.stick.x + g.stick.w / 2)
                 for (index in listOf(0, 2, 5, 7)) {
                     val r = g.actions[index]
                     val distance = hypot((r.x + r.w / 2.0) - (g.stick.x + g.stick.w / 2.0),
@@ -54,9 +57,9 @@ class PocketPcControllerGeometryTest {
             val normal = PocketPcGeometry.calculate(w, h, density, false, true)
             val big = PocketPcGeometry.calculate(w, h, density, true, true)
             assertTrue(big.dpad.w > normal.dpad.w)
-            assertTrue(big.stick.w > normal.stick.w)
+            assertTrue(big.stick.w >= normal.stick.w)
             assertTrue(abs(big.dpad.w - normal.dpad.w * 4f / 3f) <= 2)
-            assertTrue(abs(big.stick.w - normal.stick.w * 4f / 3f) <= 2)
+            if(w<h) assertTrue(abs(big.stick.w - normal.stick.w * 4f / 3f) <= 2)
             normal.actions.zip(big.actions).forEach { (a, b) -> assertEquals(a.w, b.w); assertEquals(a.h, b.h) }
         }
     }
@@ -86,11 +89,11 @@ class PocketPcControllerGeometryTest {
         }
     }
 
-    @Test fun portraitReferenceKeepsFourTimesGuestScaleInNormalAndBig() {
+    @Test fun portraitReferenceKeepsUsableGuestScaleWithFullSizeCentredStick() {
         for (height in listOf(2480, 2488, 2496)) for (big in listOf(false, true)) {
             val g = PocketPcGeometry.calculate(1200, height, 3.5f, big, true)
-            assertEquals("height=$height / Big=$big", 4,
-                minOf(g.screen.w / 240, g.screen.h / 320, 4))
+            assertTrue("height=$height / Big=$big",
+                minOf(g.screen.w / 240, g.screen.h / 320, 4)>=3)
         }
     }
 
@@ -129,8 +132,9 @@ class PocketPcControllerGeometryTest {
             assertEquals(a.dpad.w, b.dpad.w)
             assertEquals(a.stick.w, b.stick.w)
             a.actions.zip(b.actions).forEach { (x, y) -> assertEquals(x.w, y.w); assertEquals(x.h, y.h) }
-            assertEquals(a.dpad.y - a.actions[3].y, b.dpad.y - b.actions[3].y)
-            assertEquals(a.stick.y - a.actions[6].y, b.stick.y - b.actions[6].y)
+            assertTrue(abs(centreY2(a.dpad)-800)<=1)
+            assertTrue(abs(centreY2(b.dpad)-1440)<=1)
+            assertEquals(800-a.stick.y-a.stick.h,1440-b.stick.y-b.stick.h)
         }
     }
 

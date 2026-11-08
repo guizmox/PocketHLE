@@ -30,8 +30,14 @@ class InternalResolutionSettingsTest {
             val decoded=LauncherConfig.fromJson(original.toJson())
             assertEquals(policy,decoded.glesInternalResolution)
             assertEquals(original.gpuRenderer,decoded.gpuRenderer)
-            assertEquals(original.displayScale,decoded.displayScale)
         }
+    }
+    @Test fun removedDisplayScaleIsDiscardedWithoutLosingOtherPreferences() {
+        val legacy=JSONObject().put("android_display_scale",1).put("gles_internal_resolution",4).put("future_setting","kept")
+        val saved=LauncherConfig.fromJson(legacy).toJson()
+        assertFalse(saved.has("android_display_scale"))
+        assertEquals(4,saved.getInt("gles_internal_resolution"))
+        assertEquals("kept",saved.getString("future_setting"))
     }
     @Test fun oldNativeAndAllSizesPreferencesKeepTheirMeaning() {
         assertEquals(1,LauncherConfig.fromJson(JSONObject()).glesInternalResolution)

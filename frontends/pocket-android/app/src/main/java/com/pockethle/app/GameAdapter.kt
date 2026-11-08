@@ -28,6 +28,7 @@ class GameAdapter(
     private var items: List<GameEntry> = emptyList()
 
     fun submit(newItems: List<GameEntry>) {
+        if (items == newItems) return
         items = newItems
         notifyDataSetChanged()
     }
@@ -58,7 +59,7 @@ class GameAdapter(
             caption.isSelected = true
             val artwork = itemView.findViewById<android.widget.ImageView>(R.id.game_artwork)
             val label = itemView.findViewById<View>(R.id.game_label)
-            val gizmondo = NativeBridge.isGizmondoGame(libraryRoot, entry.id)
+            val gizmondo = entry.isGizmondo
             val bitmap = entry.icon?.takeIf { !gizmondo || it == "cartridge.png" }?.let {
                 BitmapFactory.decodeFile(File(libraryRoot,"games/${entry.id}/$it").absolutePath)
             }

@@ -53,16 +53,15 @@ class PocketPcLayout(context: Context,attrs: AttributeSet?=null): ViewGroup(cont
     private var nativeHeight=320
     private var renderWidth=240
     private var renderHeight=320
-    private var scaleLimit=4
-    fun setDisplaySize(width: Int,height: Int,limit: Int,renderW:Int=width,renderH:Int=height) {
-        if(nativeWidth==width && nativeHeight==height && scaleLimit==limit && renderWidth==renderW && renderHeight==renderH) return
-        nativeWidth=width.coerceAtLeast(1);nativeHeight=height.coerceAtLeast(1);scaleLimit=limit
+    fun setDisplaySize(width: Int,height: Int,renderW:Int=width,renderH:Int=height) {
+        if(nativeWidth==width && nativeHeight==height && renderWidth==renderW && renderHeight==renderH) return
+        nativeWidth=width.coerceAtLeast(1);nativeHeight=height.coerceAtLeast(1)
         renderWidth=renderW.coerceAtLeast(1);renderHeight=renderH.coerceAtLeast(1)
         requestLayout()
     }
     private fun surfaceRect(room: ControlRect): ControlRect {
-        val fit=renderedDisplayRect(room.w,room.h,nativeWidth,nativeHeight,renderWidth,renderHeight,0,scaleLimit,pocketPc=true)
-        // Keep x1 clipped inside its room if the device cannot fit native pixels.
+        val fit=renderedDisplayRect(room.w,room.h,nativeWidth,nativeHeight,renderWidth,renderHeight,0,pocketPc=true)
+        // Rendering and touch mapping use this same fitted rectangle.
         val w=minOf(room.w,fit.width);val h=minOf(room.h,fit.height)
         return ControlRect(room.x+(room.w-w)/2,room.y+(room.h-h)/2,w,h)
     }

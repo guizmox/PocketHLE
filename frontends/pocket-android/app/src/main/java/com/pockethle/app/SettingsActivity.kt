@@ -149,13 +149,6 @@ class SettingsActivity : HostKeyActivity() {
                 value = current.upscaleFilter; summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, v -> current = current.copy(upscaleFilter = v.toString()); writeConfig(); true }
             })
-            display.addPreference(ListPreference(requireContext()).apply {
-                key = "android_display_scale"; title = "Display scale"; isPersistent = false
-                entries = arrayOf("Auto (largest integer scale that fits)", "QVGA ×1", "QVGA ×2", "QVGA ×3", "QVGA ×4")
-                entryValues = arrayOf("0", "1", "2", "3", "4"); value = current.displayScale.toString()
-                summary = "Pocket PC: multiples of the QVGA grid, including VGA games. Gizmondo: native multiples. Limited to the available space."
-                setOnPreferenceChangeListener { _, v -> current = current.copy(displayScale = v.toString().toInt()); writeConfig(); true }
-            })
             giz.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key = "bluetooth_enabled"
                 title = "Bluetooth hardware (Classic / RFCOMM)"
@@ -246,7 +239,7 @@ class SettingsActivity : HostKeyActivity() {
                 key="gles_internal_resolution"; title="OpenGLES internal resolution (GPU only)"; isPersistent=false
                 entries=arrayOf("Native (1×)", "2x - only for 320x240 games", "3x - only for 320x240 games", "4x - only for 320x240 games", "2x - also for 640x480 games"); entryValues=arrayOf("1", "3", "4", "5", "2")
                 value=current.glesInternalResolution.toString(); isEnabled=current.gpuRenderer
-                summary="Includes portrait equivalents (240x320 and 480x640). QVGA-only 2x/3x/4x modes leave larger surfaces native; the other 2x mode doubles them. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch."
+                summary="Includes portrait equivalents (240x320 and 480x640). QVGA-only 2x/3x/4x modes leave larger surfaces native; the other 2x mode doubles them. Display size is automatic; PocketPC fits whole logical-screen multiples regardless of internal resolution. Touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch."
                 setOnPreferenceChangeListener { _, v -> current=current.copy(glesInternalResolution=v.toString().toInt());writeConfig();true }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {

@@ -151,7 +151,7 @@ Center tap and Extra's Rotation remain assignable commands.
 PocketPC reserves the right stick and R3 in every assignment editor, including
 per-game grids. Double-click R3 to switch between automatic Stylus stick drags
 and a visible Pointer. Single R3 does nothing in Stick mode; in Pointer mode it
-taps the cursor position after the 300 ms double-click window. A mode notice
+taps the cursor position after the 200 ms double-click window. A mode notice
 appears at the filter-notice location. The only setting is Stylus speed (pixels),
 shared by both modes. Old enable and controller-direction options are removed.
 Keyboard P defaults to click/mode switching and can be reassigned, like the
@@ -167,3 +167,9 @@ About. D-pad/left stick navigate their actual two-row positions and reveal
 buttons outside the viewport on small windows; A activates and L3 switches
 toolbar/page. Filter and Rotation show the selected mode and cycle on activation.
 The recording button is red and labelled Stop video while recording.
+
+The post-import PocketPC display prompt uses A = Not Now and B = Settings,
+directly, without first selecting a button. Control-editor mouse/trackpad clicks
+preserve the scrolled position; directional navigation still reveals its target.
+Stylus speed uses a QVGA reference and scales with logical resolution so VGA
+and QVGA have the same proportional travel time in either stylus mode.

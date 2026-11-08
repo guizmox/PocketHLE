@@ -2,36 +2,34 @@ package com.pockethle.app
 
 internal data class DisplayRect(val left: Int, val top: Int, val width: Int, val height: Int)
 
-/** Pixel-exact rectangle, shared with inverse touch mapping and GL readback. */
-internal fun displayRect(viewW: Int, viewH: Int, shownW: Int, shownH: Int, factor: Int): DisplayRect {
+/** Largest whole-image step that fits; small viewports fit proportionally. */
+internal fun displayRect(viewW: Int, viewH: Int, shownW: Int, shownH: Int): DisplayRect {
     require(shownW > 0 && shownH > 0)
-    // Keep integer enlargement when possible; oversized images downscale
-    // proportionally. Rendering, readback and inverse touch share this rectangle.
     if (shownW > viewW || shownH > viewH) return aspectDisplayRect(viewW,viewH,shownW,shownH)
-    val fit=minOf(viewW/shownW,viewH/shownH).coerceAtLeast(1)
-    val scale=if(factor<=0) fit else minOf(fit,factor)
-    val w=shownW*scale
-    val h=shownH*scale
+    val scale=minOf(viewW/shownW,viewH/shownH)
+    val w=shownW*scale;val h=shownH*scale
     return DisplayRect((viewW-w)/2,(viewH-h)/2,w,h)
 }
-/** Integer zoom is relative to the produced image, including native VGA. */
-internal fun pocketPcDisplayRect(viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,factor: Int): DisplayRect =
-    displayRect(viewW,viewH,nativeW,nativeH,if(factor<=0) 4 else factor.coerceAtMost(4))
 
-/** Presentation uses rendered pixels; inverse input still uses logical coordinates. */
-internal fun renderedDisplayRect(viewW:Int,viewH:Int,nativeW:Int,nativeH:Int,renderW:Int,renderH:Int,turn:Int,factor:Int,pocketPc:Boolean=false,fullscreen:Boolean=false):DisplayRect {
+/** PocketPC presentation steps use the logical LCD, independent of GLES density.
+ * The produced high-density texture is sampled directly at the chosen size.
+ * Fullscreen retains aspect fit; Gizmondo retains produced-image integer fitting.
+ */
+internal fun renderedDisplayRect(viewW:Int,viewH:Int,nativeW:Int,nativeH:Int,renderW:Int,renderH:Int,turn:Int,pocketPc:Boolean=false,fullscreen:Boolean=false):DisplayRect {
     require(nativeW>0 && nativeH>0 && renderW>0 && renderH>0)
     val quarter=turn==90 || turn==270
     val w=if(quarter) renderH else renderW;val h=if(quarter) renderW else renderH
-    return if(fullscreen) aspectDisplayRect(viewW,viewH,w,h)
-        else if(pocketPc) pocketPcDisplayRect(viewW,viewH,w,h,factor)
-        else displayRect(viewW,viewH,w,h,factor)
+    if(fullscreen) return aspectDisplayRect(viewW,viewH,w,h)
+    val logicalW=if(quarter) nativeH else nativeW
+    val logicalH=if(quarter) nativeW else nativeH
+    return if(pocketPc) displayRect(viewW,viewH,logicalW,logicalH)
+        else displayRect(viewW,viewH,w,h)
 }
-internal fun displayPointToGuest(x: Float,y: Float,viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,turn: Int,factor: Int,pocketPc: Boolean=false,fullscreen: Boolean=false,renderW:Int=nativeW,renderH:Int=nativeH): Pair<Int,Int>? {
+internal fun displayPointToGuest(x: Float,y: Float,viewW: Int,viewH: Int,nativeW: Int,nativeH: Int,turn: Int,pocketPc: Boolean=false,fullscreen: Boolean=false,renderW:Int=nativeW,renderH:Int=nativeH): Pair<Int,Int>? {
     if(viewW<=0 || viewH<=0 || nativeW<=0 || nativeH<=0 || renderW<=0 || renderH<=0) return null
     val quarter=turn==90 || turn==270
     val w=if(quarter) nativeH else nativeW;val h=if(quarter) nativeW else nativeH
-    val rect=renderedDisplayRect(viewW,viewH,nativeW,nativeH,renderW,renderH,turn,factor,pocketPc,fullscreen)
+    val rect=renderedDisplayRect(viewW,viewH,nativeW,nativeH,renderW,renderH,turn,pocketPc,fullscreen)
     val dx=x-rect.left;val dy=y-rect.top
     if(dx<0 || dy<0 || dx>=rect.width || dy>=rect.height) return null
     val px=(dx*w/rect.width).toInt().coerceIn(0,w-1);val py=(dy*h/rect.height).toInt().coerceIn(0,h-1)

@@ -49,20 +49,25 @@ queued game-to-game launch retains the original library snapshot.
 
 ## Image geometry and input
 
-Use the produced image size for display fitting and the logical guest size for
-input coordinates. Apply inverse rotation once, through the same display rectangle.
+Sample the produced image directly; use the platform presentation grid for
+display fitting and the logical guest size for input coordinates. Apply inverse rotation once, through the same display rectangle.
 Internal GLES scaling must not change guest hitboxes or the emulated LCD size.
 Prefer integer enlargement according to the platform's presentation policy;
 when the produced image is too large, downscale proportionally rather than clip.
 A 320x240 display grid, a native VGA image and an internal-resolution multiplier
 must not be treated as interchangeable zoom definitions.
 
-Android's current ordinary display rectangle uses the produced image and
-integer enlargement when it fits; oversized images aspect-fit downward.
-Its controller-fullscreen path has its own aspect-fit geometry. The former
-statement that every VGA image first becomes a QVGA presentation grid, or must
-clip at x1, is obsolete. Verify platform/layout-specific scale choices against
-the shared geometry helpers and their tests.
+Android display size is automatic: the former Display scale preference and its
+configuration field have been removed. PocketPC chooses the largest whole-number
+multiple of its logical LCD dimensions that fits the reserved game area, regardless
+of the internal GLES rendering resolution. All fitting integer steps are allowed,
+without a four-step cap. Thus a 320x240 guest can display at 960x720 whether GLES
+produces 320x240, 640x480, 960x720 or 1280x960. Sample the high-density texture
+directly; never first resolve it to QVGA. A genuinely native VGA guest retains its
+640x480 logical grid. If even one logical image does not fit, downscale proportionally.
+Gizmondo retains automatic produced-image integer fitting, and controller fullscreen
+retains its own aspect-fit geometry. Rendering, pointer overlays and inverse input
+mapping use the same shared rectangle; internal density never changes guest hitboxes.
 
 Controls reserve their own area and do not overlap the touchable game image.
 Big controls may reduce the fitted game scale. Do not copy a Gizmondo overflow
@@ -82,7 +87,7 @@ Menus/dialogues still need their ordinary explicit redraws and navigation.
 
 Desktop and Android now have a dedicated **PocketPC options** menu, alongside
 **Gizmondo options**. The global PocketPC processor and device identity fields
-move there. Android's PocketPC-only stylus configuration also moves there.
+move there. Stylus speed remains in the input editors on Android and desktop.
 Per-game device identity settings and their override behavior are unchanged.
 
 Emulator Settings separates graphics, recording where supported, diagnostics
@@ -110,27 +115,29 @@ or mandatory VGA-to-QVGA reduction behavior.
 configurations. Changes apply at the next launch. Size remains a separate
 Normal/Big choice in Display and controls; both layouts support it.
 
-Controller uses the existing input IDs and functions with this arrangement:
+Controller reuses the existing input IDs and functions with this arrangement:
 
-* P1/P2 on the left and P3/P4 on the right share one top coordinate and height.
-* The D-pad centre and action-diamond centre share one horizontal axis. B and
-  Action lie on that axis; A and C lie equally above and below it.
-* P1–P4 are raised together when needed to preserve the safety gap above the
-  D-pad and diamond in Big mode. Action targets are larger than the early mockup,
-  and retain their dimensions between Normal and Big.
-* The stylus stick is smaller than the D-pad and sits diagonally below and to
-  the left of the action diamond, with a gap between active circular hit
-  targets. Transparent oval corners reject a new DOWN before input listeners
-  run; accepted touches retain ownership through release or cancellation.
+* Landscape: P1/P2 on the left and P3/P4 on the right sit at the top corners,
+  retaining their previous dimensions in Normal and Big. The D-pad is centred
+  vertically. A/B/C/Action form a raised diamond below the right P bank; it no
+  longer has to share the D-pad's horizontal axis.
+* The landscape stylus stick fills the space below the diamond, up to the D-pad
+  diameter. On short viewports its diameter is capped to keep the targets apart;
+  P-key/action sizes do not shrink just to enlarge the stick.
+* Portrait: the stylus stick is centred at the bottom and exactly matches the
+  D-pad diameter in both Normal and Big. The other controls move up as necessary
+  to preserve complete separation of their hit targets. The guest display stays
+  above this bottom bank and uses the available space; Big can therefore reduce
+  its automatically fitted zoom.
+* Transparent oval corners reject a new DOWN before input listeners run;
+  accepted touches retain ownership through release or cancellation.
 * The auxiliary toolbar stays separate, with smaller targets and fitted text.
 
-Control dimensions and safety gaps use Android density units rather than
-percentages of tablet height. Additional space goes to the game viewport rather
-than stretching the control groups. Constrained windows scale the complete group
-uniformly to fit; the fit scale is calculated for Big in both modes so changing
-size does not also shrink P keys/action targets. Portrait reserves a bottom bank
-and landscape reserves side banks, using the same game surface/input geometry.
-This changes host layout only, not guest framebuffer dimensions or button maps.
+Control dimensions and safety gaps use Android density units. The existing fit
+envelope is retained so P-key and action sizes remain stable; additional space
+goes to the game viewport rather than stretching these keys. Portrait reserves
+a bottom bank and landscape reserves side banks. This changes host layout only,
+not guest framebuffer dimensions, mappings or the inverse touch transform.
 
 Classic preserves the exact existing phone rectangles, including fractional
 density and Normal/Big. On viewports whose smaller dimension is at least 600dp,
@@ -151,23 +158,23 @@ The preview reads the global configuration when the editor is opened.
 
 Validation covers all three landscape ratios, portrait, six display densities,
 both layouts and both size modes: target bounds, non-overlap of hit rectangles,
-P-row/action-axis alignment, safety gaps and bounded tablet group dimensions.
+top P banks, landscape D-pad centring, portrait stick centring/equal diameter,
+safety gaps and bounded tablet group dimensions.
 Phone snapshots verify unchanged Classic rectangles. Existing display scaling,
 fullscreen input and multitouch-routing tests are retained. Rust and Android
 configuration tests cover old files and independent layout/size persistence.
 No full Android APK build or physical device validation is claimed.
 
-#### Compact Controller landscape banks
+#### Controller sizing and display fit
 
-The landscape action diamond uses shorter offsets and the stylus stick moves
-closer to it. Target diameters and P-key sizes remain unchanged on the reference
-viewport. Outer margins and the game/control gutter are smaller, and the P row
-can sit beside the central toolbar. Toolbar width is bounded by the gap between
-the P banks. Portrait and Classic geometry are unchanged.
+Landscape margins and the game/control gutter remain compact. The top P row can
+sit beside the central toolbar; toolbar width is bounded by the gap between the
+P banks. The action diamond and P-key dimensions are unchanged by the new thumb
+placement. Classic geometry is unchanged. The landscape reference viewport still
+fits the same integer game-image scale as Classic in Normal and Big. Portrait
+uses the remaining display space above the larger centred stick, rather than
+forcing a previous zoom that would overlap the controls.
 
-The reference viewport regression checks the same integer game-image scale as
-Classic in Normal and Big. Automatic integer fitting remains unchanged on
-smaller screens; no device-name or game-specific sizing path was introduced.
 Oval action buttons and the stylus wrapper reject only new touches outside their
 oval; ongoing MOVE/UP/CANCEL and split multitouch dispatch keep their existing
 behavior. Mapping/steering previews use the same control view and geometry.
@@ -492,15 +499,18 @@ through the assistant. Assigning the gesture clears that key's old long binding;
 it is not offered as a long action. The keyboard picture and selected-input card
 show the effective mapping. The right stick/R3 remain fixed on controllers.
 
-The double-click window is 300 ms from the first release to the second press.
+The double-click window is 200 ms from the first release to the second press.
 The first click is deferred; a second press inside that window cancels it and
 switches modes on release, without injecting a guest tap. Repeat key events do
 not count as additional clicks. A mode notification uses the same desktop overlay
 or Android Toast location as filter changes: **Stylus mode: Stick / Pointer**.
 
-**Stylus speed (pixels)** is the only setting, shared by both modes (logical
-pixels per second). Keyboard stylus directions and the on-screen aim pad use the
-same current mode. Pointer coordinates follow logical resolution, zoom and the
+**Stylus speed (pixels)** is the only setting, shared by both modes. Its numeric
+value is a QVGA-reference pixels-per-second speed: the output velocity scales uniformly by the logical screen's shorter
+edge divided by 240. VGA therefore uses twice the pixel velocity of QVGA, with
+the same proportional travel time. This is independent of host zoom, GPU internal
+resolution and presentation rotation. Keyboard stylus directions and the
+on-screen aim pad use the same current mode. Pointer coordinates follow logical resolution, zoom and the
 existing inverse rotation; the crosshair is a host overlay, not guest pixels.
 Physical touch and active grids take priority. Touch/grid strokes, focus loss,
 disconnection and transitions cancel pending clicks; synthetic pulses always
@@ -571,3 +581,50 @@ a settings page. Fullscreen gameplay still hides host chrome. Legacy toolbar
 menus, nested-menu expansion state and their obsolete tests were removed;
 settings combo boxes retain their popup navigation. Android's settings layout
 is unchanged by this desktop-only toolbar.
+
+## Android catalogue loading
+
+Library activity resumes reread the current saved catalogue/settings on an IO
+coroutine, keeping the existing cards usable until the refreshed snapshot is
+ready. Concurrent refresh requests are coalesced. Switching platform tabs only
+filters the in-memory snapshot. An unchanged snapshot does not rebind the cards
+or decode their artwork again. The JNI list response supplies `is_gizmondo` once
+per entry; the filter and card adapter never call the per-game classifier, which
+would reopen/migrate the entire catalogue for every card.
+
+Custom-settings badges are still computed from current settings/config at each
+refresh. Graphics API detection uses a process-local cache keyed by executable
+path, byte length and modification time, including unknown results. Replacing an
+executable invalidates its label; restarting the app starts a fresh cache. Cold
+loading still analyses executables once and resolves display metadata, but this
+work no longer blocks the UI thread. No persistent derived-data database or new
+user refresh requirement is introduced.
+
+## Desktop focus and import display prompt
+
+In control settings, mouse clicks and scrolling must not force navigation focus
+back to the first registered page widget. A clicked skin hotspot may own an egui
+focus ID outside the controller tab list. Keep that mouse focus rather than
+repairing it to the top button. Auto-reveal and focus repair are enabled when
+keyboard/controller navigation resumes; popup selection keeps its own reveal.
+
+The modal **PocketPC display settings** prompt after import consumes its own
+controller buttons: **A/South = Not Now**, **B/East = Settings**. The labels show
+these shortcuts, which also work with keyboard A/B. They do not depend on an old
+page focus or the normal launcher A-open/B-back convention. Other game/library
+input and navigation repeat are suspended while this prompt owns the buttons.
+
+## Android input-editor selection
+
+Selecting a skin hotspot or a controller row updates the existing skin, row
+selection and selected-input summary in place. It must not replace the Activity's
+content view merely to select another input. The previous rebuild followed by a
+posted scroll restore could expose the top of the page for one frame, then jump
+back to the saved position.
+
+Profile changes, resets and keyboard zoom still rebuild the structural content.
+Their scroll offsets are restored after layout in a one-shot pre-draw callback;
+if restoration changes an offset, that intermediate draw is cancelled. No timed
+post-delay or renderer-specific workaround is used. R3's controller row explicitly
+shows its fixed mode gesture even though it is a reserved input without a normal
+host tap/hold action. This is frontend view-state handling, not a GLES game fix.

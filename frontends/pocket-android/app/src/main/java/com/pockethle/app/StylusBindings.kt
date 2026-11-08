@@ -20,5 +20,10 @@ internal class StylusBindings(config: LauncherConfig) {
         x=v.first;y=v.second;val scale=speed/hypot(x,y).coerceAtLeast(1f)
         return kotlin.math.round(x*scale).toInt() to kotlin.math.round(y*scale).toInt()
     }
+    fun velocityForSize(s:FloatArray,turns:Int,width:Int,height:Int):Pair<Int,Int> {
+        val v=velocity(s,turns);val scale=minOf(width,height).coerceAtLeast(1)/240f
+        return kotlin.math.round(v.first*scale).toInt().coerceIn(-32768,32767) to
+            kotlin.math.round(v.second*scale).toInt().coerceIn(-32768,32767)
+    }
     companion object { val directions=arrayOf("Up","Down","Left","Right") }
 }

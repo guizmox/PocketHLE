@@ -77,8 +77,13 @@ Display geometry uses produced image dimensions, preserves aspect ratio and
 shares its rectangle with inverse input mapping. Prefer the applicable integer
 presentation grid when enlarging; proportionally downscale an oversized produced
 image instead of clipping it. Do not promise identical zoom labels/policies for
-all Android control modes and desktop/Deck layouts. See
-[frontend geometry](FRONTENDS.md#image-geometry-and-input).
+all Android control modes and desktop/Deck layouts. Android display size is
+automatic. PocketPC uses all fitting integer multiples of the logical LCD,
+independent of internal rendering resolution (for example, a 320x240 guest
+rendered at 1280x960 can display directly at 960x720). Native VGA retains its
+640x480 logical grid. Gizmondo keeps produced-image integer fitting; fullscreen
+keeps aspect fit. The removed Display scale setting has no backend configuration
+field or manual-zoom path. See [frontend geometry](FRONTENDS.md#image-geometry-and-input).
 
 The filter carousel includes **No filter**, reconstruction, SMAA variants, xBRZ,
 bicubic, Lanczos, bilinear and nearest. A selected filter is not limited to QVGA

@@ -18,6 +18,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -34,6 +35,9 @@ class MainActivity : HostKeyActivity() {
 
     private lateinit var adapter: GameAdapter
     private var gizmondoTab = true
+    private var libraryGames: List<GameEntry> = emptyList()
+    private var libraryLoad: Job? = null
+    private var refreshPending = false
     private var libraryBusy = false
     private var pendingReleaseUpdate: ReleaseUpdates.Update? = null
     private var busyDialog: AlertDialog? = null
@@ -137,7 +141,7 @@ class MainActivity : HostKeyActivity() {
         tabs.addTab(tabs.newTab().setText("Gizmondo"), gizmondoTab)
         tabs.addTab(tabs.newTab().setText("Pocket PC"), !gizmondoTab)
         tabs.addOnTabSelectedListener(object : com.google.android.material.tabs.TabLayout.OnTabSelectedListener {
-            override fun onTabSelected(tab: com.google.android.material.tabs.TabLayout.Tab) { gizmondoTab = tab.position == 0; refreshLibrary() }
+            override fun onTabSelected(tab: com.google.android.material.tabs.TabLayout.Tab) { gizmondoTab = tab.position == 0; showLibraryTab() }
             override fun onTabUnselected(tab: com.google.android.material.tabs.TabLayout.Tab) {}
             override fun onTabReselected(tab: com.google.android.material.tabs.TabLayout.Tab) {}
         })
@@ -209,8 +213,8 @@ class MainActivity : HostKeyActivity() {
         return (widthDp / 164).coerceAtLeast(2)
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        outState.putBoolean("gizmondo_tab", gizmondoTab); super.onSaveInstanceState(outState)
+    override fun onSaveInstanceState(out: Bundle) {
+        out.putBoolean("gizmondo_tab", gizmondoTab); super.onSaveInstanceState(out)
     }
 
     private fun showInformation(entry: GameEntry) {
@@ -246,39 +250,35 @@ class MainActivity : HostKeyActivity() {
     }
 
     private fun refreshLibrary() {
-        val raw = NativeBridge.listGames(rootDir)
-        val parsed = parseGamesOrToast(raw).filter { NativeBridge.isGizmondoGame(rootDir,it.id) == gizmondoTab }
-        adapter.submit(parsed)
-        if (parsed.isEmpty()) {
-            recycler.visibility = View.GONE
-            emptyState.visibility = View.VISIBLE
-        } else {
-            recycler.visibility = View.VISIBLE
-            emptyState.visibility = View.GONE
+        // Coalesce refreshes, never re-open the entire catalogue once per card.
+        // Resuming still reloads saved settings, while tabs only filter memory.
+        if (libraryLoad?.isActive == true) { refreshPending = true; return }
+        libraryLoad = lifecycleScope.launch {
+            do {
+                refreshPending = false
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val raw = NativeBridge.listGames(rootDir)
+                        if (raw.trimStart().startsWith("{")) {
+                            val error = JSONObject(raw)
+                            throw IllegalStateException(error.optString("error", "Invalid library response"))
+                        }
+                        GameEntry.listFromJson(raw)
+                    }
+                }
+                result.onSuccess { games -> libraryGames = games; showLibraryTab() }
+                    .onFailure { error ->
+                        Snackbar.make(recycler, getString(R.string.error_listing_games, error.message ?: "Unknown error"), Snackbar.LENGTH_LONG).show()
+                    }
+            } while (refreshPending && !libraryBusy)
         }
     }
 
-    private fun parseGamesOrToast(raw: String): List<GameEntry> {
-        return try {
-            // Library returns [] when empty, JSON object {ok:false,error:...} on error.
-            if (raw.startsWith("{")) {
-                val obj = JSONObject(raw)
-                if (!obj.optBoolean("ok", true)) {
-                    Snackbar.make(
-                        recycler,
-                        getString(R.string.error_listing_games, obj.optString("error")),
-                        Snackbar.LENGTH_LONG,
-                    ).show()
-                }
-                emptyList()
-            } else {
-                JSONArray(raw)
-                GameEntry.listFromJson(raw)
-            }
-        } catch (e: Exception) {
-            Snackbar.make(recycler, "Library parse failed: ${e.message}", Snackbar.LENGTH_LONG).show()
-            emptyList()
-        }
+    private fun showLibraryTab() {
+        val visible = libraryGames.filter { it.isGizmondo == gizmondoTab }
+        adapter.submit(visible)
+        recycler.visibility = if (visible.isEmpty()) View.GONE else View.VISIBLE
+        emptyState.visibility = if (visible.isEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun setLibraryBusy(message: String?) {

@@ -31,4 +31,12 @@ class StylusBindingsTest {
         assertEquals(1200,b.speed);assertNull(b.key("O"))
         assertEquals(0,b.pad("RightStickUp"));assertEquals(0 to -1200,b.velocity(floatArrayOf(1f,0f,0f,0f),0))
     }
+    @Test fun normalizedSpeedMatchesQvgaVgaAndRotation() {
+        val b=StylusBindings(LauncherConfig.default())
+        for(turns in 0..3) for(s in listOf(floatArrayOf(0f,0f,0f,1f),floatArrayOf(1f,0f,0f,1f))) {
+            val q=b.velocityForSize(s,turns,240,320);val v=b.velocityForSize(s,turns,480,640)
+            assertEquals(q.first*2 to q.second*2,v)
+            assertEquals(q,b.velocityForSize(s,turns,320,240))
+        }
+    }
 }

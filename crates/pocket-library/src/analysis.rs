@@ -63,6 +63,49 @@ pub fn detect_graphics_api(path: &std::path::Path) -> Option<&'static str> {
     graphics_api_from_evidence(&imports, &strings)
 }
 
+/// Process-local cache for catalogue refreshes. File metadata, not game names,
+/// invalidates both known and unknown API results after executable replacement.
+#[derive(Default)]
+struct GraphicsApiCache {
+    entries: std::collections::HashMap<
+        std::path::PathBuf,
+        (u64, std::time::SystemTime, Option<&'static str>),
+    >,
+}
+impl GraphicsApiCache {
+    fn get(
+        &mut self,
+        path: &std::path::Path,
+        detect: impl FnOnce(&std::path::Path) -> Option<&'static str>,
+    ) -> Option<&'static str> {
+        let stamp = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok().map(|t| (m.len(), t)));
+        let Some((len, modified)) = stamp else {
+            self.entries.remove(path);
+            return detect(path);
+        };
+        if let Some((old_len, old_time, label)) = self.entries.get(path) {
+            if *old_len == len && *old_time == modified {
+                return *label;
+            }
+        }
+        let label = detect(path);
+        self.entries
+            .insert(path.to_path_buf(), (len, modified, label));
+        label
+    }
+}
+pub fn detect_graphics_api_cached(path: &std::path::Path) -> Option<&'static str> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<GraphicsApiCache>> =
+        std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path, detect_graphics_api)
+}
+
 fn graphics_api_from_evidence(
     imports: &[pocket_pe::ImportSymbol],
     strings: &[String],
@@ -910,5 +953,39 @@ mod graphics_api_tests {
             detect_graphics_api(std::path::Path::new("/nonexistent/pockethle.exe")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod catalogue_cache_tests {
+    use super::*;
+    #[test]
+    fn executable_metadata_invalidates_cached_known_and_unknown_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("game.exe");
+        std::fs::write(&file, b"one").unwrap();
+        let mut cache = GraphicsApiCache::default();
+        assert_eq!(cache.get(&file, |_| Some("GDI")), Some("GDI"));
+        assert_eq!(
+            cache.get(&file, |_| panic!("unchanged executable was rescanned")),
+            Some("GDI")
+        );
+        std::fs::write(&file, b"changed").unwrap();
+        assert_eq!(cache.get(&file, |_| None), None);
+        assert_eq!(
+            cache.get(&file, |_| panic!("unknown result must also be cached")),
+            None
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(cache.get(&file, |_| Some("OpenGL ES")), Some("OpenGL ES"));
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(cache.get(&file, |_| None), None);
+        std::fs::write(&file, b"changed").unwrap();
+        assert_eq!(cache.get(&file, |_| Some("GAPI")), Some("GAPI"));
     }
 }

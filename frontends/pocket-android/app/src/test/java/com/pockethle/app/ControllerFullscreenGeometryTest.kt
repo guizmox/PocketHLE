@@ -28,9 +28,9 @@ class ControllerFullscreenGeometryTest {
         for(turn in listOf(0,90,180,270)) {
             val w=if(turn%180==0) 240 else 320;val h=if(turn%180==0) 320 else 240
             val rect=aspectDisplayRect(1013,731,w,h)
-            assertNotNull(displayPointToGuest(rect.left+rect.width/2f,rect.top+rect.height/2f,1013,731,240,320,turn,1,true,true))
-            assertNull(displayPointToGuest(-1f,-1f,1013,731,240,320,turn,1,true,true))
-            val centre=displayPointToGuest(rect.left+rect.width/2f,rect.top+rect.height/2f,1013,731,240,320,turn,1,true,true)!!
+            assertNotNull(displayPointToGuest(rect.left+rect.width/2f,rect.top+rect.height/2f,1013,731,240,320,turn,true,true))
+            assertNull(displayPointToGuest(-1f,-1f,1013,731,240,320,turn,true,true))
+            val centre=displayPointToGuest(rect.left+rect.width/2f,rect.top+rect.height/2f,1013,731,240,320,turn,true,true)!!
             assertTrue(centre.first in 118..121 && centre.second in 158..161)
         }
     }
