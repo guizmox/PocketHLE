@@ -17,7 +17,7 @@ separate supported choice. Frame-limit inheritance and filters are defined in
 
 ## Adding data to an installed game
 
-Every PocketPC and Gizmondo game has **Add game data** in its library tile
+Every PocketPC and Gizmondo game has **Add/Replace Data** in its library tile
 overflow menu (between Settings and Remove) on desktop and Android. It is not a
 per-game settings entry. The file picker accepts any single file. Non-ZIP files are
 copied with their original filename to `games/<id>/extracted/`. For ZIP files,

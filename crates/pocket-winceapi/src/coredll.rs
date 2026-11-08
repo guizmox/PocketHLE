@@ -4812,14 +4812,17 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 // Navigator's map/routing libraries are supplied as native ARM DLLs. Keep
 // registered HLE handlers first, and use native exports only for missing APIs.
 pub(crate) fn native_import_available(kernel: &KernelState, thunk: &pocket_kernel::Thunk) -> bool {
-    !runtime_hle_dll(&thunk.dll) && kernel.find_module_file(&thunk.dll).is_some()
+    (!runtime_hle_dll(&thunk.dll) || thunk.dll.eq_ignore_ascii_case("zlib.dll"))
+        && kernel.find_module_file(&thunk.dll).is_some()
 }
 
 // MFC functions and imported class data must belong to one implementation.
 // Prefer the user's actual runtime from its first call, avoiding split HLE /
-// native CString, allocator and module state. Other DLL policies are unchanged.
+// native CString, allocator and module state. A supplied zlib likewise owns its
+// stream state; never pass an HLE stream handle into a native inflater.
 pub(crate) fn native_import_preferred(kernel: &KernelState, thunk: &pocket_kernel::Thunk) -> bool {
-    thunk.dll.eq_ignore_ascii_case("mfcce300.dll") && native_import_available(kernel, thunk)
+    (thunk.dll.eq_ignore_ascii_case("mfcce300.dll") || thunk.dll.eq_ignore_ascii_case("zlib.dll"))
+        && native_import_available(kernel, thunk)
 }
 
 pub(crate) fn native_import(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -4917,6 +4920,7 @@ pub(crate) fn runtime_hle_dll(dll: &str) -> bool {
             | "winsock.dll"
             | "ws2.dll"
             | "wininet.dll"
+            | "zlib.dll"
     ) || gles_module_handle(&name).is_some()
 }
 
@@ -5273,6 +5277,29 @@ fn map_resource_module(
     result
 }
 
+fn native_dependency_file(
+    kernel: &KernelState,
+    importer: &std::path::Path,
+    dll: &str,
+) -> Option<std::path::PathBuf> {
+    importer
+        .parent()
+        .and_then(|dir| {
+            std::fs::read_dir(dir)
+                .ok()?
+                .flatten()
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&module_file_name(dll))
+                        && entry.path().is_file()
+                })
+                .map(|entry| entry.path())
+        })
+        .or_else(|| kernel.find_module_file(dll))
+}
+
 fn map_resource_module_inner(
     ctx: &mut CallCtx<'_>,
     host_path: &std::path::Path,
@@ -5345,6 +5372,16 @@ fn map_resource_module_inner(
         set_thread_error(ctx, 193);
         return Ok(None);
     }
+    let hle_imports: Vec<_> = image
+        .imports
+        .iter()
+        .map(|import| {
+            runtime_hle_dll(&import.dll)
+                && !(import.dll.eq_ignore_ascii_case("zlib.dll")
+                    && (ctx.kernel.module_by_name(&import.dll).is_some()
+                        || native_dependency_file(ctx.kernel, host_path, &import.dll).is_some()))
+        })
+        .collect();
     let thunk_base = base + pocket_cpu::round_up_to_page(image.size_of_image);
     let import_bytes = (image.imports.len() as u32).saturating_mul(pocket_kernel::THUNK_STRIDE);
     let copy_helper_size =
@@ -5453,7 +5490,7 @@ fn map_resource_module_inner(
                 .imports
                 .iter()
                 .enumerate()
-                .filter(|(_, import)| runtime_hle_dll(&import.dll))
+                .filter(|(index, _)| hle_imports[*index])
             {
                 let address = thunk_base + index as u32 * pocket_kernel::THUNK_STRIDE;
                 let friendly_name = match &import.binding {
@@ -5571,28 +5608,16 @@ fn map_resource_module_inner(
     graph.new.push(base);
     // Publish exports before following edges, so circular imports can bind
     // addresses without recursively allocating the same DLL again.
-    for import in image
+    for (_, import) in image
         .imports
         .iter()
-        .filter(|import| !runtime_hle_dll(&import.dll))
+        .enumerate()
+        .filter(|(index, _)| !hle_imports[*index])
     {
         let dependency = if let Some(module) = ctx.kernel.module_by_name(&import.dll) {
             module.base
         } else {
-            let sibling = host_path.parent().and_then(|dir| {
-                std::fs::read_dir(dir)
-                    .ok()?
-                    .flatten()
-                    .find(|entry| {
-                        entry
-                            .file_name()
-                            .to_string_lossy()
-                            .eq_ignore_ascii_case(&module_file_name(&import.dll))
-                            && entry.path().is_file()
-                    })
-                    .map(|entry| entry.path())
-            });
-            let Some(path) = sibling.or_else(|| ctx.kernel.find_module_file(&import.dll)) else {
+            let Some(path) = native_dependency_file(ctx.kernel, host_path, &import.dll) else {
                 set_thread_error(ctx, 126);
                 return Ok(None);
             };
@@ -30686,6 +30711,73 @@ mod tests {
     }
 
     #[test]
+    fn native_decoder_imports_use_hle_zlib_without_a_host_dll() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let fixtures = tempfile::tempdir().unwrap();
+        let fixture = fixtures.path().join("decoder.dll");
+        std::fs::write(&fixture, loader_fixture_dll(Some(("ZLIB.dll", "inflate")))).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let base = map_resource_module(&mut ctx, &fixture, "decoder.dll")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ctx.kernel.modules.len(), 1);
+        assert!(ctx.kernel.modules[0].dependencies.is_empty());
+        assert!(ctx.kernel.runtime_thunks.values().any(|import| {
+            import.dll.eq_ignore_ascii_case("zlib.dll")
+                && import.binding == pocket_pe::ImportBinding::Name("inflate".into())
+        }));
+        unload_module(&mut ctx, base).unwrap();
+        assert!(ctx.kernel.runtime_thunks.is_empty());
+    }
+
+    #[test]
+    fn native_decoder_keeps_a_supplied_zlib_and_its_exports() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let fixtures = tempfile::tempdir().unwrap();
+        let fixture = fixtures.path().join("decoder.dll");
+        std::fs::write(&fixture, loader_fixture_dll(Some(("ZLIB.dll", "Value")))).unwrap();
+        std::fs::write(fixtures.path().join("zlib.dll"), loader_fixture_dll(None)).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let base = map_resource_module(&mut ctx, &fixture, "decoder.dll")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ctx.kernel.modules.len(), 2);
+        let dependency = ctx.kernel.module_by_name("zlib.dll").unwrap().base;
+        assert_eq!(
+            ctx.kernel
+                .module_by_name("decoder.dll")
+                .unwrap()
+                .dependencies,
+            vec![dependency]
+        );
+        let iat = ctx.cpu.read_u32_le(base + 0x1c00).unwrap();
+        assert_eq!(iat, ctx.kernel.dynamic_exports[&dependency]["Value"]);
+        assert!(!ctx
+            .kernel
+            .runtime_thunks
+            .values()
+            .any(|import| import.dll.eq_ignore_ascii_case("zlib.dll")));
+        unload_module(&mut ctx, base).unwrap();
+        assert!(ctx.kernel.module_by_name("decoder.dll").is_none());
+        // This low-level helper unloads one image; normal FreeLibrary walks
+        // the collected dependency group after its detach callbacks.
+        unload_module(&mut ctx, dependency).unwrap();
+        assert!(ctx.kernel.modules.is_empty());
+    }
+
+    #[test]
     fn image_entry_page_oom_rolls_back_loader_reservations() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
@@ -30817,6 +30909,10 @@ mod tests {
         thunk.dll = "mfcce300.dll".into();
         assert!(!native_import_preferred(&kernel, &thunk));
         std::fs::write(root.path().join("MFCCE300.DLL"), []).unwrap();
+        assert!(native_import_preferred(&kernel, &thunk));
+        thunk.dll = "zlib.dll".into();
+        assert!(!native_import_preferred(&kernel, &thunk));
+        std::fs::write(root.path().join("ZLIB.DLL"), []).unwrap();
         assert!(native_import_preferred(&kernel, &thunk));
         thunk.dll = "coredll.dll".into();
         std::fs::write(root.path().join("coredll.dll"), []).unwrap();

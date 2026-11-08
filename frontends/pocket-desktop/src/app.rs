@@ -98,7 +98,7 @@ enum UpscaleFilter {
     Nearest,
 }
 const GAME_MENU_LABELS: [&str; 7] = [
-    "Information", "Play", "Rename...", "Settings", "Add game data", "Remove", "Game ID",
+    "Information", "Play", "Rename...", "Settings", "Add/Replace Data", "Remove", "Game ID",
 ];
 const EXECUTABLE_HEAP_HELP: &str = "Some games need this setting to start or run correctly. It can slow down other games. If a game runs slowly, try turning it off in that game’s settings.";
 
@@ -1083,7 +1083,7 @@ impl PocketLauncher {
                     // Returning to the library during preparation cancels the
                     // staged operation, including its automatic no-conflict commit.
                     if self.data_game.take().is_none() {
-                        self.status = "Add game data cancelled.".into();
+                        self.status = "Add/Replace Data cancelled.".into();
                         continue;
                     }
                     match result {
@@ -1093,7 +1093,7 @@ impl PocketLauncher {
                         Ok(pending) => self.confirm_data(pending),
                         Err(message) => {
                             self.add_data = Some(DataPrompt::Notice {
-                                title: "Add game data failed",
+                                title: "Add/Replace Data failed",
                                 message,
                             });
                         }
@@ -1110,9 +1110,9 @@ impl PocketLauncher {
                             self.screen_cache.clear();
                             self.icon_cache.clear();
                             self.reload_library();
-                            ("Add game data complete", message)
+                            ("Add/Replace Data complete", message)
                         }
-                        Err(message) => ("Add game data failed", message),
+                        Err(message) => ("Add/Replace Data failed", message),
                     };
                     self.add_data = Some(DataPrompt::Notice { title, message });
                 }

@@ -84,7 +84,7 @@ class GameAdapter(
             popup.menu.add(0, 4, 1, R.string.action_information)
             popup.menu.add(0, 3, 2, "Rename")
             popup.menu.add(0, 0, 3, R.string.action_settings)
-            popup.menu.add(0, 6, 4, "Add game data")
+            popup.menu.add(0, 6, 4, "Add/Replace Data")
             popup.menu.add(0, 1, 5, R.string.action_remove)
             popup.menu.add(0, 5, 6, "Game ID")
             popup.setOnMenuItemClickListener { item ->

@@ -4733,6 +4733,12 @@ pub fn image_uses_thumb_entry(cpu: &mut dyn Cpu, image: &LoadedImage) -> Result<
         || (word & 0x0fff_0000) == 0x092d_0000
         || (word & 0x0fff_0000) == 0x08bd_0000
         || (word & 0x0e00_0000) == 0x0a00_0000
+        // Thumb-tagged CE DLLs can expose an ARM DllMain attach stub:
+        // str lr,[sp,#-4]!; cmp r1,#DLL_PROCESS_ATTACH. Require both
+        // instructions so an ordinary Thumb entry is not reclassified.
+        || (image.machine == machine::THUMB
+            && word == 0xe52d_e004
+            && cpu.read_u32_le(entry + 4)? == 0xe351_0001)
         // GTShell's supplied PMS DLLs declare IMAGE_FILE_MACHINE_THUMB,
         // but DllMain is an ARM `mov r0, #constant; bx lr` leaf. Check
         // both instructions: treating an arbitrary Thumb pair as ARM
@@ -6521,6 +6527,28 @@ mod tests {
         let mut cpu = StubCpu::new();
         let process = Process::map_into(image, &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
         assert!(image_uses_thumb_entry(&mut cpu, &process.image).unwrap());
+    }
+
+    #[test]
+    fn thumb_tagged_arm_dll_attach_stub_keeps_arm_mode() {
+        for (words, thumb) in [
+            ([0xe52d_e004u32, 0xe351_0001], false),
+            ([0xe52d_e004, 0x4770_2001], true),
+            ([0x2901_b500, 0xbd00_2001], true),
+        ] {
+            let mut image = image_based_at(0x10000, 0x1000);
+            image.machine = machine::THUMB;
+            for (slot, word) in image.sections[0].data[..8].chunks_exact_mut(4).zip(words) {
+                slot.copy_from_slice(&word.to_le_bytes());
+            }
+            let mut cpu = StubCpu::new();
+            let process =
+                Process::map_into(image, &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
+            assert_eq!(
+                image_uses_thumb_entry(&mut cpu, &process.image).unwrap(),
+                thumb
+            );
+        }
     }
 
     /// An image based *above* slot 0 still gets the alias window, since

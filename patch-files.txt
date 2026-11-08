@@ -1,7 +1,17 @@
+.github\workflows\ci.yml
+Cargo.lock
+Cargo.toml
+README.md
+crates\pocket-kernel\src\lib.rs
+crates\pocket-kernel\src\zlib.rs
 crates\pocket-library\src\add_data.rs
 crates\pocket-library\src\backup.rs
 crates\pocket-library\src\lib.rs
+crates\pocket-winceapi\Cargo.toml
+crates\pocket-winceapi\src\coredll.rs
+crates\pocket-winceapi\src\zlib.rs
 docs\FRONTENDS.md
+docs\GPU.md
 frontends\pocket-android-jni\src\lib.rs
 frontends\pocket-android\app\src\main\java\com\pockethle\app\AddDataDialog.kt
 frontends\pocket-android\app\src\main\java\com\pockethle\app\AddDataModel.kt

@@ -34,7 +34,7 @@ impl PocketLauncher {
     pub(super) fn apply_data(&mut self, pending: PreparedData, overwrite: bool) {
         if self.running_game.is_some() || self.pending_run.is_some() {
             self.add_data = Some(DataPrompt::Notice {
-                title: "Add game data failed",
+                title: "Add/Replace Data failed",
                 message: "Stop the running game before adding data.".into(),
             });
             return;
@@ -77,7 +77,7 @@ impl PocketLauncher {
         // it. Clearing every draw would discard queued controller presses.
         self.controller_ui.stop_repeat();
         match (prompt, choice) {
-            (_, DataChoice::Cancel) => self.status = "Add game data closed.".into(),
+            (_, DataChoice::Cancel) => self.status = "Add/Replace Data closed.".into(),
             (DataPrompt::Zip { id, path }, DataChoice::Zip(extract)) => {
                 self.prepare_data(id, path, extract)
             }
@@ -86,7 +86,7 @@ impl PocketLauncher {
                     Ok(()) => self.confirm_data(pending),
                     Err(error) => {
                         self.add_data = Some(DataPrompt::Notice {
-                            title: "Add game data failed",
+                            title: "Add/Replace Data failed",
                             message: error.to_string(),
                         })
                     }

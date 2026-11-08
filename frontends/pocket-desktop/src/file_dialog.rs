@@ -18,7 +18,7 @@ impl Purpose {
     fn title(self) -> &'static str {
         match self {
             Self::Import => "Import a game",
-            Self::AddData => "Add game data — select a file",
+            Self::AddData => "Add/Replace Data — select a file",
             Self::RestoreBackup => "Open PocketHLE backup",
             Self::SaveBackup => "Save PocketHLE backup",
         }
@@ -609,7 +609,7 @@ impl FileDialog {
                     ui.spacing_mut().text_edit_width = (ui.available_width() - 185.0).max(80.0);
                     track(&mut zones, 2, pad::text_edit(ui, &mut self.filename, "Select a file"));
                     if track(&mut zones, 2, pad::button(ui, "Cancel")).clicked() { self.finished = Some(Outcome::Cancelled(self.purpose)); }
-                    let label = match self.purpose { Purpose::SaveBackup => "Save backup", Purpose::RestoreBackup => "Open backup", Purpose::Import => "Import", Purpose::AddData => "Add game data" };
+                    let label = match self.purpose { Purpose::SaveBackup => "Save backup", Purpose::RestoreBackup => "Open backup", Purpose::Import => "Import", Purpose::AddData => "Add/Replace Data" };
                     if track(&mut zones, 2, pad::add_enabled(ui, !self.loading && (!self.filename.is_empty() || self.selected.is_some()), egui::Button::new(label))).clicked() {
                         if self.purpose == Purpose::SaveBackup {
                             match backup_filename(&self.filename) { Ok(name) => self.choose(self.directory.join(name)), Err(error) => self.error = Some(error) }

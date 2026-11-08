@@ -65,13 +65,13 @@ class MainActivity : HostKeyActivity() {
         dialog.setCanceledOnTouchOutside(false)
         when (step) {
             AddDataModel.Step.Busy -> {
-                dialog.setTitle("Add game data")
+                dialog.setTitle("Add/Replace Data")
                 dialog.setMessage("Please wait…")
                 dialog.setCancelable(false)
                 dialog.controllerCancel = false
             }
             is AddDataModel.Step.Zip -> {
-                dialog.setTitle("Add game data — ZIP archive")
+                dialog.setTitle("Add/Replace Data — ZIP archive")
                 dialog.setMessage("Extract the ZIP contents into the game folder, or copy the ZIP file unchanged?")
                 dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Extract contents") { _, _ -> addDataModel.chooseZip(true) }
                 dialog.setButton(android.content.DialogInterface.BUTTON_NEUTRAL, "Copy ZIP unchanged") { _, _ -> addDataModel.chooseZip(false) }
@@ -98,7 +98,7 @@ class MainActivity : HostKeyActivity() {
                 dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
             }
             is AddDataModel.Step.Notice -> {
-                dialog.setTitle(if (step.success) "Add game data complete" else "Add game data failed")
+                dialog.setTitle(if (step.success) "Add/Replace Data complete" else "Add/Replace Data failed")
                 dialog.setMessage(step.message)
                 dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Close") { _, _ -> addDataModel.cancel() }
             }

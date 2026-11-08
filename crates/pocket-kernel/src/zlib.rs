@@ -84,6 +84,14 @@ impl ZlibStreams {
             adler: stream.adler,
         })
     }
+    pub fn reset(&mut self, handle: u32) -> bool {
+        let Some(stream) = self.streams.get_mut(&handle) else {
+            return false;
+        };
+        stream.decoder.reset(true);
+        stream.adler = 1;
+        true
+    }
     pub fn end(&mut self, handle: u32) -> bool {
         self.streams.remove(&handle).is_some()
     }
@@ -91,5 +99,41 @@ impl ZlibStreams {
         let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(input)?;
         encoder.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn png_sized_rows_do_not_consume_all_input_before_output_is_drained() {
+        let pixels: Vec<u8> = (0..15)
+            .flat_map(|row| {
+                std::iter::once(0).chain((0..93).map(move |x| ((x / 7 + row) % 5) as u8))
+            })
+            .collect();
+        let compressed = ZlibStreams::compress(&pixels).unwrap();
+        let mut streams = ZlibStreams::default();
+        let stream = streams.init().unwrap();
+        let mut input = 0;
+        let mut output = Vec::new();
+        let mut status = 0;
+        // Old libpng consumes each IDAT while avail_in > 0. A decoder that
+        // buffers all compressed input before returning a single row leaves
+        // the rest inaccessible to that client and triggers "Not enough image data".
+        while input < compressed.len() && status != 1 {
+            let mut row = [0; 94];
+            let step = streams
+                .inflate(stream, &compressed[input..], &mut row, 1)
+                .unwrap();
+            assert!(step.consumed != 0 || step.written != 0);
+            input += step.consumed;
+            output.extend_from_slice(&row[..step.written]);
+            status = step.status;
+        }
+        assert_eq!(output, pixels);
+        assert_eq!(status, 1);
+        assert_eq!(input, compressed.len());
     }
 }

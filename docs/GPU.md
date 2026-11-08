@@ -254,3 +254,40 @@ logical/high-resolution geometry; protocol and xBRZ-expansion tests preserve
 legacy packets. Full APK/device validation remains pending. This extension is
 not a claim to have resolved the separately reported 8 FPS at 1x versus 20 FPS
 at 2x; those runs still need their presentation/readback diagnostics correlated.
+
+## Native image-decoder dependencies and zlib streams
+
+A native graphics DLL can fail before making any display calls if one of its
+imported dependencies is missing from the runtime HLE classification. `zlib.dll`
+is implemented in HLE and must be recognized there too; native import graphs
+must not require a separate zlib binary just to reach that implementation. If a
+real zlib DLL is supplied, its exports and stream state remain native: HLE/native
+inflate handles must not be mixed. The dependency graph and direct static imports
+both preserve that provider choice.
+Native dependencies remain transactional and real missing libraries/exports
+still fail loading. No game-name or DLL-version-specific fallback is added.
+
+Some CE DLLs tagged IMAGE_FILE_MACHINE_THUMB expose an ARM DllMain attach stub.
+The entry-mode detector recognizes the two-instruction ARM sequence
+`str lr,[sp,#-4]!; cmp r1,#1` for Thumb-tagged images, alongside the existing ARM
+prologues. Matching only the header or the first halfword is insufficient.
+Genuine Thumb entries and other first-word lookalikes retain Thumb mode.
+
+The guest zlib ABI includes named `crc32` (incremental seed, null/empty buffer
+semantics) and `inflateReset` (same stream handle, reset decoder/totals/adler).
+Streaming decompression uses flate2's pure Rust zlib-rs backend. The former
+miniz backend can consume all compressed input while buffering output beyond
+the caller's available output space. Older native libpng clients that process
+IDAT only while avail_in is nonzero then report "Not enough image data".
+A synthetic small-row regression covers that client contract without game data.
+Cargo feature unification also selects this backend for other flate2 consumers;
+archive imports, backup compression/restoration and existing guest zlib streams
+must be included in regression checks. This is a semantic compatibility change,
+not a measured performance guarantee.
+
+EverQuest Episode I reproduced the original black framebuffer with its supplied
+native MFC runtime while GapiDraw calls returned zero after dependency-load
+failure. After these common fixes it reaches the character-slot screen through GAPI;
+a scheduled pointer tap opens class selection/name entry. Further gameplay and
+device-specific behavior require separate validation.
+No game executable, image asset or registration check is modified.

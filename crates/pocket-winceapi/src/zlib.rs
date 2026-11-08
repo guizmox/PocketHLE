@@ -1,4 +1,4 @@
-//! WinCE zlib.dll ABI used by Unfinished Business (Gametrac Demo).
+//! WinCE zlib.dll ABI for native asset and image decoders.
 use crate::{CallCtx, WinCeDispatcher};
 use pocket_kernel::{DispatchOutcome, KernelError};
 const MAX_BUFFER: usize = 64 * 1024 * 1024;
@@ -6,6 +6,8 @@ fn result(code: i32) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(code as u32))
 }
 pub fn register(d: &mut WinCeDispatcher) {
+    d.register_handler("zlib.dll", "crc32", crc32);
+    d.register_handler("zlib.dll", "inflateReset", reset);
     for (ordinal, name, handler) in [
         (22, "inflateInit_", init as crate::Handler),
         (19, "inflate", inflate as crate::Handler),
@@ -111,6 +113,45 @@ fn inflate(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.cpu.write_mem(ptr, &data)?;
     result(step.status)
 }
+fn crc32(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let initial = ctx.arg_u32(0)?;
+    let source = ctx.arg_u32(1)?;
+    let len = ctx.arg_u32(2)?;
+    if source == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    ctx.cpu
+        .check_guest_access(source, len, pocket_cpu::Prot::READ)?;
+    let mut hash = crc32fast::Hasher::new_with_initial(initial);
+    let mut offset = 0;
+    while offset < len {
+        let count = (len - offset).min(65536);
+        hash.update(&ctx.cpu.read_mem(source + offset, count)?);
+        offset += count;
+    }
+    Ok(DispatchOutcome::ReturnedR0(hash.finalize()))
+}
+
+fn reset(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let ptr = ctx.arg_u32(0)?;
+    if ptr == 0 {
+        return result(-2);
+    }
+    let mut data = ctx.cpu.read_mem(ptr, 56)?;
+    ctx.cpu
+        .check_guest_access(ptr, 56, pocket_cpu::Prot::WRITE)?;
+    if !ctx.kernel.zlib_streams.reset(word(&data, 28)) {
+        return result(-2);
+    }
+    for offset in [8, 20, 24] {
+        put(&mut data, offset, 0);
+    }
+    put(&mut data, 44, 2);
+    put(&mut data, 48, 1);
+    ctx.cpu.write_mem(ptr, &data)?;
+    result(0)
+}
+
 fn end(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let ptr = ctx.arg_u32(0)?;
     if ptr == 0 {
@@ -223,9 +264,48 @@ mod tests {
         let data = cpu.read_mem(0x1000, 56).unwrap();
         assert_eq!(word(&data, 8), compressed.len() as u32);
         assert_eq!(word(&data, 20), payload.len() as u32);
+        let handle = word(&data, 28);
+        assert_eq!(call(&mut cpu, &mut kernel, reset, &[0x1000]), 0);
+        let mut data = cpu.read_mem(0x1000, 56).unwrap();
+        assert_eq!(word(&data, 28), handle);
+        for offset in [8, 20, 24] {
+            assert_eq!(word(&data, offset), 0);
+        }
+        assert_eq!(word(&data, 48), 1);
+        put(&mut data, 0, 0x2000);
+        put(&mut data, 4, compressed.len() as u32);
+        put(&mut data, 12, 0x3000);
+        put(&mut data, 16, payload.len() as u32 + 16);
+        cpu.write_mem(0x1000, &data).unwrap();
+        assert_eq!(call(&mut cpu, &mut kernel, inflate, &[0x1000, 4]), 1);
+        assert_eq!(cpu.read_mem(0x3000, payload.len() as u32).unwrap(), payload);
         assert_eq!(call(&mut cpu, &mut kernel, end, &[0x1000]), 0);
         assert_eq!(word(&cpu.read_mem(0x1000, 56).unwrap(), 28), 0);
         assert_eq!(call(&mut cpu, &mut kernel, end, &[0x1000]), (-2i32) as u32);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, reset, &[0x1000]),
+            (-2i32) as u32
+        );
+        assert_eq!(call(&mut cpu, &mut kernel, reset, &[0]), (-2i32) as u32);
+    }
+    #[test]
+    fn guest_crc32_known_vector_incremental_null_and_empty_buffers() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(0x1000, b"123456789").unwrap();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        assert_eq!(
+            call(&mut cpu, &mut kernel, crc32, &[0, 0x1000, 9]),
+            0xcbf4_3926
+        );
+        let first = call(&mut cpu, &mut kernel, crc32, &[0, 0x1000, 4]);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, crc32, &[first, 0x1004, 5]),
+            0xcbf4_3926
+        );
+        assert_eq!(call(&mut cpu, &mut kernel, crc32, &[123, 0, 50]), 0);
+        assert_eq!(call(&mut cpu, &mut kernel, crc32, &[123, 0x1000, 0]), 123);
     }
     #[test]
     fn guest_compress_roundtrip_and_small_destination() {
