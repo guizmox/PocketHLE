@@ -32,12 +32,6 @@ pub enum HostInput {
     Controller(String),
 }
 impl HostInput {
-    pub fn label(&self) -> String {
-        match self {
-            Self::Keyboard(n) => format!("Key {n}"),
-            Self::Controller(n) => n.clone(),
-        }
-    }
     pub fn canonical(self) -> Self {
         match self {
             Self::Keyboard(n) => {

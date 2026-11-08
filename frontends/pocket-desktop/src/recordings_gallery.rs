@@ -404,8 +404,8 @@ impl Gallery {
                                 entry
                                     .asset
                                     .error
-                                    .as_deref()
-                                    .unwrap_or("Double-click or press A to open"),
+                                    .clone()
+                                    .unwrap_or_else(||crate::controller_labels::text(ui.ctx(),"Double-click or press {South} to open")),
                             );
                             if response.clicked() {
                                 self.selected = index;

@@ -287,6 +287,7 @@ pub struct PocketLauncher {
     controller_ui: crate::controller_ui::Navigation,
     recordings_gallery: crate::recordings_gallery::Gallery,
     rename_draft: Option<(String, String, bool)>,
+    remove_game: Option<crate::remove_game::Prompt>,
     demo_import: Option<(String, String)>,
     pending_import: Option<PreparedImport>,
     pocketpc_import_options: std::collections::VecDeque<(String, bool)>,
@@ -934,6 +935,7 @@ impl PocketLauncher {
             library_columns: 1,
             deck_nav_repeat: None,
             rename_draft: None,
+            remove_game: None,
             demo_import: None,
             pending_import: None,
             pocketpc_import_options: Default::default(),
@@ -1037,8 +1039,8 @@ impl PocketLauncher {
                     update.version
                 ));
                 ui.add_space(12.0);
-                download |= crate::controller_ui::button(ui, "Download (Enter / A)").clicked();
-                dismiss |= crate::controller_ui::button(ui, "Later (Escape / B)").clicked();
+                download |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx,"Download (Enter / {South})")).clicked();
+                dismiss |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx,"Later (Escape / {East})")).clicked();
             });
         });
         if download {
@@ -1679,6 +1681,8 @@ impl PocketLauncher {
     }
 
     fn return_to_library(&mut self, ctx: &egui::Context) {
+        self.remove_game = None;
+        self.deck_library_actions.clear();
         self.pending_run = None;
         self.release_all_keys();
         if let Some(tx) = self.input_tx.as_ref() {
@@ -1778,7 +1782,7 @@ impl PocketLauncher {
         }
         if !self.gamepad_devices.is_empty() {
             ui.label(
-                "D-pad / stick: select • A: play • L1/L2/R1/R2: tabs • Y: game options • Start: settings",
+                crate::controller_labels::text(ui.ctx(), "D-pad / stick: select • {South}: play • Shoulders / triggers: tabs • {North}: game options"),
             );
         }
         if games.is_empty() {
@@ -1912,7 +1916,7 @@ impl PocketLauncher {
             (bounds.width() - 24.0).clamp(1.0, 560.0),
             (bounds.height() - 60.0).clamp(1.0, 540.0),
         );
-        egui::Window::new("Informations")
+        egui::Window::new("Information")
             .id(egui::Id::new("game_information"))
             .open(&mut open)
             .constrain_to(bounds)
@@ -2003,7 +2007,7 @@ impl PocketLauncher {
             egui::popup_below_widget(ui, popup_id, &menu_response, |ui| {
                 ui.set_min_width(170.0);
                 for (index, label) in [
-                    "Informations",
+                    "Information",
                     "Play",
                     "Rename...",
                     "Settings",
@@ -2040,24 +2044,11 @@ impl PocketLauncher {
                         self.screen = Screen::GameSettings;
                     }
                     4 => {
-                        let confirmed = rfd::MessageDialog::new()
-                            .set_title("Remove game?")
-                            .set_description(format!(
-                                "Remove {} from the library?\n\nThis permanently deletes its installed files, saves and per-game settings.",
-                                game.display_name
-                            ))
-                            .set_level(rfd::MessageLevel::Warning)
-                            .set_buttons(rfd::MessageButtons::YesNo)
-                            .show()
-                            == rfd::MessageDialogResult::Yes;
-                        if !confirmed {
-                            return;
-                        }
-                        if let Err(e) = self.library.remove(&game.id) {
-                            self.status = format!("Remove failed: {e}");
-                        } else {
-                            self.status = format!("Removed {}", game.display_name);
-                        }
+                        self.remove_game=Some(crate::remove_game::Prompt {id:game.id.clone(),name:game.display_name.clone()});
+                        self.deck_library_actions.clear();
+                        self.deck_nav_repeat=None;
+                        self.game_menu=None;
+                        self.game_menu_parent=None;
                     }
                     5 => {
                         ui.ctx().output_mut(|o| o.copied_text = game.id.clone());
@@ -2367,9 +2358,10 @@ impl PocketLauncher {
                 }
                 ui.label("Would you like to open the launch settings now?");
                 ui.horizontal(|ui| {
-                    dismiss |= crate::controller_ui::button(ui, "Not Now (A)").clicked();
-                    open_settings |= crate::controller_ui::button(ui, "Settings (B)").clicked();
+                    dismiss |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx, "Not Now ({South})")).clicked();
+                    open_settings |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx, "Settings ({East})")).clicked();
                 });
+                ui.weak("Keyboard: A = Not Now · B = Settings");
             });
         if open_settings {
             self.selected_game = Some(game.id.clone());
@@ -2843,6 +2835,7 @@ impl PocketLauncher {
                         }
                     });
                 if old != self.gamepad_selected {
+                    if let Some(device)=self.gamepad_selected {crate::controller_labels::activate(ui.ctx(),device);}
                     self.bindings_visual.clear_live();
                     self.deck_nav_repeat = None;
                     self.deck_menu_press = None;
@@ -4514,6 +4507,8 @@ impl PocketLauncher {
                     let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                     self.set_fullscreen(ctx, !full);
                 } else {
+                    self.remove_game = None;
+                    self.deck_library_actions.clear();
                     self.config_draft = None;
                     self.bindings_visual = Default::default();
                     self.screen = Screen::Library;
@@ -4659,6 +4654,9 @@ impl PocketLauncher {
                     control,
                     down,
                 } => {
+                    if down && Some(device) == self.gamepad_selected {
+                        crate::controller_labels::activate(ctx, device);
+                    }
                     // Host gestures precede binding capture and generic menu navigation.
                     if self.screen != Screen::Run
                         && Some(device) == self.gamepad_selected
@@ -4692,6 +4690,11 @@ impl PocketLauncher {
                         if control == "RightThumb" && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
                             self.stylus_button(down);
                         }
+                        continue;
+                    }
+                    if self.remove_game.is_some() && Some(device)==self.gamepad_selected
+                        && ctx.input(|i|i.viewport().focused.unwrap_or(true)) {
+                        if down && matches!(control.as_str(),"South"|"East") {self.deck_library_actions.push(control.clone());ctx.request_repaint();}
                         continue;
                     }
                     if self.screen==Screen::Library && !self.library_busy && !self.pocketpc_import_options.is_empty() && self.rename_draft.is_none()
@@ -4980,10 +4983,6 @@ impl PocketLauncher {
                                     self.deck_library_actions.clear();
                                     self.deck_nav_repeat = None;
                                 }
-                                "Start" => {
-                                    self.config_draft = Some(self.settings_draft());
-                                    self.screen = Screen::Settings;
-                                }
                                 "South" | "North" => {
                                     self.deck_library_actions.push(control.clone())
                                 }
@@ -5112,6 +5111,8 @@ impl PocketLauncher {
             match key {
                 egui::Key::F7 => self.cycle_rotation(ctx),
                 egui::Key::F8 => {
+                    self.remove_game = None;
+                    self.deck_library_actions.clear();
                     self.bindings_visual.clear_live();
                     self.config_draft = None;
                     self.game_settings_draft = None;
@@ -5587,7 +5588,7 @@ impl PocketLauncher {
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 if cfg!(feature = "steam-deck") {
-                    ui.label("A: Start • B: Back • X: Unlock Turf Wars + Tag Editor • D-pad / stick: language");
+                    ui.label(crate::controller_labels::text(ctx, "{South}: Start • {East}: Back • {West}: Unlock Turf Wars + Tag Editor • D-pad / stick: language"));
                 }
                 if languages.len() > 1 {
                 ui.label("Language");
@@ -6094,6 +6095,7 @@ impl eframe::App for PocketLauncher {
             || self.colors_startup_prompt.is_some()
             || self.library_busy
             || self.rename_draft.is_some()
+            || self.remove_game.is_some()
             || self.demo_import.is_some()
             || self.pending_import.is_some()
         {
@@ -6126,6 +6128,27 @@ impl eframe::App for PocketLauncher {
                 self.ui_demo_import(ctx);
             }
             ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
+        if let Some(prompt)=self.remove_game.as_ref() {
+            self.deck_nav_repeat=None;
+            self.controller_ui.stop_repeat();
+            let actions=std::mem::take(&mut self.deck_library_actions);
+            if let Some(confirm)=prompt.show(ctx,&actions) {
+                let prompt=self.remove_game.take().unwrap();
+                if confirm && self.running_game.is_some() {
+                    self.status="Stop the running game before removing a library entry.".into();
+                } else if confirm {
+                    match self.library.remove(&prompt.id) {
+                        Ok(())=> {
+                            self.analysis_cache.remove(&prompt.id);
+                            if self.selected_game.as_deref()==Some(&prompt.id) {self.selected_game=None;}
+                            self.status=format!("Removed {}",prompt.name);
+                        }
+                        Err(error)=>self.status=format!("Remove failed: {error}"),
+                    }
+                }
+            }
             return;
         }
         if self.ui_pocketpc_import_options(ctx) {
@@ -6212,7 +6235,7 @@ impl eframe::App for PocketLauncher {
                         );
                     });
                 });
-                ui.add(egui::Label::new(RichText::new(crate::toolbar_ui::NAV_HINT).size(12.0).color(Color32::from_gray(153))).wrap(true));
+                ui.add(egui::Label::new(RichText::new(crate::controller_labels::text(ctx,crate::toolbar_ui::NAV_HINT)).size(12.0).color(Color32::from_gray(153))).wrap(true));
             });
         }
         let central = egui::CentralPanel::default();

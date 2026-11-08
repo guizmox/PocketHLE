@@ -1,16 +1,13 @@
 package com.pockethle.app
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.opengl.GLES30.*
 import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
-import java.io.File
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -22,7 +19,6 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
     @Volatile private var pending: GameActivity.FrameSnapshot? = null
     @Volatile private var turn = 0
     @Volatile var controllerFullscreen = false
-    @Volatile private var capture = false
     private var uploaded: GameActivity.FrameSnapshot? = null
     private var texture = 0
     private var program = 0
@@ -36,7 +32,6 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
     private var failed = false
     fun submit(frame: GameActivity.FrameSnapshot) { pending = frame }
     fun setRotationDegrees(degrees: Int) { turn = ((degrees % 360)+360)%360 }
-    fun requestScreenshot() { capture = true }
     /** Called on the GL thread; invalidate uploads when changing xBRZ or SMAA. */
     fun cycleFilter():String {
         val order=DeckInputPolicy.filters
@@ -95,31 +90,11 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
             listOf("u_origin","u_dx","u_dy").forEachIndexed { i,name -> glUniform2f(glGetUniformLocation(program,name),uv[i*2],uv[i*2+1]) }
             glDrawArrays(GL_TRIANGLES,0,3)
             if (countFps) frameCounter.presented(frame)
-            if (capture) { capture=false; saveScreenshot(x,y,drawnW,drawnH) }
         } catch (e: Exception) { fail(e) }
     }
     private fun fail(e: Exception) {
         failed=true;Log.e("PocketHLE","Android presentation failed ($filter)",e)
         Handler(Looper.getMainLooper()).post { Toast.makeText(app,"Rendering failed ($filter): ${e.message}",Toast.LENGTH_LONG).show() }
-    }
-    private fun saveScreenshot(x: Int,y: Int,w: Int,h: Int) {
-        val pixels=ByteBuffer.allocateDirect(w*h*4).order(ByteOrder.nativeOrder())
-        glReadPixels(x,y,w,h,GL_RGBA,GL_UNSIGNED_BYTE,pixels)
-        check(glGetError()==GL_NO_ERROR) { "Screenshot readback failed" }
-        val colors=IntArray(w*h)
-        for (row in 0 until h) for (col in 0 until w) {
-            val offset=((h-1-row)*w+col)*4
-            colors[row*w+col]=((pixels.get(offset+3).toInt() and 255) shl 24) or ((pixels.get(offset).toInt() and 255) shl 16) or ((pixels.get(offset+1).toInt() and 255) shl 8) or (pixels.get(offset+2).toInt() and 255)
-        }
-        Thread {
-            runCatching {
-                val directory=File(LibraryPaths.root(app),"screenshots");directory.mkdirs()
-                val file=File(directory,"game-${System.currentTimeMillis()}.png")
-                val bitmap=Bitmap.createBitmap(colors,w,h,Bitmap.Config.ARGB_8888)
-                try { file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG,100,it)) } } finally { bitmap.recycle() }
-                Handler(Looper.getMainLooper()).post { Toast.makeText(app,"Screenshot: ${file.name}",Toast.LENGTH_SHORT).show() }
-            }.onFailure { Log.e("PocketHLE","Screenshot save failed",it) }
-        }.start()
     }
     private fun asset(name: String) = app.assets.open("shaders/$name").bufferedReader().use { it.readText() }
     private fun direct(bytes: ByteArray) = ByteBuffer.allocateDirect(bytes.size).apply { put(bytes);position(0) }

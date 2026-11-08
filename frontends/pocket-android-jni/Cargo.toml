@@ -27,7 +27,6 @@ unicorn = ["pocket-core/unicorn"]
 xbrz = { package = "xbrz-rs", version = "0.1.0" }
 anyhow.workspace = true
 log.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 android_logger = "0.13"
 image = { version = "0.24", default-features = false, features = ["png"] }

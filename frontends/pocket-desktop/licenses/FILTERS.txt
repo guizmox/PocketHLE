@@ -2,7 +2,7 @@ SMAA reference implementation and lookup textures
 Copyright 2013 Jorge Jimenez, Jose I. Echevarria, Belen Masia,
 Fernando Navarro and Diego Gutierrez.
 Upstream: https://github.com/iryoku/smaa
-Permission notice: ../src/shaders/smaa/LICENSE.txt and SMAA.glsl.
+Permission notice: full MIT text in SMAA.txt; source headers are retained in SMAA.glsl.
 The lookup binaries are exact bytes from AreaTex.h and SearchTex.h.
 
 xBRZ 1.8 Rust port, xbrz-rs 0.1.0

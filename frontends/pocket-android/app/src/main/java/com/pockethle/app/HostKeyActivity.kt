@@ -66,6 +66,7 @@ abstract class HostKeyActivity : AppCompatActivity() {
     }
 
     protected fun handleHostKeyEvent(event: KeyEvent): Boolean {
+        ControllerLabels.observe(event)
         val source = event.device?.sources ?: event.source
         val pad =
             source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||

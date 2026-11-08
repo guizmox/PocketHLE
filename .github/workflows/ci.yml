@@ -15,7 +15,7 @@ env:
   RUSTFLAGS: -D warnings
   # Keep Cargo artifacts separate from extracted FFmpeg sources.
   CARGO_TARGET_DIR: ${{ github.workspace }}/target/cargo
-  # SDL bundled by sdl2-sys still declares pre-3.5 CMake compatibility.
+  # Keep older native dependencies compatible with recent CMake releases.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
@@ -187,6 +187,8 @@ jobs:
       - name: stage artifacts
         run: |
           mkdir -p dist/PocketHLE-linux
+          cp -R frontends/pocket-desktop/licenses dist/PocketHLE-linux/
+          cp LICENSE LICENSE-APACHE LICENSE-MIT dist/PocketHLE-linux/
           cp target/cargo/release/pockethle dist/PocketHLE-linux/
           cp target/cargo/release/pockethle-gui dist/PocketHLE-linux/
           cp tools/install-desktop-entry.sh dist/PocketHLE-linux/
@@ -277,6 +279,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/PocketHLE-windows
+          cp -R frontends/pocket-desktop/licenses dist/PocketHLE-windows/
+          cp LICENSE LICENSE-APACHE LICENSE-MIT dist/PocketHLE-windows/
           cp target/cargo/release/pockethle.exe dist/PocketHLE-windows/
           cp target/cargo/release/pockethle-gui.exe dist/PocketHLE-windows/
           cp README.md dist/PocketHLE-windows/
@@ -298,6 +302,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/PocketHLE-steamdeck
+          cp -R frontends/pocket-desktop/licenses dist/PocketHLE-steamdeck/
+          cp LICENSE LICENSE-APACHE LICENSE-MIT dist/PocketHLE-steamdeck/
           cp target/cargo/release/pockethle-steamdeck.exe dist/PocketHLE-steamdeck/
           cp docs/STEAMDECK.md dist/PocketHLE-steamdeck/README-SteamDeck.md
       - name: zip Steam Deck artifacts

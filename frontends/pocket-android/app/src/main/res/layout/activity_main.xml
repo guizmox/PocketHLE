@@ -33,7 +33,7 @@
             android:layout_height="match_parent"
             android:clipToPadding="false"
             android:padding="8dp"
-            tools:listitem="@layout/item_game" />
+            tools:listitem="@layout/item_game_grid" />
 
         <TextView
             android:id="@+id/empty_state"

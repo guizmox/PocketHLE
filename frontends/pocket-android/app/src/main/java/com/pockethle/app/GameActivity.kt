@@ -35,12 +35,9 @@ import androidx.core.content.ContextCompat
  * The implementation drives the emulator session-style (see
  * `pocket-android-jni::runner`): a Rust worker thread runs the
  * emulator and the activity polls the latest framebuffer on the UI
- * thread roughly every 33 ms (~30 Hz), feeds touches and virtual
+ * thread roughly every 16 ms, feeds touches and virtual
  * gamepad presses straight back into the kernel, and asks the
- * worker to stop on Back / `onDestroy`. The previous single-shot
- * `NativeBridge.runGame` API blocked until the emulator exited and
- * never streamed intermediate frames, which looked like an infinite
- * loading spinner once the real Unicorn backend was wired up.
+ * worker to stop on Back / `onDestroy`.
  */
 class GameActivity : AppCompatActivity() {
     private var hardwareStart: (() -> Unit)? = null
@@ -133,8 +130,7 @@ class GameActivity : AppCompatActivity() {
         }
     }
 
-    /** Polling tick. ~30 Hz keeps the SurfaceView smooth without
-     * burning the CPU on a phone. */
+    /** Prevent multiple dependency prompts during asynchronous session polling. */
     private var dependencyDialogVisible = false
 
     private var gridRouter: StylusGridRouter? = null
@@ -1557,11 +1553,8 @@ class GameActivity : AppCompatActivity() {
         private const val VK_F3 = 0x72
         private const val VK_F11 = 0x7A
 
-        /** Polling cadence in ms. 33 ≈ 30 Hz. */
+        /** UI polling cadence; this does not measure displayed FPS. */
         private const val POLL_INTERVAL_MS = 16L
-
-        /** How far a stick has to travel before it counts as a press.
-         * A DualShock 4 rests a few percent off centre. */
 
     }
 }

@@ -20,6 +20,8 @@ class InputSettingsActivity : HostKeyActivity() {
     private val livePictures = mutableListOf<InputSkinView>()
     private val liveRows = mutableMapOf<String, Button>()
     private var selectionSummary: LinearLayout? = null
+    private var selectedInputTitle: TextView? = null
+    private var labelsRevision = -1
     private var listening = false
     private val inputListener =
         object : android.hardware.input.InputManager.InputDeviceListener {
@@ -75,8 +77,22 @@ class InputSettingsActivity : HostKeyActivity() {
     }
 
     private fun refreshLive() {
+        val changed = labelsRevision != ControllerLabels.revision
+        labelsRevision = ControllerLabels.revision
+        if (changed && controllerOnly) selected[true]?.let { input ->
+            val fallback=livePictures.firstOrNull()?.controls?.firstOrNull { it.input == input }?.label ?: input
+            selectedInputTitle?.text="Selected input: ${ControllerLabels.label(input,fallback)}"
+        }
         livePictures.forEach { it.invalidate() }
-        liveRows.forEach { (name, row) -> row.isActivated = liveInput.isDown(name, true) }
+        liveRows.forEach { (name, row) ->
+            row.isActivated = liveInput.isDown(name, true)
+            // A normal press only changes the highlight. Avoid requesting a
+            // text re-layout on every live input event in the scrollable editor.
+            if (changed) {
+                val fallback=livePictures.firstOrNull()?.controls?.firstOrNull { it.input == name }?.label ?: name
+                row.text = bindingText(name, fallback)
+            }
+        }
     }
 
     private fun controllerEvent(event: KeyEvent): Boolean {
@@ -108,6 +124,7 @@ class InputSettingsActivity : HostKeyActivity() {
 
     private fun recordKey(event: KeyEvent): Boolean {
         val pad = controllerEvent(event)
+        ControllerLabels.observe(event)
         val name = inputName(event)
         if (
             name != null &&
@@ -298,7 +315,8 @@ class InputSettingsActivity : HostKeyActivity() {
         selectionSummary?.let { panel -> panel.removeAllViews(); summary(panel, pad) }
     }
 
-    private fun bindingText(input: String, label: String): CharSequence {
+    private fun bindingText(input: String, fallback: String): CharSequence {
+        val label = ControllerLabels.label(input, fallback)
         if (input == "Misc1") return "Extra (desktop)"
         if (input == "RightThumb" && !gizmondo)
             return spans(listOf("$label: ${state.shortFor(input,true,false)}" to InputSkinView.GREEN))
@@ -601,7 +619,8 @@ class InputSettingsActivity : HostKeyActivity() {
                 InputSkinView.loadControls(this, true).firstOrNull { it.input == input }?.label
                     ?: input
             else input
-        panel.addView(text("Selected input: $physical", 18f))
+        selectedInputTitle=text("Selected input: ${if(pad) ControllerLabels.label(input,physical) else physical}",18f)
+        panel.addView(selectedInputTitle)
         if (pad && DeckInputPolicy.stylusReserved(input,gizmondo)) {
             panel.addView(text("Reserved stylus control"))
             panel.addView(text("Double-click R3 to switch stylus mode."))
@@ -701,7 +720,7 @@ class InputSettingsActivity : HostKeyActivity() {
                         }
                         selected[pad] = name
                         notice =
-                            "${if(long) "Long" else "Short"} press: $name → ${state.label(target, gizmondo)}"
+                            "${if(long) "Long" else "Short"} press: ${if(pad) ControllerLabels.label(name,name) else name} → ${state.label(target, gizmondo)}"
                         stage = 2
                         index = 0
                         render()
@@ -766,11 +785,11 @@ class InputSettingsActivity : HostKeyActivity() {
                     } else {
                         if (stage == 1) {
                             content.addView(
-                                text("$input · ${if(long) "Long" else "Short"} press", 20f)
+                                text("${if(pad) ControllerLabels.label(input!!,input!!) else input} · ${if(long) "Long" else "Short"} press", 20f)
                             )
                             content.addView(
                                 text(
-                                    "Up / Down to choose · Enter / A to apply · Escape / B to cancel"
+                                    ControllerLabels.text("Up / Down to choose · Enter / {South} to apply · Escape / {East} to cancel")
                                 )
                             )
                             if (long)

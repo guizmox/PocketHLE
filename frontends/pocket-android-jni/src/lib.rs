@@ -7,16 +7,12 @@
 //!
 //! * `banner()` — sanity string showing the loaded version.
 //! * `listGames(libraryRoot)` — JSON array of [`pocket_library::GameEntry`].
-//! * `importCab(libraryRoot, cabPath)` — JSON of the freshly-imported entry.
+//! * `prepareImport` / cabinet-platform choice / `commitPreparedImport` — transactional import.
 //! * `removeGame(libraryRoot, id)` — `"ok"` or `"err: ..."`.
 //! * `readConfig(libraryRoot)` — JSON of [`pocket_library::LauncherConfig`].
 //! * `writeConfig(libraryRoot, json)` — overwrite config with a JSON blob.
 //! * `readGameSettings(libraryRoot, id)` — JSON of per-game settings.
 //! * `writeGameSettings(libraryRoot, id, json)` — persist per-game settings.
-//! * `runGame(libraryRoot, id)` — legacy single-shot emulator run that
-//!   only ever returns the *final* framebuffer. Kept around for
-//!   compatibility but the GUI no longer drives it because it looks
-//!   like a hang to the user; see [`runner`].
 //! * `nativeStartGame` / `nativePollFrame` / `nativeSendInput` /
 //!   `nativeRequestStop` / `nativeFinishGame` — session-based
 //!   replacement that streams framebuffers to the UI as the guest
@@ -44,13 +40,11 @@ use jni::sys::{jbyteArray, jint, jlong, jshortArray, jstring};
 use jni::JNIEnv;
 
 use pocket_core::kernel::InputEvent;
-use pocket_core::Emulator;
 use pocket_library::{GameSettings, Library};
-use serde::Serialize;
 
 use crate::runner::{InputCommand, Session};
 
-// A running or still-joining session can write saves. Keep backups exclusive
+// A running or still-joining session can write saves. Keep backups/removal exclusive
 // with session creation, and retain the count until the worker has joined.
 static LIBRARY_SESSIONS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
 
@@ -354,118 +348,6 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_cancelPreparedImport<
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_importCab<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    library_root: JString<'local>,
-    cab_path: JString<'local>,
-) -> jstring {
-    init_logger();
-    let root = match jstring_to_path(&mut env, library_root) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing library root")),
-    };
-    let cab = match jstring_to_path(&mut env, cab_path) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing cab path")),
-    };
-    let result = (|| -> anyhow::Result<String> {
-        let mut lib = Library::open(&root)?;
-        let entry = lib.import_cab(&cab)?;
-        Ok(serde_json::to_string(&entry)?)
-    })();
-    match result {
-        Ok(j) => new_jstring(&env, j),
-        Err(e) => new_jstring(&env, error_json(&format!("importCab: {e:#}"))),
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_importZip<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    library_root: JString<'local>,
-    zip_path: JString<'local>,
-) -> jstring {
-    init_logger();
-    let root = match jstring_to_path(&mut env, library_root) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing library root")),
-    };
-    let zip = match jstring_to_path(&mut env, zip_path) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing zip path")),
-    };
-    let result = (|| -> anyhow::Result<String> {
-        let mut lib = Library::open(&root)?;
-        let entries = lib.import_zip_entries(&zip)?;
-        if entries.len() == 1 && !entries[0].source_cab.starts_with("gzga-collection:") {
-            Ok(serde_json::to_string(&entries[0])?)
-        } else {
-            Ok(serde_json::to_string(&entries)?)
-        }
-    })();
-    match result {
-        Ok(j) => new_jstring(&env, j),
-        Err(e) => new_jstring(&env, error_json(&format!("importZip: {e:#}"))),
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_importRar<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    library_root: JString<'local>,
-    rar_path: JString<'local>,
-) -> jstring {
-    init_logger();
-    let root = match jstring_to_path(&mut env, library_root) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing library root")),
-    };
-    let rar = match jstring_to_path(&mut env, rar_path) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing rar path")),
-    };
-    let result = (|| -> anyhow::Result<String> {
-        let mut lib = Library::open(&root)?;
-        let entry = lib.import_rar(&rar)?;
-        Ok(serde_json::to_string(&entry)?)
-    })();
-    match result {
-        Ok(j) => new_jstring(&env, j),
-        Err(e) => new_jstring(&env, error_json(&format!("importRar: {e:#}"))),
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_importExe<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    library_root: JString<'local>,
-    exe_path: JString<'local>,
-) -> jstring {
-    init_logger();
-    let root = match jstring_to_path(&mut env, library_root) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing library root")),
-    };
-    let exe = match jstring_to_path(&mut env, exe_path) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing exe path")),
-    };
-    let result = (|| -> anyhow::Result<String> {
-        let mut lib = Library::open(&root)?;
-        let entry = lib.import_exe(&exe)?;
-        Ok(serde_json::to_string(&entry)?)
-    })();
-    match result {
-        Ok(j) => new_jstring(&env, j),
-        Err(e) => new_jstring(&env, error_json(&format!("importExe: {e:#}"))),
-    }
-}
-
-#[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_removeGame<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
@@ -482,6 +364,14 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_removeGame<'local>(
         None => return new_jstring(&env, error_json("missing game id")),
     };
     let result = (|| -> anyhow::Result<()> {
+        let sessions = LIBRARY_SESSIONS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Library lock unavailable"))?;
+        anyhow::ensure!(
+            *sessions == 0,
+            "Stop the running game before removing a library entry"
+        );
+
         let mut lib = Library::open(&root)?;
         lib.remove(&id)?;
         Ok(())
@@ -629,138 +519,6 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_writeGameSettings<'lo
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_runGame<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    library_root: JString<'local>,
-    id: JString<'local>,
-) -> jstring {
-    init_logger();
-    let root = match jstring_to_path(&mut env, library_root) {
-        Some(p) => p,
-        None => return new_jstring(&env, error_json("missing library root")),
-    };
-    let id = match jstring_to_string(&mut env, id) {
-        Some(s) => s,
-        None => return new_jstring(&env, error_json("missing game id")),
-    };
-    let outcome = run_game(&root, &id);
-    let payload = serde_json::to_string(&outcome)
-        .unwrap_or_else(|e| format!("{{\"ok\":false,\"error\":\"json: {e}\"}}"));
-    new_jstring(&env, payload)
-}
-
-#[derive(Serialize)]
-struct RunOutcomeJson {
-    ok: bool,
-    summary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    frame: Option<FrameJson>,
-}
-
-#[derive(Serialize)]
-struct FrameJson {
-    width: u32,
-    height: u32,
-    /// RGBA8888 bytes encoded as base64 (standard alphabet, padded).
-    rgba_b64: String,
-}
-
-fn run_game(root: &Path, id: &str) -> RunOutcomeJson {
-    let result = (|| -> anyhow::Result<RunOutcomeJson> {
-        let lib = Library::open(root)?;
-        let entry = lib.get(id).ok_or_else(|| anyhow::anyhow!("unknown game"))?;
-        let mut summary_lines = vec![
-            format!("Game: {}", entry.display_name),
-            format!("Backend: {}", entry.settings.cpu_backend.label()),
-        ];
-        let exe = entry.launch_path(root);
-        summary_lines.push(format!("Executable: {}", exe.display()));
-        let mut emu = build_unicorn().context("Unicorn unavailable")?;
-        emu.set_gpu_renderer(
-            entry
-                .settings
-                .gpu_renderer
-                .unwrap_or(lib.config().gpu_renderer),
-        );
-        emu.set_gles_internal_resolution(lib.config().gles_internal_resolution);
-        emu.set_frame_rate_limit(entry.settings.effective_frame_rate_limit(lib.config()));
-        emu.max_slices = entry.settings.max_slices;
-        emu.instruction_budget_per_slice = entry.settings.instructions_per_slice;
-        emu.load_pe(&exe)?;
-        // Must follow `load_pe`, which creates the process that owns the
-        // framebuffer; before that the call is a no-op and the game runs
-        // at the 240x320 default whatever the user picked.
-        let (screen_w, screen_h) = entry.settings.screen.size();
-        emu.set_screen_size(screen_w, screen_h);
-        summary_lines.push(format!("Screen: {screen_w}x{screen_h}"));
-        for value in &entry.registry {
-            let registry_value = if let Some(text) = value.string.as_deref() {
-                pocket_core::kernel::registry::RegistryValue::Sz(text.to_string())
-            } else if let Some(number) = value.dword {
-                pocket_core::kernel::registry::RegistryValue::Dword(number)
-            } else {
-                continue;
-            };
-            emu.set_registry_value(&value.key, &value.name, registry_value);
-        }
-        emu.mount_dir("\\Application\\", entry.extracted_dir(root));
-        emu.mount_dir("\\Program Files\\", entry.extracted_dir(root));
-        emu.mount_dir("\\Program Files\\Game\\", entry.extracted_dir(root));
-        if let Some(install_dir) = &entry.install_dir {
-            emu.mount_dir(install_dir, entry.extracted_dir(root));
-        }
-        let run_status = match emu.run() {
-            Ok(()) => "Emulator exited cleanly.".to_string(),
-            Err(e) => format!("Emulator stopped: {e:#}"),
-        };
-        summary_lines.push(run_status);
-        let frame = emu.process_mut().and_then(|p| {
-            let fb = p
-                .state
-                .framebuffer
-                .cpu()
-                .map_err(|error| log::error!("legacy presentation read failed: {error}"))
-                .ok()?;
-            Some(FrameJson {
-                width: fb.width,
-                height: fb.height,
-                rgba_b64: base64_encode(&fb.snapshot_rgba8888()),
-            })
-        });
-        Ok(RunOutcomeJson {
-            ok: true,
-            summary: summary_lines.join("\n"),
-            error: None,
-            frame,
-        })
-    })();
-    match result {
-        Ok(j) => j,
-        Err(e) => RunOutcomeJson {
-            ok: false,
-            summary: "Run failed before emulator started".to_string(),
-            error: Some(format!("{e:#}")),
-            frame: None,
-        },
-    }
-}
-
-#[cfg(feature = "unicorn")]
-fn build_unicorn() -> anyhow::Result<Emulator> {
-    Emulator::with_unicorn_cpu()
-}
-
-#[cfg(not(feature = "unicorn"))]
-fn build_unicorn() -> anyhow::Result<Emulator> {
-    Err(anyhow::anyhow!(
-        "binary was not compiled with the `unicorn` feature"
-    ))
-}
-
 fn jstring_to_string<'a>(env: &mut JNIEnv<'a>, value: JString<'a>) -> Option<String> {
     if value.is_null() {
         return None;
@@ -796,38 +554,6 @@ fn error_json(msg: &str) -> String {
     format!("{{\"ok\":false,\"error\":\"{escaped}\"}}")
 }
 
-const B64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/// Tiny standalone base64 encoder so we don't need to add a `base64`
-/// dep just to ship the framebuffer over JNI.
-fn base64_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i + 3 <= input.len() {
-        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | input[i + 2] as u32;
-        out.push(B64_TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(B64_TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push(B64_TABLE[((n >> 6) & 0x3f) as usize] as char);
-        out.push(B64_TABLE[(n & 0x3f) as usize] as char);
-        i += 3;
-    }
-    let rem = input.len() - i;
-    if rem == 1 {
-        let n = (input[i] as u32) << 16;
-        out.push(B64_TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(B64_TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push('=');
-        out.push('=');
-    } else if rem == 2 {
-        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
-        out.push(B64_TABLE[((n >> 18) & 0x3f) as usize] as char);
-        out.push(B64_TABLE[((n >> 12) & 0x3f) as usize] as char);
-        out.push(B64_TABLE[((n >> 6) & 0x3f) as usize] as char);
-        out.push('=');
-    }
-    out
-}
-
 fn init_logger() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -843,12 +569,7 @@ fn init_logger() {
 // ---------------------------------------------------------------------------
 // Session-based emulator API
 //
-// `runGame` above is single-shot: it blocks until the emulator has run to
-// completion and only then returns the *final* framebuffer. With the trace
-// stub backend that is fast enough to look reasonable, but with the real
-// Unicorn backend the run lasts long enough that the user's UI sits on a
-// loading spinner for tens of seconds and they cannot push any input. The
-// methods below replace that with a streaming model:
+// A worker streams images and accepts input while the guest is running.
 //
 //  * `nativeStartGame` returns an opaque `jlong` handle (a pointer to a
 //    boxed [`Session`]).
@@ -944,17 +665,6 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePublishedImageI
 ) -> jni::sys::jfloat {
     session_from_handle(handle)
         .and_then(|session| session.published_image_ips())
-        .unwrap_or(-1.0)
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeSubmittedFrameFps(
-    _env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-) -> jni::sys::jfloat {
-    session_from_handle(handle)
-        .and_then(|session| session.submitted_frame_fps())
         .unwrap_or(-1.0)
 }
 
@@ -1221,22 +931,6 @@ fn session_from_handle<'a>(handle: jlong) -> Option<&'a Session> {
 
 fn clamp_u16(v: jint) -> u16 {
     v.clamp(0, u16::MAX as jint) as u16
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base64_examples() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
-    }
 }
 
 #[no_mangle]

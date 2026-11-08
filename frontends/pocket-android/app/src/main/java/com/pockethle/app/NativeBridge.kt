@@ -64,22 +64,15 @@ object NativeBridge {
     @JvmStatic external fun colorsLanguages(libraryRoot: String, id: String): String
     @JvmStatic external fun unlockColorsTurfWars(libraryRoot: String, id: String): String
 
-    /** Returns the freshly imported game as a JSON [GameEntry]. */
+    /** Prepares an import and returns its choices/token; commit returns the imported entries. */
     @JvmStatic external fun prepareImport(libraryRoot: String, source: String): String
     @JvmStatic external fun choosePreparedImportCabinet(libraryRoot: String, token: Long, index: Int): String
     @JvmStatic external fun choosePreparedImportPlatform(libraryRoot: String, token: Long, gameId: String, gizmondo: Boolean): String
     @JvmStatic external fun commitPreparedImport(libraryRoot: String, token: Long, allowUpdates: Boolean): String
     @JvmStatic external fun cancelPreparedImport(libraryRoot: String, token: Long)
 
-    @JvmStatic external fun importCab(libraryRoot: String, cabPath: String): String
     @JvmStatic external fun isDemoCard(libraryRoot: String, id: String): Boolean
     @JvmStatic external fun splitDemoCard(libraryRoot: String, id: String): String
-    /** Returns one JSON GameEntry, or an array for an automatic GZGA collection import. */
-    @JvmStatic external fun importZip(libraryRoot: String, zipPath: String): String
-    /** Imports a RAR archive containing a Pocket PC game. */
-    @JvmStatic external fun importRar(libraryRoot: String, rarPath: String): String
-    /** Imports a standalone ARM Pocket PC executable. */
-    @JvmStatic external fun importExe(libraryRoot: String, exePath: String): String
 
     /** Returns `{"ok":true}` on success or `{"ok":false,"error":...}`. */
     @JvmStatic external fun removeGame(libraryRoot: String, id: String): String
@@ -100,17 +93,6 @@ object NativeBridge {
         settingsJson: String,
     ): String
 
-    /**
-     * Legacy single-shot run. Blocks the caller until the emulator
-     * has finished, then returns a JSON object of the form
-     * `{"ok":true,"summary":"...","frame":{"width":W,"height":H,"rgba_b64":"..."}}`
-     * or `{"ok":false,"error":"..."}`. Kept for compatibility with
-     * other callers but no longer used by [GameActivity] because
-     * the real Unicorn backend takes long enough that the call
-     * looks like a hang to the user.
-     */
-    @JvmStatic external fun runGame(libraryRoot: String, id: String): String
-
     // -------------------------------------------------------------------
     // Session-based emulator API. See `pocket-android-jni::runner`.
     // -------------------------------------------------------------------
@@ -127,8 +109,6 @@ object NativeBridge {
     /** Changed images per second, or -1 before the first change. */
     @JvmStatic external fun nativePublishedImageIps(handle: Long): Float
 
-    /** Completed guest presentations per second, or -1 if no boundary was observed. */
-    @JvmStatic external fun nativeSubmittedFrameFps(handle: Long): Float
 
     const val MEDIA_PLAY_PAUSE = 0
     const val MEDIA_STOP = 1

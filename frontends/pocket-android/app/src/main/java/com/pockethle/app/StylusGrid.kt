@@ -30,7 +30,6 @@ internal data class GridInput(val source:String,val name:String) {
     fun canonical()=copy(name=if(source=="keyboard") InputBindings.canonical(name).uppercase() else when(name){
         "Back"->"Select";"Guide"->"Mode";"LeftStick"->"LeftThumb";"RightStick"->"RightThumb";else->name
     })
-    fun label()=if(source=="keyboard") "Key $name" else name.removePrefix("Touch:").let { if(name.startsWith("Touch:")) "Touch $it" else it }
     fun conflict(fullscreen:String?):String? {
         val input=canonical()
         if(source=="keyboard" && input.name in listOf("ESCAPE","F7","F8","F9","F10","F11","F12")) return "This input is reserved by PocketHLE (Escape / F7–F12)."

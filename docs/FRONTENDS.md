@@ -20,6 +20,8 @@ separate supported choice. Frame-limit inheritance and filters are defined in
 Desktop and Android require confirmation before removing a game from the library,
 for both PocketPC and Gizmondo. Desktop removal deletes the game's installed
 files, saves and per-game settings. Dismissing the confirmation cancels removal.
+Removal is refused while game sessions are running or stopping; Android holds
+the existing session gate through the filesystem operation.
 
 ## Desktop and Gizmondo controls
 
@@ -72,6 +74,43 @@ mapping use the same shared rectangle; internal density never changes guest hitb
 Controls reserve their own area and do not overlap the touchable game image.
 Big controls may reduce the fitted game scale. Do not copy a Gizmondo overflow
 option onto the PocketPC touchscreen layout.
+
+## Controller button labels in the UI
+
+Desktop controller input uses bundled, statically linked SDL3 (sdl3 crate 0.22.0).
+Input IDs and saved bindings stay positional (South/East/West/North); guest
+commands on the mapping diagram remain guest commands. UI prompts and physical
+input rows obtain their face-button markings from SDL_GetGamepadButtonLabel on
+the opened gamepad. There is no PocketHLE name/vendor lookup or Nintendo/Xbox/
+PlayStation translation table. The selected controller supplies the labels;
+accepted button input activates that device. Device removal and SDL mapping
+changes refresh the metadata. Unknown markings use explicit position names
+(Bottom/Right/Left/Top button), never an assumed Xbox letter. This applies to
+navigation hints, the update notification, the virtual keyboard, import
+display-settings prompt, full file-dialog help and overwrite/back prompt,
+capture gallery/viewer, Colors startup, binding assistant/inspection and the
+per-game stylus-grid cell labels.
+Shoulder help uses generic Left/Right shoulder terminology rather than Xbox
+LB/RB markings; SDL supplies face-button labels, not every auxiliary inscription.
+Keyboard A/B shortcuts in the import prompt are still literal keyboard keys.
+
+Android retains native Android input. ControllerLabels queries the active input
+device's KeyCharacterMap display label for each normalized face-button keycode;
+when Android supplies no printable label, it uses the same explicit position
+names. A system keycode named BUTTON_A is not itself evidence that the hardware
+button is printed A. No device-name or vendor heuristic is used. Android cannot
+guarantee physical markings when its driver supplies incomplete or normalized
+metadata; neither platform can recover hardware hidden behind a virtual controller.
+Android binding rows, selected-input summaries, assignment messages and per-game
+stylus-grid cells use this helper; effective
+bindings, reserved inputs and guest commands are unchanged.
+
+SDL3 also owns queued PCM playback in the desktop capture viewer through a
+paused-by-default audio device stream. Queue size is measured in source PCM bytes;
+seek clears the stream, playback resumes/pauses it, and dropping it closes the
+device and balances the audio-subsystem initialization on the playback worker.
+CPAL remains the emulator's game-audio backend. No second SDL2 desktop input or
+capture-audio dependency is retained.
 
 ## Desktop input lifecycle
 
@@ -262,7 +301,7 @@ Start it once, press and release
 a physical input, then choose the guest command. Releasing before 650 ms selects
 the short assignment; holding at least 650 ms selects the long assignment.
 Keyboard arrows or controller D-pad/left stick navigate. Enter or the physical
-South/A button applies; Escape or East/B cancels the command choice. Android
+South button applies; Escape or East cancels the command choice. Android
 Back can cancel the assistant. These navigation buttons are physical UI controls,
 independent of their saved guest assignments.
 
@@ -364,7 +403,7 @@ PocketPC and Gizmondo. It never sends Gizmondo Brightness. Menu/Start taps the n
 recording on desktop and has no action on Android. View/Select and Menu/Start (the small top-left and top-right
 Steam Deck buttons, shown as Full and Filter) are immutable for both tap and
 hold, outlined in red and handled before menu capture/navigation. Guide/Mode
-is customizable: its short default is Center tap on PocketPC and unassigned on
+is customizable: its short default is guest Tab on PocketPC and unassigned on
 Gizmondo. Extra/Misc1 defaults to Rotation on both profiles and is customizable.
 Neither has a default hold. Screenshot is an optional assignable command on
 desktop only, with no controller default. Extra has no standard Android key
@@ -609,9 +648,11 @@ repairing it to the top button. Auto-reveal and focus repair are enabled when
 keyboard/controller navigation resumes; popup selection keeps its own reveal.
 
 The modal **PocketPC display settings** prompt after import consumes its own
-controller buttons: **A/South = Not Now**, **B/East = Settings**. The labels show
-these shortcuts, which also work with keyboard A/B. They do not depend on an old
-page focus or the normal launcher A-open/B-back convention. Other game/library
+controller buttons: **South = Not Now**, **East = Settings**. Their displayed
+markings come from the active controller (for example, Deck A/B or Switch B/A),
+with explicit positions as the unknown-label fallback. Literal keyboard A/B
+shortcuts remain available and are indicated separately. These actions do not
+depend on an old page focus or the normal launcher confirm/back convention. Other game/library
 input and navigation repeat are suspended while this prompt owns the buttons.
 
 ## Android input-editor selection
@@ -628,3 +669,39 @@ if restoration changes an offset, that intermediate draw is cancelled. No timed
 post-delay or renderer-specific workaround is used. R3's controller row explicitly
 shows its fixed mode gesture even though it is a reserved input without a normal
 host tap/hold action. This is frontend view-state handling, not a GLES game fix.
+
+## Frontend API cleanup
+
+Android import uses the prepared-import transaction (prepare, cabinet/platform
+choice, commit or cancel). The obsolete direct CAB/ZIP/RAR/EXE JNI imports are
+removed on both sides. Android execution uses the streaming session API only;
+the blocking runGame entry point, final-frame JSON/base64 transport and unused
+submission-FPS getter are removed. The unconnected Android renderer screenshot
+request/readback/save path is removed; desktop screenshot functionality remains.
+JNI host callbacks invoked by native code are retained even when no Kotlin UI
+method calls them directly.
+
+Game removal on desktop uses an egui-owned, centered confirmation for both
+PocketPC and Gizmondo. South/Enter confirms, East/Escape or the close button
+cancels; cancellation wins simultaneous inputs. Controller markings use the
+shared label provider. No library action or repeated navigation reaches the
+underlying page while the confirmation is open. Only confirmation calls
+Library::remove, after checking that no game session is still running or stopping;
+no native modal dialog takes controller focus. Native dialogs
+remain only for startup errors and Windows command-line help before a working
+launcher viewport exists.
+
+The library has no Start-to-settings action: Menu/Start is already consumed by
+the immutable filter/recording shortcut. Settings are reached through the toolbar
+(L3 switches sections). The old unreachable Start match arm and its misleading
+library help have been removed. Android resource cleanup removes the old list
+row/preview, unused preference widget, orphan icons/backgrounds and unreferenced
+strings; the layout preview now uses the live grid card.
+
+Desktop notices under frontends/pocket-desktop/licenses match the locked SDL3,
+Rust SDL3/sys and bundled HIDAPI dependencies. The obsolete SDL2 notice filenames
+are removed. All three desktop release archives include that notices directory;
+Android does not bundle desktop SDL3. Historical SDL2 guest-ABI references and
+orbclient's target-specific transitive SDL2 dependency are unrelated to the
+removed desktop backend and must not be deleted as if they were dead frontend
+code.

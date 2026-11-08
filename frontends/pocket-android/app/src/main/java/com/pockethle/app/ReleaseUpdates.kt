@@ -3,7 +3,7 @@ package com.pockethle.app
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
-import java.net.URL
+import java.net.URI
 
 /** One bounded, background request per process; never retains an Activity. */
 object ReleaseUpdates {
@@ -18,7 +18,7 @@ object ReleaseUpdates {
         if (checked) return cached
         checked = true
         cached = runCatching {
-            val connection = URL(API).openConnection() as HttpURLConnection
+            val connection = URI(API).toURL().openConnection() as HttpURLConnection
             val deadline = System.nanoTime() + 8_000_000_000L
             try {
                 connection.connectTimeout = 4000

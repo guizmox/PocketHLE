@@ -906,12 +906,17 @@ required before treating multiplayer compatibility as established.
 
 #### 36. Desktop physical controllers
 
-The desktop frontend uses bundled, statically linked SDL2 (sdl2 crate 0.38.0).
+The desktop frontend uses bundled, statically linked SDL3 (sdl3 crate 0.22.0).
 SDL's HIDAPI Switch driver initializes the Nintendo Switch Pro USB/Bluetooth
-protocol. Only SDL input/event subsystems are initialized: egui owns the window
-and CPAL still owns audio. SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1 is required
+protocol. The input worker initializes only SDL input/event subsystems: egui owns the window
+and CPAL still owns game audio. Capture playback initializes SDL3 audio separately
+on its worker and uses a device stream with balanced subsystem refcounts. SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1 is required
 because egui's window is not an SDL window; actual guest/capture focus is gated
-by egui. SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0 preserves position-based names.
+by egui. SDL3 position-based input IDs preserve existing saved bindings. Face-button
+UI markings come from SDL_GetGamepadButtonLabel for the opened controller; no
+device-name or vendor mapping is maintained in PocketHLE. Unknown markings use
+explicit position labels. Android uses native KeyCharacterMap labels when supplied,
+with the same position fallback; see FRONTENDS.md for the platform limitations.
 SDL_JOYSTICK_HIDAPI and SDL_JOYSTICK_HIDAPI_SWITCH are enabled before startup.
 A worker collects transitions every 4 ms and wakes egui; it ignores repeats,
 uses stick hysteresis (press 0.60 / release 0.35), and stops when the GUI drops
@@ -1297,12 +1302,12 @@ sessions. Gizmondo action buttons remain on the physical right, D-pad on the
 physical left, with L/R above the corresponding groups; gameplay layout is LTR
 independently of device locale and landscape rotation.
 
-`DisplayGeometry.kt` owns the integer viewport shared by GL output, screenshot
-readback and inverse touch mapping. Auto selects the largest positive integer
-native-size multiple that fits the game area. Explicit factors are capped at
-that integer; unused pixels form letterboxes. Gizmondo always uses native 320×240.
-An undersized viewport clips at ×1 rather than fractionally resizing. Keep these
-rules synchronized with `docs/ANDROID-BUILD.md` and Android settings labels.
+`DisplayGeometry.kt` owns the viewport shared by GL output and inverse touch
+mapping. Current Android sizing is automatic: PocketPC uses every fitting integer
+multiple of the logical LCD, independently of internal GLES density. Gizmondo uses
+produced-image integer fitting. Undersized viewports downscale proportionally;
+controller fullscreen uses aspect fit. Manual display-scale and the unconnected
+Android screenshot path have been removed. See FRONTENDS.md for current policy.
 
 ##### Android child processes and RAM/VFS diagnostic parity
 
@@ -2040,7 +2045,7 @@ Its guest structures and heap surfaces are process-owned kernel::sdl state;
 Init/SetVideoMode/FillRect/Flip was checked against the exact framebuffer image.
 Unsupported audio/GL/joystick/palette/RWops and SDL2/ordinal-only imports are not
 silently advertised as supported. See docs/GIZMONDO.md for limits. This module
-is unrelated to bundled host SDL2 controller support. Timer-test rearm intervals
+is unrelated to bundled host SDL3 controller support. Timer-test rearm intervals
 are long to avoid wall-clock failures under CI descheduling; due/coalescing is
 set explicitly by the test and production timer behavior is unchanged.
 
@@ -4251,8 +4256,8 @@ identity. Meter state is detached between game sessions and idle rates become
 zero. Producer PresentationStats remain submission telemetry, not overlay FPS.
 
 Android uses the existing GL-thread PresentedFrameCounter after glDrawArrays.
-The former native submission-rate override is removed from the overlay; JNI
-telemetry is explicitly renamed nativeSubmittedFrameFps. The overlay always
+The unused native submission-rate getter and its JNI declaration/export have
+been removed. Submission statistics remain core diagnostics, not overlay FPS. The overlay always
 labels the sampled displayed-image rate FPS. No new per-frame glGetError,
 readback, glFinish, fence, input-repeat or pacing behavior is introduced.
 

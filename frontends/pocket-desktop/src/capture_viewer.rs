@@ -235,9 +235,9 @@ impl Viewer {
                 close = crate::controller_ui::button(
                     ui,
                     if self.fullscreen {
-                        "Close viewer"
+                        "Close viewer".to_owned()
                     } else {
-                        "Close (B)"
+                        crate::controller_labels::text(ctx, "Close ({East})")
                     },
                 )
                 .clicked();
@@ -305,7 +305,7 @@ fn play_video(
     let mut audio = Decoder::open(path, false, 0, 0)?;
     // SDL is already bundled for controllers. AudioQueue copies PCM and remains
     // on this worker; no host executable, file association or child process.
-    // The controller worker owns Rust-SDL2's main-thread context. Initialize
+    // The controller worker owns Rust-SDL3's main-thread context. Initialize
     // only SDL's independent audio subsystem here, with balanced C refcounts.
     let queue = if audio.is_some() {
         Some(AudioOutput::open()?)
@@ -472,60 +472,76 @@ fn playback_wait(next_pts: Option<f64>, position: f64) -> Duration {
 }
 
 #[cfg(feature = "video-static")]
-struct AudioOutput(u32);
+struct AudioOutput {
+    stream: std::ptr::NonNull<sdl3::sys::audio::SDL_AudioStream>,
+}
 #[cfg(feature = "video-static")]
 impl AudioOutput {
     fn open() -> Result<Self, String> {
-        // SDL_AudioSpec is a C POD: zero is valid for every field, including
-        // callback=None (queued audio). This device is owned by this worker.
-        unsafe {
-            if sdl2::sys::SDL_InitSubSystem(sdl2::sys::SDL_INIT_AUDIO) != 0 {
-                return Err(sdl2::get_error());
-            }
-            let mut desired: sdl2::sys::SDL_AudioSpec = std::mem::zeroed();
-            desired.freq = 44100;
-            desired.format = sdl2::sys::AUDIO_S16SYS as u16;
-            desired.channels = 2;
-            desired.samples = 1024;
-            let mut obtained = std::mem::zeroed();
-            let device =
-                sdl2::sys::SDL_OpenAudioDevice(std::ptr::null(), 0, &desired, &mut obtained, 0);
-            if device == 0 {
-                let error = sdl2::get_error();
-                sdl2::sys::SDL_QuitSubSystem(sdl2::sys::SDL_INIT_AUDIO);
-                return Err(error);
-            }
-            Ok(Self(device))
+        // SDL audio may be initialized from this worker; do not try to acquire
+        // a second Rust-SDL main-thread context on the playback thread.
+        if !unsafe { sdl3::sys::init::SDL_InitSubSystem(sdl3::sys::init::SDL_INIT_AUDIO) } {
+            return Err(sdl3::get_error().to_string());
         }
+        let desired = sdl3::sys::audio::SDL_AudioSpec {
+            freq: 44100,
+            format: sdl3::sys::audio::SDL_AUDIO_S16,
+            channels: 2,
+        };
+        // This worker owns the stream and its device. SDL converts the queued
+        // signed-16 stereo source to the hardware format without changing our
+        // source-byte queue accounting. A new device stream starts paused.
+        let stream = unsafe {
+            sdl3::sys::audio::SDL_OpenAudioDeviceStream(
+                sdl3::sys::audio::SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+                &desired,
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        let Some(stream) = std::ptr::NonNull::new(stream) else {
+            let error = sdl3::get_error().to_string();
+            unsafe {
+                sdl3::sys::init::SDL_QuitSubSystem(sdl3::sys::init::SDL_INIT_AUDIO);
+            }
+            return Err(error);
+        };
+        Ok(Self { stream })
     }
     fn pause(&self) {
         unsafe {
-            sdl2::sys::SDL_PauseAudioDevice(self.0, 1);
+            sdl3::sys::audio::SDL_PauseAudioStreamDevice(self.stream.as_ptr());
         }
     }
     fn resume(&self) {
         unsafe {
-            sdl2::sys::SDL_PauseAudioDevice(self.0, 0);
+            sdl3::sys::audio::SDL_ResumeAudioStreamDevice(self.stream.as_ptr());
         }
     }
     fn clear(&self) {
         unsafe {
-            sdl2::sys::SDL_ClearQueuedAudio(self.0);
+            sdl3::sys::audio::SDL_ClearAudioStream(self.stream.as_ptr());
         }
     }
     fn size(&self) -> u32 {
-        unsafe { sdl2::sys::SDL_GetQueuedAudioSize(self.0) }
+        unsafe { sdl3::sys::audio::SDL_GetAudioStreamQueued(self.stream.as_ptr()).max(0) as u32 }
     }
     fn queue_audio(&self, samples: &[i16]) -> Result<(), String> {
         let length = samples
             .len()
             .checked_mul(2)
-            .and_then(|v| u32::try_from(v).ok())
+            .and_then(|v| i32::try_from(v).ok())
             .ok_or("Audio block too large")?;
-        if unsafe { sdl2::sys::SDL_QueueAudio(self.0, samples.as_ptr().cast(), length) } != 0 {
-            Err(sdl2::get_error())
-        } else {
+        if unsafe {
+            sdl3::sys::audio::SDL_PutAudioStreamData(
+                self.stream.as_ptr(),
+                samples.as_ptr().cast(),
+                length,
+            )
+        } {
             Ok(())
+        } else {
+            Err(sdl3::get_error().to_string())
         }
     }
 }
@@ -533,8 +549,8 @@ impl AudioOutput {
 impl Drop for AudioOutput {
     fn drop(&mut self) {
         unsafe {
-            sdl2::sys::SDL_CloseAudioDevice(self.0);
-            sdl2::sys::SDL_QuitSubSystem(sdl2::sys::SDL_INIT_AUDIO);
+            sdl3::sys::audio::SDL_DestroyAudioStream(self.stream.as_ptr());
+            sdl3::sys::init::SDL_QuitSubSystem(sdl3::sys::init::SDL_INIT_AUDIO);
         }
     }
 }

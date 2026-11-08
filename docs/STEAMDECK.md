@@ -9,6 +9,11 @@ Download **PocketHLE-steamdeck-x86_64** from a successful CI run and extract
 `PocketHLE-steamdeck-x86_64.zip`. Point the existing Steam shortcut at
 `pockethle-steamdeck.exe`, enable Proton and select a Gamepad Steam Input layout.
 The SDL Proton profile is built in; launch options can remain empty.
+Desktop now uses bundled SDL3. The A/B/X/Y names below describe Deck markings.
+For external controllers, UI prompts use SDL's reported button labels while
+keeping the same positional actions and saved bindings. Unknown labels fall
+back to explicit position names; no brand/name guessing is used.
+
 
 The dedicated edition requests fullscreen at window creation and on its first
 UI frame after native state restoration. An explicit CLI display argument wins:
@@ -66,8 +71,9 @@ fullscreen hides the virtual Gizmondo panel and EXIT/FULL buttons; see
 
 ## Library and settings
 
-D-pad/stick selects a card; A launches; X changes category; Y opens the game's
-menu; Start opens settings. L1/L2 move to the previous tab and R1/R2 to the next,
+D-pad/stick selects a card; A launches and Y opens the game's menu.
+L3 switches between page and toolbar; use the toolbar to open settings.
+Menu remains the reserved filter shortcut, including in the library. L1/L2 move to the previous tab and R1/R2 to the next,
 wrapping through Gizmondo, PocketPC and Recordings. Selection stays in view.
 
 The game menu includes Information, Play, Rename, Settings and Remove. A accepts;
@@ -78,7 +84,9 @@ up/down, A to accept and B to cancel. Pages scroll to keep focus visible.
 A on a text field opens the virtual keyboard. Directions select, A types, Y
 switches symbols and Shift changes case. Apply accepts; B cancels.
 File browsing for import and backups uses the integrated controller-friendly
-dialog. Native error/confirmation dialogs may still be shown by the OS.
+dialog. Game removal uses an integrated confirmation with A/Enter to remove
+and B/Escape to cancel. Native message fallbacks are reserved for startup errors
+and Windows command-line help before a working launcher viewport exists.
 
 Colors startup uses directions for language, A to launch and B to cancel. Its
 explicit unlock action uses X; see [COLORS.md](COLORS.md).

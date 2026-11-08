@@ -412,7 +412,7 @@ impl PocketLauncher {
                                 for col in 0..cols {
                                     let cell=row*cols+col;
                                     let label=if editor.waiting==Some(cell){"Press input…".into()}else{
-                                        draft.pocketpc_stylus_grid.bindings.iter().find(|b|b.cell==cell).map(|b|b.input.label()).unwrap_or_else(||format!("{}",cell+1))
+                                        draft.pocketpc_stylus_grid.bindings.iter().find(|b|b.cell==cell).map(|b|crate::controller_labels::grid(ui.ctx(),&b.input)).unwrap_or_else(||format!("{}",cell+1))
                                     };
                                     let text=RichText::new(label).size(11.0).color(if editor.waiting==Some(cell){Color32::from_rgb(255,175,70)}else if draft.pocketpc_stylus_grid.bindings.iter().any(|b|b.cell==cell){Color32::from_rgb(100,220,180)}else{Color32::GRAY});
                                     let response=crate::controller_ui::sized_button(ui,Vec2::new(width/cols as f32-2.0,width/ratio/rows as f32-2.0),text);

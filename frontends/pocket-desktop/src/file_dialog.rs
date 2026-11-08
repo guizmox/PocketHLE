@@ -284,13 +284,12 @@ fn list_directory(path: &Path) -> Result<Vec<Entry>, String> {
         if !metadata.is_dir() && !metadata.is_file() {
             continue;
         }
-        #[allow(unused_mut)]
-        let mut hidden = name.starts_with('.');
+        let hidden = name.starts_with('.');
         #[cfg(windows)]
-        {
+        let hidden = {
             use std::os::windows::fs::MetadataExt;
-            hidden |= metadata.file_attributes() & 2 != 0;
-        }
+            hidden || metadata.file_attributes() & 2 != 0
+        };
         entries.push(Entry {
             path: item.path(),
             name,
@@ -505,7 +504,7 @@ impl FileDialog {
                     ui.heading("Replace existing backup?");
                     ui.label(path.display().to_string());
                     ui.label("The existing file will be replaced when the backup is saved.");
-                    if pad::button(ui, "Keep existing file / Back (B)").clicked() { self.overwrite = None; }
+                    if pad::button(ui, crate::controller_labels::text(ctx,"Keep existing file / Back ({East})")).clicked() { self.overwrite = None; }
                     if pad::button(ui, "Replace file").clicked() { self.finished = Some(Outcome::Selected(self.purpose, path)); }
                 });
                 return;
@@ -621,7 +620,7 @@ impl FileDialog {
                 ui.horizontal_wrapped(|ui| {
                     ui.weak(format!("{count} items"));
                     ui.separator();
-                    ui.label(egui::RichText::new("A Open / keyboard  ·  B Cancel  ·  LB Up  ·  RB Zones  ·  X Files  ·  Y Refresh").size(11.0).weak());
+                    ui.label(egui::RichText::new(crate::controller_labels::text(ctx,"{South} Open / keyboard  ·  {East} Cancel  ·  Left shoulder: Up  ·  Right shoulder: Zones  ·  {West} Files  ·  {North} Refresh")).size(11.0).weak());
                 });
             });
         });

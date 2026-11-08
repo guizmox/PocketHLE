@@ -672,7 +672,7 @@ impl Editor {
                     ui.colored_label(LIVE, &q.message);
                 }
                 if q.done {
-                    ui.label("Up / Down to choose · Enter / A to continue");
+                    ui.label(crate::controller_labels::text(ui.ctx(),"Up / Down to choose · Enter / {South} to continue"));
                     for (index, label) in [
                         "Assign another input",
                         "Save and finish",
@@ -689,10 +689,10 @@ impl Editor {
                 } else if let Some((input, long)) = &q.choice {
                     ui.heading(format!(
                         "{} · {} press",
-                        input,
+                        if q.controller {crate::controller_labels::button(ui.ctx(),input,input)} else {input.clone()},
                         if *long { "Long" } else { "Short" }
                     ));
-                    ui.label("Up / Down to choose · Enter / A to apply · Escape / B to cancel");
+                    ui.label(crate::controller_labels::text(ui.ctx(),"Up / Down to choose · Enter / {South} to apply · Escape / {East} to cancel"));
                     if *long {
                         ui.label(
                             "Adding a long action delays this input's short action until release.",
@@ -782,7 +782,7 @@ impl Editor {
                     q.message = format!(
                         "{} press: {} → {}",
                         if long { "Long" } else { "Short" },
-                        input,
+                        if controller {crate::controller_labels::button(ui.ctx(),&input,&input)} else {input.clone()},
                         target.label_for(self.gizmondo)
                     );
                     q.done = true;
@@ -1002,7 +1002,7 @@ impl Editor {
         } else {
             input
         };
-        ui.heading(physical);
+        ui.heading(if controller {crate::controller_labels::button(ui.ctx(),input,physical)} else {physical.to_owned()});
         if controller && !self.gizmondo && pocket_library::stylus::controller_reserved(input, false)
         {
             ui.colored_label(GREEN, "Reserved stylus control");
@@ -1441,6 +1441,8 @@ impl Editor {
         label: &str,
         rect: Rect,
     ) -> bool {
+        let display_label=if controller {crate::controller_labels::button(ui.ctx(),name,label)} else {label.to_owned()};
+        let label=display_label.as_str();
         let reserved = !controller && pocket_library::keybindings::reserved_host_key(name);
         let assignment = if controller {
             controller_assignment(config, name, self.gizmondo)

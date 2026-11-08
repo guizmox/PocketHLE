@@ -4,67 +4,23 @@
     <string name="settings_title">Settings</string>
     <string name="game_settings_title">Game settings</string>
     <string name="about_title">About</string>
-    <string name="empty_library">No games yet.\nTap “+” to import a Pocket PC CAB, ZIP, or Windows installer.</string>
+    <string name="empty_library">No games yet.\nTap “+” to import a game or installer.</string>
     <string name="import_cab">Import game or installer</string>
     <string name="import_in_progress">Importing…</string>
     <string name="import_success">Imported %1$s</string>
     <string name="import_failed">Import failed: %1$s</string>
     <string name="error_listing_games">Could not list games: %1$s</string>
-    <string name="game_icon">Game icon</string>
-    <string name="action_run">Run</string>
     <string name="action_settings">Settings</string>
     <string name="action_remove">Remove</string>
     <string name="action_more">More options</string>
-    <string name="publisher_label">Publisher: %1$s</string>
-    <string name="publisher_unknown">Unknown</string>
     <string name="remove_title">Remove game?</string>
-    <string name="remove_message">This will delete %1$s and its extracted files.</string>
+    <string name="remove_message">This permanently deletes %1$s, its installed files, saves and per-game settings.</string>
     <string name="remove">Remove</string>
     <string name="run_failed_no_id">No game id supplied.</string>
     <string name="menu_settings">Settings</string>
     <string name="menu_about">About</string>
 
-    <!-- Virtual gamepad. Glyphs are short text labels (Unicode arrows
-         / circle / 1 / 2) so the APK ships no bitmap assets. -->
-    <string name="dpad_up">D-pad up</string>
-    <string name="dpad_down">D-pad down</string>
-    <string name="dpad_left">D-pad left</string>
-    <string name="dpad_right">D-pad right</string>
-    <string name="dpad_up_glyph">▲</string>
-    <string name="dpad_down_glyph">▼</string>
-    <string name="dpad_left_glyph">◀</string>
-    <string name="dpad_right_glyph">▶</string>
-    <string name="action_button">Action</string>
-    <string name="action_button_glyph">●</string>
-    <string name="turbo_button">Turbo boost</string>
-    <string name="turbo_button_label">TURBO</string>
-    <string name="key_a_label">A</string>
-    <string name="key_b_label">B</string>
-    <string name="key_c_label">C</string>
-    <string name="soft1_label">1</string>
-    <string name="soft2_label">2</string>
-
     <!-- Preferences -->
-    <string name="pref_default_backend_title">Default CPU backend</string>
-    <string name="pref_default_backend_summary">Used for new games. Stub is safe; Unicorn requires the unicorn build.</string>
-    <string name="pref_verbosity_title">Log verbosity</string>
-    <string name="pref_verbosity_summary">0=quiet, 3=trace</string>
-    <string name="pref_show_fps_title">Show FPS counter</string>
-    <string name="pref_show_fps_summary">Overlay frames-per-second on top of the running game (j2me-loader style).</string>
-    <string name="pref_fullscreen_title">Fullscreen without system bars</string>
-    <string name="pref_fullscreen_summary">Hide the status and navigation bars while a game is running.</string>
-    <string name="pref_fullscreen_mode_title">Fullscreen controls</string>
-    <string name="pref_fullscreen_mode_summary">Choose whether virtual buttons remain visible in fullscreen.</string>
-    <string name="pref_orientation_title">Android orientation</string>
-    <string name="pref_orientation_summary">Choose automatic rotation, portrait, or landscape for games.</string>
-    <string name="pref_show_backend_log_title">Show backend log</string>
-    <string name="pref_show_backend_log_summary">Draw the "Backend: …" status panel over the running game. Turn it off for a clean picture.</string>
-    <string name="pref_controls_opacity_title">On-screen control opacity</string>
-    <string name="pref_controls_opacity_summary">How solid the virtual buttons are, in percent. Lower values let the game show through.</string>
-    <string name="pref_library_root_title">Library root</string>
-    <string name="pref_cpu_backend_title">CPU backend</string>
-    <string name="pref_max_slices_title">Max dispatch slices</string>
-    <string name="pref_instr_per_slice_title">Instructions per slice</string>
     <string name="pref_screen_title">Screen geometry</string>
     <string name="pref_rotation_title">Rotate display</string>
     <string name="pref_rotation_summary">Turn the picture without changing what the game thinks its screen is. Use 90° for a landscape game that only renders correctly at 240x320.</string>
@@ -125,10 +81,8 @@
         <item>portrait</item>
         <item>landscape</item>
     </string-array>
-    <string name="toggle_fullscreen">Toggle controls and fullscreen</string>
-    <string name="gps_fill_position">Fill</string>
     <string name="action_play">Play</string>
-    <string name="action_information">Informations</string>
+    <string name="action_information">Information</string>
     <string-array name="dpad_deadzone_entries"><item>Small (sensitive)</item><item>Medium</item><item>Large (precise)</item></string-array>
     <string-array name="dpad_deadzone_values"><item>small</item><item>medium</item><item>large</item></string-array>
     <string name="executable_heap_help">Some games need this setting to start or run correctly. It can slow down other games. If a game runs slowly, try turning it off in that game’s settings.</string>

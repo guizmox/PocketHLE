@@ -163,7 +163,7 @@ fn separator(ui: &mut Ui) {
     ui.add_space(6.0);
 }
 
-pub const NAV_HINT: &str = "D-pad / left stick: navigate   A: open   B: back   L3: switch section";
+pub const NAV_HINT: &str = "D-pad / left stick: navigate   {South}: open   {East}: back   L3: switch section";
 
 pub struct Output {
     pub action: Option<Action>,

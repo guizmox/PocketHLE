@@ -26,7 +26,7 @@ path = "../../tools/hardware-diag/suites/bluetooth/host-radio.rs"
 # real-time audio (cpal). Without `unicorn` the stub CPU is
 # trace-only and cannot actually run a game; without `audio-cpal`
 # all `waveOut*` traffic is silently discarded. Disable with
-# `--no-default-features` for a fast cmake-less build (e.g. tests).
+# `--no-default-features` to omit emulator-native features (SDL3 still builds through CMake).
 default = ["unicorn", "audio-cpal", "video-static"]
 unicorn = ["pocket-core/unicorn"]
 audio-cpal = ["pocket-core/audio-cpal"]
@@ -45,9 +45,9 @@ serde_json.workspace = true
 eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.27"
 egui_extras = { version = "0.27", features = ["image"] }
-# Use GTK3 file dialog on Linux — xdg-portal in 0.14 requires a live
-# Tokio reactor for sync calls and panics if run from a plain thread.
-# GTK3 is synchronous and works inside a `std::thread::spawn`.
+# Native message fallback for startup errors / Windows command-line help.
+# Library file pickers and confirmations are owned by egui, not rfd.
+# GTK3 is synchronous; the xdg-portal backend needs a Tokio reactor.
 rfd = { version = "0.14", default-features = false, features = ["gtk3"] }
 directories = "5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -58,7 +58,7 @@ pocket-pe = { path = "../../crates/pocket-pe" }
 
 xbrz-rs = "=0.1.0"
 
-sdl2 = { version = "=0.38.0", features = ["bundled", "static-link"] }
+sdl3 = { version = "=0.22.0", features = ["build-from-source-static"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.54", features = ["implement", "ApplicationModel_DataTransfer", "Foundation", "Foundation_Collections", "Storage", "Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }

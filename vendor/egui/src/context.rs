@@ -1870,10 +1870,10 @@ impl Context {
                         paint_widget_id(widget, "hovered", Color32::WHITE);
                     }
                 }
-                for &widget in &clicked {
+                if let Some(widget) = clicked {
                     paint_widget_id(widget, "clicked", Color32::RED);
                 }
-                for &widget in &dragged {
+                if let Some(widget) = dragged {
                     paint_widget_id(widget, "dragged", Color32::GREEN);
                 }
             }
@@ -1892,10 +1892,10 @@ impl Context {
                     paint_widget(widget, "contains_pointer", Color32::BLUE);
                 }
             }
-            for widget in &click {
+            if let Some(widget) = &click {
                 paint_widget(widget, "click", Color32::RED);
             }
-            for widget in &drag {
+            if let Some(widget) = &drag {
                 paint_widget(widget, "drag", Color32::GREEN);
             }
         }

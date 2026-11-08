@@ -1,23 +1,7 @@
 //! Session-based emulator runner exposed to the Android JNI layer.
 //!
-//! The desktop GUI ([`pocket_desktop::runner`]) drives the emulator
-//! on a background thread and streams a [`FrameSnapshot`] to the UI
-//! every time the guest produces a new framebuffer. The Android
-//! frontend used to do something fundamentally different: a single
-//! blocking JNI call (`runGame`) that ran the emulator to
-//! completion, captured the **final** framebuffer, and only then
-//! returned. With the trace-only stub backend that returned in a
-//! few milliseconds and the user just saw a static screenshot. With
-//! the real Unicorn backend wired up in
-//! [PR #11](https://github.com/j92580498-max/PocketHLE/pull/11) the
-//! emulator now actually executes ARM code and reaches the menu, so
-//! `runGame` would happily churn through 1024 dispatch slices ×
-//! 1 000 000 instructions/slice on the phone CPU before returning —
-//! visually that looks identical to a hang ("infinite loading
-//! spinner") and there is no way for the user to push input or
-//! quit. That's the symptom this module fixes.
-//!
-//! The new flow mirrors the desktop runner, just over JNI:
+//! A worker owns the emulator, streams snapshots and accepts input. The UI
+//! never waits for the complete guest run before receiving its first frame.
 //!
 //! 1. Kotlin calls [`start`] with the library root and game id. We
 //!    spawn a worker thread that owns the [`Emulator`] and runs it
@@ -225,11 +209,6 @@ impl Session {
 
     pub fn published_image_ips(&self) -> Option<f32> {
         self.state.presentation_stats.lock().ok()?.as_ref()?.ips()
-    }
-
-    /// Guest submission telemetry, independent of Android GL draw completions.
-    pub fn submitted_frame_fps(&self) -> Option<f32> {
-        self.state.presentation_stats.lock().ok()?.as_ref()?.fps()
     }
 
     pub fn is_running(&self) -> bool {

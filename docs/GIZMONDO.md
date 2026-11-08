@@ -324,7 +324,7 @@ guest scheduler. Offscreen surfaces and static query pointers survive SDL_Quit
 until the caller frees them or the process ends. State is process-owned.
 
 This is a partial SDL 1.2 implementation, separate from the desktop launcher's
-host SDL2. SDL2 guest ABI, SDL audio, joystick/CD-ROM subsystems, paletted video,
+host SDL3. SDL2 guest ABI, SDL audio, joystick/CD-ROM subsystems, paletted video,
 SDL OpenGL, RWops, SDL_image/SDL_mixer and ordinal-only SDL DLL imports are not
 implemented. Unsupported subsystems/video modes report failure; they do not
 claim success. Neither supplied demo imports SDL, so validation uses ABI unit

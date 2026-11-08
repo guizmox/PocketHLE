@@ -412,7 +412,7 @@ impl Navigation {
             .open(&mut open)
             .show(ctx, |ui| {
                 let k = self.keyboard.as_ref().unwrap();
-                ui.label("A: select · B: cancel · Y: symbols");
+                ui.label(crate::controller_labels::text(ctx,"{South}: select · {East}: cancel · {North}: symbols"));
                 egui::ScrollArea::horizontal()
                     .id_source("controller_keyboard_value")
                     .stick_to_right(true)

@@ -93,7 +93,8 @@ Actions builds after integration; no remote workflow was started here.
 
 ## Validation and limits
 
-Completed software/build checks:
+Historical packaged-build evidence (these earlier counts do not certify the
+current checkout; rerun the commands above after changes):
 
 - Kotlin/Java compilation, AAPT2 resources and D8 packaging with AndroidX.
 - 240 viewport/native-size/rotation/scale combinations: exact integer scaling,
@@ -114,7 +115,7 @@ Completed software/build checks:
 - Gradle debug APK build, APK v2 signature verification and
   `zipalign -c -P 16 4`. Both packaged native ELF libraries were checked.
 
-**Not executed in this environment:** launch on a physical phone, Android Turf
+**Not covered by that evidence:** launch on a physical phone, Android Turf
 Wars, or physical GPS/camera/Bluetooth tests. Build checks do not replace those
 tests. The existing Android camera/GPS/Bluetooth bridge is retained. Windows-specific
 Winsock RFCOMM and a general CLR/.NET CF runtime are not ported.
