@@ -1,8 +1,8 @@
-frontends\pocket-android\app\src\main\java\com\pockethle\app\DisplayGeometry.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcControllerGeometry.kt
-frontends\pocket-android\app\src\main\java\com\pockethle\app\PocketPcGeometry.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\RenderedDisplayGeometryTest.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcControllerGeometryTest.kt
-frontends\pocket-android\app\src\test\java\com\pockethle\app\PocketPcGeometryTest.kt
-docs\FRONTENDS.md
-docs\GPU.md
+crates\pocket-gles\src\combiner_program.rs
+crates\pocket-gles\src\context.rs
+crates\pocket-gles\src\context\diagnostic.rs
+crates\pocket-gles\src\gpu\shared.rs
+crates\pocket-gles\src\gpu\shared_present_tests.rs
+crates\pocket-winceapi\src\gles.rs
+crates\pocket-winceapi\src\gles\nv_combiner.rs
+docs\ANDROID-COMBINER-DIAGNOSTICS.md

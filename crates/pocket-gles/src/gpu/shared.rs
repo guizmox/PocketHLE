@@ -453,7 +453,11 @@ impl Renderer {
                 group,
                 sync: Mutex::new(SlotSync::default()),
             });
-            let fbo = if self.render_scale > 1 {
+            // GLES rejects an RGBA copy from the alpha-less RGB565 target.
+            // Keep the immutable guest-copy chain RGBA8 (including subimage
+            // patches/imports) using the existing GPU resolve at native size.
+            // Supersampled copies already use this same conversion/resolve.
+            let fbo = if self.render_scale > 1 || self.host.es {
                 if !self.resolve_logical_image(
                     self.width / self.render_scale,
                     self.height / self.render_scale,
@@ -704,6 +708,45 @@ mod tests {
                 (pixel, texture)
             })
             .unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires native shared GL/GLES"]
+    fn guest_rgb_copy_supplies_alpha_before_gles_rgba_copy() {
+        for es in [false, true] {
+            for scale in [1, 2] {
+                let mut gpu = if es {
+                    Renderer::new_es_for_test(8, 8).unwrap()
+                } else {
+                    Renderer::new(8, 8).unwrap()
+                };
+                gpu.set_surface_rgb565(true).unwrap();
+                gpu.set_render_scale(if scale == 1 { 1 } else { 2 })
+                    .unwrap();
+                let state = PipelineState {
+                    viewport: (0, 0, 8, 8),
+                    ..Default::default()
+                };
+                gpu.clear(8, 8, &state, [1., 0., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                    .unwrap();
+                let source = gpu.shared_context_source();
+                let frame = with_shared_context_source(Some(source.clone()), || {
+                    gpu.copy_guest_rgb_texture(1, 1, 4, 4).unwrap().unwrap()
+                });
+                assert_eq!(frame.size(), (4, 4));
+                assert!(
+                    gpu.readback.is_empty(),
+                    "the production copy must remain on GPU"
+                );
+                // Pixel oracle only: the production copy above does no readback.
+                let mut reader = SharedReadback::new(&source).unwrap();
+                assert_eq!(
+                    reader.read_guest_rgb_texture(&frame).unwrap(),
+                    [255, 0, 0, 255].repeat(16),
+                    "es={es} scale={scale}"
+                );
+            }
+        }
     }
 
     #[test]

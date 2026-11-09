@@ -1695,6 +1695,9 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
     };
+    if name == pocket_gles::GL_EXTENSIONS && pocket_gles::graphics_diagnostic::enabled() {
+        nv_combiner::diagnostic_extensions();
+    }
     if name == pocket_gles::GL_EXTENSIONS && nv_combiner::enabled() {
         let extensions = format!("{text} GL_NV_combiner_program");
         return Ok(DispatchOutcome::ReturnedR0(intern_string(

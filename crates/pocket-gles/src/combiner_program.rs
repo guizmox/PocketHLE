@@ -604,6 +604,24 @@ impl BasicProgram {
         glsl
     }
 
+    /// Stable semantic identity for opt-in cross-host diagnostics, not a GL name.
+    pub fn diagnostic_fingerprint(&self) -> u64 {
+        // Exclude the process-local id. Do not invoke shader generation here:
+        // a decoded program may still be rejected by the texture-unit limit.
+        let description = format!(
+            "{:?}",
+            (
+                &self.stages,
+                &self.routes,
+                self.texture_units,
+                self.coordinate_units,
+                self.reads_framebuffer,
+                self.output_register,
+            )
+        );
+        diagnostic_fingerprint(description.as_bytes())
+    }
+
     pub fn reads_framebuffer(&self) -> bool {
         self.reads_framebuffer
     }
@@ -705,6 +723,13 @@ impl BasicProgram {
         }
         registers[self.output_register]
     }
+}
+
+/// FNV-1a over bytes, independent of host word size and randomized hash seeds.
+pub fn diagnostic_fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
 }
 
 /// GoForce program names, binding and per-context constants.
@@ -822,6 +847,18 @@ mod tests {
         }
         .compile_basic()
         .unwrap();
+        let duplicate = Program {
+            architecture: Architecture::Ar11,
+            flags: 0,
+            stages: vec![weight, mix],
+        }
+        .compile_basic()
+        .unwrap();
+        assert_ne!(program.id(), duplicate.id());
+        assert_eq!(
+            program.diagnostic_fingerprint(),
+            duplicate.diagnostic_fingerprint()
+        );
         let color = program.evaluate_sampled(
             [1.; 4],
             [[0.; 4], [0.; 4], [0.; 4], [0.75; 4]],

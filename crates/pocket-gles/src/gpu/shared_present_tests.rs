@@ -163,120 +163,138 @@ fn shared_texture_handoff_preserves_pixels_and_context_lifetime() {
 #[test]
 #[ignore = "requires shared native OpenGL"]
 fn guest_texture_copy_survives_producer_surface_change() {
-    let root = Renderer::new(4, 4).unwrap();
-    let source = root.shared_context_source();
-    with_shared_context_source(Some(source.clone()), || {
-        let mut producer = Renderer::new(4, 4).unwrap();
-        producer.set_surface_rgb565(true).unwrap();
-        producer
-            .clear(
-                4,
-                4,
-                &PipelineState::default(),
-                [1., 0., 0., 1.],
-                1.,
-                GL_COLOR_BUFFER_BIT,
-            )
-            .unwrap();
-        let frame = producer
-            .copy_guest_rgb_texture(1, 1, 2, 2)
-            .unwrap()
-            .unwrap();
-        assert!(producer.readback.is_empty());
-        drop(producer);
+    for es in [false, true] {
+        let root = if es {
+            Renderer::new_es_for_test(4, 4).unwrap()
+        } else {
+            Renderer::new(4, 4).unwrap()
+        };
+        let source = root.shared_context_source();
+        with_shared_context_source(Some(source.clone()), || {
+            let mut producer = Renderer::new(4, 4).unwrap();
+            producer.set_surface_rgb565(true).unwrap();
+            producer
+                .clear(
+                    4,
+                    4,
+                    &PipelineState::default(),
+                    [1., 0., 0., 1.],
+                    1.,
+                    GL_COLOR_BUFFER_BIT,
+                )
+                .unwrap();
+            let frame = producer
+                .copy_guest_rgb_texture(1, 1, 2, 2)
+                .unwrap()
+                .unwrap();
+            assert!(producer.readback.is_empty());
+            drop(producer);
 
-        let consumer = Renderer::new(4, 4).unwrap();
-        consumer.host.make_current().unwrap();
-        let mut texture = 0;
-        unsafe {
-            (consumer.gl.GenTextures)(1, &mut texture);
-            (consumer.gl.BindTexture)(GL_TEXTURE_2D, texture);
-            assert!(consumer.import_guest_rgb_texture(&frame).unwrap());
-            (consumer.gl.BindFramebuffer)(0x8d40, consumer.fbo);
-            (consumer.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, texture, 0);
-            let mut pixels = [0u8; 16];
-            (consumer.gl.ReadPixels)(
-                0,
-                0,
-                2,
-                2,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                pixels.as_mut_ptr().cast(),
+            let consumer = Renderer::new(4, 4).unwrap();
+            consumer.host.make_current().unwrap();
+            let mut texture = 0;
+            unsafe {
+                (consumer.gl.GenTextures)(1, &mut texture);
+                (consumer.gl.BindTexture)(GL_TEXTURE_2D, texture);
+                assert!(consumer.import_guest_rgb_texture(&frame).unwrap());
+                (consumer.gl.BindFramebuffer)(0x8d40, consumer.fbo);
+                (consumer.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, texture, 0);
+                let mut pixels = [0u8; 16];
+                (consumer.gl.ReadPixels)(
+                    0,
+                    0,
+                    2,
+                    2,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    pixels.as_mut_ptr().cast(),
+                );
+                assert_eq!(pixels, [255, 0, 0, 255].repeat(4).as_slice());
+                (consumer.gl.FramebufferTexture2D)(
+                    0x8d40,
+                    0x8ce0,
+                    GL_TEXTURE_2D,
+                    consumer.color,
+                    0,
+                );
+                (consumer.gl.DeleteTextures)(1, &texture);
+                consumer.check().unwrap();
+            }
+            let mut reader = SharedReadback::new(&source).unwrap();
+            assert_eq!(
+                reader.read_guest_rgb_texture(&frame).unwrap(),
+                [255, 0, 0, 255].repeat(4)
             );
-            assert_eq!(pixels, [255, 0, 0, 255].repeat(4).as_slice());
-            (consumer.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, consumer.color, 0);
-            (consumer.gl.DeleteTextures)(1, &texture);
-            consumer.check().unwrap();
-        }
-        let mut reader = SharedReadback::new(&source).unwrap();
-        assert_eq!(
-            reader.read_guest_rgb_texture(&frame).unwrap(),
-            [255, 0, 0, 255].repeat(4)
-        );
-    });
+        });
+    }
 }
 
 #[test]
 #[ignore = "requires native shared OpenGL"]
 fn supersampled_guest_texture_copies_and_subimages_keep_logical_pixels() {
-    let root = Renderer::new(4, 4).unwrap();
-    let source = root.shared_context_source();
-    with_shared_context_source(Some(source.clone()), || {
-        for policy in [1, 3, 4, 5] {
-            let mut producer = Renderer::new(320, 240).unwrap();
-            producer.set_surface_rgb565(true).unwrap();
-            producer.set_render_scale(policy).unwrap();
-            let state = PipelineState {
-                viewport: (0, 0, 320, 240),
-                ..Default::default()
-            };
-            producer
-                .clear(320, 240, &state, [1., 0., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
-                .unwrap();
-            let original = producer
-                .copy_guest_rgb_texture(1, 1, 4, 4)
-                .unwrap()
-                .unwrap();
-            producer
-                .clear(320, 240, &state, [0., 1., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
-                .unwrap();
-            let patch = producer
-                .copy_guest_rgb_texture(0, 0, 2, 2)
-                .unwrap()
-                .unwrap();
-            let mut texture = Texture::default();
-            texture.set_level(0, 4, 4, Vec::new());
-            texture.gpu_copy = Some(original.clone());
-            let result = producer
-                .patch_guest_rgb_texture(&texture, &patch, 1, 1)
-                .unwrap()
-                .unwrap();
-            assert!(
-                producer.readback.is_empty(),
-                "copy downloaded native framebuffer"
-            );
-            let mut reader = SharedReadback::new(&source).unwrap();
-            let pixels = reader.read_guest_rgb_texture(&result).unwrap();
-            for y in 0..4 {
-                for x in 0..4 {
-                    let expected = if (1..3).contains(&x) && (1..3).contains(&y) {
-                        [0, 255, 0, 255]
-                    } else {
-                        [255, 0, 0, 255]
-                    };
-                    let offset = (y * 4 + x) * 4;
-                    assert_eq!(
-                        &pixels[offset..offset + 4],
-                        &expected,
-                        "policy={policy} x={x} y={y}"
-                    );
+    for es in [false, true] {
+        let root = if es {
+            Renderer::new_es_for_test(4, 4).unwrap()
+        } else {
+            Renderer::new(4, 4).unwrap()
+        };
+        let source = root.shared_context_source();
+        with_shared_context_source(Some(source.clone()), || {
+            for policy in [1, 3, 4, 5] {
+                let mut producer = Renderer::new(320, 240).unwrap();
+                producer.set_surface_rgb565(true).unwrap();
+                producer.set_render_scale(policy).unwrap();
+                let state = PipelineState {
+                    viewport: (0, 0, 320, 240),
+                    ..Default::default()
+                };
+                producer
+                    .clear(320, 240, &state, [1., 0., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                    .unwrap();
+                let original = producer
+                    .copy_guest_rgb_texture(1, 1, 4, 4)
+                    .unwrap()
+                    .unwrap();
+                producer
+                    .clear(320, 240, &state, [0., 1., 0., 1.], 1., GL_COLOR_BUFFER_BIT)
+                    .unwrap();
+                let patch = producer
+                    .copy_guest_rgb_texture(0, 0, 2, 2)
+                    .unwrap()
+                    .unwrap();
+                let mut texture = Texture::default();
+                texture.set_level(0, 4, 4, Vec::new());
+                texture.gpu_copy = Some(original.clone());
+                let result = producer
+                    .patch_guest_rgb_texture(&texture, &patch, 1, 1)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    producer.readback.is_empty(),
+                    "copy downloaded native framebuffer"
+                );
+                let mut reader = SharedReadback::new(&source).unwrap();
+                let pixels = reader.read_guest_rgb_texture(&result).unwrap();
+                for y in 0..4 {
+                    for x in 0..4 {
+                        let expected = if (1..3).contains(&x) && (1..3).contains(&y) {
+                            [0, 255, 0, 255]
+                        } else {
+                            [255, 0, 0, 255]
+                        };
+                        let offset = (y * 4 + x) * 4;
+                        assert_eq!(
+                            &pixels[offset..offset + 4],
+                            &expected,
+                            "policy={policy} x={x} y={y}"
+                        );
+                    }
                 }
+                assert_eq!(
+                    reader.read_guest_rgb_texture(&original).unwrap(),
+                    [255, 0, 0, 255].repeat(16)
+                );
             }
-            assert_eq!(
-                reader.read_guest_rgb_texture(&original).unwrap(),
-                [255, 0, 0, 255].repeat(16)
-            );
-        }
-    });
+        });
+    }
 }

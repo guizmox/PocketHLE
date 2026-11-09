@@ -10,6 +10,7 @@
 //! implementation; the emulator backs it with the CPU's address space
 //! and the tests back it with a plain byte vector.
 
+mod diagnostic;
 mod es11;
 mod sharing;
 pub use es11::StateValue;
@@ -388,6 +389,7 @@ pub struct Context {
 
     // ---- fragment pipeline ----
     pub state: PipelineState,
+    diagnostic_combiners: diagnostic::CombinerTrace,
     pub combiner_programs: crate::combiner_program::ProgramObjects,
     pub clear_color: [f32; 4],
     pub clear_depth: f32,
@@ -478,6 +480,7 @@ impl Context {
             names: Default::default(),
             external_references: Default::default(),
             state,
+            diagnostic_combiners: Default::default(),
             combiner_programs: Default::default(),
             clear_color: [0.0, 0.0, 0.0, 0.0],
             clear_depth: 1.0,
@@ -3126,6 +3129,9 @@ impl Context {
     ) {
         if self.gpu_failed {
             return;
+        }
+        if crate::graphics_diagnostic::enabled() {
+            self.trace_combiner_draw(mode, count);
         }
         self.es11.point_primitive = mode == GL_POINTS;
         self.es11.point_draw = mode == GL_POINTS

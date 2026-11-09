@@ -16,6 +16,31 @@ pub(super) fn enabled() -> bool {
     })
 }
 
+pub(super) fn diagnostic_extensions() {
+    let advertised = enabled();
+    let state = with_ctx(|c| {
+        [
+            advertised,
+            c.nv_combiner_client,
+            c.gpu_requested(),
+            c.gpu_active(),
+            c.gpu_supports_combiner(),
+        ]
+    });
+    thread_local! { static QUERIES: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+    if !QUERIES.with(|queries| {
+        let count = queries.get();
+        if count >= 32 {
+            return false;
+        }
+        queries.set(count + 1);
+        true
+    }) {
+        return;
+    }
+    log::info!("NV_DIAG event=extensions advertised={} client={} gpu_requested={} gpu_active={} gpu_support={}", state[0], state[1], state[2], state[3], state[4]);
+}
+
 fn error(code: u32) -> DispatchOutcome {
     with_ctx(|c| c.set_error(code));
     VOID
@@ -87,22 +112,62 @@ fn load(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return Ok(error(GL_INVALID_VALUE));
     }
     let bytes = ctx.cpu.read_mem(pointer, length)?;
-    let program = match Program::decode(&bytes)
-        .ok()
-        .and_then(|p| p.compile_basic().ok())
-    {
-        Some(program) => program,
-        None => return Ok(error(GL_INVALID_OPERATION)),
+    let decoded = match Program::decode(&bytes) {
+        Ok(program) => program,
+        Err(_) => {
+            diagnostic_load("decode_rejected", &bytes, None);
+            return Ok(error(GL_INVALID_OPERATION));
+        }
     };
+    let program = match decoded.compile_basic() {
+        Ok(program) => program,
+        Err(_) => {
+            diagnostic_load("compile_rejected", &bytes, None);
+            return Ok(error(GL_INVALID_OPERATION));
+        }
+    };
+    diagnostic_load("compiled", &bytes, Some(&program));
     if with_ctx(|c| {
         c.combiner_programs
             .load_bound(program, pocket_gles::raster::MAX_TEXTURE_STAGES)
     })
     .is_err()
     {
+        diagnostic_load("unit_rejected", &bytes, None);
         return Ok(error(GL_INVALID_OPERATION));
     }
+    diagnostic_load("accepted", &bytes, None);
     Ok(VOID)
+}
+
+fn diagnostic_load(
+    status: &str,
+    bytes: &[u8],
+    program: Option<&pocket_gles::combiner_program::BasicProgram>,
+) {
+    if !pocket_gles::graphics_diagnostic::enabled() {
+        return;
+    }
+    thread_local! { static EVENTS: std::cell::Cell<u16> = const { std::cell::Cell::new(0) }; }
+    if !EVENTS.with(|events| {
+        let count = events.get();
+        if count >= 512 {
+            return false;
+        }
+        events.set(count + 1);
+        true
+    }) {
+        return;
+    }
+    let key = pocket_gles::combiner_program::diagnostic_fingerprint(bytes);
+    log::info!(
+        "NV_DIAG event=load status={status} code_hash={key:016x} bytes={} header={:02x?}",
+        bytes.len(),
+        &bytes[..bytes.len().min(5)]
+    );
+    if let Some(program) = program {
+        log::info!("NV_DIAG event=compiled code_hash={key:016x} program={:016x} framebuffer_fetch={} textures=0x{:x} coordinates=0x{:x}", program.diagnostic_fingerprint(), program.reads_framebuffer(), program.texture_units(), program.coordinate_units());
+    }
 }
 
 fn query(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
