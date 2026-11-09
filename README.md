@@ -441,5 +441,5 @@ Join the [PocketHLE Discord community](https://discord.gg/jDvzctQdFu) for develo
 * [EKA2L1](https://github.com/EKA2L1/EKA2L1) for another practical HLE-oriented emulator architecture;
 * [j2me-loader](https://github.com/nikita36078/j2me-loader) for launcher and library UX inspiration;
 * [Katamaran21](https://github.com/Katamaran21/PocketHLE-GTShell) for GTShell support;
-* Nekomo, OLego, TimofeyLednev, Benoît (FX-man), Jérôme (SoldatGG), and Tim (Firefly);
+* Nekomo, OLego, TimofeyLednev, Benoît (FX-man), Jérôme (SoldatGG), Tim (Firefly), Marat, and torrenia;
 * the PocketHLE contributors and testers who provide legally obtained software, traces and compatibility reports.

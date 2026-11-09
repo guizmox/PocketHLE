@@ -86,7 +86,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_libraryBackup<'local>
 }
 
 fn about_banner() -> String {
-    format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project — j92580498-max\nhttps://github.com/j92580498-max/PocketHLE\n\nGTShell support — Katamaran21\nhttps://github.com/Katamaran21/PocketHLE-GTShell\n\nThanks\nNekomo\nOLego\nTimofeyLednev\nBenoît (FX-man)\nJérôme (SoldatGG)\nTim (Firefly)", env!("CARGO_PKG_VERSION"))
+    format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project — j92580498-max\nhttps://github.com/j92580498-max/PocketHLE\n\nGTShell support — Katamaran21\nhttps://github.com/Katamaran21/PocketHLE-GTShell\n\nThanks\nNekomo\nOLego\nTimofeyLednev\nBenoît (FX-man)\nJérôme (SoldatGG)\nTim (Firefly)\nMarat\ntorrenia", env!("CARGO_PKG_VERSION"))
 }
 
 #[no_mangle]

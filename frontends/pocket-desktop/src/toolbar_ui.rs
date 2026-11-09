@@ -228,7 +228,7 @@ mod tests {
 
     fn state() -> State<'static> {
         State {
-            version: "0.4.4",
+            version: env!("CARGO_PKG_VERSION"),
             selected: None,
             resume: false,
             import: true,

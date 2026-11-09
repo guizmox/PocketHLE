@@ -1664,6 +1664,7 @@ impl PocketLauncher {
                             ["Nekomo", "OLego"],
                             ["TimofeyLednev", "Benoît (FX-man)"],
                             ["Jérôme (SoldatGG)", "Tim (Firefly)"],
+                            ["Marat", "torrenia"],
                         ] {
                             ui.label(names[0]);
                             ui.label(names[1]);
