@@ -78,12 +78,8 @@ impl DeferredPresentation {
         pixels.validate_for(self.logical, self.native)?;
         let mut image = Framebuffer::new(self.logical.0, self.logical.1);
         image.pixels = pixels.rgb565;
-        if self.native != self.logical {
-            image.set_render_presentation_rgba(
-                self.native.0,
-                self.native.1,
-                pixels.native_rgba.unwrap(),
-            );
+        if let Some(rgba) = pixels.native_rgba {
+            image.set_render_presentation_rgba(self.native.0, self.native.1, rgba);
         }
         image.set_backlight_level(self.backlight);
         let mut rgba = Vec::new();
@@ -310,12 +306,9 @@ impl DeferredFramebuffer {
         // storage private, the same GPU authority, revision and retryability.
         self.cpu.pixels = pixels.rgb565;
         self.cpu.clear_render_presentation();
-        if gpu.native != gpu.logical {
-            self.cpu.set_render_presentation_rgba(
-                gpu.native.0,
-                gpu.native.1,
-                pixels.native_rgba.unwrap(),
-            );
+        if let Some(rgba) = pixels.native_rgba {
+            self.cpu
+                .set_render_presentation_rgba(gpu.native.0, gpu.native.1, rgba);
         }
         self.resident = true;
         Ok(())
@@ -379,6 +372,61 @@ impl DeferredFramebuffer {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn same_size_rgba_survives_cpu_reads_but_never_hides_cpu_writes() {
+        #[derive(Debug)]
+        struct Rgba;
+        impl CpuPixelSource for Rgba {
+            fn logical_size(&self) -> (u32, u32) {
+                (2, 1)
+            }
+            fn native_size(&self) -> (u32, u32) {
+                (2, 1)
+            }
+            fn materialize(&self) -> Result<MaterializedPixels, String> {
+                Ok(MaterializedPixels {
+                    logical_size: (2, 1),
+                    native_size: (2, 1),
+                    rgb565: vec![0; 4],
+                    native_rgba: Some(vec![101, 102, 103, 255, 104, 105, 106, 255]),
+                })
+            }
+        }
+        let source = Arc::new(Rgba);
+        let snapshot = DeferredPresentation::new(source.clone(), 11).unwrap();
+        let expected = vec![101, 102, 103, 255, 104, 105, 106, 255];
+        assert_eq!(snapshot.rgba().unwrap().as_ref(), &expected);
+        let mut framebuffer = DeferredFramebuffer::new(Framebuffer::new(2, 1)).unwrap();
+        framebuffer.publish_gpu(source).unwrap();
+        let revision = framebuffer.revision();
+        let epoch = framebuffer.authority_epoch();
+        let mut pixels = Vec::new();
+        framebuffer
+            .cpu()
+            .unwrap()
+            .snapshot_presentation_rgba8888_into(&mut pixels);
+        assert_eq!(pixels, expected);
+        let ppm = framebuffer.cpu().unwrap().snapshot_presentation_ppm();
+        assert!(ppm.ends_with(&[101, 102, 103, 104, 105, 106]));
+        assert_eq!(framebuffer.cpu().unwrap().pixels, [0; 4]);
+        assert!(framebuffer
+            .cpu()
+            .unwrap()
+            .presentation_rgb565_unadjusted()
+            .is_none());
+        assert_eq!(framebuffer.revision(), revision);
+        assert_eq!(framebuffer.authority_epoch(), epoch);
+        let cpu = framebuffer.cpu_mut().unwrap();
+        cpu.put_pixel(0, 0, 0xf800);
+        cpu.mark_dirty();
+        framebuffer
+            .cpu()
+            .unwrap()
+            .snapshot_presentation_rgba8888_into(&mut pixels);
+        assert_eq!(pixels, [255, 0, 0, 255, 0, 0, 0, 255]);
+        assert_eq!(snapshot.rgba().unwrap().as_ref(), &expected);
+    }
 
     #[test]
     fn ips_counts_pixel_changes_once_per_publication() {

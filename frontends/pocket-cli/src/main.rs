@@ -506,7 +506,7 @@ fn cmd_render_demo(out_path: &std::path::Path) -> Result<()> {
         pack_rgb565(0xff, 0, 0),
     );
 
-    let ppm = fb.snapshot_ppm();
+    let ppm = fb.snapshot_presentation_ppm();
     std::fs::write(out_path, &ppm).context("writing PPM")?;
     println!(
         "Wrote {}×{} demo PPM to {}",
@@ -962,7 +962,7 @@ fn cmd_run(
             .state
             .presentation_framebuffer()
             .map_err(anyhow::Error::msg)?
-            .snapshot_ppm();
+            .snapshot_presentation_ppm();
         let final_path = std::env::temp_dir().join("pockethle-final.ppm");
         if let Err(e) = std::fs::write(&final_path, &ppm) {
             eprintln!("warn: could not write {} ({e})", final_path.display());
@@ -1333,7 +1333,10 @@ impl pocket_core::kernel::FrameHook for LiveInputHook {
                                     .presentation_framebuffer()
                                     .map_err(std::io::Error::other)
                                     .and_then(|frame| {
-                                        std::fs::write(path.trim(), frame.snapshot_ppm())
+                                        std::fs::write(
+                                            path.trim(),
+                                            frame.snapshot_presentation_ppm(),
+                                        )
                                     }) {
                                     Ok(()) => {
                                         log::info!("live framebuffer snapshot: {}", path.trim())
@@ -1628,7 +1631,7 @@ impl pocket_core::kernel::FrameHook for DumpFrameHook {
         }
         let path = self.dir.join(format!("frame_{:06}.ppm", self.written));
         let ppm = match state.presentation_framebuffer() {
-            Ok(frame) => frame.snapshot_ppm(),
+            Ok(frame) => frame.snapshot_presentation_ppm(),
             Err(error) => {
                 log::error!("dump presentation failed: {error}");
                 return pocket_core::kernel::FrameAction::Stop;

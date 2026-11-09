@@ -528,6 +528,7 @@ impl Reconstruction {
                     std::num::NonZeroU32::new(name).map(glow::NativeTexture),
                 );
                 gl.uniform_1_i32(gl.get_uniform_location(program, "u_source").as_ref(), 0);
+                gl.uniform_1_i32(gl.get_uniform_location(program, "u_rgb565").as_ref(), i32::from(source.is_rgb565()));
                 gl.uniform_2_f32(
                     gl.get_uniform_location(program, "u_size").as_ref(),
                     size[0] as f32,

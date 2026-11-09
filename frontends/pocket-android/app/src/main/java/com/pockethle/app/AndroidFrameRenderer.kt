@@ -90,15 +90,15 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
     }
     /** Called synchronously within SharedFrame.with_texture; never retain its GL name. */
     @androidx.annotation.Keep
-    fun drawSharedTexture(source: Int, w: Int, h: Int, tw: Int, th: Int, backlight: Int, token: Long) {
+    fun drawSharedTexture(source: Int, w: Int, h: Int, tw: Int, th: Int, backlight: Int, token: Long, rgb565: Boolean) {
         var frame = sharedFrame
         if (frame == null || frame.sharedToken != token) {
             frame = GameActivity.FrameSnapshot(w,h,ByteArray(0),0,tw,th,token)
             sharedFrame = frame
         }
-        renderFrame(frame,source,backlight)
+        renderFrame(frame,source,backlight,rgb565)
     }
-    private fun renderFrame(frame: GameActivity.FrameSnapshot, sharedTexture: Int = 0, backlight: Int = 11) {
+    private fun renderFrame(frame: GameActivity.FrameSnapshot, sharedTexture: Int = 0, backlight: Int = 11, sharedRgb565: Boolean = false) {
         glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,viewW,viewH)
         glDisable(GL_SCISSOR_TEST);glDisable(GL_BLEND);glDisable(GL_DEPTH_TEST)
         glClearColor(0f,0f,0f,1f);glClear(GL_COLOR_BUFFER_BIT)
@@ -114,7 +114,7 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
                 if (sharedTexture != 0) {
                     gpuTimer?.begin()
                     val convert=timing.start()
-                    convertSharedTexture(sharedTexture,frame.textureWidth,frame.textureHeight,backlight)
+                    convertSharedTexture(sharedTexture,frame.textureWidth,frame.textureHeight,backlight,sharedRgb565)
                     timing.end(GraphicsTiming.Stage.SHARED_CONVERT,convert)
                 } else {
                     val prepare = timing.start()
@@ -175,7 +175,7 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
             fail(e)
         } finally { gpuTimer?.end() }
     }
-    private fun convertSharedTexture(source:Int,w:Int,h:Int,backlight:Int) {
+    private fun convertSharedTexture(source:Int,w:Int,h:Int,backlight:Int,rgb565:Boolean) {
         check(source != texture && glIsTexture(source)) { "Shared texture is not visible in the consumer context" }
         bindConversionTarget(w,h)
         glViewport(0,0,w,h);glUseProgram(sharedProgram)
@@ -183,6 +183,7 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
         glUniform1i(glGetUniformLocation(sharedProgram,"u_source"),0)
         glUniform2f(glGetUniformLocation(sharedProgram,"u_size"),w.toFloat(),h.toFloat())
         glUniform1i(glGetUniformLocation(sharedProgram,"u_backlight"),backlight)
+        glUniform1i(glGetUniformLocation(sharedProgram,"u_rgb565"),if(rgb565) 1 else 0)
         glDrawArrays(GL_TRIANGLES,0,3)
     }
     private fun bindConversionTarget(w:Int,h:Int) {

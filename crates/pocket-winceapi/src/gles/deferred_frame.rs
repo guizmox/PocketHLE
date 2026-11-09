@@ -38,13 +38,28 @@ impl GlesCpuPixelSource {
     fn read_with(&self, reader: &mut SharedReadback) -> Result<MaterializedPixels, String> {
         let result = (|| {
             let mut rgb565 = Vec::new();
-            reader.read_rgb565_into(&self.frame, self.logical, &mut rgb565)?;
-            let native_rgba = if self.native_size() != self.logical {
+            // At 1x RGBA, download once and pack only the guest-memory copy.
+            // Shared presentation itself remains GPU-only.
+            let native_rgba = if self.native_size() == self.logical && !self.frame.is_rgb565() {
                 let mut rgba = Vec::new();
                 reader.read_display_rgba_into(&self.frame, &mut rgba)?;
+                rgb565.reserve(rgba.len() / 2);
+                for p in rgba.chunks_exact(4) {
+                    let value = ((u16::from(p[0]) >> 3) << 11)
+                        | ((u16::from(p[1]) >> 2) << 5)
+                        | (u16::from(p[2]) >> 3);
+                    rgb565.extend_from_slice(&value.to_le_bytes());
+                }
                 Some(rgba)
             } else {
-                None
+                reader.read_rgb565_into(&self.frame, self.logical, &mut rgb565)?;
+                if self.native_size() != self.logical {
+                    let mut rgba = Vec::new();
+                    reader.read_display_rgba_into(&self.frame, &mut rgba)?;
+                    Some(rgba)
+                } else {
+                    None
+                }
             };
             Ok(MaterializedPixels {
                 logical_size: self.logical,

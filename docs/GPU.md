@@ -437,3 +437,104 @@ silhouettes missing when main-thread message polling publishes a worker's draw.
 The issue remains with GetNearestColor implemented. A synthetic worker-draw/main-
 poll regression and the existing retained-GAPI tests cover the ownership guard.
 Device-specific presentation and later gameplay still need separate validation.
+
+## Paired color capture (desktop diagnostics)
+
+Set `POCKETHLE_COLOR_CAPTURE` to an output directory before launching PocketHLE.
+At a completed onscreen EGL swap, an enabled session checks once per second for
+`capture.request` in that directory. Creating the empty file requests one pair;
+the emulator consumes the file. Recreate it to capture again. Offscreen swaps
+and cooperative pacing retries do not consume requests. When the variable is
+unset, there is no file polling, image allocation or additional GPU readback.
+The disabled path retains only the capture-state check at the swap boundary.
+
+Windows Command Prompt, from the repository directory:
+
+```bat
+set "POCKETHLE_COLOR_CAPTURE=%CD%\color-captures"
+target\release\pockethle-gui.exe
+```
+
+In a second Command Prompt opened in the same repository directory, once the
+camera is stationary at the desired scene:
+
+```bat
+type nul > color-captures\capture.request
+```
+
+Each request writes three files with one timestamp/sequence stem:
+
+- `.render.png`: logical RGBA render readback before display publication. An
+  RGB565 EGL attachment has already quantized its rendering; this capture does
+  not reconstruct discarded precision. Use the RGBA8888-only profile to test
+  an RGBA attachment and check `render_format` in the JSON.
+- `.presentation.png`: CPU reference for that same publication, including its
+  display color conversion and backlight, before frontend filters, rotation,
+  UI overlays and host-window composition. It is not a window screenshot.
+- `.json`: dimensions, render format, active backend, requested guest dithering
+  state and completed-presentation count. Dithering state is not proof that the
+  backend implements it.
+
+Start with internal resolution 1x, no frontend filter and neutral backlight to
+compare corresponding pixels directly. Higher-density presentation can have
+larger dimensions than the logical render capture. Both software and GPU paths
+are supported. A requested capture synchronously reads/encodes images and can
+cause a short pause; do not use its frame timing as a performance measurement.
+Errors are logged without turning diagnostics into a guest EGL error.
+Disable for subsequent launches with `set "POCKETHLE_COLOR_CAPTURE="`.
+
+The paired-capture regressions verify a real software EGL swap and a native-GL
+swap using shared GPU publication, consumption of one request, PNG contents,
+RGBA shade preservation, separate guest RGB565 bytes and publication identity. Native validation uses
+Mesa llvmpipe; Windows device testing remains required. The regular WinCE API
+suite passes with the optional native tests excluded.
+
+## Preserve the selected EGL color precision
+
+The per-game RGBA8888-only option controls the advertised EGL catalog. It does
+not turn RGB565 rendering into 32-bit rendering after the fact. Presentation
+now follows the actual EGL attachment: an RGBA8888 attachment retains its RGB
+bytes until host filtering/backlight, while a real RGB565 attachment keeps the
+existing 16-bit display expansion. Host display alpha remains opaque.
+This applies equally to default-selected RGBA configurations and the optional
+profile; there is no game-name, texture or combiner-program test.
+
+| Path | Presentation contract |
+| --- | --- |
+| Software EGL | Retain same-size RGBA presentation beside logical RGB565 memory. |
+| GPU with CPU publication | Reuse native readback at 1x/scaled sizes; RGBA surfaces avoid display quantization. |
+| Shared GPU, desktop | Immutable snapshot carries its source format; the display shader preserves RGBA or expands RGB565, then applies backlight. |
+| Shared GPU, Android | Same shader and format policy through the synchronized JNI callback; rebuild native libraries and APK together. |
+| Deferred CPU read/capture | Optional RGBA presentation is valid even at logical size; reads retain GPU authority and publication identity. |
+| Guest GAPI memory and IPS | Logical RGB565 conversion and the existing logical-pixel IPS definition remain. |
+| Screenshots, recording, filters | Frontend presentation snapshots retain RGBA; CLI display PPM captures now use presentation pixels too. Logical snapshot_ppm remains a separate memory diagnostic. |
+| Real CPU drawing | CPU/GDI/GAPI writes invalidate older alternate/GPU images and win; the next EGL swap can publish RGBA again. |
+
+SIP/shell-menu and system-video composition keep their established logical
+CPU composition policy; they can select a 16-bit composite while active. This
+change does not introduce a high-color GDI renderer or a mixed-precision overlay
+engine. An old RGBA image must never cover a newer CPU drawing operation.
+
+The shader change adds no GPU readback to shared display. CPU publication now
+retains/transfers four-byte presentation pixels for RGBA surfaces, including at
+1x; this costs buffer space/bandwidth compared with packed two-byte display
+pixels. A 1x shared RGBA materialization downloads RGBA once and packs the guest
+RGB565 copy on the CPU. Scaled paths retain their established logical reduction
+and separate native presentation preparation.
+
+The reported THPS2 pair established RGBA rendering followed by an unintended
+RGB565 display reduction: a sampled floor region went from 209 colors to 16.
+The fix preserves rendered bytes; it does not reconstruct colors already lost
+in RGB565 textures or attachments and does not implement missing dithering.
+
+
+### Snapshot-reference test correction
+
+The previously reported RGB565 snapshot/reduction discrepancy was traced to a
+malformed test fixture. It set the renderer's RGB565 policy, then replaced the
+actual attachment with GL_RGBA storage before taking an RGB565 snapshot. The
+reference and snapshot consequently started from different color precisions.
+The fixture now uploads in the actual attachment format, checks the GL error,
+and also covers 320x240 at 2x on desktop GL and GLES. No RGB565 production
+reduction arithmetic was changed to make this test pass. The corrected fixture
+also passes against the unmodified production code of commit 9bebfb5b.

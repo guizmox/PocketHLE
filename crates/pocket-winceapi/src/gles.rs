@@ -4,6 +4,7 @@
 //! in [`register`] by iterating the ordinal tables, mirroring what
 //! [`super::WinCeDispatcher::new`] does for `coredll.dll`.
 
+mod color_capture;
 mod egl_config;
 mod egl_context;
 mod es11;
@@ -433,6 +434,7 @@ pub(crate) fn release_gpu() {
 /// runs reusing the same host thread. Dropping the old Context frees all
 /// host-side GL resources; guest memory belongs to the new kernel/CPU.
 pub(crate) fn reset_for_session() {
+    color_capture::reset();
     egl_context::set_thread(0);
     SHARED_WINDOW.with(|s| s.take());
     SHARED_HANDOFF_SEEN.with(|s| s.set(0));
@@ -2852,6 +2854,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             c.target.resize(w, h);
         }
     });
+    let color_capture = color_capture::begin();
     let enabled = SHARED_EXPORT.with(|s| {
         s.borrow()
             .as_ref()
@@ -2969,6 +2972,9 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
     ctx.kernel.framebuffer.presentation_stats.record_present();
+    if let Some(capture) = color_capture {
+        color_capture::finish(capture, ctx.kernel);
+    }
     // Ancillary buffers are not preserved by a window swap. In particular a
     // HUD may leave DepthMask(FALSE); that must not preserve previous-frame Z.
     // Do this only after the actual presentation, never on cooperative retry

@@ -602,12 +602,23 @@ impl Context {
         self.gpu.as_ref()?.scaled_rgb565_into(out)
     }
 
-    /// Host presentation pixels; logical readbacks and guest memory remain RGB565.
+    /// Host presentation at source precision; guest display memory remains RGB565.
     pub fn scaled_display_rgba_into(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
         if self.gpu_failed {
             return None;
         }
-        self.gpu.as_ref()?.scaled_display_rgba_into(out)
+        if let Some(gpu) = self.gpu.as_ref() {
+            return gpu.scaled_display_rgba_into(out);
+        }
+        if self.target.rgb565 {
+            return None;
+        }
+        out.clear();
+        out.extend_from_slice(&self.target.color);
+        for pixel in out.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        Some((self.target.width, self.target.height))
     }
 
     /// Select before guest rendering begins. Initialization failure keeps software.

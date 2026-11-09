@@ -3769,10 +3769,10 @@ impl Renderer {
         Some((self.width, self.height))
     }
 
-    /// Publish top-down RGBA directly, preserving the old RGB565 display precision.
+    /// Publish top-down opaque RGBA at the actual surface precision.
     /// Uses the existing readback; introduces no GL call or synchronization.
     pub fn scaled_display_rgba_into(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
-        if self.render_scale == 1
+        if self.render_scale == 1 && self.rgb565
             || self.dirty
             || self.readback.len() != (self.width * self.height * 4) as usize
         {
@@ -3791,6 +3791,10 @@ impl Renderer {
             .zip(out.chunks_exact_mut(stride))
         {
             for (src, dst) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                if !self.rgb565 {
+                    dst.copy_from_slice(&[src[0], src[1], src[2], 255]);
+                    continue;
+                }
                 let r = src[0] >> 3;
                 let g = src[1] >> 2;
                 let b = src[2] >> 3;

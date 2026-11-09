@@ -159,6 +159,7 @@ impl SharedReadback {
                 let mut pixel = sum.map(|value| (value / (scale * scale)) as u8);
                 match quantize {
                     transfer::Quantization::Preserve => {}
+                    transfer::Quantization::DisplayRgba8 => pixel[3] = 255,
                     transfer::Quantization::LogicalRgb565 => {
                         pixel = crate::raster::rgb565_pixel(pixel)
                     }
@@ -285,7 +286,7 @@ impl SharedReadback {
     pub fn matches_source(&self, source: &SharedContextSource) -> bool {
         Arc::ptr_eq(&self.group, &source.1)
     }
-    /// Top-down opaque RGBA at existing display precision, before brightness.
+    /// Top-down opaque RGBA at source color precision, before brightness.
     pub fn read_display_rgba_into(
         &mut self,
         frame: &SharedFrame,
@@ -294,7 +295,11 @@ impl SharedReadback {
         self.prepare_pixels(
             frame,
             frame.size(),
-            transfer::Quantization::DisplayRgb565,
+            if frame.is_rgb565() {
+                transfer::Quantization::DisplayRgb565
+            } else {
+                transfer::Quantization::DisplayRgba8
+            },
             false,
         )?;
         out.clear();
@@ -375,7 +380,13 @@ mod tests {
     fn snapshot_materialization_preserves_old_image_cache_format_and_native_binding() {
         for es in [false, true] {
             for rgb565 in [false, true] {
-                for (w, h, policy) in [(8, 6, 1), (8, 6, 2), (320, 240, 4), (240, 320, 5)] {
+                for (w, h, policy) in [
+                    (8, 6, 1),
+                    (8, 6, 2),
+                    (320, 240, 2),
+                    (320, 240, 4),
+                    (240, 320, 5),
+                ] {
                     let ui = if es {
                         Renderer::new_es_for_test(8, 8).unwrap()
                     } else {
@@ -388,19 +399,47 @@ mod tests {
                     let data: Vec<u8> = (0..producer.width * producer.height * 4)
                         .map(|i| i.wrapping_mul(73).wrapping_add(i / 11).wrapping_add(7) as u8)
                         .collect();
+                    // Populate the allocated attachment without replacing RGB565
+                    // storage with RGBA8. The snapshot must copy the same format
+                    // that read_present uses as its reference.
+                    let upload: Vec<u8> = if rgb565 {
+                        data.chunks_exact(4)
+                            .flat_map(|p| {
+                                (((u16::from(p[0]) >> 3) << 11)
+                                    | ((u16::from(p[1]) >> 2) << 5)
+                                    | (u16::from(p[2]) >> 3))
+                                    .to_le_bytes()
+                            })
+                            .collect()
+                    } else {
+                        data.clone()
+                    };
                     unsafe {
                         (producer.gl.BindTexture)(GL_TEXTURE_2D, producer.color);
                         (producer.gl.TexImage2D)(
                             GL_TEXTURE_2D,
                             0,
-                            GL_RGBA as i32,
+                            if rgb565 {
+                                if producer.host.es {
+                                    GL_RGB as i32
+                                } else {
+                                    0x8d62
+                                }
+                            } else {
+                                GL_RGBA as i32
+                            },
                             producer.width as i32,
                             producer.height as i32,
                             0,
-                            GL_RGBA,
-                            GL_UNSIGNED_BYTE,
-                            data.as_ptr().cast(),
+                            if rgb565 { GL_RGB } else { GL_RGBA },
+                            if rgb565 {
+                                GL_UNSIGNED_SHORT_5_6_5
+                            } else {
+                                GL_UNSIGNED_BYTE
+                            },
+                            upload.as_ptr().cast(),
                         );
+                        producer.check().unwrap();
                     }
                     let frame = producer.snapshot_shared_frame().unwrap().unwrap();
                     let mut target = if rgb565 {

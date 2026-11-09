@@ -170,7 +170,7 @@ impl Drop for Slot {
 }
 
 /// Immutable raw native snapshot. Coordinates are GL bottom-up; consumer must
-/// apply the established RGB565 display quantization, rotation and brightness.
+/// respect its source format, row order and display brightness.
 /// Clones retain the slot; dropping an unpainted frame returns it without any GL
 /// work. The producer cannot overwrite a retained frame, including after resize.
 #[derive(Clone, Debug)]
@@ -194,6 +194,9 @@ impl SharedFrame {
     }
     pub fn belongs_to_source(&self, source: &SharedContextSource) -> bool {
         Arc::ptr_eq(&self.0.group, &source.1)
+    }
+    pub fn is_rgb565(&self) -> bool {
+        self.0.rgb565
     }
     pub fn size(&self) -> (u32, u32) {
         (self.0.width, self.0.height)

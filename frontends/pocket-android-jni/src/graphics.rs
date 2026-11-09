@@ -303,7 +303,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeDrawPresentatio
                 env.call_method(
                     &renderer,
                     "drawSharedTexture",
-                    "(IIIIIIJ)V",
+                    "(IIIIIIJZ)V",
                     &[
                         (texture as i32).into(),
                         (frame.width as i32).into(),
@@ -312,6 +312,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeDrawPresentatio
                         (frame.texture_height as i32).into(),
                         (frame.backlight as i32).into(),
                         (image.token as i64).into(),
+                        shared.is_rgb565().into(),
                     ],
                 )
                 .map(|_| ())

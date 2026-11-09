@@ -57,7 +57,10 @@ fn shared_display_shader_matches_rgb565_backlight_and_row_order() {
                 )
                 .unwrap()
             };
-            for level in [0u32, 1, 11, 21, 31, 99] {
+            for (level, rgb565) in [0u32, 1, 11, 21, 31, 99]
+                .into_iter()
+                .flat_map(|level| [(level, false), (level, true)])
+            {
                 unsafe {
                     frame
                         .with_consumer(&mut consumer, |texture| {
@@ -83,6 +86,10 @@ fn shared_display_shader_matches_rgb565_backlight_and_row_order() {
                             (ui.gl.Uniform1i)(
                                 (ui.gl.GetUniformLocation)(program, c"u_backlight".as_ptr()),
                                 level as i32,
+                            );
+                            (ui.gl.Uniform1i)(
+                                (ui.gl.GetUniformLocation)(program, c"u_rgb565".as_ptr()),
+                                i32::from(rgb565),
                             );
                             (ui.gl.Uniform2f)(
                                 (ui.gl.GetUniformLocation)(program, c"u_size".as_ptr()),
@@ -119,7 +126,11 @@ fn shared_display_shader_matches_rgb565_backlight_and_row_order() {
                         for src in row.chunks_exact(4) {
                             for (i, shift) in [3u8, 2, 3].into_iter().enumerate() {
                                 let bits = src[i] >> shift;
-                                let c = ((bits << shift) | (bits >> (8 - shift * 2))) as u32;
+                                let c = if rgb565 {
+                                    ((bits << shift) | (bits >> (8 - shift * 2))) as u32
+                                } else {
+                                    u32::from(src[i])
+                                };
                                 let c = if valid <= 11 {
                                     c - c * (11 - valid) / 50
                                 } else {

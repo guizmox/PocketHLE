@@ -351,7 +351,7 @@ impl Framebuffer {
         self.set_render_image(width, height, pixels, false);
     }
 
-    /// Host-only RGBA, already quantized to the display precision; never guest mapped.
+    /// Host-only RGBA at source precision; never guest mapped.
     pub fn set_render_presentation_rgba(&mut self, width: u32, height: u32, pixels: Vec<u8>) {
         self.set_render_image(width, height, pixels, true);
     }
@@ -363,7 +363,7 @@ impl Framebuffer {
             && self.height > 0
             && width % self.width == 0
             && height % self.height == 0
-            && width / self.width >= 2
+            && width / self.width >= if rgba { 1 } else { 2 }
             && width / self.width == height / self.height
             && (width as usize)
                 .checked_mul(height as usize)
@@ -601,6 +601,20 @@ impl Framebuffer {
     /// Pack the framebuffer as a P6 PPM image. P6 is binary, one
     /// triplet per pixel, no compression — perfect for headless
     /// proof-of-rendering captures without pulling in `png`.
+    /// Display capture, including same-size RGBA or higher-density presentation.
+    /// snapshot_ppm retains its existing logical RGB565 diagnostic contract.
+    pub fn snapshot_presentation_ppm(&self) -> Vec<u8> {
+        let (width, height) = self.presentation_size();
+        let mut rgba = Vec::new();
+        self.snapshot_presentation_rgba8888_into(&mut rgba);
+        let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
+        out.reserve(rgba.len() / 4 * 3);
+        for pixel in rgba.chunks_exact(4) {
+            out.extend_from_slice(&pixel[..3]);
+        }
+        out
+    }
+
     pub fn snapshot_ppm(&self) -> Vec<u8> {
         let header = format!("P6\n{} {}\n255\n", self.width, self.height);
         let mut out = Vec::with_capacity(header.len() + (self.width * self.height * 3) as usize);

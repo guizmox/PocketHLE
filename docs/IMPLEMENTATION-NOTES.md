@@ -5723,3 +5723,42 @@ requires explicitly selecting RGBA8888 only.
 
 A further native-GL Doom outdoor capture with the profile disabled also retains
 its floor/sky passes, validating the restored default RGBA8 window capability.
+
+
+### Preserve RGBA EGL presentation precision (2026-11-09)
+
+The supplied THPS2 paired capture confirms an RGBA8888 render image losing RGB
+precision during presentation. Surface-format selection and AR10/AR11 execution
+remain separate. GPU display conversion now receives immutable source-format
+metadata; deferred and CPU publications can retain an RGBA presentation at the
+logical size. Native GPU readback/reduction respects the same rule. Android's
+synchronized shared callback adds a boolean; its compiled Kotlin descriptor is
+checked against the JNI signature. Rebuild native libraries and APK together.
+
+The user's full 640x480 render capture was replayed through the corrected
+software publication and kernel presentation path: every RGB byte is preserved
+and the sampled floor remains at 209 colors, rather than 16. Display alpha stays
+opaque. This is a replay of captured pixels, not a rerun of the game executable.
+Regular GLES/kernel/WinCE tests, native GL/GLES shader and reduction tests, CPU
+write/invalidation and paired capture tests cover the shared contracts. Logical
+memory and IPS still use RGB565. No new readback is added to shared presentation;
+CPU RGBA publication uses more buffer bandwidth than packed RGB565.
+
+A previously failing snapshot test was investigated instead of excluded. Its
+fixture replaced an attachment marked RGB565 with GL_RGBA storage, so the
+snapshot and reference had different input precisions. Uploading in the actual
+format fixes the fixture; the added 320x240/2x case passes on GL and GLES. No
+production RGB565 reduction arithmetic is changed for that issue. See GPU.md.
+
+Full desktop packaging and an Android APK/device run remain separate checks.
+The Android renderer is type-checked against Android API classes with narrow
+app-service stubs; this does not certify a complete APK or a physical device.
+Existing logical CPU/SIP/menu/video composition retains its 16-bit authority
+policy. The fix does not implement a new mixed-precision GDI compositor.
+
+Final validation: 331 GLES tests including all optional native GL/GLES cases
+passed sequentially, with no exclusion; 344 kernel tests and 731 regular WinCE
+API tests passed. The 112 selected EGL/native bridge tests and the final two
+paired-capture regressions passed. The repaired snapshot fixture also passes on
+production 9bebfb5b without the RGBA changes, including the added 320x240/2x
+case. CLI/Unicorn and JNI host checking, rustfmt and whitespace checks pass.

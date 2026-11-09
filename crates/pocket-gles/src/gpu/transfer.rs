@@ -5,6 +5,7 @@ use super::*;
 pub(super) enum Quantization {
     Preserve,
     DisplayRgb565,
+    DisplayRgba8,
     LogicalRgb565,
 }
 
@@ -52,6 +53,9 @@ impl Renderer {
                 ));
                 if quantize == Quantization::DisplayRgb565 {
                     fragment.push_str("vec3 q=floor(b.rgb/vec3(8.0,4.0,8.0));b=vec4(q*vec3(8.0,4.0,8.0)+floor(q/vec3(4.0,16.0,4.0)),255.0);");
+                }
+                if quantize == Quantization::DisplayRgba8 {
+                    fragment.push_str("b.a=255.0;");
                 }
                 if quantize == Quantization::LogicalRgb565 {
                     fragment.push_str("vec3 levels=vec3(31.0,63.0,31.0);vec3 q=floor((b.rgb*levels+127.0)/255.0);b=vec4(floor((q*255.0+floor(levels/2.0))/levels),255.0);");
@@ -241,7 +245,11 @@ impl Renderer {
             self.height,
             1,
             true,
-            Quantization::DisplayRgb565,
+            if self.rgb565 {
+                Quantization::DisplayRgb565
+            } else {
+                Quantization::DisplayRgba8
+            },
             (self.width, self.height),
         )?;
         self.readback
