@@ -78,9 +78,15 @@ impl Config {
             }
             EGL_STENCIL_SIZE | EGL_SAMPLES | EGL_SAMPLE_BUFFERS => 0,
             EGL_DEPTH_SIZE => self.depth,
+            // The native WinCE visual is 16-bit RGB565 (GetDeviceCaps).
+            // Alpha-capable RGBA8 images are offscreen render targets.
             EGL_SURFACE_TYPE => {
-                (EGL_WINDOW_BIT | EGL_PBUFFER_BIT | if self.rgba { 0 } else { EGL_PIXMAP_BIT })
-                    as i32
+                (EGL_PBUFFER_BIT
+                    | if self.rgba {
+                        0
+                    } else {
+                        EGL_WINDOW_BIT | EGL_PIXMAP_BIT
+                    }) as i32
             }
             EGL_CONFIG_ID => self.id(),
             EGL_RENDERABLE_TYPE => 1,
@@ -94,6 +100,23 @@ impl Config {
             MIN_SWAP_INTERVAL | MAX_SWAP_INTERVAL => 1,
             _ => return None,
         })
+    }
+
+    /// EGL 1.1 section 3.4.1: prefer more bits in explicitly requested
+    /// nonzero color components, then the smaller overall color buffer.
+    /// All other sort criteria are identical for our two configurations.
+    pub(super) fn sort_key(&self, pairs: &[(u32, i32)]) -> (std::cmp::Reverse<i32>, i32, i32) {
+        let attrs: HashMap<_, _> = pairs.iter().copied().collect();
+        let color_bits = [EGL_RED_SIZE, EGL_GREEN_SIZE, EGL_BLUE_SIZE, EGL_ALPHA_SIZE]
+            .into_iter()
+            .filter(|key| attrs.get(key).is_some_and(|&value| value > 0))
+            .map(|key| self.attribute(key).unwrap())
+            .sum();
+        (
+            std::cmp::Reverse(color_bits),
+            self.attribute(EGL_BUFFER_SIZE).unwrap(),
+            self.id(),
+        )
     }
 
     pub(super) fn matches(&self, pairs: &[(u32, i32)]) -> Result<bool, u32> {

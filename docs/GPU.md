@@ -63,13 +63,21 @@ Intel 2700G depth-bias profiles. CLI launches retain their existing default.
 
 ## EGL surfaces and shared objects
 
-Configuration 1 remains RGB565 and the first/default opaque choice.
-Configuration 2 is RGBA8888 for applications requesting alpha. Attribute queries,
-context/surface configuration IDs, component queries and readback reflect the
-actual attachments. RGBA8 supports windows and pbuffers; native RGB565 GDI
-pixmaps retain their existing configuration. Incompatible context/surface pairs
-return EGL_BAD_MATCH. Selecting alpha can enable additional application passes;
-it does not mean rendering has switched to software.
+Configuration 1 is RGB565 and supports native windows, GDI pixmaps and
+pbuffers, matching the WinCE screen's 16-bit visual (`GetDeviceCaps(BITSPIXEL)`).
+Configuration 2 is RGBA8888 for alpha-capable offscreen pbuffers; it does not
+advertise window/pixmap support, and creating a native window with it returns
+EGL_BAD_MATCH. This separates the native screen visual from offscreen alpha
+storage without dropping the alpha passes used by applications.
+
+`eglChooseConfig` filters first, then sorts before applying the caller's output
+capacity. EGL 1.1 section 3.4.1 prefers more bits in explicitly requested nonzero
+color components, then smaller total buffer size and configuration ID (the
+other sort criteria are equal for these configurations). Omitted, zero and
+DONT_CARE color components do not affect that color preference. Attribute
+queries, configuration IDs and readback describe the actual attachments.
+Incompatible context/surface pairs return EGL_BAD_MATCH. Selecting alpha can
+enable additional application passes; it does not imply software rendering.
 
 EGL share groups own named textures, buffers and NV program bodies. Bindings,
 constants, enables and texture object zero are local to each context. Bound

@@ -2150,7 +2150,7 @@ fn egl_choose_config(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     }
     let matched = egl_config::read_pairs(ctx, attribs).and_then(|pairs| {
         let mut matched = Vec::new();
-        // Keep RGB565 first for applications that do not request color/alpha.
+        // Filter first, then apply EGL configuration ordering before truncation.
         for handle in [CONFIG_HANDLE, CONFIG_RGBA_HANDLE] {
             if egl_config::Config::from_handle(handle)
                 .unwrap()
@@ -2159,6 +2159,11 @@ fn egl_choose_config(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
                 matched.push(handle);
             }
         }
+        matched.sort_by_key(|&handle| {
+            egl_config::Config::from_handle(handle)
+                .unwrap()
+                .sort_key(&pairs)
+        });
         Ok(matched)
     });
     match matched {
@@ -2216,6 +2221,16 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     }
     let window = ctx.arg_u32(2)?;
     let config = ctx.arg_u32(1)?;
+    if egl_config::Config::from_handle(config)
+        .unwrap()
+        .attribute(pocket_gles::EGL_SURFACE_TYPE)
+        .unwrap()
+        & pocket_gles::EGL_WINDOW_BIT as i32
+        == 0
+    {
+        set_egl_error(pocket_gles::EGL_BAD_MATCH);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
+    }
     let goforce = with_ctx(|c| c.gizmondo_goforce_20051013);
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
     let handle = SURFACES.with(|s| {
@@ -6042,7 +6057,11 @@ mod tests {
                 vec![(EGL_RED_SIZE, 5), (EGL_GREEN_SIZE, 6), (EGL_DEPTH_SIZE, 16)],
                 CONFIG_HANDLE,
             ),
-            (vec![(EGL_ALPHA_SIZE, 8)], CONFIG_RGBA_HANDLE),
+            (vec![(EGL_ALPHA_SIZE, 8)], 0),
+            (
+                vec![(EGL_ALPHA_SIZE, 8), (EGL_SURFACE_TYPE, EGL_PBUFFER_BIT)],
+                CONFIG_RGBA_HANDLE,
+            ),
             (vec![(EGL_STENCIL_SIZE, 8)], 0),
             (vec![(EGL_SAMPLE_BUFFERS, 1)], 0),
             (vec![(EGL_RENDERABLE_TYPE, 4)], 0),
@@ -6072,6 +6091,85 @@ mod tests {
             );
             assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), EGL_SUCCESS);
         }
+    }
+
+    #[test]
+    fn egl_choose_config_sorts_before_applying_output_capacity() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(8, 8);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        let out = SCRATCH + 0x100;
+        let num = out + 8;
+        for (color, expected) in [
+            (vec![], [CONFIG_HANDLE, CONFIG_RGBA_HANDLE]),
+            (
+                vec![(EGL_BUFFER_SIZE, 16)],
+                [CONFIG_HANDLE, CONFIG_RGBA_HANDLE],
+            ),
+            (
+                vec![(EGL_RED_SIZE, u32::MAX)],
+                [CONFIG_HANDLE, CONFIG_RGBA_HANDLE],
+            ),
+            (vec![(EGL_RED_SIZE, 5)], [CONFIG_RGBA_HANDLE, CONFIG_HANDLE]),
+            (
+                vec![
+                    (EGL_RED_SIZE, 5),
+                    (EGL_GREEN_SIZE, 6),
+                    (EGL_BLUE_SIZE, 5),
+                    (EGL_ALPHA_SIZE, 0),
+                ],
+                [CONFIG_RGBA_HANDLE, CONFIG_HANDLE],
+            ),
+            (
+                vec![(EGL_RED_SIZE, 5), (EGL_RED_SIZE, 0)],
+                [CONFIG_HANDLE, CONFIG_RGBA_HANDLE],
+            ),
+        ] {
+            let mut attrs = color;
+            attrs.push((EGL_SURFACE_TYPE, EGL_PBUFFER_BIT));
+            write_egl_attributes(&mut cpu, &attrs);
+            for size in [1, 2] {
+                assert_eq!(
+                    call(
+                        &mut cpu,
+                        &mut kernel,
+                        egl_choose_config,
+                        &[DISPLAY_HANDLE, SCRATCH, out, size, num]
+                    ),
+                    EGL_TRUE
+                );
+                assert_eq!(cpu.read_u32_le(num).unwrap(), size);
+                assert_eq!(cpu.read_u32_le(out).unwrap(), expected[0], "{attrs:?}");
+                if size == 2 {
+                    assert_eq!(cpu.read_u32_le(out + 4).unwrap(), expected[1], "{attrs:?}");
+                }
+            }
+        }
+        // The native WinCE window has the RGB565 visual; RGBA8 is offscreen.
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_window_surface,
+                &[DISPLAY_HANDLE, CONFIG_RGBA_HANDLE, 1, 0]
+            ),
+            EGL_NO_SURFACE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_get_error, &[]),
+            EGL_BAD_MATCH
+        );
+        assert_ne!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_window_surface,
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 1, 0]
+            ),
+            EGL_NO_SURFACE
+        );
     }
 
     #[test]

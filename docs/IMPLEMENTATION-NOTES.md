@@ -5594,12 +5594,36 @@ Temporary desktop profiling, per-program aggregation and delivery-specific
 notes were subsequently removed/merged into the owning guides. Functional
 regression tests and the pre-existing opt-in Android diagnostics are retained.
 
-A subsequent three-second user video shows an enlarged part of the GoForce
-badge visible in the water while the camera moves. The source pass/texture and
-onset have not been isolated; neither the footage nor the filenames of packaged
-logo/reflection assets establish whether it is a binding/copy, coordinate or
-content issue. Documentation/profiling cleanup does not claim to correct it.
-The instrumented source checkpoint remains separate for further investigation.
+The subsequent enlarged GoForce/Denied Reality logo in water was reproduced
+in Siege's attract demo. Bounded local texture captures identified a static HUD
+logo bound to sampler 0 of the water compositor, where the freshly generated
+DSDT texture belonged. Introducing an RGBA8 window configuration made the
+engine choose a 32-bit main window and a separate 16-bit offscreen context.
+Its process-wide binding cache then skipped a bind on returning to the main
+context. Binding state must remain context-local; sharing it would violate EGL
+and break other applications.
+
+The virtual WinCE device reports a native RGB565 screen. RGBA8 is now advertised
+for offscreen pbuffers only, and native window creation validates that surface
+capability. Siege falls back to its RGB565 window path and reuses its context;
+the water compositor receives the generated field rather than the HUD logo.
+A separate generic correction applies EGL 1.1 configuration sorting before
+truncation, including the nonzero requested-component rule. Neither correction
+recognizes a game, executable, shader hash or texture ID. RGBA8 offscreen alpha
+and context-local state are retained. An application requiring an RGBA8 native
+window instead of accepting the modeled 16-bit visual will now find no such
+configuration; this is an intentional correction of an over-advertised
+capability, not a guarantee that all applications support the fallback.
+
+Validation for this follow-up: 727 WinCE API unit tests passed, all 18 selected
+EGL lifecycle tests passed including native/software variants, and both RGBA8
+pbuffer alpha/mismatched-context tests passed. CLI/Unicorn checking, rustfmt
+and diff whitespace checks passed.
+
+Local Mesa native-GL runs reached the Siege demo with the expected water
+textures and started the Doom outdoor fixture. Temporary per-call/texture
+capture probes were removed from delivered sources. Physical Windows/Android
+rendering and motion remain user validation, not inferred from these runs.
 
 The cleanup pass retained functional tests and passed 247 regular GLES tests,
 330 regular/native GLES tests with the same pre-existing snapshot discrepancy
