@@ -41,11 +41,14 @@ impl EglSurfaces {
         if self.loaded == handle {
             return;
         }
+        let shared_group = self
+            .contexts
+            .get(&self.loaded)
+            .zip(self.contexts.get(&handle))
+            .is_some_and(|(outgoing, incoming)| outgoing.group == incoming.group);
         with_ctx(|c| {
             self.select(c, 0);
             c.flush();
-            let mut cache_ids: Vec<_> = c.textures.keys().copied().collect();
-            cache_ids.push(0);
             if let Some(record) = self.contexts.get_mut(&self.loaded) {
                 c.exchange_shared_objects(self.groups.get_mut(&record.group).unwrap());
                 record.pack = PACK_ALIGNMENT.with(Cell::get);
@@ -56,7 +59,6 @@ impl EglSurfaces {
             if let Some(record) = self.contexts.get_mut(&handle) {
                 let mut incoming = record.state.take().expect("parked EGL context");
                 incoming.exchange_shared_objects(self.groups.get_mut(&record.group).unwrap());
-                cache_ids.extend(incoming.textures.keys().copied());
                 *c = incoming;
                 PACK_ALIGNMENT.with(|a| a.set(record.pack));
                 UNPACK_ALIGNMENT.with(|a| a.set(record.unpack));
@@ -65,11 +67,19 @@ impl EglSurfaces {
                 PACK_ALIGNMENT.with(|a| a.set(4));
                 UNPACK_ALIGNMENT.with(|a| a.set(4));
             }
-            // Surface renderers can contain equal numeric IDs from unrelated
-            // groups, or different context-local texture-zero images.
+            // Same-group object identities and image revisions remain valid.
+            // Keep those native copies instead of deleting/reuploading static
+            // images at every pbuffer context switch. Prune unlinked objects;
+            // texture zero is always local. Unrelated groups may reuse numeric
+            // IDs/revisions, so their surface caches still require a full reset.
+            let live: std::collections::HashSet<_> = c.textures.keys().copied().collect();
             for image in self.images.values_mut() {
                 if let Some(b) = image.buffers.as_mut() {
-                    b.delete_textures(&cache_ids);
+                    if shared_group {
+                        b.retain_shared_texture_cache(&live);
+                    } else {
+                        b.invalidate_texture_cache();
+                    }
                 }
             }
         });

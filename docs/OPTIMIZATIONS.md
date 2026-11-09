@@ -122,3 +122,11 @@ native permissions, self-modifying code and shared-memory tests pass as well.
 
 A final rebuild of the delivered source (including the nested-deletion guard)
 repeats the 580 frames in 25.8 s, 22.5 fps. Formatting and diff checks pass.
+
+## Graphics paths
+
+Native shared-texture caching, stable-channel framebuffer feedback batching and
+NV sampler/uniform preparation are maintained in [GPU.md](GPU.md#nv-combiner-execution).
+They apply automatically when their rendering path is used. Renderer choice and
+the PocketPC NV extension compatibility gate remain separate supported settings;
+these optimizations do not add game-specific overrides or change frame limits.

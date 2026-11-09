@@ -532,6 +532,16 @@ file and `resolve` would otherwise fail them.
 independent paths that mix together. Which one a game uses decides where
 a silence bug lives.
 
+The WinMM mixer API exposes one virtual PCM mixer with a speaker destination,
+a connected stereo wave-output source and volume control. The implementation
+is `coredll/mixer.rs`: device enumeration, ID/open/close, capabilities, line and
+control queries, and volume get/set include the ANSI/wide aliases. Mixer handles
+are separate from wave handles and work with or without the optional HMIXER
+flag. ONEBYID ignores dwLineID; TARGETTYPE validates the requested wave-device
+caps. Volume uses the existing AudioEngine wave-device volume for current and
+future streams, never the host system volume. MMRESULT failures preserve
+GetLastError. Physical/input/MIDI mixers and callbacks are not advertised.
+
 **`waveOut` (`coredll`).** The guest decodes audio itself and hands over
 finished PCM. `waveOutWrite` → `push_wave_samples`. This is a *stream*: the
 guest owns timing and back-pressure, so `CALLBACK_EVENT` must really

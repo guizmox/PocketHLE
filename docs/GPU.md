@@ -57,21 +57,74 @@ active combiner state in the session's contexts. New EGL contexts and client
 state resets preserve the gate. Enabling it permits the existing client detection;
 it does not force combiner rendering on applications that do not request it.
 
-NV texture fetches can select x/y independently from up to six tracked
-coordinate sets. AR10 keeps its own four-coordinate/two-temporary encoding
-limits. Five/six-coordinate GPU programs use a separate shader variant and
-attribute locations 8/9, preserving the existing locations and compact upload
-path for ordinary draws. The wider path requires at least ten vertex attributes,
-ten varying vectors and seven fragment texture units on the host. Program
-loading checks that capacity; unsupported wider programs are rejected rather
-than silently switching renderers. Software has the six-coordinate path too.
-Program names/bodies participate in EGL sharing; bindings, constants and enable
-state remain context-local. Supported fragment rejection instructions discard
-without writing color or depth.
-
 The PocketPC switch does not alter Gizmondo's existing policy. Both launchers
 explicitly configure the session gate, independently of the GoForce driver and
 Intel 2700G depth-bias profiles. CLI launches retain their existing default.
+
+## EGL surfaces and shared objects
+
+Configuration 1 remains RGB565 and the first/default opaque choice.
+Configuration 2 is RGBA8888 for applications requesting alpha. Attribute queries,
+context/surface configuration IDs, component queries and readback reflect the
+actual attachments. RGBA8 supports windows and pbuffers; native RGB565 GDI
+pixmaps retain their existing configuration. Incompatible context/surface pairs
+return EGL_BAD_MATCH. Selecting alpha can enable additional application passes;
+it does not mean rendering has switched to software.
+
+EGL share groups own named textures, buffers and NV program bodies. Bindings,
+constants, enables and texture object zero are local to each context. Bound
+objects survive name deletion while another context retains them. Namespace
+ownership moves only at context switches; draws do not acquire a shared lock.
+
+Surface renderers retain native texture uploads for live nonzero object
+identities within the same group. Existing image-revision and mip/filter checks
+still update changed images. On a shared-context switch, prune unlinked objects
+and invalidate the surface's cached object zero. Crossing unrelated groups or
+an implicit/no-context boundary clears those surface caches: equal numeric IDs
+and revisions must never alias across namespaces. Cache maintenance runs with
+the owning native context current and is distinct from guest glDeleteTextures(0),
+which remains ignored. Useful images stay resident longer, increasing possible
+VRAM use; orphan/group/renderer cleanup remains required. Immutable snapshots,
+reader fences and GPU/CPU pixel authority are separate contracts and unchanged.
+
+## NV combiner execution
+
+The CPU decodes supported AR10/AR11 programs at load; native GPU execution uses
+cached host shaders, while software rendering evaluates the supported arithmetic
+on the CPU. New programs must fail explicitly when unsupported rather than
+substitute a guessed shader or select a game-specific path.
+
+Fetches can select x/y independently: selector banks 0..7 and 8..15 identify x
+and y. Storage tracks six coordinate sets; capacity checks reject unavailable
+sets. AR10 retains its own four-coordinate/two-temporary encoding limits;
+AR11 supports its additional registers and signed quarter-unit immediate
+literals. Supported equality/inequality rejection discards a fragment without
+writing color or depth. This is not complete or bit-exact GoForce conformance.
+
+Five/six-coordinate GPU programs use separate shader variants and attributes
+8/9, preserving normal/fog/provoking/point locations, ordinary four-coordinate
+packing and compact deduplication keys. Wider programs need at least ten vertex
+attributes, ten varying vectors and seven fragment texture units on the host;
+program loading checks that capacity. Software has six-coordinate storage too.
+Expanded CPU vertex records carry two additional coordinate sets; preserve the
+compact upload path when those coordinates are unnecessary.
+
+A program's conservative sampled-texture mask controls native sampler
+preparation. Coordinate-only stages still supply transformed/projective vertex
+coordinates, but their texture objects and LOD limits cannot trigger uploads,
+bindings or an unnecessary range shader. Referenced high samplers still need
+the established white fallback when their image is incomplete and absent from
+enabled stages. Fixed-function rendering prepares/rebinds its units normally.
+Inactive host vector/matrix uniform locations return before payload/cache work;
+active uniforms retain their per-program value cache. These rules preserve
+NV/fixed-function transitions rather than changing guest texture state.
+
+Framebuffer reads use a conservative channel-dependency mask computed at load.
+When a draw cannot write any channel the program reads, capture the destination
+once and batch the draw in native order. RGB565 has no writable alpha channel.
+True read/write hazards and logic operations retain the existing per-primitive
+snapshot/order path. Depth, blending and color masks remain effective. No extra
+per-draw program decode, screenshot comparison or GPU readback is introduced.
 
 ## Internal resolution
 

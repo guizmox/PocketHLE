@@ -4,8 +4,7 @@ Use this guide to collect graphics timings from the current Android build.
 Rendering and presentation contracts are maintained in [GPU.md](GPU.md);
 build the complete app with matching Rust JNI and Kotlin code as described in
 [ANDROID-BUILD.md](ANDROID-BUILD.md). No old diagnostic or cumulative patch ZIP
-is needed. For NV combiner program/texture traces and the separate RGB-copy and
-precision investigations, see [the targeted combiner guide](ANDROID-COMBINER-DIAGNOSTICS.md).
+is needed.
 
 Shared GLES presentation reports `PRESENTATION=GPU_SHARED (Android)` when active.
 CPU-origin logical RGB565 images use packed transport and GPU integer conversion:
@@ -104,77 +103,27 @@ still has overhead (clocks, aggregated logs and sampled GPU queries). Default-of
 execution issues no diagnostic GL queries, takes no diagnostic JNI lock and does
 not create diagnostic timestamps.
 
-## Historical delivery validation
+## NV program observations
 
-The following records describe earlier source-patch deliveries and their local
-checks, not requirements for installing the current release or current CI test
-selection. Executable ARM diagnostics are now manual/opt-in; see
-[ANDROID-BUILD.md](ANDROID-BUILD.md#diagnostics-and-runner-regression-tests).
+The same Android switch enables bounded `NV_DIAG` observations: extension/client
+identity; decode/compile/capacity acceptance; semantic program fingerprints;
+draw constants, coordinate routes and transforms; referenced texture formats,
+filters, completeness, revisions and available payloads. Software feedback draws
+may inspect already-owned CPU bytes; GPU snapshots are not materialized for a
+trace. Prefix hashes cover at most 64 KiB and are not full-image checksums.
+Missing CPU RGBA bytes can be normal when compressed/native decoding is deferred.
 
-The original ZIP contained source changes and this guide, not an APK. Validation includes
-Rust formatting, GLES and Android-runner unit tests, config persistence, query
-pool/disjoint tests and Kotlin aggregation/config tests. The Android renderer
-sources were additionally type-checked against Android API classes with app
-boundary stubs; that is not a complete APK build. The full NDK/FFmpeg toolchain
-and the Samsung device remain necessary for APK/runtime validation.
+Draw observations are limited to uses 1, 2, 16 and 256 for at most 128 runtime
+programs per context. Load events are capped at 512 and extension observations
+at 32 per worker thread. Disabled diagnostics do not hash, format, inspect
+pixels or insert trace-map rows; a flag check remains, not literally zero CPU
+instructions. A different semantic hash does not by itself establish a bug.
 
-Local checks on this change:
+## Desktop scope
 
-- `cargo fmt --all -- --check` and `git diff --check`: passed.
-- GLES: 234 passed, 73 native graphics tests ignored by default. Nine shared-texture/packed-conversion native GL/EGL tests were also run explicitly on Mesa, all passed.
-- WinCE API: 713 passed, 13 hardware tests ignored by default.
-- Android runner with Unicorn: 20 passed, including ARM RAM/process/VFS probes
-  after generating the repository's diagnostic fixtures.
-- Library setting persistence: passed.
-- Kotlin aggregation/configuration, frame protocol and RGB565 CPU fallback: 10 passed with Kotlin 2.1.21.
-- GLES Rust code checked for aarch64-linux-android; the exact new JNI timer
-  function also checked separately for that target against the real JNI crate.
-- Renderer/timer Kotlin sources type-checked against Android 15 API classes,
-  with stubs for app-boundary dependencies only.
-
-No complete APK build, device benchmark or physical GPU timer validation is
-claimed by these checks. Existing hardware tests remain excluded here.
-
-Historical merge audit:
-
-- Applied the implementation as a three-way delta onto 9cfdcd1, with the
-  pre-merge source/patch retained independently.
-- Kept the upstream removal of Android screenshot support, legacy run/import
-  JNI functions, base64 and unused submitted-FPS telemetry.
-- SDL3 dependencies, Cargo.lock, controller-label changes and UI cleanup are
-  taken directly from the upstream commit; this patch does not replace them.
-- The AndroidFrameRenderer conflict was resolved by retaining GPU transport,
-  timing and resource cleanup while keeping screenshot code removed.
-
-## Historical e68ff5f rebase and file audit
-
-All 30 entries in the previous ZIP were compared, not just selected source
-files. Only pocket-library/src/lib.rs and patch-files.txt overlap the new commit;
-none of the nine added source/documentation files collides with a new upstream
-file. The complete source delta applies cleanly in three-way mode to e68ff5f.
-Compared with the previous ZIP (before this guide/manifest update), only the
-merged library source differs. Its delta against upstream is limited to the
-diagnostic configuration field/default and persistence assertions. The runtime
-Standard/SteamDeck profiles and their config routing remain exactly upstream.
-The manifest is regenerated for this cumulative ZIP; desktop/CI/profile files
-outside the library source are not overwritten by the patch.
-
-
-## RGB565 shared-snapshot copy correction
-
-The Toy Golf device trace reports `Shared frame export unavailable` with
-`0x0502`, then CPU presentation, for both 1x and 2x with IPS disabled. The
-snapshot pool previously allocated RGBA8 destinations for RGB565 render targets.
-GLES/ANGLE copy validation rejects this source/destination combination. Keep
-RGB565 snapshots in a sized RGB565 texture (RGB / UNSIGNED_SHORT_5_6_5), and
-reallocate a reusable slot when the source format changes, even at equal sizes.
-RGBA sources keep their existing allocation. Conversion to display RGBA still
-happens in the consumer shader; no new CPU conversion/readback is introduced.
-
-A native desktop GL + GLES test checks the actual snapshot attachment's
-5/6/5/0 component bits and sampled pixels. The test fails against the old
-allocation (8/8/8/8), passes after the correction. All four native shared-pool
-tests and 234 ordinary GLES tests pass; aarch64 Android Rust checking passes.
-Mesa accepts the former copy, so these checks do not reproduce ANGLE's runtime
-error. Confirm `PRESENTATION=GPU_SHARED` on the affected device; no Samsung
-performance result or complete APK build is claimed.
+The temporary desktop environment switch, per-program cost/phase counters and
+desktop timer extension used for the November investigation are removed. Setting
+that old variable no longer activates profiling. Android's pre-existing setting,
+ES timer queries and bounded observations remain available as described above.
+Functional rendering contracts belong to [GPU.md](GPU.md); dated measurements
+and validation limits belong to [IMPLEMENTATION-NOTES.md](IMPLEMENTATION-NOTES.md#nv-combiner-and-egl-investigation-2026-11-09).

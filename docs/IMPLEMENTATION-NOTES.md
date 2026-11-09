@@ -4419,7 +4419,7 @@ software and the native renderer.
 missing. Explicit saved Software choices remain honored. Per-game choices are
 Emulator default / Software / GPU; restart the game after changing the backend.
 Windows uses OpenGL through WGL; Android uses EGL/GLES. Linux uses the shared
-frontend; see [desktop parity](FRONTENDS.md#windowslinux-native-service-parity) for platform limits.
+frontend; see [desktop parity](FRONTENDS.md#native-service-parity) for platform limits.
 
 Anisotropic filtering offers Off, 2x, 4x and 8x, capped to driver support. It is
 available only with GPU rendering. Upscaling and image filters are presentation
@@ -5524,3 +5524,85 @@ LR_LOADFROMFILE, image-list overlays, a complete desktop Win32 ListView and
 SW_SMOOTHSCROLL animation were outside that profile. No COMMCTRL ordinal was
 invented. Its VALIDATION-BUILD27.txt and verification directory belonged to the
 old delivery; they are not implicitly present in the current checkout.
+
+
+## NV combiner and EGL investigation (2026-11-09)
+
+Current contracts are in [GPU.md](GPU.md#egl-surfaces-and-shared-objects), virtual
+WinMM mixer behavior in [AGENTS.md](AGENTS.md#12-audio--two-transports), and the
+retained Android diagnostic interface in [ANDROID-GRAPHICS-DIAGNOSTICS.md](ANDROID-GRAPHICS-DIAGNOSTICS.md).
+The following is historical evidence, not a launch recipe or conformance claim.
+
+DoomGLES requested alpha-capable pbuffers and shared NV program bodies. Adding
+RGBA8 configuration/queries, program namespace sharing and supported AR11
+fragment rejection made previously missing reflection/sky passes available.
+Further supplied programs required independent coordinate-component selectors,
+five/six-coordinate routing and signed quarter literals. All 24 supplied program
+bodies passed original-driver load validation and local constant-input
+software/desktop-GL/GLES comparisons within the established small tolerance.
+This does not prove physical GoForce bit-exact arithmetic or every game effect.
+The virtual PCM mixer resolved its missing WinMM calls independently of graphics.
+
+The earlier Android investigation corrected guest RGB copy-chain compatibility:
+a logical RGB565 render image could not be copied directly into every alpha-less
+texture storage combination accepted by desktop drivers. Guest texture chains
+use the required compatible intermediate while preserving RGB565 precision and
+opaque alpha on materialization. Display snapshot pools are a distinct path:
+source-native RGB565 versus RGBA storage/slot reuse must match their contract.
+GLES3 NV shaders use matched highp precision through the coordinate/varying,
+framebuffer-size and feedback-sampler path to avoid camera-dependent water
+instability. Desktop, ES2, ordinary shaders and software retain their policies.
+These are rendering fixes, not scene-dependent animation adjustments.
+
+Temporary CPU/GPU timing separated program decoding, preparation, uploads,
+feedback, drawing and presentation. Doom initially performed about 5,800 full
+destination copies per image after reflection passes became available. Its
+stable-alpha case needed only one snapshot per draw; generic channel-hazard
+analysis reduced the measured copies by approximately 97%. A local llvmpipe
+outdoor fixture improved from about 1.9 to 17–19 guest presentations/s. The old
+incomplete image was faster but was not an equivalent rendering workload.
+
+Siege's supplied GTX 1650 logs measured approximately 50 swaps/s without
+combiners versus 22.4 with them; 75 program loads cost only 0.233 ms in total.
+The problem was not continuous program decoding. EGL context activation was
+invalidating all native texture uploads even within a shared object group.
+Keeping live named images while pruning unlinked/default-zero entries removed
+tens of thousands of redundant local uploads. A subsequent user capture rose
+to approximately 48.8 swaps/s, with CPU host submission falling from about
+23.4 to 3.0 ms per swap. These are moving-scene guest swap rates, not independent
+measurements of desktop FPS or a benchmark of every device.
+
+The sampler-state follow-up eliminated about 68% of sampler-unit preparations
+in a local Siege run. A single-worker llvmpipe control pair gave 15.66 to 17.50
+presentations/s, while ordinary local runs varied substantially. The subsequent
+user capture stayed around 47.9 versus 48.8 swaps/s in comparable nine-second
+windows; no additional device FPS gain was established. A last-index-upload
+cache experiment likewise showed no convincing incremental throughput gain and
+was not shipped. Fewer redundant commands alone are not a universal FPS promise.
+
+Validation included native shader transitions, sparse high samplers, incomplete
+image fallback, active/inactive uniforms, shared image updates, context-local
+texture zero, independent namespaces, deleted-name reuse, fragment discard and
+stable/writable framebuffer feedback. Native host tests use Mesa rather than a
+physical GoForce. Full Windows/Android packages and device conformance are
+separate checks. The pre-existing Mesa RGB565 8x6/policy-2 snapshot
+materialization discrepancy was reproduced before these changes; its source
+was not suppressed. Original diagnostic/benchmark fixtures were local tools,
+not game payloads or required runtime files.
+
+Temporary desktop profiling, per-program aggregation and delivery-specific
+notes were subsequently removed/merged into the owning guides. Functional
+regression tests and the pre-existing opt-in Android diagnostics are retained.
+
+A subsequent three-second user video shows an enlarged part of the GoForce
+badge visible in the water while the camera moves. The source pass/texture and
+onset have not been isolated; neither the footage nor the filenames of packaged
+logo/reflection assets establish whether it is a binding/copy, coordinate or
+content issue. Documentation/profiling cleanup does not claim to correct it.
+The instrumented source checkpoint remains separate for further investigation.
+
+The cleanup pass retained functional tests and passed 247 regular GLES tests,
+330 regular/native GLES tests with the same pre-existing snapshot discrepancy
+excluded, 726 WinCE API tests and all 19 selected EGL lifecycle tests. GLES
+ARM64 Android checking and CLI/Unicorn checking pass; complete desktop/Android
+packages and physical-device conformance remain separate validation levels.

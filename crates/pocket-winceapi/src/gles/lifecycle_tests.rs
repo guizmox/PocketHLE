@@ -670,3 +670,41 @@ fn implicit_loader_thread_keeps_standard_and_multicontext_isolation() {
         with_ctx(|c| assert_eq!(c.textures[&17].rgba, [21, 43, 65, 255]));
     }
 }
+
+fn coherent_shared_images_and_local_zero(gpu: bool) {
+    reset_for_test(8, 8);
+    let (mut cpu, mut k) = (fresh_cpu(), fresh_kernel());
+    set_gpu_renderer(gpu);
+    quad(&mut cpu);
+    with_ctx(|c| {
+        texture(c, 17, [0, 255, 0, 255]);
+        texture(c, 0, [255, 0, 0, 255]);
+    });
+    assert_eq!(render(&mut cpu), [255, 0, 0, 255]);
+    let b = create(&mut cpu, &mut k, CONTEXT_HANDLE);
+    bind(&mut cpu, &mut k, b, SURFACE_HANDLE);
+    with_ctx(|c| texture(c, 0, [0, 0, 255, 255]));
+    assert_eq!(render(&mut cpu), [0, 0, 255, 255]);
+    with_ctx(|c| c.bind_texture(GL_TEXTURE_2D, 17));
+    assert_eq!(render(&mut cpu), [0, 255, 0, 255]);
+    bind(&mut cpu, &mut k, CONTEXT_HANDLE, SURFACE_HANDLE);
+    assert_eq!(render(&mut cpu), [255, 0, 0, 255]);
+    with_ctx(|c| c.bind_texture(GL_TEXTURE_2D, 17));
+    assert_eq!(render(&mut cpu), [0, 255, 0, 255]);
+    with_ctx(|c| texture(c, 17, [255, 255, 0, 255]));
+    bind(&mut cpu, &mut k, b, SURFACE_HANDLE);
+    assert_eq!(render(&mut cpu), [255, 255, 0, 255]);
+    with_ctx(|c| c.bind_texture(GL_TEXTURE_2D, 0));
+    assert_eq!(render(&mut cpu), [0, 0, 255, 255]);
+}
+#[test]
+fn shared_images_update_while_texture_zero_stays_context_local_software() {
+    let _g = guard();
+    coherent_shared_images_and_local_zero(false);
+}
+#[test]
+#[ignore = "requires host OpenGL; shared cache and context-local texture zero"]
+fn shared_images_update_while_texture_zero_stays_context_local_gpu() {
+    let _g = guard();
+    coherent_shared_images_and_local_zero(true);
+}

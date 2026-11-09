@@ -2137,6 +2137,10 @@ impl Renderer {
         }
     }
     unsafe fn uniform_4fv(&mut self, l: i32, n: i32, p: *const f32) {
+        // An inactive uniform needs neither a driver call nor payload/cache work.
+        if l < 0 {
+            return;
+        }
         let mut bits = [0u32; 32];
         let len = n as usize * 4;
         for (dst, v) in bits[..len]
@@ -2150,6 +2154,9 @@ impl Renderer {
         }
     }
     unsafe fn uniform_matrix4fv(&mut self, l: i32, n: i32, transpose: u8, p: *const f32) {
+        if l < 0 {
+            return;
+        }
         let mut bits = [0u32; 16];
         for (dst, v) in bits.iter_mut().zip(std::slice::from_raw_parts(p, 16)) {
             *dst = v.to_bits();
@@ -2482,6 +2489,35 @@ impl Renderer {
     pub fn supports_compressed(&self, format: u32) -> bool {
         let format = native_compressed_format(format);
         self.gl.CompressedTexImage2D.is_some() && self.compressed_formats.contains(&format)
+    }
+    /// EGL cache maintenance, independent of guest glDeleteTextures semantics.
+    /// Shared named objects retain identity/revision across contexts; texture
+    /// zero is context-local and must never survive a surface context switch.
+    pub fn retain_shared_texture_cache(&mut self, live: &std::collections::HashSet<u32>) {
+        let stale: Vec<_> = self
+            .textures
+            .keys()
+            .copied()
+            .filter(|name| *name == 0 || !live.contains(name))
+            .collect();
+        self.invalidate_texture_cache_entries(&stale);
+    }
+    pub fn invalidate_texture_cache(&mut self) {
+        let names: Vec<_> = self.textures.keys().copied().collect();
+        self.invalidate_texture_cache_entries(&names);
+    }
+    fn invalidate_texture_cache_entries(&mut self, names: &[u32]) {
+        if names.is_empty() || self.host.make_current().is_err() {
+            return;
+        }
+        for name in names {
+            if let Some((id, _)) = self.textures.remove(name) {
+                self.texture_params.remove(&id);
+                unsafe {
+                    (self.gl.DeleteTextures)(1, &id);
+                }
+            }
+        }
     }
     pub fn delete_textures(&mut self, names: &[u32]) {
         if self.host.make_current().is_err() {
@@ -2822,7 +2858,13 @@ impl Renderer {
     ) -> Result<(), String> {
         let _diagnostic =
             crate::graphics_diagnostic::Span::new(crate::graphics_diagnostic::Stage::Submit);
-        let wide_draw = stages.iter().any(|s| s.unit >= 4);
+        // A sampled high unit still needs its white fallback when its image
+        // is incomplete and therefore absent from the enabled stage list.
+        let wide_draw = stages.iter().any(|s| s.unit >= 4)
+            || self
+                .combiner
+                .as_ref()
+                .is_some_and(|(p, _)| (p.texture_units() | p.coordinate_units()) & 0x30 != 0);
         if wide_draw && !self.wide_textures {
             return Err("six texture coordinates exceed host shader limits".into());
         }
@@ -2858,7 +2900,11 @@ impl Renderer {
             0
         };
         let vertex_count = stream.map_or(vertices.len(), |s| s.count);
+        let sampled_units = self.combiner.as_ref().map(|(p, _)| p.texture_units());
         let range = stages.iter().any(|stage| {
+            if sampled_units.is_some_and(|mask| mask & (1 << stage.unit) == 0) {
+                return false;
+            }
             textures.get(&names[stage.unit]).is_some_and(|tex| {
                 let (lo, hi) = tex.lod_bounds();
                 let (w, h) = tex.sampling_size();
@@ -3311,6 +3357,12 @@ impl Renderer {
                 .take(if wide_draw { 6 } else { 4 })
                 .enumerate()
             {
+                // NV coordinate routes and sampled textures are independent.
+                // Keep all needed vertex coordinates, but do not bind/upload
+                // textures or send sampler state for an unreferenced unit.
+                if sampled_units.is_some_and(|mask| mask & (1 << i) == 0) {
+                    continue;
+                }
                 (self.gl.ActiveTexture)(GL_TEXTURE0 + i as u32);
                 let stage = stages.iter().find(|s| s.unit == i);
                 let mut id = self.white;
@@ -6512,6 +6564,253 @@ mod tests {
                     assert_eq!(&native.color[i..i + 4], &cpu.color[i..i + 4]);
                 }
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES; inactive uniform payload fast path"]
+    fn inactive_uniforms_skip_payload_reads_and_active_uniforms_keep_value_caching() {
+        use std::cell::Cell;
+        thread_local! {static VECTORS:Cell<usize>=const{Cell::new(0)};static MATRICES:Cell<usize>=const{Cell::new(0)};}
+        unsafe extern "system" fn vector(_: i32, _: i32, _: *const f32) {
+            VECTORS.with(|n| n.set(n.get() + 1));
+        }
+        unsafe extern "system" fn matrix(_: i32, _: i32, _: u8, _: *const f32) {
+            MATRICES.with(|n| n.set(n.get() + 1));
+        }
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            let (v, m) = (gpu.gl.Uniform4fv, gpu.gl.UniformMatrix4fv);
+            gpu.gl.Uniform4fv = vector;
+            gpu.gl.UniformMatrix4fv = matrix;
+            VECTORS.with(|n| n.set(0));
+            MATRICES.with(|n| n.set(0));
+            unsafe {
+                // Inactive locations return before touching any payload.
+                gpu.uniform_4fv(-1, 8, std::ptr::null());
+                gpu.uniform_matrix4fv(-1, 1, 0, std::ptr::null());
+                assert!(!gpu.uniform_values.contains_key(&-1));
+                let mut color = [0.25; 4];
+                gpu.uniform_4fv(501, 1, color.as_ptr());
+                gpu.uniform_4fv(501, 1, color.as_ptr());
+                color[0] = 0.75;
+                gpu.uniform_4fv(501, 1, color.as_ptr());
+                gpu.uniform_matrix4fv(502, 1, 0, IDENTITY.as_ptr());
+                gpu.uniform_matrix4fv(502, 1, 0, IDENTITY.as_ptr());
+            }
+            VECTORS.with(|n| assert_eq!(n.get(), 2));
+            MATRICES.with(|n| assert_eq!(n.get(), 1));
+            gpu.gl.Uniform4fv = v;
+            gpu.gl.UniformMatrix4fv = m;
+            gpu.poll_error().unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES; NV sampler/coordinate routing transitions"]
+    fn nv_unused_sampler_units_skip_bindings_uploads_and_lod_without_losing_coordinates() {
+        use std::cell::Cell;
+        type Active = unsafe extern "system" fn(u32);
+        thread_local! {static REAL:Cell<Option<Active>>=const{Cell::new(None)};static UNITS:Cell<u32>=const{Cell::new(0)};}
+        unsafe extern "system" fn active(unit: u32) {
+            UNITS.with(|m| m.set(m.get() | 1 << (unit - GL_TEXTURE0)));
+            let real = REAL.with(Cell::get).unwrap();
+            real(unit);
+        }
+        let program = std::sync::Arc::new(
+            crate::combiner_program::Program::decode(&[
+                b'A', b'R', b'1', b'0', 1, 0x70, 0x06, 0, 0, 0x83, 0xc3, 0xcc, 0x70, 0x80, 0, 0, 0,
+                0, 0xa4, 0xe4, 0, 0x88, 0x29, 0x5c, 0x5b, 0x29,
+            ])
+            .unwrap()
+            .compile_basic()
+            .unwrap(),
+        );
+        assert_eq!(program.texture_units(), 1);
+        assert_eq!(program.coordinate_units(), 2);
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            let mut target = RenderTarget::new(8, 8);
+            let state = PipelineState {
+                viewport: (0, 0, 8, 8),
+                ..Default::default()
+            };
+            let vertices = [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| {
+                let mut v = Vertex {
+                    pos,
+                    color: [1.; 4],
+                    ..Default::default()
+                };
+                v.texcoord[1] = [0.75, 0., 0., 1.];
+                v
+            });
+            let mut t = Texture::default();
+            t.min_filter = Filter::Nearest;
+            t.mag_filter = Filter::Nearest;
+            t.set_level(0, 2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+            let mut unused = Texture::default();
+            unused.min_filter = Filter::Nearest;
+            unused.max_lod = 0.;
+            unused.set_level(0, 2, 2, [0, 0, 255, 255].repeat(4));
+            let textures = HashMap::from([(1, t), (2, unused)]);
+            let stages = [0, 1].map(|unit| TextureStage {
+                unit,
+                env: TexEnvMode::Replace,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            });
+            let real = gpu.gl.ActiveTexture;
+            REAL.with(|r| r.set(Some(real)));
+            gpu.gl.ActiveTexture = active;
+            for nv in [true, false, true] {
+                gpu.set_combiner(nv.then_some(&program), [[0.; 4]; 4]);
+                UNITS.with(|m| m.set(0));
+                gpu.draw(
+                    &target,
+                    &state,
+                    GL_TRIANGLES,
+                    &vertices,
+                    &stages,
+                    &textures,
+                    [1, 2, 0, 0, 0, 0],
+                )
+                .unwrap();
+                UNITS.with(|m| assert_eq!(m.get(), if nv { 1 } else { 15 }, "es={es} nv={nv}"));
+                assert_eq!(gpu.range_active, !nv);
+                if nv && gpu.textures.len() == 1 {
+                    assert!(!gpu.textures.contains_key(&2));
+                }
+                gpu.read(&mut target).unwrap();
+                let i = (3 * 8 + 4) * 4;
+                assert_eq!(
+                    &target.color[i..i + 4],
+                    if nv {
+                        &[0, 255, 0, 255]
+                    } else {
+                        &[0, 0, 255, 255]
+                    },
+                    "es={es} nv={nv}"
+                );
+                gpu.poll_error().unwrap();
+            }
+            gpu.gl.ActiveTexture = real;
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native desktop GL and GLES; shared texture cache lifecycle"]
+    fn shared_texture_cache_retains_live_images_and_prunes_local_or_unlinked_objects() {
+        for es in [false, true] {
+            let mut gpu = if es {
+                Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            let mut target = RenderTarget::new(8, 8);
+            let state = PipelineState {
+                viewport: (0, 0, 8, 8),
+                ..Default::default()
+            };
+            let vertices =
+                [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
+                    pos,
+                    ..Default::default()
+                });
+            let stage = TextureStage {
+                unit: 0,
+                env: TexEnvMode::Replace,
+                env_color: [0.; 4],
+                lod_bias: 0.,
+            };
+            let mut tex = Texture::default();
+            tex.min_filter = Filter::Nearest;
+            tex.set_level(0, 1, 1, vec![255, 0, 0, 255]);
+            let mut textures = HashMap::from([(0, tex.clone()), (7, tex.clone()), (8, tex)]);
+            for name in [0, 7, 8] {
+                gpu.draw(
+                    &target,
+                    &state,
+                    GL_TRIANGLES,
+                    &vertices,
+                    &[stage],
+                    &textures,
+                    [name, 0, 0, 0, 0, 0],
+                )
+                .unwrap();
+            }
+            let original = gpu.textures[&7];
+            gpu.retain_shared_texture_cache(&std::collections::HashSet::from([7]));
+            assert!(!gpu.textures.contains_key(&0));
+            assert!(!gpu.textures.contains_key(&8));
+            assert_eq!(gpu.textures[&7], original);
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[stage],
+                &textures,
+                [7, 0, 0, 0, 0, 0],
+            )
+            .unwrap();
+            assert_eq!(gpu.textures[&7], original);
+            textures
+                .get_mut(&7)
+                .unwrap()
+                .set_level(0, 1, 1, vec![0, 255, 0, 255]);
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[stage],
+                &textures,
+                [7, 0, 0, 0, 0, 0],
+            )
+            .unwrap();
+            assert_eq!(gpu.textures[&7].0, original.0);
+            assert_ne!(gpu.textures[&7].1, original.1);
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[(3 * 8 + 4) * 4..(3 * 8 + 4) * 4 + 4],
+                &[0, 255, 0, 255]
+            );
+            gpu.invalidate_texture_cache();
+            assert!(gpu.textures.is_empty());
+            assert!(gpu.texture_params.is_empty());
+            // A new unrelated namespace may have the same object id/revision.
+            textures
+                .get_mut(&7)
+                .unwrap()
+                .set_level(0, 1, 1, vec![0, 0, 255, 255]);
+            textures.get_mut(&7).unwrap().revision = original.1;
+            gpu.draw(
+                &target,
+                &state,
+                GL_TRIANGLES,
+                &vertices,
+                &[stage],
+                &textures,
+                [7, 0, 0, 0, 0, 0],
+            )
+            .unwrap();
+            gpu.read(&mut target).unwrap();
+            assert_eq!(
+                &target.color[(3 * 8 + 4) * 4..(3 * 8 + 4) * 4 + 4],
+                &[0, 0, 255, 255]
+            );
+            gpu.poll_error().unwrap();
         }
     }
 

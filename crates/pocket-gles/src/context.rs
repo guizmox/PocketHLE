@@ -303,6 +303,16 @@ impl SurfaceBuffers {
         }
         true
     }
+    pub fn retain_shared_texture_cache(&mut self, live: &std::collections::HashSet<u32>) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.retain_shared_texture_cache(live);
+        }
+    }
+    pub fn invalidate_texture_cache(&mut self) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.invalidate_texture_cache();
+        }
+    }
     pub fn delete_textures(&mut self, names: &[u32]) {
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.delete_textures(names);
@@ -5147,6 +5157,98 @@ mod tests {
                         "write_alpha={alpha}: {actual:?} vs {expected:?}"
                     );
                 }
+            });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires native desktop GL and GLES; sparse high NV sampler"]
+    fn gpu_nv_sparse_sampler_four_keeps_coordinate_one_and_fixed_function_transitions() {
+        use crate::combiner_program::{Architecture, Program, Stage};
+        for es in [false, true] {
+            let root = if es {
+                crate::gpu::Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                crate::gpu::Renderer::new(8, 8).unwrap()
+            };
+            crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
+                let mut c = ctx();
+                c.nv_combiner_client = true;
+                c.enable_gpu().unwrap();
+                let mut mem = FakeMem {
+                    base: BASE,
+                    bytes: quad_floats(),
+                };
+                c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+                c.set_client_state(GL_VERTEX_ARRAY, true);
+                c.set_active_texture(1);
+                c.bind_texture(GL_TEXTURE_2D, 2);
+                c.tex_image_2d(
+                    GL_TEXTURE_2D,
+                    0,
+                    1,
+                    1,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    &[0, 0, 255, 255],
+                );
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                c.set_capability(GL_TEXTURE_2D, true);
+                c.tex_env(GL_TEXTURE_ENV_MODE, GL_REPLACE);
+                c.set_multi_texcoord4(GL_TEXTURE0 + 1, [0.75, 0., 0., 1.]);
+                c.set_active_texture(4);
+                c.bind_texture(GL_TEXTURE_2D, 1);
+                c.tex_image_2d(
+                    GL_TEXTURE_2D,
+                    0,
+                    2,
+                    1,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    &[255, 0, 0, 255, 0, 255, 0, 255],
+                );
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                c.set_capability(GL_TEXTURE_2D, true);
+                c.tex_env(GL_TEXTURE_ENV_MODE, GL_MODULATE);
+                let p = Program {
+                    architecture: Architecture::Ar11,
+                    flags: 0,
+                    stages: vec![Stage {
+                        alpha_output: 0x0670,
+                        alpha_inputs: 0xc304_0000,
+                        flags: 0xe8,
+                        color_output: 0x8070,
+                        color_input_modifiers: 0x0400,
+                        color_inputs: 0xe408_0000,
+                        color_input_modes: 0x8100,
+                        texture_routing: 0x3fff_fc21,
+                    }],
+                }
+                .compile_basic()
+                .unwrap();
+                assert_eq!(p.texture_units(), 1 << 4);
+                assert_eq!(p.coordinate_units(), 1 << 1);
+                c.combiner_programs.load_bound(p, 6).unwrap();
+                for nv in [true, false, true] {
+                    c.combiner_programs.set_enabled(nv);
+                    c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+                    c.sync_gpu();
+                    assert_eq!(
+                        pixel(&c, 32, 32),
+                        if nv { [0, 255, 0, 255] } else { [0, 0, 0, 255] },
+                        "es={es} nv={nv}"
+                    );
+                    assert_eq!(c.take_error(), GL_NO_ERROR);
+                }
+                // An incomplete high sampler is absent from enabled stages,
+                // but must still replace the prior binding with its fallback.
+                c.set_active_texture(4);
+                c.bind_texture(GL_TEXTURE_2D, 99);
+                c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+                c.sync_gpu();
+                assert_eq!(pixel(&c, 32, 32), [255, 255, 255, 255]);
+                assert_eq!(c.take_error(), GL_NO_ERROR);
             });
         }
     }
