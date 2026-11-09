@@ -44,6 +44,22 @@ not silently hidden by continuing with stale software depth or color state.
 - Finish the worker before closing the UI share group. Preserve parent/child
   context restoration, EGL surface lifetime and restart behavior.
 
+## PocketPC graphics compatibility options
+
+The PocketPC options panel exposes **NVIDIA GoForce 5500 AR10/AR11 combiners**
+immediately below Intel 2700G depth-bias compatibility, on desktop and Android.
+It is a global PocketPC setting, applied on the next launch in software and GPU
+modes. The persisted `pocketpc_nv_combiners` flag defaults to true, including
+when absent from older configuration files, preserving detected-client behavior.
+
+Disabling it gates extension advertisement and NV entry points and disables
+active combiner state in the session's contexts. New EGL contexts and client
+state resets preserve the gate. Enabling it permits the existing client detection;
+it does not force combiner rendering on applications that do not request it.
+The PocketPC switch does not alter Gizmondo's existing policy. Both launchers
+explicitly configure the session gate, independently of the GoForce driver and
+Intel 2700G depth-bias profiles. CLI launches retain their existing default.
+
 ## Internal resolution
 
 Internal rasterization resolution, guest logical resolution and display zoom are

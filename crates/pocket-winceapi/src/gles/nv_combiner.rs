@@ -10,9 +10,10 @@ pub(super) const TARGET: u32 = 0x890a;
 
 pub(super) fn enabled() -> bool {
     with_ctx(|c| {
-        (c.nv_combiner_client && (!c.gpu_active() || c.gpu_supports_combiner()))
-            || (!c.gpu_requested()
-                && std::env::var_os("POCKETHLE_EXPERIMENTAL_NV_COMBINER").is_some())
+        c.nv_combiner_allowed
+            && ((c.nv_combiner_client && (!c.gpu_active() || c.gpu_supports_combiner()))
+                || (!c.gpu_requested()
+                    && std::env::var_os("POCKETHLE_EXPERIMENTAL_NV_COMBINER").is_some()))
     })
 }
 
@@ -25,6 +26,7 @@ pub(super) fn diagnostic_extensions() {
             c.gpu_requested(),
             c.gpu_active(),
             c.gpu_supports_combiner(),
+            c.nv_combiner_allowed,
         ]
     });
     thread_local! { static QUERIES: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
@@ -38,7 +40,7 @@ pub(super) fn diagnostic_extensions() {
     }) {
         return;
     }
-    log::info!("NV_DIAG event=extensions advertised={} client={} gpu_requested={} gpu_active={} gpu_support={}", state[0], state[1], state[2], state[3], state[4]);
+    log::info!("NV_DIAG event=extensions advertised={} client={} gpu_requested={} gpu_active={} gpu_support={} allowed={}", state[0], state[1], state[2], state[3], state[4], state[5]);
 }
 
 fn error(code: u32) -> DispatchOutcome {
@@ -245,6 +247,24 @@ pub(super) fn register(d: &mut WinCeDispatcher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_gate_survives_context_creation_and_client_reset() {
+        crate::gles::reset_for_session();
+        with_ctx(|context| context.nv_combiner_client = true);
+        for allowed in [false, true] {
+            crate::gles::set_nv_combiner_allowed(allowed);
+            assert_eq!(enabled(), allowed);
+            with_ctx(|context| {
+                assert_eq!(context.new_egl_context().nv_combiner_allowed, allowed);
+                context.reset_client_state();
+                assert_eq!(context.nv_combiner_allowed, allowed);
+            });
+            assert_eq!(enabled(), allowed);
+        }
+        crate::gles::reset_for_session();
+        assert!(with_ctx(|context| context.nv_combiner_allowed));
+    }
 
     #[test]
     fn detected_software_client_gets_combiners_without_gpu() {

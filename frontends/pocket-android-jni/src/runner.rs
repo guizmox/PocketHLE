@@ -581,6 +581,7 @@ fn run_process_inner(
             .unwrap_or(launcher_config.gpu_renderer),
     );
     emu.set_gizmondo_goforce_driver(is_gizmondo);
+    emu.set_nv_combiner_allowed(is_gizmondo || launcher_config.pocketpc_nv_combiners);
     emu.set_intel2700g_depth_bias(!is_gizmondo && launcher_config.pocketpc_intel2700g_depth_bias);
     emu.set_gles_internal_resolution(launcher_config.gles_internal_resolution);
     emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(

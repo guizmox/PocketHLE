@@ -132,6 +132,18 @@ class SettingsActivity : HostKeyActivity() {
                     true
                 }
             })
+            ppcGraphics.addPreference(SwitchPreferenceCompat(requireContext()).apply {
+                key = "pocketpc_nv_combiners"
+                title = "NVIDIA GoForce 5500 AR10/AR11 combiners"
+                summary = "Enable NVIDIA GoForce 5500 combiner programs for PocketPC games that request them. Applies next launch, in software and GPU modes."
+                isPersistent = false
+                isChecked = current.toJson().optBoolean("pocketpc_nv_combiners", true)
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(originalJson = current.toJson().put("pocketpc_nv_combiners", value as Boolean).toString())
+                    writeConfig()
+                    true
+                }
+            })
             identityField(giz, "gizmondo_preset_id", "Device name (Preset ID — Gizmondo)")
             identityField(giz, "gizmondo_platform_id", "Console identifier (Platform ID — hexadecimal, Gizmondo)")
             fun toggle(keyName: String, label: String, checked: Boolean, update: (Boolean) -> Unit) {

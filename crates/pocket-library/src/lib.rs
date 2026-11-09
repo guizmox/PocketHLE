@@ -1052,6 +1052,9 @@ pub struct LauncherConfig {
     /// All PocketPC applications may opt in; Gizmondo always keeps standard ES.
     #[serde(default)]
     pub pocketpc_intel2700g_depth_bias: bool,
+    /// Allow detected PocketPC clients to use NVIDIA AR10/AR11 programs.
+    #[serde(default = "default_pocketpc_nv_combiners")]
+    pub pocketpc_nv_combiners: bool,
     #[serde(default = "default_recording_format")]
     pub recording_format: String,
     /// Video recording JPEG quality preset: low, medium or high.
@@ -1361,6 +1364,10 @@ fn default_pocketpc_processor() -> String {
     "pxa270".into()
 }
 
+fn default_pocketpc_nv_combiners() -> bool {
+    true
+}
+
 fn default_desktop_vsync() -> bool {
     true
 }
@@ -1378,6 +1385,7 @@ impl Default for LauncherConfig {
             desktop_vsync: true,
             pocketpc_processor: default_pocketpc_processor(),
             pocketpc_intel2700g_depth_bias: false,
+            pocketpc_nv_combiners: true,
             recording_quality: default_recording_quality(),
             recording_format: default_recording_format(),
             device_preset_id: default_device_preset_id(),
@@ -7252,4 +7260,25 @@ fn intel2700g_compatibility_is_opt_in_and_round_trips() {
         config.gles_internal_resolution
     );
     assert_eq!(restored.gpu_renderer, config.gpu_renderer);
+}
+
+#[test]
+fn pocketpc_nv_combiners_preserve_default_and_round_trip_disabled() {
+    let mut config = LauncherConfig::default();
+    assert!(config.pocketpc_nv_combiners);
+    let mut old = serde_json::to_value(&config).unwrap();
+    old.as_object_mut().unwrap().remove("pocketpc_nv_combiners");
+    assert!(
+        serde_json::from_value::<LauncherConfig>(old)
+            .unwrap()
+            .pocketpc_nv_combiners
+    );
+    config.pocketpc_nv_combiners = false;
+    let restored: LauncherConfig =
+        serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+    assert!(!restored.pocketpc_nv_combiners);
+    assert_eq!(
+        restored.pocketpc_intel2700g_depth_bias,
+        config.pocketpc_intel2700g_depth_bias
+    );
 }

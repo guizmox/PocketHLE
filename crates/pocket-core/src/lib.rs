@@ -135,6 +135,11 @@ impl Emulator {
         pocket_winceapi::gles::set_gizmondo_goforce_driver(enabled);
     }
 
+    /// Session gate for detected NVIDIA AR10/AR11 combiner clients.
+    pub fn set_nv_combiner_allowed(&mut self, allowed: bool) {
+        pocket_winceapi::gles::set_nv_combiner_allowed(allowed);
+    }
+
     /// Opt-in Intel 2700G WinCE depth-bias semantics for the PocketPC profile.
     pub fn set_intel2700g_depth_bias(&mut self, enabled: bool) {
         pocket_winceapi::gles::set_intel2700g_depth_bias(enabled);

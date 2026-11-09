@@ -341,6 +341,18 @@ pub fn uses_nv_combiner(image: &pocket_pe::LoadedImage) -> bool {
     })
 }
 
+/// Set the session capability gate without changing client detection.
+pub fn set_nv_combiner_allowed(allowed: bool) {
+    let apply = |c: &mut Context| {
+        c.nv_combiner_allowed = allowed;
+        if !allowed {
+            c.combiner_programs.set_enabled(false);
+        }
+    };
+    with_ctx(apply);
+    update_stored_contexts(apply);
+}
+
 /// Set the extension policy independently of the Gizmondo driver profile.
 pub fn set_nv_combiner_client(enabled: bool) {
     with_ctx(|c| c.nv_combiner_client = enabled);

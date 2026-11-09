@@ -2573,6 +2573,9 @@ impl PocketLauncher {
         crate::controller_ui::checkbox(ui, &mut draft.pocketpc_intel2700g_depth_bias,
             "Intel 2700G depth-bias compatibility");
         ui.add(egui::Label::new("Use if projected lights or ground decals show through foreground objects. Reproduces the original WinCE driver's integer constant bias without its slope term, with 24-bit depth. Applies to PocketPC games on the next launch, in software and GPU modes.").wrap(true));
+        crate::controller_ui::checkbox(ui, &mut draft.pocketpc_nv_combiners,
+            "NVIDIA GoForce 5500 AR10/AR11 combiners");
+        ui.add(egui::Label::new("Enable NVIDIA GoForce 5500 combiner programs for PocketPC games that request them. Applies on the next launch, in software and GPU modes.").wrap(true));
         } else {
         let library_root = self.library.root().display().to_string();
         ui.add_space(10.0);

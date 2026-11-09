@@ -397,6 +397,8 @@ pub struct Context {
     /// a hardware claim or an ES-wide relaxation. Standard profile is default.
     pub gizmondo_goforce_20051013: bool,
     pub nv_combiner_client: bool,
+    /// Session capability gate, independent of client detection and driver profile.
+    pub nv_combiner_allowed: bool,
     /// `GL_CULL_FACE` enable, tracked separately from the face mode so
     /// `glCullFace` before `glEnable` is not lost.
     cull_enabled: bool,
@@ -486,6 +488,7 @@ impl Context {
             clear_depth: 1.0,
             gizmondo_goforce_20051013: false,
             nv_combiner_client: false,
+            nv_combiner_allowed: true,
             cull_enabled: false,
             scissor_enabled: false,
             scissor_box: None,
@@ -537,6 +540,7 @@ impl Context {
         fresh.internal_resolution = self.internal_resolution;
         fresh.gizmondo_goforce_20051013 = self.gizmondo_goforce_20051013;
         fresh.nv_combiner_client = self.nv_combiner_client;
+        fresh.nv_combiner_allowed = self.nv_combiner_allowed;
         fresh.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;
         std::mem::swap(&mut fresh.target, &mut self.target);
         std::mem::swap(&mut fresh.gpu, &mut self.gpu);
