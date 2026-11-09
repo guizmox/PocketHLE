@@ -1,6 +1,19 @@
 use super::*;
 use pocket_library::stylus_grid::{ControlsMode, HostInput, TouchAction};
 
+// Assignment labels and status messages must not change the modal bounds.
+fn editor_window<'a>(ctx: &egui::Context, title: &str) -> egui::Window<'a> {
+    let size = (ctx.available_rect().size() - Vec2::splat(48.0))
+        .min(Vec2::new(600.0, 680.0))
+        .max(Vec2::splat(100.0));
+    egui::Window::new(title)
+        .id(egui::Id::new("stylus_controls_editor"))
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .collapsible(false)
+        .resizable(false)
+        .fixed_size(size)
+}
+
 pub(super) struct StylusEditor {
     pub waiting: Option<usize>,
     selected: Option<usize>,
@@ -373,12 +386,11 @@ impl PocketLauncher {
         } else {
             "Touch zone mapping"
         };
-        egui::Window::new(title).id(egui::Id::new("stylus_controls_editor"))
-            .open(&mut open).collapsible(false).resizable(false)
-            .max_width((ctx.available_rect().width()-32.0).clamp(160.0,600.0))
+        editor_window(ctx, title)
+            .open(&mut open)
             .show(ctx,|ui| {
                 crate::controller_ui::page_scope(ui,"stylus_grid_modal",|ui| {
-                egui::ScrollArea::vertical().max_height((ctx.available_rect().height()-110.0).max(100.0)).show(ui,|ui|{
+                egui::ScrollArea::vertical().id_source("stylus_controls_editor_body").auto_shrink([false, false]).show(ui,|ui|{
                     if !editor.testing {
                         crate::controller_ui::ComboBox::from_id_source("stylus_grid_size")
                             .selected_text(format!("{} × {}",draft.pocketpc_stylus_grid.columns,draft.pocketpc_stylus_grid.rows))
@@ -427,7 +439,7 @@ impl PocketLauncher {
                                 editor.waiting=None;
                             }
                             if crate::controller_ui::button(ui,"Clear all").clicked(){draft.pocketpc_stylus_grid.bindings.clear();editor.waiting=None;}
-                            if editor.waiting.is_some() && crate::controller_ui::button(ui,"Cancel assignment").clicked(){editor.waiting=None;}
+                            if crate::controller_ui::add_enabled(ui, editor.waiting.is_some(), egui::Button::new("Cancel assignment")).clicked(){editor.waiting=None;}
                         });
                         ui.label(&editor.message);
                     }
@@ -439,6 +451,76 @@ impl PocketLauncher {
             self.stylus_editor = Some(editor);
         } else {
             self.controller_ui.stop_repeat();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assignment_messages_keep_window_and_grid_cells_stationary() {
+        for screen in [
+            Vec2::new(1280.0, 800.0),
+            Vec2::new(800.0, 480.0),
+            Vec2::new(640.0, 400.0),
+        ] {
+            let ctx = egui::Context::default();
+            let draw = |assigned: bool| {
+                let mut cell = egui::Rect::NOTHING;
+                let _ =
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            editor_window(ctx, "Touch zone mapping").show(ctx, |ui| {
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.label("Select a zone, then press an input.");
+                                        let response = crate::controller_ui::sized_button(
+                                            ui,
+                                            Vec2::new(80.0, 70.0),
+                                            if assigned { "RightStickDown" } else { "1" },
+                                        );
+                                        cell = response.rect;
+                                        ui.add_enabled(
+                                            !assigned,
+                                            egui::Button::new("Cancel assignment"),
+                                        );
+                                        ui.label(if assigned {
+                                "This input is reserved by PocketHLE. Choose another input."
+                            } else { "Waiting for input." });
+                                        let _ = ui.button("Done");
+                                    });
+                            });
+                        },
+                    );
+                (
+                    ctx.memory(|m| m.area_rect(egui::Id::new("stylus_controls_editor")))
+                        .unwrap(),
+                    cell,
+                )
+            };
+            draw(false);
+            let (window, cell) = draw(false);
+            for assigned in [true, false, true] {
+                let (next_window, next_cell) = draw(assigned);
+                assert!(
+                    next_window.min.distance(window.min) < 1.0,
+                    "window moved on {screen:?}: {window:?} -> {next_window:?}"
+                );
+                assert!((next_window.size() - window.size()).length() < 1.0);
+                assert!(
+                    next_cell.min.distance(cell.min) < 1.0,
+                    "cell moved after assignment"
+                );
+                assert!(next_window.left() >= 0.0 && next_window.top() >= 0.0);
+                assert!(next_window.right() <= screen.x && next_window.bottom() <= screen.y);
+            }
         }
     }
 }

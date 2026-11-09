@@ -1,11 +1,6 @@
-crates\pocket-core\src\lib.rs
-crates\pocket-gles\src\context.rs
-crates\pocket-gles\src\context\sharing.rs
-crates\pocket-library\src\lib.rs
-crates\pocket-winceapi\src\gles.rs
-crates\pocket-winceapi\src\gles\nv_combiner.rs
-docs\GPU.md
-frontends\pocket-android-jni\src\runner.rs
-frontends\pocket-android\app\src\main\java\com\pockethle\app\SettingsActivity.kt
-frontends\pocket-desktop\src\app.rs
-frontends\pocket-desktop\src\runner.rs
+docs/FRONTENDS.md
+docs/STEAMDECK.md
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-desktop/src/controller_ui.rs
+frontends/pocket-desktop/src/recordings_gallery.rs
+frontends/pocket-desktop/src/stylus_controls_ui.rs

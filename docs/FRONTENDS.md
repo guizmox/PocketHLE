@@ -65,6 +65,23 @@ files, saves and per-game settings. Dismissing the confirmation cancels removal.
 Removal is refused while game sessions are running or stopping; Android holds
 the existing session gate through the filesystem operation.
 
+Desktop uses an egui-owned, centred confirmation. South/Enter confirms;
+East/Escape or the close button cancels, with cancellation winning simultaneous
+inputs. Face-button markings use the shared SDL3 label provider. Library actions
+and navigation repeat do not reach the page behind the confirmation. Only the
+confirmed action calls `Library::remove`; no native dialog takes controller focus.
+
+## Desktop capture gallery
+
+The Recordings tab lists screenshots and videos. From the selected tile,
+**South opens** and **East requests deletion** (A/B on Deck); face-button help
+uses SDL3 labels from the active controller. The former R3 deletion shortcut is
+removed. Native sharing, where available, remains on North. Mouse Delete and
+controller deletion open the same confirmation, initially selecting Cancel.
+Left selects Cancel, right selects Delete, South accepts the selected choice,
+and East cancels. Repeated directional input does not toggle the selection.
+In the viewer, East still leaves fullscreen or closes playback; it never deletes.
+
 ## Desktop and Gizmondo controls
 
 The desktop Gizmondo panel uses the PocketPC-style dark/translucent design,
@@ -646,6 +663,10 @@ PocketPC Center tap, but not Screenshot.
 
 ## Desktop button toolbar
 
+Menu/Start remains the immutable filter/recording shortcut; it does not open
+settings. Use the Settings toolbar group, with L3 to switch between toolbar and
+page. There is no separate Start-to-settings action.
+
 The former Game library, Settings and About dropdown hierarchy is replaced by
 direct buttons in four separated groups: Game library, Settings, Features,
 About. Each group has at most two rows; small windows scroll horizontally
@@ -698,6 +719,14 @@ back to the first registered page widget. A clicked skin hotspot may own an egui
 focus ID outside the controller tab list. Keep that mouse focus rather than
 repairing it to the top button. Auto-reveal and focus repair are enabled when
 keyboard/controller navigation resumes; popup selection keeps its own reveal.
+Native touch Start/Move/End/Cancel events and held pointer gestures also suspend
+navigation focus repair, including when no mouse-button edge accompanies the
+touch event. Each swipe continues from the existing scroll offset.
+
+The **Touch zone mapping** and **Test touch steering** windows use centred,
+viewport-bounded fixed dimensions and an internal scroll area. Assignment labels
+and feedback do not resize or reposition the window. Cancel assignment retains
+its place while disabled outside capture, keeping the controls stationary.
 
 The modal **PocketPC display settings** prompt after import consumes its own
 controller buttons: **South = Not Now**, **East = Settings**. Their displayed
@@ -722,7 +751,7 @@ post-delay or renderer-specific workaround is used. R3's controller row explicit
 shows its fixed mode gesture even though it is a reserved input without a normal
 host tap/hold action. This is frontend view-state handling, not a GLES game fix.
 
-## Frontend API cleanup
+## Frontend APIs and dependency notices
 
 Android import uses the prepared-import transaction (prepare, cabinet/platform
 choice, commit or cancel). The obsolete direct CAB/ZIP/RAR/EXE JNI imports are
@@ -733,26 +762,13 @@ request/readback/save path is removed; desktop screenshot functionality remains.
 JNI host callbacks invoked by native code are retained even when no Kotlin UI
 method calls them directly.
 
-Game removal on desktop uses an egui-owned, centered confirmation for both
-PocketPC and Gizmondo. South/Enter confirms, East/Escape or the close button
-cancels; cancellation wins simultaneous inputs. Controller markings use the
-shared label provider. No library action or repeated navigation reaches the
-underlying page while the confirmation is open. Only confirmation calls
-Library::remove, after checking that no game session is still running or stopping;
-no native modal dialog takes controller focus. Native dialogs
-remain only for startup errors and Windows command-line help before a working
-launcher viewport exists.
-
-The library has no Start-to-settings action: Menu/Start is already consumed by
-the immutable filter/recording shortcut. Settings are reached through the toolbar
-(L3 switches sections). The old unreachable Start match arm and its misleading
-library help have been removed. Android resource cleanup removes the old list
-row/preview, unused preference widget, orphan icons/backgrounds and unreferenced
-strings; the layout preview now uses the live grid card.
+Android no longer retains the old list row/preview, unused preference widget,
+orphan icons/backgrounds or unreferenced strings. Layout previews use the live
+grid card.
 
 Desktop notices under frontends/pocket-desktop/licenses match the locked SDL3,
 Rust SDL3/sys and bundled HIDAPI dependencies. The obsolete SDL2 notice filenames
-are removed. All three desktop release archives include that notices directory;
+are removed. Both Windows and Linux desktop archives include that notices directory;
 Android does not bundle desktop SDL3. Historical SDL2 guest-ABI references and
 orbclient's target-specific transitive SDL2 dependency are unrelated to the
 removed desktop backend and must not be deleted as if they were dead frontend

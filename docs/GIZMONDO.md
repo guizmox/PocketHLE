@@ -3,7 +3,7 @@
 Use Gizmondo options globally or in per-game settings where offered. Hardware
 access switches apply at the next launch; the guest starts the actual service.
 Windows/Linux share the desktop settings UI, but native hardware bridges are
-platform-specific. See [DESKTOP-PARITY.md](FRONTENDS.md#native-service-parity).
+platform-specific. See [DESKTOP-PARITY.md](FRONTENDS.md#windowslinux-native-service-parity).
 
 ## Imports and game information
 

@@ -4785,7 +4785,7 @@ impl PocketLauncher {
                     }
                     if self.screen == Screen::Library
                         && self.library_tab == crate::deck_navigation::LibraryTab::Recordings
-                        && matches!(control.as_str(), "East" | "RightThumb")
+                        && control == "East"
                     {
                         self.deck_library_actions.push(control.clone());
                         continue;

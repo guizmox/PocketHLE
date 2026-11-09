@@ -181,6 +181,10 @@ impl Gallery {
             .show(ctx, |ui| {
                 ui.label(path.file_name().unwrap_or_default().to_string_lossy());
                 ui.label("Permanently delete this file?");
+                ui.label(crate::controller_labels::text(
+                    ctx,
+                    "Left / right: choose · {South}: confirm · {East}: cancel",
+                ));
                 ui.horizontal(|ui| {
                     cancel = ui
                         .selectable_label(!self.delete_confirm, "Cancel")
@@ -205,9 +209,8 @@ impl Gallery {
             for action in std::mem::take(&mut actions) {
                 match action.as_str() {
                     "East" => self.delete = None,
-                    "DPadLeft" | "DPadRight" | "LeftStickLeft" | "LeftStickRight" => {
-                        self.delete_confirm = !self.delete_confirm
-                    }
+                    "DPadLeft" | "LeftStickLeft" => self.delete_confirm = false,
+                    "DPadRight" | "LeftStickRight" => self.delete_confirm = true,
                     "South" => {
                         if self.delete_confirm {
                             self.delete_capture();
@@ -276,6 +279,13 @@ impl Gallery {
         {
             self.refresh(root, ui.ctx(), force);
         }
+        ui.label(crate::controller_labels::text(
+            ui.ctx(),
+            "D-pad / stick: select · {South}: open · {East}: delete",
+        ));
+        if self.share.available() {
+            ui.label(crate::controller_labels::text(ui.ctx(), "{North}: share"));
+        }
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::LIGHT_RED, error);
         }
@@ -295,7 +305,7 @@ impl Gallery {
                     .entries
                     .get(self.selected)
                     .map(|e| e.asset.key.path.clone());
-            } else if action == "RightThumb" {
+            } else if action == "East" {
                 delete = self
                     .entries
                     .get(self.selected)
@@ -401,11 +411,12 @@ impl Gallery {
                                 }
                             });
                             let response = response.on_hover_text(
-                                entry
-                                    .asset
-                                    .error
-                                    .clone()
-                                    .unwrap_or_else(||crate::controller_labels::text(ui.ctx(),"Double-click or press {South} to open")),
+                                entry.asset.error.clone().unwrap_or_else(|| {
+                                    crate::controller_labels::text(
+                                        ui.ctx(),
+                                        "Double-click or press {South} to open",
+                                    )
+                                }),
                             );
                             if response.clicked() {
                                 self.selected = index;
@@ -438,6 +449,73 @@ impl Gallery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn controller_delete_requires_confirmation_and_back_cancels() {
+        let root = std::env::temp_dir().join(format!(
+            "pockethle-controller-delete-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("capture.mp4");
+        std::fs::write(&capture, b"capture").unwrap();
+        let mut gallery = Gallery {
+            entries: vec![Entry {
+                asset: Asset {
+                    key: Key {
+                        path: capture.clone(),
+                        modified: 0,
+                        size: 7,
+                    },
+                    video: true,
+                    image: None,
+                    error: None,
+                },
+                texture: None,
+            }],
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let draw = |gallery: &mut Gallery, actions: &[&str]| {
+            gallery.refreshed = Some(Instant::now());
+            let _ = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    gallery.show(ui, &root, actions.iter().map(|s| (*s).into()).collect());
+                });
+            });
+        };
+        draw(&mut gallery, &["RightThumb"]);
+        assert!(gallery.delete.is_none(), "old R3 shortcut must be removed");
+        draw(&mut gallery, &["East"]);
+        assert_eq!(gallery.delete.as_ref(), Some(&capture));
+        assert!(capture.exists());
+        assert!(!gallery.delete_confirm, "Cancel is selected by default");
+        draw(&mut gallery, &["East"]);
+        assert!(gallery.delete.is_none());
+        assert!(capture.exists());
+        draw(&mut gallery, &["East"]);
+        draw(&mut gallery, &["South"]);
+        assert!(gallery.delete.is_none());
+        assert!(capture.exists(), "default confirmation must cancel");
+        gallery.open(capture.clone(), &ctx);
+        draw(&mut gallery, &["East"]);
+        assert!(gallery.player.is_none());
+        assert!(
+            gallery.delete.is_none(),
+            "Back in the viewer must only close it"
+        );
+        assert!(capture.exists());
+        draw(&mut gallery, &["East"]);
+        draw(&mut gallery, &["DPadRight", "DPadRight", "South"]);
+        assert!(!capture.exists());
+        assert!(gallery.entries.is_empty());
+        assert!(gallery.delete.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn supported_media_only() {
         assert_eq!(media_kind(Path::new("game.PNG")), Some(false));

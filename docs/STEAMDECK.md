@@ -46,8 +46,11 @@ pockethle-gui.exe --steam-deck "Game name or ID" 1
 | Extra/Misc1, hold 650 ms (if delivered) | Unassigned by default |
 | Guide/Mode, short press (if delivered) | PocketPC Tab; Gizmondo unassigned (customizable) |
 
-These host gestures take precedence over an old default-binding migration note.
-They change emulator presentation/device controls, not SteamOS volume/brightness.
+View/Select and Menu/Start are the small top-left and top-right buttons. Both
+their tap and hold actions are reserved and outlined in red in the editor;
+fullscreen/filter taps also work in launcher menus and the assignment assistant.
+These change emulator controls, not SteamOS volume/brightness. Guide and Extra
+remain customizable, and SteamOS may consume them before PocketHLE receives them.
 
 ### PocketPC / WinCE factory guest mappings
 
@@ -66,7 +69,15 @@ motion are independent. Guide/Mode sends guest Tab on PocketPC when SDL receives
 no default long action. Extra/Misc1 cycles rotation on both profiles. Screenshot
 is optional and assignable on desktop.
 View hold exits either device profile; it never sends Brightness.
-SteamOS may reserve these controls before they reach the application.
+
+The right stick is fixed to the PocketPC stylus. Double-click R3 switches Stick
+and Pointer modes; a single click does nothing in Stick mode and taps the cursor
+in Pointer mode after the 200 ms double-click window. Keyboard P defaults to the
+same gesture; its assignment and O/K/L/M stylus directions remain customizable.
+Stylus speed uses a QVGA reference, giving equal proportional travel time at
+QVGA and VGA. Per-game grids refuse reserved inputs and current stylus keys.
+See [stylus modes](FRONTENDS.md#pocketpc-right-stick-stylus-modes) for timing,
+input priority and Android behavior.
 
 ### Gizmondo factory guest mappings
 
@@ -114,8 +125,8 @@ Windows prefix. Another shortcut/prefix can therefore resolve to another library
 For updates, keep the existing shortcut and back up the entire PocketHLE library
 outside the Proton prefix before replacing program files.
 
-**Keyboard bindings** and **External controller bindings**
-are separate settings entries. In the controller entry, clicking both sticks
+Desktop exposes separate **Keyboard** and **Controller** buttons in the
+Settings toolbar group. In the controller entry, clicking both sticks
 (**L3 + R3**) starts **Assign an input…**; the keyboard entry uses **Ctrl+Enter**.
 Both shortcuts are shown on their buttons. Release the combination before
 pressing the input to bind. They are editor-only, not gameplay shortcuts.
@@ -125,6 +136,16 @@ and apply a guest command. **Assign another input** continues; **Save and finish
 saves without returning to touch/mouse controls. The device picture and selected
 input card are read-only. See [FRONTENDS.md](FRONTENDS.md#visual-input-editor--desktop-and-android)
 for precedence, timing and the configuration schema.
+
+The toolbar groups Game library, Settings, Features and About. Directions follow
+its two-row layout; A activates and L3 switches toolbar/page. Filter and Rotation
+show the current mode and cycle on activation. Recording shows a red **Stop video**
+button while active. See [the toolbar reference](FRONTENDS.md#desktop-button-toolbar).
+
+Finger scrolling and mouse/trackpad clicks retain the current page offset;
+controller navigation reveals its target. The touch-zone editor stays centred
+with fixed bounds while assignments change. The post-import PocketPC display
+prompt uses A = Not Now and B = Settings directly, without moving focus first.
 
 **Reset keys to defaults** and **Reset controller defaults** replace the old
 **Apply Steam Deck preset** action. Each resets its guest table and explicit
@@ -140,16 +161,23 @@ the same presentation-filter carousel as Menu. F10/F11 retain game capture and
 recording, and F12 toggles fullscreen/windowed even in binding pages and their
 assistant. F7–F12 cannot be assigned to guest commands, including through a
 legacy configuration or a touch grid; the keyboard skin outlines them in red.
-See [FRONTENDS.md](FRONTENDS.md#visual-input-editor--desktop-and-android) for
-menu behavior and draft persistence. These are physical host keys, independent
-of the guest VK codes sent by the Deck's game buttons.
+These are physical host keys, independent of guest VK codes. PocketPC keyboard
+P1–P4 default to number-row 1–4; Tab is the assignable Center tap. Gizmondo uses
+F1–F5 for its piano keys and 1/2 for L1/R1, with no extra T-to-Brightness alias.
+Number-row bindings ignore Shift without changing letter layouts or text entry.
+See the [factory profiles](FRONTENDS.md#factory-input-profiles) and
+[host-key reference](FRONTENDS.md#colors-physical-feedback-and-host-shortcuts)
+for defaults, reserved inputs and platform differences.
 
 ## Captures
 
 A long Menu press toggles recording; release is not required to keep recording.
 The flashing REC indicator is local UI, applied after game capture. In Recordings,
-A opens the selected capture. Y shares only when a native share service exists;
-no fixed list of sharing destinations is fabricated.
+A opens the selected capture; B requests deletion with a confirmation initially
+set to Cancel. Left/right chooses Cancel/Delete, A confirms and B cancels.
+Inside the viewer B still leaves fullscreen or closes playback. These face-button
+labels follow SDL3 on other controllers. Y shares only when a native share
+service exists; no fixed list of sharing destinations is fabricated.
 
 ## Build
 
@@ -162,44 +190,3 @@ target directory). CI compiles it once and publishes the Windows archive for bot
 Deck-profile updates under Proton select that same Windows archive.
 The desktop and Android keep the same factory binding reference. Physical
 Proton/controller behavior still requires device validation.
-
-The small top-left View/Select (Full) and top-right Menu/Start (Filter) buttons
-are reserved for PocketHLE, including their holds. Their mapping outlines are
-red and neither gesture can be assigned to a guest command. Fullscreen and
-filter taps remain active in launcher menus and the assignment assistant.
-
-Keyboard profiles use PocketPC P1/P2/P3/P4 on number-row 1/2/3/4. Gizmondo
-keeps F1–F5 for its piano keys, uses L1/R1 for its shoulder command names, and
-has no factory T-to-Brightness alias. PocketPC has no factory Gizmondo F-key
-actions. Number-row binding events ignore Shift via physical digit positions;
-AZERTY letter mappings and ordinary text entry retain their layout.
-
-F7 cycles the active game's presentation rotation and is reserved. Keyboard Tab
-defaults to a 60 ms Center tap only for PocketPC; Guide sends guest Tab.
-Center tap and Extra's Rotation remain assignable commands.
-
-PocketPC reserves the right stick and R3 in every assignment editor, including
-per-game grids. Double-click R3 to switch between automatic Stylus stick drags
-and a visible Pointer. Single R3 does nothing in Stick mode; in Pointer mode it
-taps the cursor position after the 200 ms double-click window. A mode notice
-appears at the filter-notice location. The only setting is Stylus speed (pixels),
-shared by both modes. Old enable and controller-direction options are removed.
-Keyboard P defaults to click/mode switching and can be reassigned, like the
-O/K/L/M stylus directions. Per-game grids refuse the current stylus keyboard
-keys, including remapped ones, until they are freed in Keyboard bindings.
-The right-stick picture uses a single Click / ×2 caption; direction mappings
-stay in the rails. Full/Filter hold captions are outside their outlines.
-See [FRONTENDS.md](FRONTENDS.md#pocketpc-right-stick-stylus-modes) for timing,
-priority, cancellation and Android parity.
-
-Desktop launcher buttons are grouped into Game library, Settings, Features and
-About. D-pad/left stick navigate their actual two-row positions and reveal
-buttons outside the viewport on small windows; A activates and L3 switches
-toolbar/page. Filter and Rotation show the selected mode and cycle on activation.
-The recording button is red and labelled Stop video while recording.
-
-The post-import PocketPC display prompt uses A = Not Now and B = Settings,
-directly, without first selecting a button. Control-editor mouse/trackpad clicks
-preserve the scrolled position; directional navigation still reveals its target.
-Stylus speed uses a QVGA reference and scales with logical resolution so VGA
-and QVGA have the same proportional travel time in either stylus mode.

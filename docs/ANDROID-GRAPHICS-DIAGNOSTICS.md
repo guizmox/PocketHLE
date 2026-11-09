@@ -4,7 +4,8 @@ Use this guide to collect graphics timings from the current Android build.
 Rendering and presentation contracts are maintained in [GPU.md](GPU.md);
 build the complete app with matching Rust JNI and Kotlin code as described in
 [ANDROID-BUILD.md](ANDROID-BUILD.md). No old diagnostic or cumulative patch ZIP
-is needed.
+is needed. For NV combiner program/texture traces and the separate RGB-copy and
+precision investigations, see [the targeted combiner guide](ANDROID-COMBINER-DIAGNOSTICS.md).
 
 Shared GLES presentation reports `PRESENTATION=GPU_SHARED (Android)` when active.
 CPU-origin logical RGB565 images use packed transport and GPU integer conversion:

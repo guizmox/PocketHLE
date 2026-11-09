@@ -11,6 +11,7 @@ source identifiers, paths and original product names retain their spelling.
 | [FRONTENDS.md](FRONTENDS.md) | Shared settings, input profiles/commands, desktop button toolbar, display/input geometry and platform UI parity |
 | [ANDROID-BUILD.md](ANDROID-BUILD.md) | Android toolchain, packaging, signing and runner checks |
 | [ANDROID-GRAPHICS-DIAGNOSTICS.md](ANDROID-GRAPHICS-DIAGNOSTICS.md) | Current Android graphics log collection and explicitly historical validation records |
+| [ANDROID-COMBINER-DIAGNOSTICS.md](ANDROID-COMBINER-DIAGNOSTICS.md) | Targeted NV combiner traces and dated RGB-copy/precision investigations |
 | [STEAMDECK.md](STEAMDECK.md) | Steam Deck profile through Proton, controller gestures and shared Windows package |
 | [GTSHELL.md](GTSHELL.md) | Optional Gizmondo shell profiles, local XML DOM and separate SD cards |
 | [GIZMONDO.md](GIZMONDO.md) | Device services, imports and dated compatibility reports |

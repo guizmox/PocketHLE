@@ -60,6 +60,10 @@ The PocketPC switch does not alter Gizmondo's existing policy. Both launchers
 explicitly configure the session gate, independently of the GoForce driver and
 Intel 2700G depth-bias profiles. CLI launches retain their existing default.
 
+For targeted program/texture trace collection and dated copy/precision evidence,
+see [NV combiner diagnostics](ANDROID-COMBINER-DIAGNOSTICS.md). These records do
+not replace the current option policy above or certify current device behavior.
+
 ## Internal resolution
 
 Internal rasterization resolution, guest logical resolution and display zoom are

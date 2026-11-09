@@ -1,14 +1,21 @@
 # Cross-host NV combiner diagnostics
 
-Baseline: d4d1a4e58e63af3010e9fd725af80a2339e7d389.
-This cumulative patch retains the opt-in observations and corrects the GLES
-native-resolution guest RGB texture-copy path described below. AR10/AR11
-arithmetic, extension policy and frontend presentation are unchanged. No game
-name, asset path or executable signature is added.
+Use this guide for targeted NV combiner traces. General log collection belongs
+to [Android graphics diagnostics](ANDROID-GRAPHICS-DIAGNOSTICS.md); current
+rendering and compatibility-option policy belongs to [GPU.md](GPU.md#pocketpc-graphics-compatibility-options).
+Build the current Git revision; no historical patch ZIP is required. Keep the
+PocketPC **NVIDIA GoForce 5500 AR10/AR11 combiners** option enabled when testing
+this path, and record its value alongside the renderer and internal resolution.
+
+The investigation records below began from baseline
+`d4d1a4e58e63af3010e9fd725af80a2339e7d389`. Their test counts and device-validation
+limits describe those revisions, not a fresh validation of the current tree.
+The RGB-copy correction and ES3 precision change are separate investigations;
+neither introduces game-name, asset-path or executable-signature exceptions.
 
 ## Original diagnostic capture (before correction)
 
-1. Install a build with this patch. Enable **Graphics diagnostics**, with log
+1. Use a build of the revision being compared. Enable **Graphics diagnostics**, with log
    verbosity **1**, before starting the game.
 2. For the first capture select **software rendering**, since the reported
    defect also occurs there. Restart the game so initialization is captured.
@@ -27,7 +34,7 @@ After reproducing, collect the PocketHLE tag without losing its startup records:
 adb logcat -d -v threadtime -s PocketHLE:I > siege-android.txt
 ```
 
-The new records contain `NV_DIAG`. Keep the complete log, including ordinary
+The targeted records contain `NV_DIAG`. Keep the complete log, including ordinary
 warnings/errors. Timing differences and the diagnostic capture's FPS are not
 benchmarks. One software run is the initial request; no GPU/backend matrix is
 needed to start comparing it with the PC reference.
@@ -145,7 +152,8 @@ The expected result is populated intermediate textures and visible water. Keep
 the diagnostic option disabled for ordinary performance checks. If the defect
 persists, capture continuously from before launch with diagnostics enabled and
 attach the complete log; do not infer the backend from a saved preference alone.
-This ZIP replaces the earlier diagnostic ZIP and retains its opt-in traces.
+This verification concerns the RGB-copy correction described above. Use the
+current source build; the original diagnostic ZIP is a historical delivery.
 
 
 ## GLES3 combiner precision candidate
@@ -180,5 +188,5 @@ variants, ordinary color precision, retained guest copies and supersampled
 subimages, across desktop GL and GLES. Android ARM64 checking, formatting and
 whitespace checks pass. No physical-phone jitter improvement or APK build is
 claimed. Compare the same camera sequence/settings with the previous RGB-copy
-build, preferably with diagnostics disabled. This cumulative ZIP retains the
-RGB-copy fix and opt-in instrumentation and replaces the earlier ZIP.
+build, preferably with diagnostics disabled. These validation results belong
+to the precision-change revision; they are not a requirement to install an old ZIP.

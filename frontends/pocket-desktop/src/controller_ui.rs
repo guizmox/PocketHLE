@@ -412,7 +412,10 @@ impl Navigation {
             .open(&mut open)
             .show(ctx, |ui| {
                 let k = self.keyboard.as_ref().unwrap();
-                ui.label(crate::controller_labels::text(ctx,"{South}: select · {East}: cancel · {North}: symbols"));
+                ui.label(crate::controller_labels::text(
+                    ctx,
+                    "{South}: select · {East}: cancel · {North}: symbols",
+                ));
                 egui::ScrollArea::horizontal()
                     .id_source("controller_keyboard_value")
                     .stick_to_right(true)
@@ -633,6 +636,11 @@ pub fn begin_frame(ctx: &egui::Context) {
     let pointer = ctx.input(|i| {
         i.pointer.any_pressed()
             || i.pointer.any_released()
+            || i.pointer.any_down()
+            || i.any_touches()
+            || i.events
+                .iter()
+                .any(|event| matches!(event, Event::Touch { .. }))
             || i.raw_scroll_delta != egui::Vec2::ZERO
     });
     let keyboard = ctx.input(|i| {
@@ -919,6 +927,117 @@ mod tests {
             "controller navigation must scroll the section"
         );
         assert!(target_visible, "the focused row must be fully visible");
+    }
+
+    #[test]
+    fn native_touch_suspends_controller_focus_repair_until_navigation_resumes() {
+        let ctx = egui::Context::default();
+        let mut nav = Navigation::default();
+        frame(&ctx, &mut nav, |ui| {
+            sections(ui);
+        });
+        edit_widgets(&ctx, |w| {
+            w.navigation_focus = true;
+            w.reveal_focus = Some(Id::new("old_navigation_target"));
+        });
+        for phase in [
+            egui::TouchPhase::Start,
+            egui::TouchPhase::Move,
+            egui::TouchPhase::End,
+            egui::TouchPhase::Cancel,
+        ] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events: vec![Event::Touch {
+                        device_id: egui::TouchDeviceId(0),
+                        id: egui::TouchId(1),
+                        phase,
+                        pos: egui::pos2(500.0, 200.0),
+                        force: None,
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    begin_frame(ctx);
+                    assert!(!widgets(ctx).navigation_focus);
+                    assert!(widgets(ctx).reveal_focus.is_none());
+                },
+            );
+        }
+        nav.press("DPadDown");
+        frame(&ctx, &mut nav, |ui| {
+            sections(ui);
+        });
+        assert!(widgets(&ctx).navigation_focus);
+    }
+
+    #[test]
+    fn repeated_touch_scrolls_keep_their_offset_between_gestures() {
+        let ctx = egui::Context::default();
+        ctx.style_mut(|s| s.animation_time = 0.0);
+        let mut time = 0.0;
+        let mut draw = |events: Vec<Event>| {
+            time += 1.0 / 60.0;
+            let mut offset = 0.0;
+            let _ = ctx.run(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 480.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    begin_frame(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        page_scope(ui, "touch_scroll_settings", |ui| {
+                            let output =
+                                egui::ScrollArea::vertical()
+                                    .max_height(300.0)
+                                    .show(ui, |ui| {
+                                        for row in 0..60 {
+                                            button(ui, format!("Setting {row}"));
+                                        }
+                                        scroll_focus(ui);
+                                    });
+                            offset = output.state.offset.y;
+                        });
+                    });
+                },
+            );
+            offset
+        };
+        let pointer = |y, pressed| Event::PointerButton {
+            pos: egui::pos2(500.0, y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        draw(vec![]);
+        draw(vec![]);
+        for _ in 0..3 {
+            let before = draw(vec![]);
+            let start = draw(vec![
+                Event::PointerMoved(egui::pos2(500.0, 260.0)),
+                pointer(260.0, true),
+            ]);
+            assert!(
+                start >= before - 1.0,
+                "new touch reset scroll: {before} -> {start}"
+            );
+            let after = draw(vec![Event::PointerMoved(egui::pos2(500.0, 100.0))]);
+            assert!(
+                after > start + 100.0,
+                "drag did not scroll: {start} -> {after}"
+            );
+            // Settle the finger before release to remove inertia from this check.
+            for _ in 0..10 {
+                draw(vec![]);
+            }
+            draw(vec![pointer(100.0, false), Event::PointerGone]);
+        }
     }
 
     #[test]
