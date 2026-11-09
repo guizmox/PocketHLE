@@ -29,6 +29,36 @@ The existing GoForce option, RGB565 presentation and diagnostics gate remain.
 Programs previously accepted retain their arithmetic; this does not claim
 complete coverage of every AR10/AR11 instruction or bit-exact GoForce hardware.
 
+## Remaining supplied programs
+
+All 24 supplied DoomGLES programs now decode and execute in the software,
+OpenGL desktop and GLES test harnesses. The seven additional programs need:
+
+| Programs | Generic addition |
+| --- | --- |
+| `t4lm`, `4lm` | Fifth coordinate set |
+| `t5lm`, `5lm` | Sixth coordinate set |
+| `blurh`, `blurv` | Independent x/y component selectors for each fetch axis, including derivatives |
+| `invuln` | Extended signed immediate literals with quarter-unit fractions |
+
+AR11 coordinate selectors 0..7 select x and 8..15 select y. The driver validator
+keeps separate AR10/AR11 coordinate, sampler and temporary-register limits;
+those architecture bounds are retained even though shared storage is wider.
+The software/backend capacity is six coordinate sets; encodings needing sets
+six/seven (zero-based) still fail the capacity check. Extra GPU attributes do
+not reuse the established normal/fog or provoking/point-size slots. Conventional
+four-coordinate shader variants, typed upload packing and small deduplication
+keys remain; wider variants/keys are selected only as needed. Expanded CPU
+vertices do carry two extra coordinate sets, increasing their storage by 32
+bytes. No benchmark-based performance guarantee is made for that path.
+
+The original supplied NVIDIA driver validator accepts these 24 binaries. A local
+probe also executes every supplied binary on constant textures/framebuffer data
+and compares software with both host shader dialects. This establishes decoding,
+compilation and cross-backend consistency, not bit-exact physical GoForce
+arithmetic or visual correctness of every in-game effect. Visual checks for
+invulnerability, blur/glow and multi-light variants remain user-side.
+
 ## Audio mixer
 
 Expose one virtual PCM mixer, with a speaker destination and a connected wave
@@ -43,7 +73,14 @@ Input/MIDI mixers, callbacks and physical mixer controls are not advertised.
 
 ## Validation and limits
 
-- Rust formatting; 240 GLES tests, 725 WinCE API tests and 343 kernel tests.
+- Rust formatting; 246 GLES tests, 725 WinCE API tests and 343 kernel tests.
+- 78 native graphics tests pass, including desktop GL/GLES extended literals,
+  mixed coordinate axes, six-coordinate arrays/current values, projective
+  transforms, compact/wide shader transitions and NV routing/ordered reads.
+- One additional native snapshot test fails identically before and after this
+  extension (same expected/actual RGB565 bytes on Mesa, 8x6, policy 2):
+  `snapshot_materialization_preserves_old_image_cache_format_and_native_binding`.
+  This existing supersampled readback discrepancy is not changed or suppressed.
 - Native desktop GL and GLES tests for NV routing, ordered framebuffer reads
   and discard/color/depth preservation; native EGL RGBA alpha roundtrip,
   configuration mismatch, pixmap/offscreen lifecycle and parent restoration.
@@ -63,3 +100,25 @@ water passes; wave volume and cleanup. Apps explicitly requesting alpha can
 now select RGBA8 and take newly available offscreen rendering paths. RGBA texture
 copies keep the existing CPU materialization path when no native fast path is
 available; this patch does not promise every new alpha operation is GPU-only.
+
+This ZIP is cumulative against the baseline above and replaces the earlier
+DoomGLES ZIP. It includes the EGL, program-sharing and mixer changes as well as
+the additional seven-program support. No game binaries or vendor DLLs are
+included; no temporary CLI switches or asset-dependent test probes are shipped.
+
+## Stable framebuffer-channel feedback
+
+The program compiler records a conservative mask of framebuffer channels read
+by the combiner, including fragment-rejection predicates. When none of those
+channels can be written by the draw, the GPU captures the destination once
+and submits the entire draw in native order. RGB565 targets have no writable
+alpha channel. Draws that read a channel they can write, and logic operations,
+retain the existing per-primitive snapshot/order path. Depth tests, blending
+and color masks are unchanged. The analysis happens at program load; draws
+only test the stored mask. There are no game identifiers or runtime probes.
+
+A synthetic pair of overlapping triangles verifies both immutable-alpha
+batching and writable-alpha ordering against software, desktop GL and GLES.
+This optimization does not remove required reflection rendering or the IPS
+presentation readback. Benchmark results and hardware limits accompany the
+delivery separately.

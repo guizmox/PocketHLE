@@ -398,7 +398,7 @@ mod tests {
                             &vertices,
                             &[],
                             &HashMap::new(),
-                            [0; 4],
+                            [0; 6],
                         )
                         .unwrap();
                         let mut rgb = vec![0; 320 * 240 * 2];

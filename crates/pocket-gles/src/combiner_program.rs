@@ -286,6 +286,9 @@ pub struct TextureRoute {
     pub texture: usize,
     pub s: usize,
     pub t: usize,
+    /// Component bank: selectors 0..7 read x, selectors 8..15 read y.
+    pub s_component: usize,
+    pub t_component: usize,
 }
 
 const MAX_PROGRAM_STAGES: usize = 12;
@@ -312,6 +315,7 @@ pub struct BasicProgram {
     routes: Vec<TextureRoute>,
     coordinate_units: u8,
     reads_framebuffer: bool,
+    framebuffer_reads: u8,
     output_register: usize,
 }
 
@@ -343,13 +347,21 @@ impl Program {
             let s_unit = (coords >> 5) as usize;
             let t_selector = (coords & 31) as usize;
             let route = if let Some(texture) = unit {
-                if s_unit >= 5 || !(8..13).contains(&t_selector) {
+                let coordinate_limit = if ar11 { 8 } else { 4 };
+                if texture >= if ar11 { 5 } else { 4 }
+                    || s_unit >= 16
+                    || t_selector >= 16
+                    || (s_unit & 7) >= coordinate_limit
+                    || (t_selector & 7) >= coordinate_limit
+                {
                     return Err(UnsupportedOperation);
                 }
                 Some(TextureRoute {
                     texture,
-                    s: s_unit,
-                    t: t_selector - 8,
+                    s: s_unit & 7,
+                    t: t_selector & 7,
+                    s_component: usize::from(s_unit >= 8),
+                    t_component: usize::from(t_selector >= 8),
                 })
             } else {
                 if coords != 0x3ff {
@@ -475,6 +487,28 @@ impl Program {
         let reads_framebuffer = stages
             .iter()
             .any(|stage| matches!(stage.fetch, Fetch::Framebuffer));
+        // Conservative channel dependencies: all framebuffer texel reads,
+        // including discard predicates, remain hazards even if a later stage
+        // overwrites their result. Registers cannot introduce a dependency
+        // which was not already observed at their original texel read.
+        let mut framebuffer_reads = 0;
+        let mut framebuffer_texel = false;
+        for stage in &stages {
+            match stage.fetch {
+                Fetch::Framebuffer => framebuffer_texel = true,
+                Fetch::Texture(_) => framebuffer_texel = false,
+                Fetch::Keep => {}
+            }
+            if framebuffer_texel {
+                for calc in &stage.calculations {
+                    for term in calc.terms {
+                        if let Source::Texture(component) = term.source {
+                            framebuffer_reads |= 1 << component;
+                        }
+                    }
+                }
+            }
+        }
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         Ok(BasicProgram {
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -483,6 +517,7 @@ impl Program {
             routes,
             coordinate_units,
             reads_framebuffer,
+            framebuffer_reads,
             output_register,
         })
     }
@@ -504,12 +539,19 @@ fn compile_term(
     }
     let component = usize::from(operand.components[channel]);
     let source = match operand.selector {
-        register @ 0..=3 => Source::Register(usize::from(register)),
+        register @ 0..=3 if ar11 || register < 2 => Source::Register(usize::from(register)),
         index @ 0x20..=0x23 if ar11 => Source::Constant(usize::from(index - 0x20), false),
         index @ 0x20..=0x23 => Source::Constant(usize::from((index - 0x20) >> 1), index & 1 != 0),
         0x40 if component < 4 => Source::Primary(component),
         0x60 if has_texture && component < 4 => Source::Texture(component),
-        0x80 if component <= 4 => Source::Literal(component as f32 * 0.25),
+        0x80 if component < if ar11 { 32 } else { 5 } => {
+            let magnitude = (component & 15) as f32 * 0.25;
+            Source::Literal(if component & 16 == 0 {
+                magnitude
+            } else {
+                -magnitude
+            })
+        }
         _ => return Err(UnsupportedOperation),
     };
     let scale = f32::from(1 + double);
@@ -546,15 +588,32 @@ impl BasicProgram {
                     glsl.push_str("texel=texture2D(logicDestination,gl_FragCoord.xy/logicSize);\n");
                 }
                 Fetch::Texture(slot) => {
-                    let TextureRoute { texture, s, t } = self.routes[slot];
+                    let TextureRoute {
+                        texture,
+                        s,
+                        t,
+                        s_component,
+                        t_component,
+                    } = self.routes[slot];
                     let coordinate = |unit: usize| {
-                        let component = ["x", "y", "z", "w"][unit];
-                        format!("pointCoordinate(uv{unit},pointReplace.{component})")
+                        let bank = if unit < 4 {
+                            "pointReplace"
+                        } else {
+                            "pointReplaceHigh"
+                        };
+                        let component = ["x", "y", "z", "w"][unit % 4];
+                        format!("pointCoordinate(uv{unit},{bank}.{component})")
                     };
-                    let uv = if s == t {
+                    let uv = if s == t && s_component == 0 && t_component == 1 {
                         coordinate(s)
                     } else {
-                        format!("vec2({}.x,{}.y)", coordinate(s), coordinate(t))
+                        format!(
+                            "vec2({}.{},{}.{})",
+                            coordinate(s),
+                            ["x", "y"][s_component],
+                            coordinate(t),
+                            ["x", "y"][t_component]
+                        )
                     };
                     writeln!(
                         glsl,
@@ -646,6 +705,16 @@ impl BasicProgram {
 
     pub fn reads_framebuffer(&self) -> bool {
         self.reads_framebuffer
+    }
+
+    /// A snapshot taken before the draw remains valid when the draw cannot
+    /// write any channel read by the program. Depth and blending still execute
+    /// in native primitive order; only redundant framebuffer copies disappear.
+    pub(crate) fn framebuffer_needs_primitive_order(&self, color_mask: [bool; 4]) -> bool {
+        color_mask
+            .into_iter()
+            .enumerate()
+            .any(|(channel, write)| write && self.framebuffer_reads & (1 << channel) != 0)
     }
 
     pub fn texture_units(&self) -> u8 {
@@ -1153,6 +1222,49 @@ mod tests {
         assert!(first.active().is_none());
         let mut independent = ProgramObjects::default();
         assert!(!independent.bind(name));
+    }
+
+    #[test]
+    fn ar11_coordinate_capacity_does_not_expand_the_ar10_encoding() {
+        let stage = |coordinate: u32| Stage {
+            alpha_output: 0,
+            alpha_inputs: 0,
+            flags: 0,
+            color_output: 0,
+            color_input_modifiers: 0,
+            color_inputs: 0,
+            color_input_modes: 0,
+            texture_routing: 0x3fff_fc00 | coordinate << 5 | (coordinate + 8),
+        };
+        for (architecture, coordinate, accepted) in [
+            (Architecture::Ar10, 3, true),
+            (Architecture::Ar10, 4, false),
+            (Architecture::Ar11, 5, true),
+            (Architecture::Ar11, 7, true),
+        ] {
+            let result = Program {
+                architecture,
+                flags: 0,
+                stages: vec![stage(coordinate)],
+            }
+            .compile_basic();
+            assert_eq!(result.is_ok(), accepted);
+            if coordinate == 7 {
+                assert!(!result.unwrap().supports_texture_units(6));
+            }
+        }
+        assert!(compile_term(Operand::register(2, [0; 3], [0; 3]), false, 0, false).is_err());
+    }
+
+    #[test]
+    fn ar11_signed_quarter_literals_cover_the_full_encoding() {
+        for code in 0..32 {
+            let term = compile_term(Operand::literal([code; 3]), false, 0, true).unwrap();
+            let expected = (code & 15) as f32 * 0.25 * if code & 16 == 0 { 1. } else { -1. };
+            assert!(matches!(term.source, Source::Literal(value) if value == expected));
+        }
+        assert!(compile_term(Operand::literal([32; 3]), false, 0, true).is_err());
+        assert!(compile_term(Operand::literal([5; 3]), false, 0, false).is_err());
     }
 
     #[test]

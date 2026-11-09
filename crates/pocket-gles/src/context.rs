@@ -193,6 +193,9 @@ fn decode_component(bytes: &[u8], ty: u32, normalize: bool) -> f32 {
 /// stage 1 — the reset unbound the texture that had just been bound, and
 /// the game's sky came out as an opaque white sheet. Tracking the stages
 /// the engine actually touches, plus one spare, keeps stage 2 harmless.
+// Ordinary clients retain four selectable units. NV clients additionally
+// need coordinate sets four/five; storage is shared, API limits are checked
+// by client_texture_unit_capacity and the native shader resource limits.
 const MAX_TEXTURE_UNITS: usize = raster::MAX_TEXTURE_STAGES;
 
 /// A buffer object: the host-side copy of what `glBufferData` uploaded.
@@ -656,6 +659,20 @@ impl Context {
     pub fn gpu_requested(&self) -> bool {
         self.gpu_requested
     }
+    fn client_texture_unit_capacity(&self) -> usize {
+        if self.nv_combiner_client && self.nv_combiner_allowed {
+            self.nv_texture_coordinate_capacity()
+        } else {
+            4
+        }
+    }
+
+    pub fn nv_texture_coordinate_capacity(&self) -> usize {
+        self.gpu
+            .as_ref()
+            .map_or(MAX_TEXTURE_UNITS, |g| g.texture_coordinate_capacity())
+    }
+
     pub fn gpu_active(&self) -> bool {
         self.gpu.is_some()
     }
@@ -868,7 +885,7 @@ impl Context {
             }
             GL_TEXTURE_2D => {
                 let unit = self.active_texture as usize;
-                if unit >= MAX_TEXTURE_UNITS {
+                if unit >= self.client_texture_unit_capacity() {
                     self.set_error(GL_INVALID_ENUM);
                     return;
                 }
@@ -904,7 +921,7 @@ impl Context {
             GL_COLOR_ARRAY => self.color_array.enabled = on,
             GL_TEXTURE_COORD_ARRAY => {
                 let unit = self.client_active_texture as usize;
-                if unit >= MAX_TEXTURE_UNITS {
+                if unit >= self.client_texture_unit_capacity() {
                     self.set_error(GL_INVALID_ENUM);
                     return;
                 }
@@ -945,7 +962,7 @@ impl Context {
             return;
         }
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -1148,7 +1165,7 @@ impl Context {
     }
 
     pub fn set_active_texture(&mut self, unit: u32) {
-        if unit as usize >= MAX_TEXTURE_UNITS {
+        if unit as usize >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -1156,7 +1173,7 @@ impl Context {
     }
 
     pub fn set_client_active_texture(&mut self, unit: u32) {
-        if unit as usize >= MAX_TEXTURE_UNITS {
+        if unit as usize >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -1255,7 +1272,7 @@ impl Context {
             return;
         }
         let unit = self.client_active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -1275,7 +1292,7 @@ impl Context {
             self.set_error(GL_INVALID_ENUM);
             return;
         };
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -1290,7 +1307,7 @@ impl Context {
         self.set_multi_texcoord(unit, values[0], values[1]);
         if let Some(index) = unit
             .checked_sub(GL_TEXTURE0)
-            .filter(|i| (*i as usize) < MAX_TEXTURE_UNITS)
+            .filter(|i| (*i as usize) < self.client_texture_unit_capacity())
         {
             self.es11.current_texcoords[index as usize] = values;
             self.texture_units[index as usize].current_texcoord = values;
@@ -1917,7 +1934,7 @@ impl Context {
             return;
         }
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
@@ -2020,7 +2037,7 @@ impl Context {
             return;
         }
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_OPERATION);
             return;
         }
@@ -2135,7 +2152,7 @@ impl Context {
         patch: &[u8],
     ) {
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -2190,7 +2207,7 @@ impl Context {
             return;
         }
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -2297,7 +2314,7 @@ impl Context {
             }
         };
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -2308,7 +2325,7 @@ impl Context {
     /// the active unit.
     pub fn set_tex_env_color(&mut self, color: [f32; 4]) {
         let unit = self.active_texture as usize;
-        if unit >= MAX_TEXTURE_UNITS {
+        if unit >= self.client_texture_unit_capacity() {
             self.set_error(GL_INVALID_ENUM);
             return;
         }
@@ -3008,7 +3025,7 @@ impl Context {
         stream.bytes.clear();
         stream.indices.clear();
         stream.attributes.fill(None);
-        stream.constants = [[0., 0., 0., 1.]; 8];
+        stream.constants = [[0., 0., 0., 1.]; 10];
         stream.constants[1] = self.current_color;
         stream.constants[6] = [
             self.current_normal[0],
@@ -3074,7 +3091,7 @@ impl Context {
                 if unit.texcoord_array.enabled {
                     self.stream_array(
                         stream,
-                        stage.unit + 2,
+                        crate::gpu::texture_attribute(stage.unit),
                         unit.texcoord_array,
                         lo,
                         stream.count,
@@ -3083,7 +3100,8 @@ impl Context {
                         native_fixed,
                     )?;
                 } else {
-                    stream.constants[stage.unit + 2] = unit.current_texcoord;
+                    stream.constants[crate::gpu::texture_attribute(stage.unit)] =
+                        unit.current_texcoord;
                 }
             }
             if self.lighting.enabled {
@@ -3167,7 +3185,12 @@ impl Context {
         };
         self.state.two_sided_lighting = self.lighting.enabled && self.lighting.two_sided;
         let combiner = self.combiner_programs.active_shared();
-        let framebuffer_fetch = combiner.is_some_and(|p| p.reads_framebuffer());
+        let mut feedback_writes = self.state.color_mask;
+        if self.target.rgb565 {
+            feedback_writes[3] = false;
+        }
+        let framebuffer_fetch =
+            combiner.is_some_and(|p| p.framebuffer_needs_primitive_order(feedback_writes));
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_combiner(combiner, self.combiner_programs.constants());
         }
@@ -4316,7 +4339,7 @@ mod tests {
                 &reference,
                 &[],
                 &c.textures,
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
         let mut expected = raster::RenderTarget::new(c.target.width, c.target.height);
@@ -5041,6 +5064,399 @@ mod tests {
             };
             crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
                 combiner_discard_preserves_color_and_depth(true);
+            });
+        }
+    }
+
+    fn feedback_alpha_case(gpu: bool, write_alpha: bool) -> [u8; 4] {
+        use crate::combiner_program::{Architecture, Program, Stage};
+        let mut c = ctx();
+        if gpu {
+            c.enable_gpu().unwrap();
+        }
+        c.clear_color = [0., 0., 0., 0.5];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.state.color_mask = [true, true, true, write_alpha];
+        c.set_capability(GL_BLEND, true);
+        c.set_blend_func(GL_ONE, GL_ONE);
+        let positions = [[-1f32, -1., 0.], [1., -1., 0.], [0., 1., 0.]];
+        let bytes = positions
+            .into_iter()
+            .cycle()
+            .take(6)
+            .flatten()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let mut mem = FakeMem { base: BASE, bytes };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        let p = Program {
+            architecture: Architecture::Ar11,
+            flags: 0,
+            stages: vec![Stage {
+                alpha_output: 0x0670,
+                alpha_inputs: 0xc340_0000,
+                flags: 0xec,
+                color_output: 0x8070,
+                color_input_modifiers: 0,
+                color_inputs: 0xff40_0000,
+                color_input_modes: 0x8800,
+                texture_routing: 0x7fff_ffff,
+            }],
+        }
+        .compile_basic()
+        .unwrap();
+        assert_eq!(
+            p.framebuffer_needs_primitive_order([true, true, true, write_alpha]),
+            write_alpha
+        );
+        c.combiner_programs.set_constant(0, [16384; 4]);
+        c.combiner_programs
+            .load_bound(p, MAX_TEXTURE_UNITS)
+            .unwrap();
+        c.combiner_programs.set_enabled(true);
+        c.draw_arrays(&mut mem, GL_TRIANGLES, 0, 6);
+        c.sync_gpu();
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        let first = pixel(&c, 32, 32);
+        if !write_alpha && gpu {
+            assert!(c.vertex_stream.count > 0);
+        }
+        first
+    }
+    #[test]
+    fn software_feedback_distinguishes_alpha_reads_from_alpha_writes() {
+        assert_eq!(feedback_alpha_case(false, false), [64, 64, 64, 128]);
+        assert_eq!(feedback_alpha_case(false, true), [72, 72, 72, 200]);
+    }
+    #[test]
+    #[ignore = "requires native desktop GL and GLES"]
+    fn gpu_feedback_stable_alpha_batches_without_losing_overlapping_order() {
+        for es in [false, true] {
+            let root = if es {
+                crate::gpu::Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                crate::gpu::Renderer::new(8, 8).unwrap()
+            };
+            crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
+                for alpha in [false, true] {
+                    let expected = feedback_alpha_case(false, alpha);
+                    let actual = feedback_alpha_case(true, alpha);
+                    assert!(
+                        actual.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 1),
+                        "write_alpha={alpha}: {actual:?} vs {expected:?}"
+                    );
+                }
+            });
+        }
+    }
+
+    fn literal_normalization(gpu: bool) {
+        use crate::combiner_program::{Architecture, Program, Stage};
+        let mut c = ctx();
+        if gpu {
+            c.enable_gpu().unwrap();
+        }
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: quad_floats(),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.combiner_programs.set_constant(0, [8192; 4]);
+        for code in 0..32u16 {
+            let packed = code | code << 5 | code << 10;
+            let literal = Stage {
+                alpha_output: 0x0670,
+                alpha_inputs: u32::from(code) << 24 | 4 << 16,
+                flags: 0xe0,
+                color_output: 0x8070,
+                color_input_modifiers: (packed & 15) << 12 | 0x0400,
+                color_inputs: u32::from((packed >> 4) & 255) << 24 | 0x0008_0000,
+                color_input_modes: ((packed >> 12) & 7) << 12 | 0x0100,
+                texture_routing: 0xffff_ffff,
+            };
+            // Map the complete signed literal range into [0,1], retaining its
+            // distinction after framebuffer clamping: output = literal/8+1/2.
+            let normalize = Stage {
+                alpha_output: 0x0670,
+                alpha_inputs: 0x0040_0204,
+                flags: 0xec,
+                color_output: 0x8070,
+                color_input_modifiers: 0x0024,
+                color_inputs: 0x0040_8408,
+                color_input_modes: 0x8801,
+                texture_routing: 0xffff_ffff,
+            };
+            let program = Program {
+                architecture: Architecture::Ar11,
+                flags: 0,
+                stages: vec![literal, normalize],
+            }
+            .compile_basic()
+            .unwrap();
+            c.combiner_programs
+                .load_bound(program, MAX_TEXTURE_UNITS)
+                .unwrap();
+            c.combiner_programs.set_enabled(true);
+            c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+            c.sync_gpu();
+            let value = (code & 15) as f32 * 0.25 * if code & 16 == 0 { 1. } else { -1. };
+            let expected = ((value * 0.125 + 0.5) * 255.).round() as u8;
+            let pixel = pixel(&c, 32, 32);
+            assert!(
+                pixel.iter().all(|&v| v.abs_diff(expected) <= 1),
+                "code={code}: {pixel:?}, expected={expected}"
+            );
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+        }
+    }
+
+    #[test]
+    fn software_ar11_literals_preserve_sign_and_fraction_through_arithmetic() {
+        literal_normalization(false);
+    }
+
+    #[test]
+    #[ignore = "requires native desktop GL and GLES"]
+    fn gpu_ar11_literals_preserve_sign_and_fraction_through_arithmetic() {
+        for es in [false, true] {
+            let root = if es {
+                crate::gpu::Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                crate::gpu::Renderer::new(8, 8).unwrap()
+            };
+            crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
+                literal_normalization(true);
+            });
+        }
+    }
+
+    fn fixed_sixth_texture_stage(gpu: bool) {
+        let mut c = ctx();
+        c.nv_combiner_client = true;
+        if gpu {
+            c.enable_gpu().unwrap();
+        }
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: quad_floats(),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.set_active_texture(5);
+        c.bind_texture(GL_TEXTURE_2D, 1);
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            1,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[0, 255, 0, 255],
+        );
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        c.set_capability(GL_TEXTURE_2D, true);
+        c.tex_env(GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        // Populate the NV cache before the wide fixed-function cache. Program
+        // ID zero is a real NV identity and must not alias the fixed variant.
+        use crate::combiner_program::{Architecture, Program, Stage};
+        let blue = Program {
+            architecture: Architecture::Ar11,
+            flags: 0,
+            stages: vec![Stage {
+                alpha_output: 0x0670,
+                alpha_inputs: 0x4004_0000,
+                flags: 0xe8,
+                color_output: 0x8070,
+                color_input_modifiers: 0x0400,
+                color_inputs: 0x4008_0000,
+                color_input_modes: 0x8100,
+                texture_routing: 0xffff_ffff,
+            }],
+        }
+        .compile_basic()
+        .unwrap();
+        c.combiner_programs.set_constant(0, [0, 0, 65536, 65536]);
+        c.combiner_programs
+            .load_bound(blue, MAX_TEXTURE_UNITS)
+            .unwrap();
+        c.combiner_programs.set_enabled(true);
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        c.sync_gpu();
+        assert_eq!(pixel(&c, 32, 32), [0, 0, 255, 255]);
+        c.combiner_programs.set_enabled(false);
+        for bounded in [false, true] {
+            if bounded {
+                c.tex_parameter_float(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD_SGIS, 0.);
+            }
+            c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+            assert_eq!(c.take_error(), GL_NO_ERROR);
+        }
+        c.set_capability(GL_TEXTURE_2D, false);
+        c.current_color = [1., 0., 0., 1.];
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        c.sync_gpu();
+        assert_eq!(pixel(&c, 32, 32), [255, 0, 0, 255]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+    #[test]
+    fn software_nv_coordinate_capacity_preserves_regular_limits() {
+        let mut c = ctx();
+        c.set_active_texture(4);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        assert_eq!(c.active_texture, 0);
+        c.nv_combiner_client = true;
+        c.set_active_texture(5);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        c.set_client_active_texture(5);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+        c.set_multi_texcoord4(GL_TEXTURE0 + 5, [0.25, 0.5, 0., 1.]);
+        assert_eq!(c.es11.current_texcoords[5], [0.25, 0.5, 0., 1.]);
+        c.set_active_texture(6);
+        assert_eq!(c.take_error(), GL_INVALID_ENUM);
+        assert_eq!(c.active_texture, 5);
+        fixed_sixth_texture_stage(false);
+    }
+    #[test]
+    #[ignore = "requires native desktop GL and GLES"]
+    fn gpu_nv_sixth_stage_and_return_to_four_stage_variants() {
+        for es in [false, true] {
+            let root = if es {
+                crate::gpu::Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                crate::gpu::Renderer::new(8, 8).unwrap()
+            };
+            crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
+                fixed_sixth_texture_stage(true)
+            });
+        }
+    }
+
+    fn swizzled_combiner_coordinates(gpu: bool) {
+        use crate::combiner_program::{Architecture, Program, Stage};
+        let mut c = ctx();
+        c.nv_combiner_client = true;
+        if gpu {
+            c.enable_gpu().unwrap();
+            assert_eq!(c.nv_texture_coordinate_capacity(), 6);
+        }
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: quad_floats(),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.bind_texture(GL_TEXTURE_2D, 1);
+        // Top-right is white; all other quadrants have different colours.
+        c.tex_image_2d(
+            GL_TEXTURE_2D,
+            0,
+            2,
+            2,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            &[
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ],
+        );
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        c.tex_parameter(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        for (s, t) in [(10u32, 1u32), (5, 12)] {
+            let si = (s & 7) as usize;
+            let ti = (t & 7) as usize;
+            c.texture_units[si].current_texcoord = [0.25, 0.25, 0., 1.];
+            c.texture_units[ti].current_texcoord = [0.25, 0.25, 0., 1.];
+            c.texture_matrix[si].load(matrix::translate(
+                if s < 8 { 0.5 } else { 0. },
+                if s >= 8 { 0.5 } else { 0. },
+                0.,
+            ));
+            c.texture_matrix[ti].load(matrix::translate(
+                if t < 8 { 0.5 } else { 0. },
+                if t >= 8 { 0.5 } else { 0. },
+                0.,
+            ));
+            let program = Program {
+                architecture: Architecture::Ar11,
+                flags: 0,
+                stages: vec![Stage {
+                    alpha_output: 0x0670,
+                    alpha_inputs: 0xc304_0000,
+                    flags: 0xc8,
+                    color_output: 0x8070,
+                    color_input_modifiers: 0x0400,
+                    color_inputs: 0xe408_0000,
+                    color_input_modes: 0x8100,
+                    texture_routing: 0x3fff_fc00 | s << 5 | t,
+                }],
+            }
+            .compile_basic()
+            .unwrap();
+            assert!(program.supports_texture_units(6));
+            if si >= 4 || ti >= 4 {
+                assert!(!program.supports_texture_units(4));
+            }
+            c.combiner_programs
+                .load_bound(program, MAX_TEXTURE_UNITS)
+                .unwrap();
+            c.combiner_programs.set_enabled(true);
+            for arrays in [false, true] {
+                if arrays {
+                    for unit in [si, ti] {
+                        let pointer = BASE + mem.bytes.len() as u32;
+                        for _ in 0..4 {
+                            mem.bytes.extend(
+                                [0.25f32, 0.25, 0., 2.]
+                                    .into_iter()
+                                    .flat_map(f32::to_le_bytes),
+                            );
+                        }
+                        c.set_client_active_texture(unit as u32);
+                        c.set_texcoord_pointer(4, GL_FLOAT, 16, pointer);
+                        c.set_client_state(GL_TEXTURE_COORD_ARRAY, true);
+                    }
+                }
+                for pretransform in [false, true] {
+                    c.es11.pretransform = pretransform;
+                    c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+                    c.sync_gpu();
+                    assert_eq!(
+                        pixel(&c, 32, 32),
+                        [255; 4],
+                        "s={s} t={t} arrays={arrays} pretransform={pretransform}"
+                    );
+                    assert_eq!(c.take_error(), GL_NO_ERROR);
+                }
+            }
+            // The ordinary four-coordinate shader must still work afterwards.
+            c.combiner_programs.set_enabled(false);
+            c.current_color = [0., 1., 0., 1.];
+            c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn software_combiner_swizzles_axes_and_uses_six_coordinate_sets() {
+        swizzled_combiner_coordinates(false);
+    }
+
+    #[test]
+    #[ignore = "requires native desktop GL and GLES"]
+    fn gpu_combiner_swizzles_axes_and_uses_six_coordinate_sets() {
+        for es in [false, true] {
+            let root = if es {
+                crate::gpu::Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                crate::gpu::Renderer::new(8, 8).unwrap()
+            };
+            crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
+                swizzled_combiner_coordinates(true);
             });
         }
     }
@@ -6238,7 +6654,7 @@ mod subimage_and_logic_tests {
                     &tri,
                     &stages,
                     &c.textures,
-                    [0; 4],
+                    [0; 6],
                 )
                 .unwrap();
             c.sync_gpu();
@@ -7524,7 +7940,7 @@ mod window_depth_discard_tests {
                 &near,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
         } else {
@@ -7559,7 +7975,7 @@ mod window_depth_discard_tests {
                 &far,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
         } else {
@@ -7618,7 +8034,7 @@ mod goforce_driver_tests {
                     &v,
                     &[],
                     &HashMap::new(),
-                    [0; 4],
+                    [0; 6],
                 )
                 .unwrap();
             } else {
@@ -7844,7 +8260,7 @@ mod compressed_validation_tests {
                             &tri,
                             &stages,
                             &c.textures,
-                            [0; 4],
+                            [0; 6],
                         )
                         .unwrap();
                     c.sync_gpu();
@@ -8063,7 +8479,7 @@ mod retrospective_texture_tests {
                                     (pos[1] + 1.) * footprint,
                                     0.,
                                     1.,
-                                ]; 4],
+                                ]; 6],
                                 ..Default::default()
                             }
                         });
@@ -8077,7 +8493,7 @@ mod retrospective_texture_tests {
                             &tri,
                             &stage,
                             &c.textures,
-                            [0; 4],
+                            [0; 6],
                         )
                         .unwrap();
                     c.sync_gpu();

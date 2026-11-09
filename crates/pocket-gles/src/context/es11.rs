@@ -5,13 +5,13 @@ use std::collections::HashSet;
 #[derive(Clone)]
 pub(super) struct Es11State {
     pub auxiliary: std::collections::HashMap<u32, StateValue>,
-    pub combiners: [crate::raster::Combine; 4],
+    pub combiners: [crate::raster::Combine; MAX_TEXTURE_UNITS],
     pub planes: [[f32; 4]; 6],
     pub clip_enabled: [bool; 6],
     pub point_min: f32,
     pub point_max: f32,
     pub point_max_changed: bool,
-    pub current_texcoords: [[f32; 4]; 4],
+    pub current_texcoords: [[f32; 4]; MAX_TEXTURE_UNITS],
     pub point_fade: f32,
     pub attenuation: [f32; 3],
     pub pretransform: bool,
@@ -49,13 +49,13 @@ impl Default for Es11State {
             ]
             .into_iter()
             .collect(),
-            combiners: [Default::default(); 4],
+            combiners: [Default::default(); MAX_TEXTURE_UNITS],
             planes: [[0.; 4]; 6],
             clip_enabled: [false; 6],
             point_min: 0.,
             point_max: 64.,
             point_max_changed: false,
-            current_texcoords: [[0., 0., 0., 1.]; 4],
+            current_texcoords: [[0., 0., 0., 1.]; MAX_TEXTURE_UNITS],
             point_fade: 1.,
             attenuation: [1., 0., 0.],
             pretransform: false,

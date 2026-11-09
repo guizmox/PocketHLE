@@ -130,8 +130,8 @@ fn load(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     };
     diagnostic_load("compiled", &bytes, Some(&program));
     if with_ctx(|c| {
-        c.combiner_programs
-            .load_bound(program, pocket_gles::raster::MAX_TEXTURE_STAGES)
+        let capacity = c.nv_texture_coordinate_capacity();
+        c.combiner_programs.load_bound(program, capacity)
     })
     .is_err()
     {

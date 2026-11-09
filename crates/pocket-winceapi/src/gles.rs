@@ -4940,7 +4940,7 @@ mod tests {
         reset_for_session();
         assert!(!with_ctx(|c| c.state.point_sprite));
         assert!(!with_ctx(|c| c.point_size_array.enabled));
-        assert_eq!(with_ctx(|c| c.state.point_coord_replace), [false; 4]);
+        assert_eq!(with_ctx(|c| c.state.point_coord_replace), [false; 6]);
     }
 
     #[test]

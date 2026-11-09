@@ -1,6 +1,9 @@
 crates\pocket-gles\src\combiner_program.rs
 crates\pocket-gles\src\context.rs
+crates\pocket-gles\src\context\es11.rs
 crates\pocket-gles\src\context\sharing.rs
+crates\pocket-gles\src\gpu\mod.rs
+crates\pocket-gles\src\gpu\resolve.rs
 crates\pocket-gles\src\raster.rs
 crates\pocket-kernel\src\lib.rs
 crates\pocket-winceapi\src\coredll.rs
@@ -8,4 +11,7 @@ crates\pocket-winceapi\src\coredll\mixer.rs
 crates\pocket-winceapi\src\gles.rs
 crates\pocket-winceapi\src\gles\egl_config.rs
 crates\pocket-winceapi\src\gles\egl_context.rs
+crates\pocket-winceapi\src\gles\nv_combiner.rs
 docs\EGL-ALPHA-NV-MIXER.md
+docs\GPU.md
+docs\NV-COMBINER-PERFORMANCE.md

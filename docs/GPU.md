@@ -56,13 +56,22 @@ Disabling it gates extension advertisement and NV entry points and disables
 active combiner state in the session's contexts. New EGL contexts and client
 state resets preserve the gate. Enabling it permits the existing client detection;
 it does not force combiner rendering on applications that do not request it.
+
+NV texture fetches can select x/y independently from up to six tracked
+coordinate sets. AR10 keeps its own four-coordinate/two-temporary encoding
+limits. Five/six-coordinate GPU programs use a separate shader variant and
+attribute locations 8/9, preserving the existing locations and compact upload
+path for ordinary draws. The wider path requires at least ten vertex attributes,
+ten varying vectors and seven fragment texture units on the host. Program
+loading checks that capacity; unsupported wider programs are rejected rather
+than silently switching renderers. Software has the six-coordinate path too.
+Program names/bodies participate in EGL sharing; bindings, constants and enable
+state remain context-local. Supported fragment rejection instructions discard
+without writing color or depth.
+
 The PocketPC switch does not alter Gizmondo's existing policy. Both launchers
 explicitly configure the session gate, independently of the GoForce driver and
 Intel 2700G depth-bias profiles. CLI launches retain their existing default.
-
-For targeted program/texture trace collection and dated copy/precision evidence,
-see [NV combiner diagnostics](ANDROID-COMBINER-DIAGNOSTICS.md). These records do
-not replace the current option policy above or certify current device behavior.
 
 ## Internal resolution
 

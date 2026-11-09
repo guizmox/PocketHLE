@@ -67,7 +67,7 @@ pub struct VertexTransforms {
     pub normal_matrix: Matrix4,
     pub projection: Matrix4,
     pub modelview: Matrix4,
-    pub textures: [Matrix4; 4],
+    pub textures: [Matrix4; 6],
 }
 /// Host-owned snapshots only. Guest addresses never reach the native driver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,8 +81,8 @@ pub(crate) struct StreamAttribute {
 #[derive(Default)]
 pub(crate) struct VertexStream {
     pub bytes: Vec<u8>,
-    pub attributes: [Option<StreamAttribute>; 8],
-    pub constants: [[f32; 4]; 8],
+    pub attributes: [Option<StreamAttribute>; 10],
+    pub constants: [[f32; 4]; 10],
     pub count: usize,
     pub indices: Vec<u16>,
     pub coverage: Vec<u8>,
@@ -193,7 +193,7 @@ impl VertexStream {
 /// lighting aliases the position attribute instead of uploading it twice.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct VertexLayout {
-    attributes: [Option<(i32, usize)>; 8],
+    attributes: [Option<(i32, usize)>; 10],
     floats: usize,
     prelit: bool,
     point_sizes: bool,
@@ -214,7 +214,7 @@ impl VertexLayout {
     ) -> Self {
         let lighting = transforms.is_some_and(|t| t.lighting.enabled);
         let mut layout = Self {
-            attributes: [None; 8],
+            attributes: [None; 10],
             floats: 8,
             prelit: transforms.is_none(),
             point_sizes: false,
@@ -223,7 +223,7 @@ impl VertexLayout {
         layout.attributes[1] = Some((4, 4));
         for stage in stages {
             let size = if mask & (1 << stage.unit) != 0 { 4 } else { 2 };
-            layout.attributes[stage.unit + 2] = Some((size, layout.floats));
+            layout.attributes[texture_attribute(stage.unit)] = Some((size, layout.floats));
             layout.floats += size as usize;
         }
         if lighting || (transforms.is_none() && (state.fog || state.two_sided_lighting)) {
@@ -256,8 +256,8 @@ impl VertexLayout {
         } else {
             provoking.color
         });
-        for unit in 0..4 {
-            if let Some((size, _)) = self.attributes[unit + 2] {
+        for unit in 0..6 {
+            if let Some((size, _)) = self.attributes[texture_attribute(unit)] {
                 out.extend_from_slice(&vertex.texcoord[unit][..size as usize]);
             }
         }
@@ -297,42 +297,113 @@ fn pack_flat_triangles(layout: &VertexLayout, out: &mut Vec<f32>, vertices: &[Ve
     }
 }
 
-const TEXTURE_MATRICES: [&str; 4] = [
+fn unique_records<const N: usize>(
+    source: &[f32],
+    floats: usize,
+    unique: &mut HashMap<[u32; N], u16>,
+    packed: &mut Vec<f32>,
+    indices: &mut Vec<u16>,
+) -> bool {
+    debug_assert!(floats <= N);
+    unique.clear();
+    for record in source.chunks_exact(floats) {
+        let key = std::array::from_fn(|i| record.get(i).map_or(0, |v| v.to_bits()));
+        let index = if let Some(&index) = unique.get(&key) {
+            index
+        } else {
+            if unique.len() == 65536 {
+                return false;
+            }
+            let index = unique.len() as u16;
+            unique.insert(key, index);
+            packed.extend_from_slice(record);
+            index
+        };
+        indices.push(index);
+    }
+    true
+}
+
+// Preserve normal/fog and provoking/point attributes at locations 6/7.
+// Additional coordinate sets are active only in a wide shader variant.
+pub(crate) fn texture_attribute(unit: usize) -> usize {
+    if unit < 4 {
+        unit + 2
+    } else {
+        unit + 4
+    }
+}
+const TEXTURE_MATRICES: [&str; 6] = [
     "textureMatrix0",
     "textureMatrix1",
     "textureMatrix2",
     "textureMatrix3",
+    "textureMatrix4",
+    "textureMatrix5",
 ];
-const SAMPLERS: [&str; 4] = ["sampler0", "sampler1", "sampler2", "sampler3"];
-const ENVIRONMENTS: [&str; 4] = ["env0", "env1", "env2", "env3"];
-const LOD_LIMITS: [&str; 4] = ["lodLimit0", "lodLimit1", "lodLimit2", "lodLimit3"];
-const LOD_BIASES: [&str; 4] = ["lodBias0", "lodBias1", "lodBias2", "lodBias3"];
-const ENV_COLORS: [&str; 4] = ["envColor0", "envColor1", "envColor2", "envColor3"];
-const COMBINE_UNIFORMS: [[&str; 4]; 5] = [
-    ["combineOps0", "combineOps1", "combineOps2", "combineOps3"],
+const SAMPLERS: [&str; 6] = [
+    "sampler0", "sampler1", "sampler2", "sampler3", "sampler4", "sampler5",
+];
+const ENVIRONMENTS: [&str; 6] = ["env0", "env1", "env2", "env3", "env4", "env5"];
+const LOD_LIMITS: [&str; 6] = [
+    "lodLimit0",
+    "lodLimit1",
+    "lodLimit2",
+    "lodLimit3",
+    "lodLimit4",
+    "lodLimit5",
+];
+const LOD_BIASES: [&str; 6] = [
+    "lodBias0", "lodBias1", "lodBias2", "lodBias3", "lodBias4", "lodBias5",
+];
+const ENV_COLORS: [&str; 6] = [
+    "envColor0",
+    "envColor1",
+    "envColor2",
+    "envColor3",
+    "envColor4",
+    "envColor5",
+];
+const COMBINE_UNIFORMS: [[&str; 6]; 5] = [
+    [
+        "combineOps0",
+        "combineOps1",
+        "combineOps2",
+        "combineOps3",
+        "combineOps4",
+        "combineOps5",
+    ],
     [
         "combineRgbSource0",
         "combineRgbSource1",
         "combineRgbSource2",
         "combineRgbSource3",
+        "combineRgbSource4",
+        "combineRgbSource5",
     ],
     [
         "combineAlphaSource0",
         "combineAlphaSource1",
         "combineAlphaSource2",
         "combineAlphaSource3",
+        "combineAlphaSource4",
+        "combineAlphaSource5",
     ],
     [
         "combineRgbOperand0",
         "combineRgbOperand1",
         "combineRgbOperand2",
         "combineRgbOperand3",
+        "combineRgbOperand4",
+        "combineRgbOperand5",
     ],
     [
         "combineAlphaOperand0",
         "combineAlphaOperand1",
         "combineAlphaOperand2",
         "combineAlphaOperand3",
+        "combineAlphaOperand4",
+        "combineAlphaOperand5",
     ],
 ];
 #[allow(non_snake_case)]
@@ -1307,6 +1378,12 @@ fn host_mipmap_levels(tex: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
     levels
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SpecializedShader {
+    Combiner(u64),
+    WideFixed,
+}
+
 type ProgramState = (u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>);
 
 pub struct Renderer {
@@ -1316,7 +1393,7 @@ pub struct Renderer {
     program: u32,
     alternate_program: Option<(u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>)>,
     affine_program: bool,
-    combiner_programs: HashMap<(u64, bool), ProgramState>,
+    combiner_programs: HashMap<(SpecializedShader, bool), ProgramState>,
     combiner: Option<(
         std::sync::Arc<crate::combiner_program::BasicProgram>,
         [[f32; 4]; 4],
@@ -1334,6 +1411,7 @@ pub struct Renderer {
     indices: Vec<u16>,
     packed_scratch: Vec<f32>,
     vertex_keys: HashMap<[u32; 32], u16>,
+    wide_vertex_keys: HashMap<[u32; 48], u16>,
     uniform_values: HashMap<i32, Vec<u32>>,
     pipeline: Option<PipelineState>,
     point_sprite_mode: bool,
@@ -1373,9 +1451,11 @@ pub struct Renderer {
     lod_derivatives: bool,
     compressed_formats: HashSet<u32>,
     attribute_layout: Option<VertexLayout>,
-    stream_layout: Option<[Option<StreamAttribute>; 8]>,
+    stream_layout: Option<[Option<StreamAttribute>; 10]>,
     native_fixed: bool,
     combiner_available: bool,
+    wide_textures: bool,
+    last_wide_draw: bool,
     pub point_range: [f32; 2],
     pub line_range: [f32; 2],
     pub max_viewport: [i32; 2],
@@ -1442,6 +1522,12 @@ impl Renderer {
             if units < 4 || attributes < 8 {
                 return Err("OpenGL driver lacks required texture/attribute units".into());
             }
+            let mut varying = 0;
+            (gl.GetIntegerv)(if host.es { 0x8dfc } else { 0x8b4b }, &mut varying);
+            if !host.es {
+                varying /= 4;
+            }
+            let wide_textures = attributes >= 10 && units >= 7 && varying >= 10;
             let mut max_viewport = [0; 2];
             let mut subpixel_bits = 0;
             (gl.GetIntegerv)(0x0d3a, max_viewport.as_mut_ptr());
@@ -1543,6 +1629,7 @@ impl Renderer {
                 indices: Vec::new(),
                 packed_scratch: Vec::new(),
                 vertex_keys: HashMap::new(),
+                wide_vertex_keys: HashMap::new(),
                 uniform_values: HashMap::new(),
                 pipeline: None,
                 point_sprite_mode: false,
@@ -1585,6 +1672,8 @@ impl Renderer {
                 stream_layout: None,
                 native_fixed,
                 combiner_available: units >= 5,
+                wide_textures,
+                last_wide_draw: false,
                 point_range,
                 line_range,
                 max_viewport,
@@ -1643,11 +1732,14 @@ impl Renderer {
                 "textureMatrix1",
                 "textureMatrix2",
                 "textureMatrix3",
+                "textureMatrix4",
+                "textureMatrix5",
                 "depthRange",
                 "pointSize",
                 "pointArray",
                 "pointArrayParams",
                 "pointReplace",
+                "pointReplaceHigh",
                 "logicMode",
                 "logicDestination",
                 "logicSize",
@@ -1662,7 +1754,7 @@ impl Renderer {
             ] {
                 r.cache_uniform(name);
             }
-            for i in 0..4 {
+            for i in 0..6 {
                 for name in [
                     "sampler",
                     "env",
@@ -1831,8 +1923,15 @@ impl Renderer {
             "tex3",
             "normalAndFog",
             "lightPosition",
+            "tex4",
+            "tex5",
         ]
         .iter()
+        .take(if vertex.contains("#define WIDE_TEXTURES") {
+            10
+        } else {
+            8
+        })
         .enumerate()
         {
             (self.gl.BindAttribLocation)(program, i as u32, CString::new(*name).unwrap().as_ptr());
@@ -2409,7 +2508,7 @@ impl Renderer {
         vertices: &[Vertex],
         stages: &[TextureStage],
         textures: &HashMap<u32, Texture>,
-        names: [u32; 4],
+        names: [u32; 6],
     ) -> Result<(), String> {
         self.draw_inner(
             target, state, mode, vertices, stages, textures, names, None, false, None, None,
@@ -2424,7 +2523,7 @@ impl Renderer {
         vertices: &[Vertex],
         stages: &[TextureStage],
         textures: &HashMap<u32, Texture>,
-        names: [u32; 4],
+        names: [u32; 6],
         transforms: &VertexTransforms,
     ) -> Result<(), String> {
         self.draw_inner(
@@ -2450,7 +2549,7 @@ impl Renderer {
         vertices: &[Vertex],
         stages: &[TextureStage],
         textures: &HashMap<u32, Texture>,
-        names: [u32; 4],
+        names: [u32; 6],
         transforms: &VertexTransforms,
     ) -> Result<(), String> {
         self.draw_inner(
@@ -2478,7 +2577,7 @@ impl Renderer {
         indices: &[u16],
         stages: &[TextureStage],
         textures: &HashMap<u32, Texture>,
-        names: [u32; 4],
+        names: [u32; 6],
         transforms: &VertexTransforms,
     ) -> Result<(), String> {
         if indices.iter().any(|i| *i as usize >= vertices.len()) {
@@ -2511,7 +2610,7 @@ impl Renderer {
         stream: &VertexStream,
         stages: &[TextureStage],
         textures: &HashMap<u32, Texture>,
-        names: [u32; 4],
+        names: [u32; 6],
         transforms: &VertexTransforms,
     ) -> Result<(), String> {
         if (state.smooth_shading && stream.flat_triangles)
@@ -2569,6 +2668,14 @@ impl Renderer {
         )
     }
 
+    pub(crate) fn texture_coordinate_capacity(&self) -> usize {
+        if self.wide_textures {
+            6
+        } else {
+            4
+        }
+    }
+
     pub(crate) fn supports_combiner(&self) -> bool {
         self.combiner_available
     }
@@ -2586,9 +2693,18 @@ impl Renderer {
         program: &crate::combiner_program::BasicProgram,
         range: bool,
     ) -> Result<ProgramState, String> {
-        if let Some(cached) = self.combiner_programs.remove(&(program.id(), range)) {
+        if let Some(cached) = self
+            .combiner_programs
+            .remove(&(SpecializedShader::Combiner(program.id()), range))
+        {
             return Ok(cached);
         }
+        let wide = program.coordinate_units() & 0x30 != 0 || program.texture_units() & 0x30 != 0;
+        if wide && !self.wide_textures {
+            return Err("six texture coordinates exceed host shader limits".into());
+        }
+        let wide_define = if wide { "#define WIDE_TEXTURES\n" } else { "" };
+        let vertex = format!("{wide_define}{VERTEX}");
         let fragment = FRAGMENT.replace("/* NV_COMBINER_FUNCTION */", &program.fragment_function());
         let range_define = if range {
             "#define TEXTURE_LOD_RANGE\n"
@@ -2597,8 +2713,8 @@ impl Renderer {
         };
         unsafe {
             let id = self.compile_program(
-                VERTEX,
-                &format!("#define NV_COMBINER\n{range_define}{fragment}"),
+                &vertex,
+                &format!("#define NV_COMBINER\n{wide_define}{range_define}{fragment}"),
             )?;
             let locations = self
                 .uniforms
@@ -2609,6 +2725,43 @@ impl Renderer {
                     (
                         name.to_owned(),
                         (self.gl.GetUniformLocation)(id, CString::new(name).unwrap().as_ptr()),
+                    )
+                })
+                .collect();
+            Ok((id, locations, HashMap::new()))
+        }
+    }
+
+    fn take_wide_fixed_program(&mut self, range: bool) -> Result<ProgramState, String> {
+        if let Some(program) = self
+            .combiner_programs
+            .remove(&(SpecializedShader::WideFixed, range))
+        {
+            return Ok(program);
+        }
+        if !self.wide_textures {
+            return Err("six texture coordinates exceed host shader limits".into());
+        }
+        let range_define = if range {
+            "#define TEXTURE_LOD_RANGE\n"
+        } else {
+            ""
+        };
+        unsafe {
+            let id = self.compile_program(
+                &format!("#define WIDE_TEXTURES\n{VERTEX}"),
+                &format!("#define WIDE_TEXTURES\n{range_define}{FRAGMENT}"),
+            )?;
+            let locations = self
+                .uniforms
+                .keys()
+                .map(|name| {
+                    (
+                        name.clone(),
+                        (self.gl.GetUniformLocation)(
+                            id,
+                            CString::new(name.as_str()).unwrap().as_ptr(),
+                        ),
                     )
                 })
                 .collect();
@@ -2661,7 +2814,7 @@ impl Renderer {
         vertices: &[Vertex],
         stages: &[TextureStage],
         textures: &HashMap<u32, Texture>,
-        names: [u32; 4],
+        names: [u32; 6],
         transforms: Option<&VertexTransforms>,
         sequential: bool,
         guest_indices: Option<&[u16]>,
@@ -2669,6 +2822,21 @@ impl Renderer {
     ) -> Result<(), String> {
         let _diagnostic =
             crate::graphics_diagnostic::Span::new(crate::graphics_diagnostic::Stage::Submit);
+        let wide_draw = stages.iter().any(|s| s.unit >= 4);
+        if wide_draw && !self.wide_textures {
+            return Err("six texture coordinates exceed host shader limits".into());
+        }
+        let attribute_limit = if wide_draw || self.last_wide_draw {
+            10
+        } else {
+            8
+        };
+        if wide_draw != self.last_wide_draw {
+            // Clear locations 8/9 once when returning to the compact path.
+            self.attribute_layout = None;
+            self.stream_layout = None;
+        }
+        self.last_wide_draw = wide_draw;
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
         let _gpu_diagnostic = diagnostic::Timer::scope(&self.diagnostic);
@@ -2701,7 +2869,14 @@ impl Renderer {
         let framebuffer_fetch = combiner
             .as_ref()
             .is_some_and(|(program, _)| program.reads_framebuffer());
-        let ordered = state.logic_op || framebuffer_fetch;
+        let mut feedback_writes = state.color_mask;
+        if self.rgb565 {
+            feedback_writes[3] = false;
+        }
+        let ordered = state.logic_op
+            || combiner.as_ref().is_some_and(|(program, _)| {
+                program.framebuffer_needs_primitive_order(feedback_writes)
+            });
         let affine = combiner.is_none()
             && !range
             && mode != GL_POINTS
@@ -2846,7 +3021,6 @@ impl Renderer {
                 }
             }
             self.indices.clear();
-            let mut unique = std::mem::take(&mut self.vertex_keys);
             let mut packed = std::mem::take(&mut self.packed_scratch);
             packed.clear();
             indexed = !direct;
@@ -2855,23 +3029,25 @@ impl Renderer {
                 indexed = true;
             }
             if !direct {
-                unique.clear();
-                for record in self.scratch.chunks_exact(layout.floats) {
-                    let key = std::array::from_fn(|i| record.get(i).map_or(0, |v| v.to_bits()));
-                    let index = if let Some(&index) = unique.get(&key) {
-                        index
-                    } else {
-                        if unique.len() == 65536 {
-                            indexed = false;
-                            break;
-                        }
-                        let index = unique.len() as u16;
-                        unique.insert(key, index);
-                        packed.extend_from_slice(record);
-                        index
-                    };
-                    self.indices.push(index);
-                }
+                // Preserve the existing small-key path for ordinary draws.
+                // Only a wide packed vertex needs the larger key/cache.
+                indexed = if layout.floats <= 32 {
+                    unique_records(
+                        &self.scratch,
+                        layout.floats,
+                        &mut self.vertex_keys,
+                        &mut packed,
+                        &mut self.indices,
+                    )
+                } else {
+                    unique_records(
+                        &self.scratch,
+                        layout.floats,
+                        &mut self.wide_vertex_keys,
+                        &mut packed,
+                        &mut self.indices,
+                    )
+                };
             }
             // Do not increase transfer size for draws with little vertex reuse.
             if guest_indices.is_none() {
@@ -2880,13 +3056,16 @@ impl Renderer {
             if indexed && guest_indices.is_none() {
                 std::mem::swap(&mut self.scratch, &mut packed);
             }
-            self.vertex_keys = unique;
             self.packed_scratch = packed;
         }
         let combiner_state = if let Some((program, _)) = &combiner {
             let mut shader = self.take_combiner_program(program, range)?;
             self.swap_program_state(&mut shader);
-            Some((program.id(), shader))
+            Some((SpecializedShader::Combiner(program.id()), shader))
+        } else if stages.iter().any(|stage| stage.unit >= 4) {
+            let mut shader = self.take_wide_fixed_program(range)?;
+            self.swap_program_state(&mut shader);
+            Some((SpecializedShader::WideFixed, shader))
         } else {
             None
         };
@@ -2918,6 +3097,8 @@ impl Renderer {
                         .point_coord_replace
                         .map(|enabled| if sprite && enabled { 1. } else { 0. });
                 self.uniform_4fv(self.loc("pointReplace"), 1, replacements.as_ptr());
+                let high = [replacements[4], replacements[5], 0., 0.];
+                self.uniform_4fv(self.loc("pointReplaceHigh"), 1, high.as_ptr());
             }
             self.point_drawing = mode == GL_POINTS;
             self.uniform_1f(
@@ -3076,7 +3257,11 @@ impl Renderer {
             self.uniform_matrix4fv(self.loc("projectionMatrix"), 1, 0, projection.as_ptr());
             self.uniform_matrix4fv(self.loc("modelviewMatrix"), 1, 0, modelview.as_ptr());
             if !self.untextured_active {
-                for (i, name) in TEXTURE_MATRICES.iter().enumerate() {
+                for (i, name) in TEXTURE_MATRICES
+                    .iter()
+                    .take(if wide_draw { 6 } else { 4 })
+                    .enumerate()
+                {
                     let matrix = transforms.map(|t| &t.textures[i]).unwrap_or(&IDENTITY);
                     self.uniform_matrix4fv(self.loc(name), 1, 0, matrix.as_ptr());
                 }
@@ -3121,7 +3306,11 @@ impl Renderer {
                 self.uniform_1f(self.loc(n), v);
             }
             (self.gl.PixelStorei)(0x0cf5, 1);
-            for (i, name) in names.into_iter().enumerate() {
+            for (i, name) in names
+                .into_iter()
+                .take(if wide_draw { 6 } else { 4 })
+                .enumerate()
+            {
                 (self.gl.ActiveTexture)(GL_TEXTURE0 + i as u32);
                 let stage = stages.iter().find(|s| s.unit == i);
                 let mut id = self.white;
@@ -3246,7 +3435,16 @@ impl Renderer {
                         .get(&name)
                         .map_or((-1000., 1000.), |t| t.lod_bounds());
                     self.uniform_2f(
-                        self.loc(["lodRange0", "lodRange1", "lodRange2", "lodRange3"][i]),
+                        self.loc(
+                            [
+                                "lodRange0",
+                                "lodRange1",
+                                "lodRange2",
+                                "lodRange3",
+                                "lodRange4",
+                                "lodRange5",
+                            ][i],
+                        ),
                         lo,
                         hi,
                     );
@@ -3316,7 +3514,7 @@ impl Renderer {
             (self.gl.BufferData)(GL_ARRAY_BUFFER, length as isize, data, 0x88e0);
             if let Some(stream) = stream {
                 if self.stream_layout != Some(stream.attributes) {
-                    for (i, attr) in stream.attributes.iter().enumerate() {
+                    for (i, attr) in stream.attributes.iter().take(attribute_limit).enumerate() {
                         if let Some(attr) = attr {
                             (self.gl.EnableVertexAttribArray)(i as u32);
                             (self.gl.VertexAttribPointer)(
@@ -3333,7 +3531,12 @@ impl Renderer {
                     }
                     self.stream_layout = Some(stream.attributes);
                 }
-                for (i, attr) in stream.attributes.iter().enumerate() {
+                for (i, attr) in stream
+                    .attributes
+                    .iter()
+                    .take(if wide_draw { 10 } else { 8 })
+                    .enumerate()
+                {
                     if attr.is_none() {
                         (self.gl.VertexAttrib4fv)(i as u32, stream.constants[i].as_ptr());
                     }
@@ -3341,7 +3544,8 @@ impl Renderer {
                 self.attribute_layout = None;
             } else {
                 if self.attribute_layout != Some(layout) {
-                    for (i, attribute) in layout.attributes.iter().enumerate() {
+                    for (i, attribute) in layout.attributes.iter().take(attribute_limit).enumerate()
+                    {
                         if let Some((size, offset)) = attribute {
                             (self.gl.EnableVertexAttribArray)(i as u32);
                             (self.gl.VertexAttribPointer)(
@@ -3368,17 +3572,20 @@ impl Renderer {
                     -1
                 },
             );
-            if ordered {
+            if ordered || framebuffer_fetch {
                 let levels = if self.rgb565 {
                     [31., 63., 31., 255.]
                 } else {
                     [255.; 4]
                 };
                 self.uniform_4fv(self.loc("logicLevels"), 1, levels.as_ptr());
-                self.uniform_1i(self.loc("logicDestination"), 4);
+                self.uniform_1i(
+                    self.loc("logicDestination"),
+                    if self.wide_textures { 6 } else { 4 },
+                );
                 let loc = self.loc("logicSize");
                 (self.gl.Uniform2f)(loc, self.width as f32, self.height as f32);
-                (self.gl.ActiveTexture)(GL_TEXTURE0 + 4);
+                (self.gl.ActiveTexture)(GL_TEXTURE0 + if self.wide_textures { 6 } else { 4 });
                 if self.logic_destination == 0 {
                     (self.gl.GenTextures)(1, &mut self.logic_destination);
                 }
@@ -3389,6 +3596,10 @@ impl Renderer {
                     Wrap::ClampToEdge,
                     Wrap::ClampToEdge,
                 );
+            }
+            if framebuffer_fetch && !ordered {
+                // The sampled channels are immutable for this entire draw.
+                self.copy_destination(true);
             }
             if indexed {
                 let indices = stream
@@ -3818,9 +4029,9 @@ fn affine_texture_coordinates(
             }
         }
         if let Some(stream) = stream {
-            match stream.attributes[stage.unit + 2] {
+            match stream.attributes[texture_attribute(stage.unit)] {
                 Some(a) => a.size < 4,
-                None => stream.constants[stage.unit + 2][3] == 1.,
+                None => stream.constants[texture_attribute(stage.unit)][3] == 1.,
             }
         } else {
             vertices.iter().all(|v| v.texcoord[stage.unit][3] == 1.)
@@ -3843,8 +4054,15 @@ VARYING vec4 vColor,vBackColor;
 #define UV_TYPE vec4
 #define UV_VALUE(v) (v)
 #endif
-TEX_VARYING UV_TYPE uv0,uv1,uv2,uv3;VARYING float vFog;uniform vec2 depthRange;
+TEX_VARYING UV_TYPE uv0,uv1,uv2,uv3;
+#ifdef WIDE_TEXTURES
+TEX_VARYING UV_TYPE uv4,uv5;
+#endif
+VARYING float vFog;uniform vec2 depthRange;
 uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
+#ifdef WIDE_TEXTURES
+attribute vec4 tex4,tex5;uniform mat4 textureMatrix4,textureMatrix5;
+#endif
 uniform int objectSpace,lightingEnabled,normalMode,colorMaterial,twoSided;
 uniform mat4 normalMatrix;
 uniform float normalRescale,shininess,pointSize;uniform int pointArray;uniform vec4 pointArrayParams;
@@ -3897,6 +4115,9 @@ void main(){
  uv1=UV_VALUE(textureMatrix1*tex1);
  uv2=UV_VALUE(textureMatrix2*tex2);
  uv3=UV_VALUE(textureMatrix3*tex3);
+#ifdef WIDE_TEXTURES
+ uv4=UV_VALUE(textureMatrix4*tex4);uv5=UV_VALUE(textureMatrix5*tex5);
+#endif
 #endif
  vFog=objectSpace!=0?abs(eye.z):normalAndFog.w;
 }
@@ -3925,7 +4146,11 @@ VARYING vec4 vColor,vBackColor;
 #define UV_TYPE vec4
 #define UV_VALUE(v) (v)
 #endif
-TEX_VARYING UV_TYPE uv0,uv1,uv2,uv3;VARYING float vFog;
+TEX_VARYING UV_TYPE uv0,uv1,uv2,uv3;
+#ifdef WIDE_TEXTURES
+TEX_VARYING UV_TYPE uv4,uv5;
+#endif
+VARYING float vFog;
 uniform int logicMode;uniform sampler2D logicDestination;uniform vec2 logicSize;uniform vec4 logicLevels;
 // ES2 has no integer bitwise operators. All intermediates are exact 8-bit integers.
 #ifndef AFFINE_TEXTURES
@@ -3947,11 +4172,18 @@ vec4 logicalColor(vec4 source,vec4 destination){
 uniform vec4 lodLimit0,lodLimit1,lodLimit2,lodLimit3;
 uniform vec2 lodRange0,lodRange1,lodRange2,lodRange3;
 uniform float lodBias0,lodBias1,lodBias2,lodBias3;uniform sampler2D sampler0,sampler1,sampler2,sampler3;uniform int env0,env1,env2,env3;uniform vec4 envColor0,envColor1,envColor2,envColor3;
-uniform vec4 pointReplace;uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
+uniform vec4 pointReplace,pointReplaceHigh;uniform int alphaMode,fogMode,twoSided;uniform float alphaRef,fogStart,fogEnd,fogDensity;uniform vec4 fogColor;
 uniform vec4 combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0;
 uniform vec4 combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1;
 uniform vec4 combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2;
 uniform vec4 combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3;
+#ifdef WIDE_TEXTURES
+uniform sampler2D sampler4;uniform float lodBias4;uniform vec4 lodLimit4;uniform vec2 lodRange4;uniform int env4;uniform vec4 envColor4;
+uniform vec4 combineOps4,combineRgbSource4,combineAlphaSource4,combineRgbOperand4,combineAlphaOperand4;
+uniform sampler2D sampler5;uniform float lodBias5;uniform vec4 lodLimit5;uniform vec2 lodRange5;uniform int env5;uniform vec4 envColor5;
+uniform vec4 combineOps5,combineRgbSource5,combineAlphaSource5,combineRgbOperand5,combineAlphaOperand5;
+#endif
+
 
 vec4 selectSource(float s,vec4 t,vec4 k,vec4 primary,vec4 previous){if(s<0.5)return t;if(s<1.5)return k;if(s<2.5)return primary;return previous;}
 vec3 rgbOperand(vec4 v,float op){if(op<0.5)return v.rgb;if(op<1.5)return vec3(1.0)-v.rgb;if(op<2.5)return vec3(v.a);return vec3(1.0-v.a);}
@@ -4001,6 +4233,11 @@ void main(){vec4 c=twoSided!=0&&!gl_FrontFacing?vBackColor:vColor;vec4 primary=c
 c=nvCombiner(primary);
 #elif !defined(UNTEXTURED_DRAW)
 if(env0>=0){vec4 t=sampleRange(sampler0,pointCoordinate(uv0,pointReplace.x),lodBias0,lodLimit0,lodRange0);if(env0==5)c=combineStage(c,t,envColor0,primary,combineOps0,combineRgbSource0,combineAlphaSource0,combineRgbOperand0,combineAlphaOperand0);else c=stage(c,t,env0,envColor0);}if(env1>=0){vec4 t=sampleRange(sampler1,pointCoordinate(uv1,pointReplace.y),lodBias1,lodLimit1,lodRange1);if(env1==5)c=combineStage(c,t,envColor1,primary,combineOps1,combineRgbSource1,combineAlphaSource1,combineRgbOperand1,combineAlphaOperand1);else c=stage(c,t,env1,envColor1);}if(env2>=0){vec4 t=sampleRange(sampler2,pointCoordinate(uv2,pointReplace.z),lodBias2,lodLimit2,lodRange2);if(env2==5)c=combineStage(c,t,envColor2,primary,combineOps2,combineRgbSource2,combineAlphaSource2,combineRgbOperand2,combineAlphaOperand2);else c=stage(c,t,env2,envColor2);}if(env3>=0){vec4 t=sampleRange(sampler3,pointCoordinate(uv3,pointReplace.w),lodBias3,lodLimit3,lodRange3);if(env3==5)c=combineStage(c,t,envColor3,primary,combineOps3,combineRgbSource3,combineAlphaSource3,combineRgbOperand3,combineAlphaOperand3);else c=stage(c,t,env3,envColor3);}
+#ifdef WIDE_TEXTURES
+if(env4>=0){vec4 t=sampleRange(sampler4,pointCoordinate(uv4,pointReplaceHigh.x),lodBias4,lodLimit4,lodRange4);if(env4==5)c=combineStage(c,t,envColor4,primary,combineOps4,combineRgbSource4,combineAlphaSource4,combineRgbOperand4,combineAlphaOperand4);else c=stage(c,t,env4,envColor4);}
+if(env5>=0){vec4 t=sampleRange(sampler5,pointCoordinate(uv5,pointReplaceHigh.y),lodBias5,lodLimit5,lodRange5);if(env5==5)c=combineStage(c,t,envColor5,primary,combineOps5,combineRgbSource5,combineAlphaSource5,combineRgbOperand5,combineAlphaOperand5);else c=stage(c,t,env5,envColor5);}
+#endif
+
 #endif
 float alpha=floor(clamp(c.a,0.0,1.0)*255.0+0.5);
 if(alphaMode==0||(alphaMode==1&&alpha>=alphaRef)||(alphaMode==2&&alpha!=alphaRef)||(alphaMode==3&&alpha>alphaRef)||(alphaMode==4&&alpha<=alphaRef)||(alphaMode==5&&alpha==alphaRef)||(alphaMode==6&&alpha<alphaRef))discard;
@@ -4071,7 +4308,7 @@ mod tests {
                                     |pos| Vertex {
                                         pos,
                                         color: [0.61, 0.39, 0.23, alpha],
-                                        texcoord: [[0.37, 0.63, 0., 1.]; 4],
+                                        texcoord: [[0.37, 0.63, 0., 1.]; 6],
                                         ..Default::default()
                                     },
                                 );
@@ -4099,7 +4336,7 @@ mod tests {
                                     &vertices,
                                     stages,
                                     &textures,
-                                    [1, 0, 0, 0],
+                                    [1, 0, 0, 0, 0, 0],
                                 )
                                 .unwrap();
                                 reference
@@ -4110,7 +4347,7 @@ mod tests {
                                         &vertices,
                                         stages,
                                         &textures,
-                                        [1, 0, 0, 0],
+                                        [1, 0, 0, 0, 0, 0],
                                     )
                                     .unwrap();
                             }
@@ -4186,7 +4423,7 @@ mod tests {
                     &vertices,
                     stages,
                     &textures,
-                    [1; 4],
+                    [1; 6],
                 )
                 .unwrap();
                 reference
@@ -4197,7 +4434,7 @@ mod tests {
                         &vertices,
                         stages,
                         &textures,
-                        [1; 4],
+                        [1; 6],
                     )
                     .unwrap();
                 if i >= 7 {
@@ -4254,10 +4491,10 @@ mod tests {
                         t.min_filter = Filter::LinearMipmapLinear;
                     }
                 }
-                fast.draw(&a, &state, mode, &coordinates, &stages, &textures, [1; 4])
+                fast.draw(&a, &state, mode, &coordinates, &stages, &textures, [1; 6])
                     .unwrap();
                 reference
-                    .draw(&b, &state, mode, &coordinates, &stages, &textures, [1; 4])
+                    .draw(&b, &state, mode, &coordinates, &stages, &textures, [1; 6])
                     .unwrap();
                 assert!(!fast.simple_active, "feature {feature}");
                 fast.read(&mut a).unwrap();
@@ -4273,7 +4510,7 @@ mod tests {
                         &vertices,
                         &[stage.clone()],
                         &textures,
-                        [1; 4],
+                        [1; 6],
                     )
                     .unwrap();
                     reference
@@ -4284,7 +4521,7 @@ mod tests {
                             &vertices,
                             &[stage.clone()],
                             &textures,
-                            [1; 4],
+                            [1; 6],
                         )
                         .unwrap();
                 }
@@ -4296,7 +4533,7 @@ mod tests {
                     fog: i % 2 == 0,
                     ..base.clone()
                 };
-                fast.draw(&a, &state, GL_TRIANGLES, &vertices, &[], &textures, [1; 4])
+                fast.draw(&a, &state, GL_TRIANGLES, &vertices, &[], &textures, [1; 6])
                     .unwrap();
                 assert!(!fast.simple_active);
             }
@@ -4336,7 +4573,7 @@ mod tests {
                     &triangle,
                     &[],
                     &textures,
-                    [0; 4],
+                    [0; 6],
                 )
                 .unwrap();
                 gpu.read(&mut target).unwrap();
@@ -4349,7 +4586,7 @@ mod tests {
                     &vertices,
                     &[],
                     &textures,
-                    [0; 4],
+                    [0; 6],
                 )
                 .unwrap();
                 gpu.read(&mut target).unwrap();
@@ -4383,7 +4620,7 @@ mod tests {
                 [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
                     pos,
                     color: [1., 0., 0., 1.],
-                    texcoord: [[0.125, 0.125, 0., 1.]; 4],
+                    texcoord: [[0.125, 0.125, 0., 1.]; 6],
                     ..Default::default()
                 });
             let mut vertices = vertices.repeat(64);
@@ -4391,7 +4628,7 @@ mod tests {
                 projection: IDENTITY,
                 modelview: IDENTITY,
                 normal_matrix: IDENTITY,
-                textures: [IDENTITY; 4],
+                textures: [IDENTITY; 6],
                 lighting: Default::default(),
             };
             let mut tex = Texture::default();
@@ -4422,7 +4659,7 @@ mod tests {
                 &vertices[..3],
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4434,7 +4671,7 @@ mod tests {
                 &vertices,
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4463,7 +4700,7 @@ mod tests {
                 &vertices,
                 &stages,
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4477,7 +4714,7 @@ mod tests {
                 &vertices[..3],
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4493,7 +4730,7 @@ mod tests {
                 &vertices,
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4507,7 +4744,7 @@ mod tests {
                 &vertices,
                 &stages,
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4526,7 +4763,7 @@ mod tests {
                 &vertices,
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4540,7 +4777,7 @@ mod tests {
                 &vertices,
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4555,7 +4792,7 @@ mod tests {
                 &vertices,
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4570,7 +4807,7 @@ mod tests {
                 &vertices[..1],
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4582,7 +4819,7 @@ mod tests {
                 &vertices,
                 &[],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &transforms,
             )
             .unwrap();
@@ -4623,7 +4860,7 @@ mod tests {
                     [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
                         pos,
                         color: [1.; 4],
-                        texcoord: [[0.125, 0.125, 0., 1.]; 4],
+                        texcoord: [[0.125, 0.125, 0., 1.]; 6],
                         ..Default::default()
                     });
                 let mut target = RenderTarget::new(8, 8);
@@ -4642,7 +4879,7 @@ mod tests {
                         &vertices,
                         &stages,
                         &textures,
-                        [1, 0, 0, 0],
+                        [1, 0, 0, 0, 0, 0],
                     )
                     .unwrap();
                     gpu.read(&mut target).unwrap();
@@ -4782,6 +5019,29 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn packed_vertex_keys_keep_additional_coordinates_distinct() {
+        let mut source = vec![0.; 40];
+        let mut second = source.clone();
+        second[35] = 1.;
+        source.extend(&second);
+        source.extend([0.; 40]);
+        let mut keys = HashMap::<[u32; 48], u16>::new();
+        let mut packed = Vec::new();
+        let mut indices = Vec::new();
+        assert!(unique_records(
+            &source,
+            40,
+            &mut keys,
+            &mut packed,
+            &mut indices
+        ));
+        assert_eq!(indices, [0, 1, 0]);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(packed.len(), 80);
+        assert_eq!(packed[75], 1.);
+    }
+
     #[cfg(unix)]
 
     fn identity_transforms() -> VertexTransforms {
@@ -4790,7 +5050,7 @@ mod tests {
             normal_matrix: IDENTITY,
             projection: IDENTITY,
             modelview: IDENTITY,
-            textures: [IDENTITY; 4],
+            textures: [IDENTITY; 6],
         }
     }
     #[cfg(unix)]
@@ -4864,7 +5124,7 @@ mod tests {
                     &[0, 1, 2, 3],
                     &[stage],
                     &textures,
-                    [1, 0, 0, 0],
+                    [1, 0, 0, 0, 0, 0],
                     &identity_transforms(),
                 )
                 .unwrap();
@@ -4921,7 +5181,7 @@ mod tests {
                             &[0, 1, 2, 3],
                             &[stage],
                             &textures,
-                            [1, 0, 0, 0],
+                            [1, 0, 0, 0, 0, 0],
                             &identity_transforms(),
                         )
                         .unwrap();
@@ -4948,7 +5208,7 @@ mod tests {
                 &[0, 1, 2, 3],
                 &[stage],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &identity_transforms(),
             )
             .unwrap();
@@ -4975,7 +5235,7 @@ mod tests {
                 &[0, 1, 2, 3],
                 &[stage],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &identity_transforms(),
             )
             .unwrap();
@@ -4995,7 +5255,7 @@ mod tests {
                 &[0, 1, 2, 3],
                 &[stage],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &identity_transforms(),
             )
             .unwrap();
@@ -5013,7 +5273,7 @@ mod tests {
                 &[0, 1, 2, 3],
                 &[stage],
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
                 &identity_transforms(),
             )
             .unwrap();
@@ -5038,7 +5298,7 @@ mod tests {
                     &[0, 1, 2, 3],
                     &[stage],
                     &textures,
-                    [1, 0, 0, 0],
+                    [1, 0, 0, 0, 0, 0],
                     &identity_transforms(),
                 )
                 .unwrap();
@@ -5067,7 +5327,7 @@ mod tests {
                     &[9],
                     &[],
                     &textures,
-                    [0; 4],
+                    [0; 6],
                     &identity_transforms()
                 )
                 .is_err());
@@ -5347,7 +5607,7 @@ mod tests {
                             &vertices,
                             &stages,
                             &textures,
-                            [1, 0, 0, 0],
+                            [1, 0, 0, 0, 0, 0],
                             &transforms,
                         )
                         .unwrap();
@@ -5371,7 +5631,7 @@ mod tests {
                                 &vertices,
                                 &stages,
                                 &textures,
-                                [1, 0, 0, 0],
+                                [1, 0, 0, 0, 0, 0],
                                 &transforms,
                             )
                             .unwrap();
@@ -5416,7 +5676,7 @@ mod tests {
         assert_eq!(projective.attributes[2], Some((4, 8)));
         assert_eq!(projective.floats, 12);
         let vertex = Vertex {
-            texcoord: [[0.25, 0.5, 2., 3.]; 4],
+            texcoord: [[0.25, 0.5, 2., 3.]; 6],
             ..Default::default()
         };
         let mut packed = Vec::new();
@@ -5444,7 +5704,7 @@ mod tests {
                 pos: [i as f32, 1., 2., 1.],
                 color: [i as f32 / 6., 0.5, 0.25, 1.],
                 normal: [i as f32, 0., 1.],
-                texcoord: [[i as f32, 0.5, 0., 1.]; 4],
+                texcoord: [[i as f32, 0.5, 0., 1.]; 6],
                 fog_depth: i as f32 + 0.25,
                 ..Default::default()
             })
@@ -5578,7 +5838,7 @@ mod tests {
                         &vertices,
                         &[],
                         &HashMap::new(),
-                        [0; 4],
+                        [0; 6],
                         &transforms,
                     )
                     .unwrap();
@@ -5593,7 +5853,7 @@ mod tests {
                         &vertices,
                         &[],
                         &HashMap::new(),
-                        [0; 4],
+                        [0; 6],
                         &transforms,
                     )
                     .unwrap();
@@ -5629,7 +5889,7 @@ mod tests {
                 &vertices,
                 &[stage],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
                 &transforms,
             )
             .unwrap();
@@ -5642,7 +5902,7 @@ mod tests {
                 &vertices,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
                 &transforms,
             )
             .unwrap();
@@ -5690,7 +5950,7 @@ mod tests {
                 &vertices,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             assert_eq!(gpu.scratch.len(), 3 * 8);
@@ -5717,7 +5977,7 @@ mod tests {
                 &mesh,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             assert_eq!(gpu.scratch.len() * 4 + gpu.indices.len() * 2, 328);
@@ -5730,7 +5990,7 @@ mod tests {
                 &vertices,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             let uniforms = gpu.uniform_values.clone();
@@ -5741,7 +6001,7 @@ mod tests {
                 &vertices,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             assert_eq!(gpu.uniform_values, uniforms);
@@ -5765,7 +6025,7 @@ mod tests {
                 &triangle([0., 1., 0., 1.], 0.),
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             gpu.read(&mut target).unwrap();
@@ -5875,7 +6135,7 @@ mod tests {
                         &draw_vertices,
                         &[],
                         &HashMap::new(),
-                        [0; 4],
+                        [0; 6],
                     )
                     .unwrap();
                     gpu.read(&mut native).unwrap();
@@ -5913,7 +6173,7 @@ mod tests {
                         &draw_vertices,
                         &[],
                         &HashMap::new(),
-                        [0; 4],
+                        [0; 6],
                     )
                     .unwrap();
                     gpu.read(&mut native).unwrap();
@@ -5966,7 +6226,7 @@ mod tests {
                     &vertices,
                     &[],
                     &HashMap::new(),
-                    [0; 4],
+                    [0; 6],
                 )
                 .unwrap();
                 gpu.read(&mut native).unwrap();
@@ -6010,7 +6270,7 @@ mod tests {
                 &vertices,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             gpu.read(&mut native).unwrap();
@@ -6061,7 +6321,7 @@ mod tests {
                 &near,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], near);
@@ -6085,7 +6345,7 @@ mod tests {
                 &far,
                 &[],
                 &HashMap::new(),
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             gpu.read(&mut native).unwrap();
@@ -6140,7 +6400,7 @@ mod tests {
                         &foreground,
                         &[],
                         &HashMap::new(),
-                        [0; 4],
+                        [0; 6],
                     )
                     .unwrap();
                     let mut light = triangle([1., 0., 0., 1.], 0.3);
@@ -6159,7 +6419,7 @@ mod tests {
                         &light,
                         &[],
                         &HashMap::new(),
-                        [0; 4],
+                        [0; 6],
                     )
                     .unwrap();
                     gpu.read(&mut target).unwrap();
@@ -6180,7 +6440,7 @@ mod tests {
                         &light,
                         &[],
                         &HashMap::new(),
-                        [0; 4],
+                        [0; 6],
                     )
                     .unwrap();
                     gpu.read(&mut target).unwrap();
@@ -6236,7 +6496,7 @@ mod tests {
                         &vertices,
                         &[],
                         &HashMap::new(),
-                        [0; 4],
+                        [0; 6],
                     )
                     .unwrap();
                 }
@@ -6344,7 +6604,7 @@ mod tests {
                     &triangle([1.; 4], 0.),
                     &[],
                     &HashMap::new(),
-                    [0; 4],
+                    [0; 6],
                 )
                 .unwrap();
                 gpu.flush().unwrap();
@@ -6387,7 +6647,7 @@ mod tests {
                     &triangle([1.; 4], 0.),
                     &[stage],
                     &textures,
-                    [1; 4]
+                    [1; 6]
                 )
                 .is_err(),
                 "pending draw errors must not be consumed by upload fallback"
@@ -6426,7 +6686,7 @@ mod tests {
                 &triangle([1., 0., 0., 1.], 0.),
                 &[],
                 &textures,
-                [0; 4],
+                [0; 6],
             )
             .unwrap();
             let mut logical = vec![0; 16 * 16 * 2];
@@ -6534,7 +6794,7 @@ mod tests {
                     )
                     .unwrap();
                     let tri = triangle(src.map(|v| v as f32 / 255.), 0.);
-                    gpu.draw(&native, &state, GL_TRIANGLES, &tri, &[], &textures, [0; 4])
+                    gpu.draw(&native, &state, GL_TRIANGLES, &tri, &[], &textures, [0; 6])
                         .unwrap();
                     gpu.read(&mut native).unwrap();
                     let i = (16 * 32 + 16) * 4;
@@ -6568,7 +6828,7 @@ mod tests {
                         &vertices,
                         &[],
                         &textures,
-                        [0; 4],
+                        [0; 6],
                     )
                     .unwrap();
                     for _ in 0..2 {
@@ -6584,7 +6844,7 @@ mod tests {
                     // Switching back must restore blending and normal batched draws.
                     state.logic_op = false;
                     state.color_mask = [true; 4];
-                    gpu.draw(&native, &state, GL_TRIANGLES, &tri, &[], &textures, [0; 4])
+                    gpu.draw(&native, &state, GL_TRIANGLES, &tri, &[], &textures, [0; 6])
                         .unwrap();
                     gpu.read(&mut native).unwrap();
                     assert_eq!(&native.color[i..i + 4], &[0; 4]);
@@ -6635,9 +6895,9 @@ mod tests {
                     }),
                 };
                 let mut raw = triangle([0.9, 0.75, 0.5, 1.], 0.);
-                raw[0].texcoord = [[0.1, 0.1, 0., 1.]; 4];
-                raw[1].texcoord = [[0.8, 0.1, 0., 1.]; 4];
-                raw[2].texcoord = [[0.4, 0.9, 0., 1.]; 4];
+                raw[0].texcoord = [[0.1, 0.1, 0., 1.]; 6];
+                raw[1].texcoord = [[0.8, 0.1, 0., 1.]; 6];
+                raw[2].texcoord = [[0.4, 0.9, 0., 1.]; 6];
                 let mut cpu = raw;
                 let mvp = matrix::multiply(&transforms.projection, &transforms.modelview);
                 for vertex in &mut cpu {
@@ -6669,7 +6929,7 @@ mod tests {
                         env_color: [0.; 4],
                         lod_bias: 0.0,
                     }];
-                    let mut names = [0; 4];
+                    let mut names = [0; 6];
                     names[unit] = 1;
                     for mode in [GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN] {
                         let state = PipelineState {
@@ -6750,7 +7010,7 @@ mod tests {
             let mut transform = VertexTransforms {
                 projection: IDENTITY,
                 modelview: IDENTITY,
-                textures: [IDENTITY; 4],
+                textures: [IDENTITY; 6],
                 normal_matrix: IDENTITY,
                 lighting: Default::default(),
             };
@@ -6776,7 +7036,7 @@ mod tests {
                     vertices,
                     &[],
                     &textures,
-                    [0; 4],
+                    [0; 6],
                     t,
                 )
                 .unwrap();
@@ -6918,7 +7178,7 @@ mod tests {
             &vertices,
             &[],
             &textures,
-            [0; 4],
+            [0; 6],
         )
         .unwrap();
         gpu.read(&mut target).unwrap();
@@ -6933,7 +7193,7 @@ mod tests {
             &triangle([0., 1., 0., 1.], 0.),
             &[],
             &textures,
-            [0; 4],
+            [0; 6],
         )
         .unwrap();
         gpu.read(&mut target).unwrap();
@@ -6968,7 +7228,7 @@ mod tests {
             &triangle([1., 0., 0., 1.], 0.),
             &[],
             &textures,
-            [0; 4],
+            [0; 6],
         )
         .unwrap();
         gpu.read(&mut target).unwrap();
@@ -6990,7 +7250,7 @@ mod tests {
             &triangle([0., 1., 0., 1.], -0.5),
             &[],
             &textures,
-            [0; 4],
+            [0; 6],
         )
         .unwrap();
         gpu.draw(
@@ -7000,7 +7260,7 @@ mod tests {
             &triangle([1., 0., 0., 1.], 0.5),
             &[],
             &textures,
-            [0; 4],
+            [0; 6],
         )
         .unwrap();
         gpu.read(&mut target).unwrap();
@@ -7016,7 +7276,7 @@ mod tests {
             &triangle([1., 0., 0., 0.25], 0.),
             &[],
             &textures,
-            [0; 4],
+            [0; 6],
         )
         .unwrap();
         gpu.read(&mut target).unwrap();
@@ -7032,7 +7292,7 @@ mod tests {
             &triangle([1., 0., 0., 0.5], 0.),
             &[],
             &textures,
-            [0; 4],
+            [0; 6],
         )
         .unwrap();
         gpu.read(&mut target).unwrap();
@@ -7062,7 +7322,7 @@ mod tests {
             &triangle([1.; 4], 0.),
             &stages,
             &textures,
-            [1, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0],
         )
         .unwrap();
         gpu.read(&mut target).unwrap();
@@ -7076,7 +7336,7 @@ mod tests {
             &triangle([1.; 4], 0.),
             &stages,
             &textures,
-            [1, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0],
         )
         .unwrap();
         gpu.read(&mut target).unwrap();
@@ -7093,7 +7353,7 @@ mod tests {
                 &triangle([1.; 4], 0.),
                 &stages,
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
             )
             .unwrap();
             gpu.read(&mut target).unwrap();
@@ -7216,7 +7476,7 @@ mod nonzero_base_es2_tests {
             }];
             let tri = [[-1., -1., 0., 1.], [1., -1., 0., 1.], [0., 1., 0., 1.]].map(|pos| Vertex {
                 pos,
-                texcoord: [[(pos[0] + 1.) * 64., (pos[1] + 1.) * 64., 0., 1.]; 4],
+                texcoord: [[(pos[0] + 1.) * 64., (pos[1] + 1.) * 64., 0., 1.]; 6],
                 ..Default::default()
             });
             let mut target = RenderTarget::new(16, 16);
@@ -7230,7 +7490,7 @@ mod nonzero_base_es2_tests {
                 &tri,
                 &stages,
                 &textures,
-                [1, 0, 0, 0],
+                [1, 0, 0, 0, 0, 0],
             )
             .unwrap();
             gpu.read(&mut target).unwrap();

@@ -21,7 +21,7 @@ mod combine;
 pub use combine::Combine;
 
 /// How many texture stages a draw can cascade through.
-pub const MAX_TEXTURE_STAGES: usize = 4;
+pub const MAX_TEXTURE_STAGES: usize = 6;
 
 /// A vertex after the modelview-projection transform, in clip space.
 #[derive(Debug, Clone, Copy)]
@@ -231,7 +231,7 @@ pub struct PipelineState {
     pub point_size: f32,
     pub point_size_array: bool,
     pub point_sprite: bool,
-    pub point_coord_replace: [bool; 4],
+    pub point_coord_replace: [bool; MAX_TEXTURE_STAGES],
     pub line_width: f32,
     pub polygon_offset: bool,
     pub polygon_factor: f32,
@@ -272,7 +272,7 @@ impl Default for PipelineState {
             point_size: 1.0,
             point_size_array: false,
             point_sprite: false,
-            point_coord_replace: [false; 4],
+            point_coord_replace: [false; MAX_TEXTURE_STAGES],
             line_width: 1.0,
             polygon_offset: false,
             polygon_factor: 0.,
@@ -542,12 +542,24 @@ fn evaluate_combiner(
         let Some(stage) = stages.iter().find(|stage| stage.unit == route.texture) else {
             return [0., 0., 0., 1.];
         };
-        let (s, t, grad) = if route.s == route.t {
+        let (s, t, grad) = if route.s == route.t && route.s_component == 0 && route.t_component == 1
+        {
             coordinate(route.s)
         } else {
-            let (s, _, sg) = coordinate(route.s);
-            let (_, t, tg) = coordinate(route.t);
-            (s, t, [sg[0], tg[1], sg[2], tg[3]])
+            let (sx, sy, sg) = coordinate(route.s);
+            let (tx, ty, tg) = coordinate(route.t);
+            let s = [sx, sy][route.s_component];
+            let t = [tx, ty][route.t_component];
+            (
+                s,
+                t,
+                [
+                    sg[route.s_component],
+                    tg[route.t_component],
+                    sg[route.s_component + 2],
+                    tg[route.t_component + 2],
+                ],
+            )
         };
         sample
             .sample_grad(route.texture, s, t, grad, stage.lod_bias)
@@ -2446,7 +2458,7 @@ mod tests {
         let uv = [[0., 0.], [8., 0.], [0., 8.]];
         let vertices = std::array::from_fn(|i| Vertex {
             pos: positions[i],
-            texcoord: [[uv[i][0], uv[i][1], 0., 1.]; 4],
+            texcoord: [[uv[i][0], uv[i][1], 0., 1.]; 6],
             ..Default::default()
         });
         let stage = TextureStage {
@@ -2498,7 +2510,7 @@ mod tests {
         let uv = [[0., 0.], [8., 0.], [0., 8.]];
         let vertices = std::array::from_fn(|i| Vertex {
             pos: positions[i],
-            texcoord: [[uv[i][0], uv[i][1], 0., 1.]; 4],
+            texcoord: [[uv[i][0], uv[i][1], 0., 1.]; 6],
             ..Default::default()
         });
         let stage = TextureStage {
@@ -2694,7 +2706,7 @@ mod projective_coordinate_tests {
             let uv = [[0., 1., 0.2, 1.], [2., 1., 0.4, 3.], [0., -1., 0.6, 1.]];
             let vertices = std::array::from_fn(|i| Vertex {
                 pos: [xy[i][0] * clip_w[i], xy[i][1] * clip_w[i], 0., clip_w[i]],
-                texcoord: [uv[i]; 4],
+                texcoord: [uv[i]; 6],
                 ..Default::default()
             });
             let mut target = RenderTarget::new(N, N);
@@ -2760,14 +2772,14 @@ mod projective_coordinate_tests {
     #[test]
     fn clipping_interpolates_all_four_coordinates_before_projection() {
         let a = Vertex {
-            texcoord: [[1., 2., 3., 4.]; 4],
+            texcoord: [[1., 2., 3., 4.]; 6],
             ..Default::default()
         };
         let b = Vertex {
-            texcoord: [[5., 6., 7., 8.]; 4],
+            texcoord: [[5., 6., 7., 8.]; 6],
             ..Default::default()
         };
-        assert_eq!(lerp_vertex(&a, &b, 0.25).texcoord, [[2., 3., 4., 5.]; 4]);
+        assert_eq!(lerp_vertex(&a, &b, 0.25).texcoord, [[2., 3., 4., 5.]; 6]);
     }
     #[test]
     fn points_and_lines_preserve_homogeneous_coordinate_equivalence() {
@@ -2794,7 +2806,7 @@ mod projective_coordinate_tests {
                         0.25 * q,
                         0.5 * q,
                         q,
-                    ]; 4],
+                    ]; 6],
                     ..Default::default()
                 });
                 let written = if line {
@@ -2841,7 +2853,7 @@ mod sprite_formula_tests {
         let mut state = PipelineState {
             viewport: (0, 0, 16, 16),
             point_sprite: true,
-            point_coord_replace: [true; 4],
+            point_coord_replace: [true; MAX_TEXTURE_STAGES],
             point_size: 4.,
             ..Default::default()
         };
