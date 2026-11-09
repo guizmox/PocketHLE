@@ -1,4 +1,4 @@
-//! The virtual RGB565 configuration, shared by selection and attribute queries.
+//! Virtual RGB565/RGBA8 configurations, shared by selection and queries.
 //! EGL 1.1 tables 3.1/3.3; renderable-type queries retain ES 1.x compatibility.
 use super::*;
 use pocket_gles::*;
@@ -17,23 +17,73 @@ const TRANSPARENT_RGB: i32 = 0x3052;
 
 pub(super) struct Config {
     depth: i32,
+    rgba: bool,
 }
 impl Config {
     pub(super) fn current() -> Self {
         Self {
             depth: with_ctx(|c| c.state.depth_bits() as i32),
+            rgba: false,
+        }
+    }
+
+    pub(super) fn from_handle(handle: u32) -> Option<Self> {
+        let rgba = match handle {
+            CONFIG_HANDLE => false,
+            CONFIG_RGBA_HANDLE => true,
+            _ => return None,
+        };
+        Some(Self {
+            rgba,
+            ..Self::current()
+        })
+    }
+    fn id(&self) -> i32 {
+        if self.rgba {
+            2
+        } else {
+            1
         }
     }
 
     pub(super) fn attribute(&self, key: u32) -> Option<i32> {
         Some(match key {
-            EGL_BUFFER_SIZE => 16,
-            EGL_RED_SIZE | EGL_BLUE_SIZE => 5,
-            EGL_GREEN_SIZE => 6,
-            EGL_ALPHA_SIZE | EGL_STENCIL_SIZE | EGL_SAMPLES | EGL_SAMPLE_BUFFERS => 0,
+            EGL_BUFFER_SIZE => {
+                if self.rgba {
+                    32
+                } else {
+                    16
+                }
+            }
+            EGL_RED_SIZE | EGL_BLUE_SIZE => {
+                if self.rgba {
+                    8
+                } else {
+                    5
+                }
+            }
+            EGL_GREEN_SIZE => {
+                if self.rgba {
+                    8
+                } else {
+                    6
+                }
+            }
+            EGL_ALPHA_SIZE => {
+                if self.rgba {
+                    8
+                } else {
+                    0
+                }
+            }
+            EGL_STENCIL_SIZE | EGL_SAMPLES | EGL_SAMPLE_BUFFERS => 0,
             EGL_DEPTH_SIZE => self.depth,
-            EGL_SURFACE_TYPE => (EGL_WINDOW_BIT | EGL_PBUFFER_BIT | EGL_PIXMAP_BIT) as i32,
-            EGL_CONFIG_ID | EGL_RENDERABLE_TYPE => 1,
+            EGL_SURFACE_TYPE => {
+                (EGL_WINDOW_BIT | EGL_PBUFFER_BIT | if self.rgba { 0 } else { EGL_PIXMAP_BIT })
+                    as i32
+            }
+            EGL_CONFIG_ID => self.id(),
+            EGL_RENDERABLE_TYPE => 1,
             EGL_CONFIG_CAVEAT | EGL_TRANSPARENT_TYPE => EGL_NONE as i32,
             EGL_NATIVE_RENDERABLE | BIND_TO_TEXTURE_RGB | BIND_TO_TEXTURE_RGBA => EGL_FALSE as i32,
             EGL_LEVEL | EGL_NATIVE_VISUAL_ID | EGL_NATIVE_VISUAL_TYPE => 0,
@@ -82,7 +132,7 @@ impl Config {
         }
         // Validate the whole list even when CONFIG_ID overrides selection.
         if let Some(&id) = attrs.get(&EGL_CONFIG_ID).filter(|&&v| v != DONT_CARE) {
-            return Ok(id == 1);
+            return Ok(id == self.id());
         }
         attrs.entry(EGL_LEVEL).or_insert(0);
         attrs
@@ -151,7 +201,10 @@ mod tests {
     use super::*;
     #[test]
     fn matching_uses_minimum_exact_mask_and_dont_care_rules() {
-        let c = Config { depth: 16 };
+        let c = Config {
+            depth: 16,
+            rgba: false,
+        };
         for (pairs, want) in [
             (vec![], true),
             (
@@ -183,14 +236,21 @@ mod tests {
             assert_eq!(c.matches(&pairs), Ok(want), "{pairs:?}");
         }
         assert_eq!(
-            Config { depth: 24 }.matches(&[(EGL_DEPTH_SIZE, 24)]),
+            Config {
+                depth: 24,
+                rgba: false
+            }
+            .matches(&[(EGL_DEPTH_SIZE, 24)]),
             Ok(true)
         );
         assert_eq!(c.matches(&[(EGL_DEPTH_SIZE, 24)]), Ok(false));
     }
     #[test]
     fn id_override_and_query_only_attributes_follow_selection_rules() {
-        let c = Config { depth: 16 };
+        let c = Config {
+            depth: 16,
+            rgba: false,
+        };
         assert_eq!(
             c.matches(&[(EGL_CONFIG_ID, 1), (EGL_STENCIL_SIZE, 8)]),
             Ok(true)
@@ -209,7 +269,10 @@ mod tests {
     }
     #[test]
     fn invalid_names_values_and_level_dont_care_are_errors() {
-        let c = Config { depth: 16 };
+        let c = Config {
+            depth: 16,
+            rgba: false,
+        };
         for pair in [
             (0xdead, 0),
             (EGL_RED_SIZE, -2),

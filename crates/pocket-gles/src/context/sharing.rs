@@ -25,6 +25,7 @@ impl ObjectReferences {
 }
 #[derive(Default)]
 pub struct SharedObjects {
+    programs: crate::combiner_program::ProgramObjects,
     textures: HashMap<u32, Texture>,
     buffers: HashMap<u32, Buffer>,
     names: ObjectNames,
@@ -69,6 +70,8 @@ impl Context {
     }
     /// Texture zero is context-local, including its image and parameters.
     pub fn exchange_shared_objects(&mut self, group: &mut SharedObjects) {
+        self.combiner_programs
+            .exchange_namespace(&mut group.programs);
         let zero = self.textures.remove(&0);
         std::mem::swap(&mut self.textures, &mut group.textures);
         std::mem::swap(&mut self.buffers, &mut group.buffers);

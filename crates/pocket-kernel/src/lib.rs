@@ -483,6 +483,9 @@ pub struct WaveOutDevice {
 /// State shared by all open `waveOut` handles.
 #[derive(Debug, Default)]
 pub struct WaveOutState {
+    /// WinMM mixer opens have their own lifetime; never alias wave/file handles.
+    pub mixer_handles: std::collections::HashSet<u32>,
+    pub next_mixer_handle: u32,
     /// Optional compatibility budget for simultaneously open output handles.
     /// None preserves the unbounded software mixer. This is not a measured
     /// hardware voice count; device launchers may explicitly opt into a budget.

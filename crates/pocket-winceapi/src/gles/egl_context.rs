@@ -3,6 +3,7 @@
 use super::*;
 
 pub(super) struct EglContext {
+    pub config: u32,
     pub state: Option<Context>,
     pub group: u32,
     pub deleted: bool,
@@ -152,6 +153,7 @@ impl EglSurfaces {
         self.contexts.insert(
             handle,
             EglContext {
+                config: CONFIG_HANDLE,
                 state: Some(with_ctx(|c| c.new_egl_context())),
                 group,
                 deleted: false,
@@ -168,6 +170,7 @@ impl EglSurfaces {
         self.contexts.insert(
             CONTEXT_HANDLE,
             EglContext {
+                config: CONFIG_HANDLE,
                 state: None,
                 group: 1,
                 deleted: false,

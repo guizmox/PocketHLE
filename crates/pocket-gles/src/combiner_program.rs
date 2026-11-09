@@ -271,6 +271,8 @@ struct Calculation {
 enum CalculationMode {
     Sum,
     Maximum,
+    KillEqual,
+    KillNotEqual,
 }
 
 const ZERO_TERM: InputTerm = InputTerm {
@@ -404,9 +406,10 @@ impl Program {
                     stage.color_output
                 };
                 let paired = mode == 2;
+                let kill = ar11 && mode == 1 && matches!(word & 0x7f, 0x70 | 0x71);
                 let compare_positive = alpha && word & 0x01ff == 0x0121;
                 let maximum = ar11 && mode == 3 && (word & 0x01ff == 0x0071 || compare_positive);
-                if !paired && !maximum && (mode != 3 || word & 0x7f != 0x70) {
+                if !kill && !paired && !maximum && (mode != 3 || word & 0x7f != 0x70) {
                     return Err(UnsupportedOperation);
                 }
                 let compare_register = (maximum && compare_positive).then(|| {
@@ -447,7 +450,13 @@ impl Program {
                             register: usize::from(outputs[0].destination),
                             channel,
                             terms,
-                            mode: if maximum {
+                            mode: if kill {
+                                if word & 1 == 0 {
+                                    CalculationMode::KillEqual
+                                } else {
+                                    CalculationMode::KillNotEqual
+                                }
+                            } else if maximum {
                                 CalculationMode::Maximum
                             } else {
                                 CalculationMode::Sum
@@ -580,9 +589,22 @@ impl BasicProgram {
                 });
                 let [a, b, c, d] = terms;
                 writeln!(glsl, "float left{index}={a}*{b},right{index}={c}*{d};").unwrap();
+                if matches!(
+                    calc.mode,
+                    CalculationMode::KillEqual | CalculationMode::KillNotEqual
+                ) {
+                    let op = if matches!(calc.mode, CalculationMode::KillEqual) {
+                        "=="
+                    } else {
+                        "!="
+                    };
+                    writeln!(glsl, "if(left{index}{op}right{index})discard;").unwrap();
+                    continue;
+                }
                 let result = match calc.mode {
                     CalculationMode::Sum => format!("left{index}+right{index}"),
                     CalculationMode::Maximum => format!("max(left{index},right{index})"),
+                    CalculationMode::KillEqual | CalculationMode::KillNotEqual => unreachable!(),
                 };
                 let result = match calc.clamp {
                     [false, false] => result,
@@ -653,13 +675,26 @@ impl BasicProgram {
         )
     }
 
+    /// Color-only inspection helper. Rasterization uses `evaluate_fragment`
+    /// so a rejected fragment cannot become a transparent-black write.
     pub fn evaluate_sampled(
         &self,
         primary: [f32; 4],
         constants: [[f32; 4]; 4],
         framebuffer: [f32; 4],
-        mut sample: impl FnMut(TextureRoute) -> [f32; 4],
+        sample: impl FnMut(TextureRoute) -> [f32; 4],
     ) -> [f32; 4] {
+        self.evaluate_fragment(primary, constants, framebuffer, sample)
+            .unwrap_or([0.; 4])
+    }
+
+    pub fn evaluate_fragment(
+        &self,
+        primary: [f32; 4],
+        constants: [[f32; 4]; 4],
+        framebuffer: [f32; 4],
+        mut sample: impl FnMut(TextureRoute) -> [f32; 4],
+    ) -> Option<[f32; 4]> {
         let mut textures = [[0.0; 4]; MAX_PROGRAM_STAGES];
         for (&route, texel) in self.routes.iter().zip(&mut textures) {
             *texel = sample(route);
@@ -696,9 +731,21 @@ impl BasicProgram {
                 });
                 let left = a * b;
                 let right = c * d;
+                if matches!(calc.mode, CalculationMode::KillEqual) && left == right
+                    || matches!(calc.mode, CalculationMode::KillNotEqual) && left != right
+                {
+                    return None;
+                }
+                if matches!(
+                    calc.mode,
+                    CalculationMode::KillEqual | CalculationMode::KillNotEqual
+                ) {
+                    continue;
+                }
                 let result = match calc.mode {
                     CalculationMode::Sum => left + right,
                     CalculationMode::Maximum => left.max(right),
+                    CalculationMode::KillEqual | CalculationMode::KillNotEqual => unreachable!(),
                 };
                 let result = match calc.clamp {
                     [false, false] => result,
@@ -721,7 +768,7 @@ impl BasicProgram {
                 }
             }
         }
-        registers[self.output_register]
+        Some(registers[self.output_register])
     }
 }
 
@@ -738,11 +785,28 @@ pub struct ProgramObjects {
     programs: std::collections::BTreeMap<u32, Option<std::sync::Arc<BasicProgram>>>,
     next: u32,
     bound: u32,
+    retained: Option<std::sync::Arc<BasicProgram>>,
     enabled: bool,
     constants: [[f32; 4]; 4],
 }
 
 impl ProgramObjects {
+    /// Transfer the shared program namespace at EGL switches, preserving each
+    /// context's enable, binding, constants and default (name-zero) program.
+    pub(crate) fn exchange_namespace(&mut self, group: &mut Self) {
+        // A deletion in another sharing context removes the name, not an
+        // existing binding. Keep that immutable body until this context rebinds.
+        if let Some(program) = self.programs.get(&self.bound) {
+            self.retained = program.clone();
+        }
+        let zero = self.programs.remove(&0);
+        std::mem::swap(&mut self.programs, &mut group.programs);
+        std::mem::swap(&mut self.next, &mut group.next);
+        if let Some(zero) = zero {
+            self.programs.insert(0, zero);
+        }
+    }
+
     pub fn generate(&mut self) -> Option<u32> {
         let name = self.next.checked_add(1)?;
         self.next = name;
@@ -754,6 +818,7 @@ impl ProgramObjects {
         self.programs.remove(&name);
         if self.bound == name {
             self.bound = 0;
+            self.retained = None;
         }
     }
 
@@ -762,6 +827,7 @@ impl ProgramObjects {
             return false;
         }
         self.bound = name;
+        self.retained = self.programs.get(&name).cloned().flatten();
         true
     }
 
@@ -777,8 +843,9 @@ impl ProgramObjects {
         if !program.supports_texture_units(texture_units) {
             return Err(UnsupportedOperation);
         }
-        self.programs
-            .insert(self.bound, Some(std::sync::Arc::new(program)));
+        let program = std::sync::Arc::new(program);
+        self.retained = Some(program.clone());
+        self.programs.insert(self.bound, Some(program));
         Ok(())
     }
 
@@ -807,7 +874,9 @@ impl ProgramObjects {
 
     pub(crate) fn active_shared(&self) -> Option<&std::sync::Arc<BasicProgram>> {
         if self.enabled {
-            self.programs.get(&self.bound)?.as_ref()
+            self.programs
+                .get(&self.bound)
+                .map_or(self.retained.as_ref(), |p| p.as_ref())
         } else {
             None
         }
@@ -1015,6 +1084,75 @@ mod tests {
         assert_eq!(program.stages[0].color_output, 0x0908);
         assert_eq!(program.stages[0].color_inputs, 0x0f0e_0d0c);
         assert_eq!(program.stages[0].texture_routing, 0x1514_1312);
+    }
+
+    fn alpha_predicate(not_equal: bool) -> BasicProgram {
+        Program {
+            architecture: Architecture::Ar11,
+            flags: 0,
+            stages: vec![Stage {
+                alpha_output: 0x70 | u16::from(not_equal),
+                // Primary alpha times one, compared with zero times one.
+                alpha_inputs: 0x8304_0004,
+                flags: 0x68,
+                color_output: 0,
+                color_input_modifiers: 0,
+                color_inputs: 0,
+                color_input_modes: 0,
+                texture_routing: 0xffff_ffff,
+            }],
+        }
+        .compile_basic()
+        .unwrap()
+    }
+
+    #[test]
+    fn ar11_alpha_predicates_discard_instead_of_writing_zero() {
+        for not_equal in [false, true] {
+            let program = alpha_predicate(not_equal);
+            for alpha in [0., 0.25, 1.] {
+                let output = program.evaluate_fragment(
+                    [1., 1., 1., alpha],
+                    [[0.; 4]; 4],
+                    [0.; 4],
+                    |_| unreachable!(),
+                );
+                assert_eq!(output.is_none(), (alpha != 0.) == not_equal);
+            }
+            assert!(program.fragment_function().contains("discard"));
+        }
+    }
+
+    #[test]
+    fn shared_program_names_keep_bindings_and_constants_context_local() {
+        let mut group = ProgramObjects::default();
+        let mut first = ProgramObjects::default();
+        let mut second = ProgramObjects::default();
+        let name = first.generate().unwrap();
+        assert!(first.bind(name));
+        first.load_bound(alpha_predicate(false), 4).unwrap();
+        let id = first.programs[&name].as_ref().unwrap().id();
+        first.set_enabled(true);
+        first.set_constant(0, [65536; 4]);
+        first.exchange_namespace(&mut group);
+        second.exchange_namespace(&mut group);
+        assert!(second.active().is_none());
+        assert_eq!(second.constants(), [[0.; 4]; 4]);
+        assert!(second.bind(name));
+        second.set_enabled(true);
+        assert_eq!(second.active().unwrap().id(), id);
+        assert!(second.generate().unwrap() > name);
+        second.delete(name);
+        second.exchange_namespace(&mut group);
+        first.exchange_namespace(&mut group);
+        // A deleted name cannot be rebound, but an existing binding survives.
+        assert_eq!(first.active().unwrap().id(), id);
+        assert_eq!(first.constants()[0], [1.; 4]);
+        assert!(!first.bind(name));
+        assert!(first.bind(0));
+        assert!(first.active().is_none());
+        let mut independent = ProgramObjects::default();
+        assert!(!independent.bind(name));
     }
 
     #[test]

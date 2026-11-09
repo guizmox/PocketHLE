@@ -537,8 +537,8 @@ fn evaluate_combiner(
     constants: [[f32; 4]; 4],
     framebuffer: [f32; 4],
     coordinate: impl Fn(usize) -> (f32, f32, [f32; 4]),
-) -> [f32; 4] {
-    program.evaluate_sampled(primary, constants, framebuffer, |route| {
+) -> Option<[f32; 4]> {
+    program.evaluate_fragment(primary, constants, framebuffer, |route| {
         let Some(stage) = stages.iter().find(|stage| stage.unit == route.texture) else {
             return [0., 0., 0., 1.];
         };
@@ -980,8 +980,12 @@ fn raster_clipped(
                 } else {
                     [0.; 4]
                 };
-                frag =
-                    evaluate_combiner(program, sample, stages, primary, constants, dst, coordinate);
+                let Some(color) =
+                    evaluate_combiner(program, sample, stages, primary, constants, dst, coordinate)
+                else {
+                    continue;
+                };
+                frag = color;
             } else {
                 for stage in stages {
                     let (u, v, grad) = coordinate(stage.unit);
@@ -1145,7 +1149,7 @@ fn primitive_fragment(
         }
     };
     let color = if let Some(program) = sample.combiner_program() {
-        evaluate_combiner(
+        let Some(color) = evaluate_combiner(
             program,
             sample,
             stages,
@@ -1157,7 +1161,10 @@ fn primitive_fragment(
                 [0.; 4]
             },
             coordinate,
-        )
+        ) else {
+            return false;
+        };
+        color
     } else {
         let mut color = v.color;
         for stage in stages {

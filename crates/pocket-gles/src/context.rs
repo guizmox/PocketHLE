@@ -4974,6 +4974,77 @@ mod tests {
         assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
     }
 
+    fn combiner_discard_preserves_color_and_depth(gpu: bool) {
+        use crate::combiner_program::{Architecture, Program, Stage};
+        let mut c = ctx();
+        if gpu {
+            c.enable_gpu().unwrap();
+        }
+        c.clear_color = [0., 0., 1., 1.];
+        c.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        c.set_capability(GL_DEPTH_TEST, true);
+        let mut mem = FakeMem {
+            base: BASE,
+            bytes: quad_floats(),
+        };
+        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+        c.set_client_state(GL_VERTEX_ARRAY, true);
+        c.current_color = [1., 0., 0., 0.];
+        let program = Program {
+            architecture: Architecture::Ar11,
+            flags: 0,
+            stages: vec![Stage {
+                alpha_output: 0x70,
+                alpha_inputs: 0x8304_0004,
+                flags: 0x68,
+                color_output: 0,
+                color_input_modifiers: 0,
+                color_inputs: 0,
+                color_input_modes: 0,
+                texture_routing: 0xffff_ffff,
+            }],
+        }
+        .compile_basic()
+        .unwrap();
+        c.combiner_programs
+            .load_bound(program, MAX_TEXTURE_UNITS)
+            .unwrap();
+        c.combiner_programs.set_enabled(true);
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        c.sync_gpu();
+        assert_eq!(pixel(&c, 32, 32), [0, 0, 255, 255]);
+        c.combiner_programs.set_enabled(false);
+        c.current_color = [0., 1., 0., 1.];
+        // Farther geometry remains visible: the rejected fragment wrote no Z.
+        for vertex in mem.bytes.chunks_exact_mut(12) {
+            vertex[8..12].copy_from_slice(&0.5f32.to_le_bytes());
+        }
+        c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+        c.sync_gpu();
+        assert_eq!(pixel(&c, 32, 32), [0, 255, 0, 255]);
+        assert_eq!(c.take_error(), GL_NO_ERROR);
+    }
+
+    #[test]
+    fn software_combiner_discard_preserves_color_and_depth() {
+        combiner_discard_preserves_color_and_depth(false);
+    }
+
+    #[test]
+    #[ignore = "requires native desktop GL and GLES"]
+    fn gpu_combiner_discard_preserves_color_and_depth() {
+        for es in [false, true] {
+            let root = if es {
+                crate::gpu::Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                crate::gpu::Renderer::new(8, 8).unwrap()
+            };
+            crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
+                combiner_discard_preserves_color_and_depth(true);
+            });
+        }
+    }
+
     #[test]
     fn software_combiner_samples_coordinates_from_the_program_route() {
         combiner_samples_coordinates_from_the_program_route(false);

@@ -36,6 +36,8 @@ mod file_mapping;
 #[path = "coredll/list_paint.rs"]
 mod list_paint;
 pub(crate) mod menu_api;
+#[path = "coredll/mixer.rs"]
+mod mixer;
 #[path = "coredll/palette.rs"]
 mod palette;
 mod progress;
@@ -656,7 +658,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "waveOutSetVolume", wave_out_set_volume);
     d.register_handler(dll, "waveOutOpen", wave_out_open);
     d.register_handler(dll, "waveOutClose", wave_out_close);
-    d.register_handler(dll, "mixerClose", mixer_close);
+    mixer::register(d, dll);
     d.register_handler(dll, "waveOutWrite", wave_out_write);
     d.register_handler(dll, "waveOutReset", wave_out_reset);
     d.register_handler(dll, "waveOutBreakLoop", wave_out_break_loop);
@@ -24546,13 +24548,6 @@ fn wave_out_enter_callback(
         "waveOutProc(0x{proc_va:08x}) h=0x{callback_handle:08x} msg=0x{message:04x} param1=0x{param1:08x}"
     );
     Ok(Some(DispatchOutcome::JumpTo(proc_va)))
-}
-
-/// `MMRESULT mixerClose(HMIXER)` — no mixer handles are currently issued.
-/// Chicane calls this with NULL during cleanup. MMRESULT errors travel in
-/// r0, not GetLastError; never close an unrelated wave/VFS handle here.
-fn mixer_close(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(5)) // MMSYSERR_INVALHANDLE
 }
 
 /// `MMRESULT waveOutGetNumDevs(void)` — number of host wave-out
