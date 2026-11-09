@@ -1730,13 +1730,22 @@ impl Renderer {
         } else {
             "#version 120\n#define VARYING varying\n"
         };
-        let modern_range = self.host.es && fragment.contains("#define TEXTURE_LOD_RANGE") && {
-            let p = (self.gl.GetString)(0x1f02);
-            !p.is_null()
-                && CStr::from_ptr(p.cast())
-                    .to_string_lossy()
-                    .starts_with("OpenGL ES 3.")
-        };
+        let es3 = self.host.es
+            && (fragment.contains("#define TEXTURE_LOD_RANGE")
+                || fragment.contains("#define NV_COMBINER"))
+            && {
+                let p = (self.gl.GetString)(0x1f02);
+                !p.is_null()
+                    && CStr::from_ptr(p.cast())
+                        .to_string_lossy()
+                        .starts_with("OpenGL ES 3.")
+            };
+        // Multipass combiners project texture coordinates and sample previous
+        // framebuffer passes. ES mediump can round those moving coordinates
+        // into visible steps. ES3 guarantees fragment highp; retain the ES2
+        // compatibility path and ordinary fixed-function shaders unchanged.
+        let precise_combiner = es3 && fragment.contains("#define NV_COMBINER");
+        let modern_range = es3 && fragment.contains("#define TEXTURE_LOD_RANGE");
         let vertex_source = if modern_range {
             vertex.replace("attribute ", "in ")
         } else {
@@ -1747,6 +1756,18 @@ impl Renderer {
         } else {
             prefix.replace("precision mediump float", "precision highp float")
         };
+        let vertex_prefix = format!(
+            "{vertex_prefix}#define TEX_VARYING {}\n",
+            if precise_combiner {
+                if modern_range {
+                    "out highp"
+                } else {
+                    "varying highp"
+                }
+            } else {
+                "VARYING"
+            }
+        );
         let vs = match self.shader(0x8b31, &format!("{}{}", vertex_prefix, vertex_source)) {
             Ok(shader) => shader,
             Err(error) => {
@@ -1774,6 +1795,23 @@ impl Renderer {
         } else {
             fragment_prefix
         };
+        let fragment_prefix = if precise_combiner {
+            fragment_prefix.replace("precision mediump float", "precision highp float")
+        } else {
+            fragment_prefix
+        };
+        let fragment_prefix = format!(
+            "{fragment_prefix}#define TEX_VARYING {}\n",
+            if precise_combiner {
+                if modern_range {
+                    "in highp"
+                } else {
+                    "varying highp"
+                }
+            } else {
+                "VARYING"
+            }
+        );
         let fs = match self.shader(0x8b30, &format!("{fragment_prefix}{fragment}")) {
             Ok(s) => s,
             Err(e) => {
@@ -3805,7 +3843,7 @@ VARYING vec4 vColor,vBackColor;
 #define UV_TYPE vec4
 #define UV_VALUE(v) (v)
 #endif
-VARYING UV_TYPE uv0,uv1,uv2,uv3;VARYING float vFog;uniform vec2 depthRange;
+TEX_VARYING UV_TYPE uv0,uv1,uv2,uv3;VARYING float vFog;uniform vec2 depthRange;
 uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
 uniform int objectSpace,lightingEnabled,normalMode,colorMaterial,twoSided;
 uniform mat4 normalMatrix;
@@ -3887,7 +3925,7 @@ VARYING vec4 vColor,vBackColor;
 #define UV_TYPE vec4
 #define UV_VALUE(v) (v)
 #endif
-VARYING UV_TYPE uv0,uv1,uv2,uv3;VARYING float vFog;
+TEX_VARYING UV_TYPE uv0,uv1,uv2,uv3;VARYING float vFog;
 uniform int logicMode;uniform sampler2D logicDestination;uniform vec2 logicSize;uniform vec4 logicLevels;
 // ES2 has no integer bitwise operators. All intermediates are exact 8-bit integers.
 #ifndef AFFINE_TEXTURES

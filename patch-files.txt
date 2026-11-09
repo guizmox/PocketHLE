@@ -1,6 +1,7 @@
 crates\pocket-gles\src\combiner_program.rs
 crates\pocket-gles\src\context.rs
 crates\pocket-gles\src\context\diagnostic.rs
+crates\pocket-gles\src\gpu\mod.rs
 crates\pocket-gles\src\gpu\shared.rs
 crates\pocket-gles\src\gpu\shared_present_tests.rs
 crates\pocket-winceapi\src\gles.rs

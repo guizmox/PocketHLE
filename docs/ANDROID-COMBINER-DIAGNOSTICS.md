@@ -146,3 +146,39 @@ the diagnostic option disabled for ordinary performance checks. If the defect
 persists, capture continuously from before launch with diagnostics enabled and
 attach the complete log; do not infer the backend from a saved preference alone.
 This ZIP replaces the earlier diagnostic ZIP and retains its opt-in traces.
+
+
+## GLES3 combiner precision candidate
+
+The supplied camera-motion video follows the native-resolution RGB-copy fix.
+The report describes water sliding/jittering while the camera moves, but stable
+appearance at rest. This is a separate symptom; its precise cause has not been
+reproduced on the connected-device side (no device is available here).
+
+The common ES shader compiler used mediump texture-coordinate varyings and
+mediump fragment floats, unlike desktop OpenGL's default precision. Projective
+coordinates, framebuffer coordinates and cascaded combiner calculations can
+lose subpixel precision on mobile hardware that implements mediump at reduced
+precision. This is a plausible mechanism, not proof that it caused this video.
+
+This candidate requests highp texture-coordinate varyings (matched in vertex
+and fragment stages) and fragment floating-point calculations for NV combiner
+programs on ES3 hosts, where fragment highp is guaranteed. It covers the ordinary
+GLSL ES 1.00 and explicit-LOD GLSL ES 3.00 generated variants. Color/fog varyings
+keep their established precision. There is no scene/game test or animation
+adjustment. Desktop GL, ES2 compatibility, non-NV shaders and the software
+combiner remain on their established precision policy.
+
+The shader is still cached by program/range as before. Version/precision
+selection runs at shader creation, not every draw. Increased GPU precision may
+increase GPU arithmetic/register cost on some devices; no universal performance
+guarantee is claimed. Diagnostic-disabled behavior is unchanged.
+
+Validation: 237 ordinary GLES tests and six explicitly executed native tests
+cover combiner coordinate routing, ordered framebuffer fetch, both LOD shader
+variants, ordinary color precision, retained guest copies and supersampled
+subimages, across desktop GL and GLES. Android ARM64 checking, formatting and
+whitespace checks pass. No physical-phone jitter improvement or APK build is
+claimed. Compare the same camera sequence/settings with the previous RGB-copy
+build, preferably with diagnostics disabled. This cumulative ZIP retains the
+RGB-copy fix and opt-in instrumentation and replaces the earlier ZIP.

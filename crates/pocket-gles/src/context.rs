@@ -4978,7 +4978,16 @@ mod tests {
     #[test]
     #[ignore = "requires native OpenGL"]
     fn gpu_combiner_samples_coordinates_from_the_program_route() {
-        combiner_samples_coordinates_from_the_program_route(true);
+        for es in [false, true] {
+            let root = if es {
+                crate::gpu::Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                crate::gpu::Renderer::new(8, 8).unwrap()
+            };
+            crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
+                combiner_samples_coordinates_from_the_program_route(true);
+            });
+        }
     }
 
     fn combiner_samples_coordinates_from_the_program_route(gpu: bool) {
@@ -5022,6 +5031,17 @@ mod tests {
         c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
         c.sync_gpu();
         assert_eq!(pixel(&c, 32, 32), [16, 80, 64, 255]);
+        if gpu {
+            // Force the explicit-LOD shader variant too (GLSL ES 3 on GLES).
+            // Restricting these nonmipmapped inputs to level zero must not
+            // change their colors or the program's coordinate routing.
+            for texture in c.textures.values_mut() {
+                texture.max_lod = 0.;
+            }
+            c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+            c.sync_gpu();
+            assert_eq!(pixel(&c, 32, 32), [16, 80, 64, 255]);
+        }
 
         c.combiner_programs.set_enabled(false);
         c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
@@ -5032,55 +5052,64 @@ mod tests {
     #[test]
     #[ignore = "requires native OpenGL"]
     fn gpu_combiner_reads_overlapping_primitives_in_draw_order() {
-        use crate::combiner_program::{Architecture, Program, Stage};
+        for es in [false, true] {
+            let root = if es {
+                crate::gpu::Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                crate::gpu::Renderer::new(8, 8).unwrap()
+            };
+            crate::gpu::with_shared_context_source(Some(root.shared_context_source()), || {
+                use crate::combiner_program::{Architecture, Program, Stage};
 
-        let mut c = ctx();
-        c.enable_gpu().unwrap();
-        c.clear_color = [1., 0.5, 0.25, 1.];
-        c.clear(GL_COLOR_BUFFER_BIT);
-        let mut mem = FakeMem {
-            base: BASE,
-            bytes: floats(&[-1., -1., 0., 1., -1., 0., 0., 1., 0.].repeat(2)),
-        };
-        c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
-        c.set_client_state(GL_VERTEX_ARRAY, true);
-        let stage = Stage {
-            alpha_output: 0x0670,
-            alpha_inputs: 0x0404_0000,
-            flags: 0xe0,
-            color_output: 0x8070,
-            color_input_modifiers: 0x0200,
-            color_inputs: 0xe484_0000,
-            color_input_modes: 0x8000,
-            texture_routing: 0x7fff_ffff,
-        };
-        let program = Program {
-            architecture: Architecture::Ar11,
-            flags: 0,
-            stages: vec![stage],
-        }
-        .compile_basic()
-        .unwrap();
-        let expected = program.evaluate_sampled(
-            [1.; 4],
-            [[0.; 4]; 4],
-            program.evaluate_sampled(
-                [1.; 4],
-                [[0.; 4]; 4],
-                [1., 0.5, 0.25, 1.],
-                |_| unreachable!(),
-            ),
-            |_| unreachable!(),
-        );
-        c.combiner_programs
-            .load_bound(program, MAX_TEXTURE_UNITS)
-            .unwrap();
-        c.combiner_programs.set_enabled(true);
-        c.draw_arrays(&mut mem, GL_TRIANGLES, 0, 6);
-        c.sync_gpu();
-        let actual = pixel(&c, 32, 32);
-        for (actual, expected) in actual.into_iter().zip(expected) {
-            assert!(actual.abs_diff((expected * 255.).round() as u8) <= 1);
+                let mut c = ctx();
+                c.enable_gpu().unwrap();
+                c.clear_color = [1., 0.5, 0.25, 1.];
+                c.clear(GL_COLOR_BUFFER_BIT);
+                let mut mem = FakeMem {
+                    base: BASE,
+                    bytes: floats(&[-1., -1., 0., 1., -1., 0., 0., 1., 0.].repeat(2)),
+                };
+                c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+                c.set_client_state(GL_VERTEX_ARRAY, true);
+                let stage = Stage {
+                    alpha_output: 0x0670,
+                    alpha_inputs: 0x0404_0000,
+                    flags: 0xe0,
+                    color_output: 0x8070,
+                    color_input_modifiers: 0x0200,
+                    color_inputs: 0xe484_0000,
+                    color_input_modes: 0x8000,
+                    texture_routing: 0x7fff_ffff,
+                };
+                let program = Program {
+                    architecture: Architecture::Ar11,
+                    flags: 0,
+                    stages: vec![stage],
+                }
+                .compile_basic()
+                .unwrap();
+                let expected = program.evaluate_sampled(
+                    [1.; 4],
+                    [[0.; 4]; 4],
+                    program.evaluate_sampled(
+                        [1.; 4],
+                        [[0.; 4]; 4],
+                        [1., 0.5, 0.25, 1.],
+                        |_| unreachable!(),
+                    ),
+                    |_| unreachable!(),
+                );
+                c.combiner_programs
+                    .load_bound(program, MAX_TEXTURE_UNITS)
+                    .unwrap();
+                c.combiner_programs.set_enabled(true);
+                c.draw_arrays(&mut mem, GL_TRIANGLES, 0, 6);
+                c.sync_gpu();
+                let actual = pixel(&c, 32, 32);
+                for (actual, expected) in actual.into_iter().zip(expected) {
+                    assert!(actual.abs_diff((expected * 255.).round() as u8) <= 1);
+                }
+            });
         }
     }
 
