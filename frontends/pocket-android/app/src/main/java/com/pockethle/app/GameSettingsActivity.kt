@@ -131,6 +131,9 @@ class GameSettingsActivity : HostKeyActivity() {
                 identityField("pocketpc_device_id", "PocketPC ID (Platform ID — hexadecimal)", current.pocketpcDeviceId) {current=current.copy(pocketpcDeviceId=it)}
             }
             findPreference<ListPreference>("screen")?.apply {
+                summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
+                    "${pref.entry}\n${getString(R.string.pref_screen_summary)}"
+                }
                 value = current.screen
                 setOnPreferenceChangeListener { _, newValue ->
                     current = current.copy(screen = newValue.toString())
@@ -163,6 +166,9 @@ class GameSettingsActivity : HostKeyActivity() {
                 }
             }
             findPreference<ListPreference>("rotation")?.apply {
+                summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
+                    "${pref.entry}\n${getString(R.string.pref_rotation_summary)}"
+                }
                 value = current.rotation
                 setOnPreferenceChangeListener { _, newValue ->
                     current = current.copy(rotation = newValue.toString())

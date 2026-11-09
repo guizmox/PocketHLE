@@ -2980,24 +2980,6 @@ impl PocketLauncher {
             .num_columns(2)
             .spacing(Vec2::new(12.0, 8.0))
             .show(ui, |ui| {
-                ui.label("Frame rate limit");
-                let inherited_limit_label = format!("Emulator default ({})", self.library.config().frame_rate_limit.label());
-                crate::controller_ui::ComboBox::from_id_source("game_frame_rate_limit")
-                    .selected_text(draft.frame_rate_limit.map(|v| v.label().to_owned()).unwrap_or_else(|| inherited_limit_label.clone()))
-                    .show_ui(ui, |ui| {
-                        crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, None, inherited_limit_label.as_str());
-                        for value in pocket_library::FrameRateLimit::ALL {
-                            crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, Some(value), value.label());
-                        }
-                    });
-                ui.end_row();
-                ui.label("");
-                ui.vertical(|ui| {
-                    ui.set_max_width(380.0);
-                    ui.add(egui::Label::new("Maximum game FPS, or Unlimited. Emulator default inherits the global limit; an explicit value overrides it. Restart the game to apply.").wrap(true))
-                        .on_hover_text("Caps GAPI, DirectDraw and OpenGL ES presentations, not video recording FPS. GDI-only drawing is not capped. A cap does not speed up a slow game.");
-                });
-                ui.end_row();
                 if is_gizmondo {
                     ui.label("Screen");
                     let portrait = draft.screen == ScreenPref::Qvga;
@@ -3033,6 +3015,13 @@ impl PocketLauncher {
                     ui.end_row();
                 }
 
+                ui.label("");
+                ui.vertical(|ui| {
+                    ui.set_max_width(380.0);
+                    ui.add(egui::Label::new("Screen size reported to the game. Choose the size the game was designed for; this does not rotate the picture. Restart the game to apply.").wrap(true));
+                });
+                ui.end_row();
+
                 // Presentation-only: the guest keeps rendering into
                 // whatever `Screen` says. This is the knob for a
                 // landscape game that shipped as a 240x320 portrait
@@ -3049,6 +3038,31 @@ impl PocketLauncher {
                     });
                 ui.end_row();
 
+                ui.label("");
+                ui.vertical(|ui| {
+                    ui.set_max_width(380.0);
+                    ui.add(egui::Label::new("Turns the picture without changing the screen size reported to the game. Use this if the picture is sideways. Touch and direction controls follow the rotation.").wrap(true));
+                });
+                ui.end_row();
+
+                ui.label("Frame rate limit");
+                let inherited_limit_label = format!("Emulator default ({})", self.library.config().frame_rate_limit.label());
+                crate::controller_ui::ComboBox::from_id_source("game_frame_rate_limit")
+                    .selected_text(draft.frame_rate_limit.map(|v| v.label().to_owned()).unwrap_or_else(|| inherited_limit_label.clone()))
+                    .show_ui(ui, |ui| {
+                        crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, None, inherited_limit_label.as_str());
+                        for value in pocket_library::FrameRateLimit::ALL {
+                            crate::controller_ui::selectable_value(ui, &mut draft.frame_rate_limit, Some(value), value.label());
+                        }
+                    });
+                ui.end_row();
+                ui.label("");
+                ui.vertical(|ui| {
+                    ui.set_max_width(380.0);
+                    ui.add(egui::Label::new("Maximum game FPS, or Unlimited. Emulator default inherits the global limit; an explicit value overrides it. Restart the game to apply.").wrap(true))
+                        .on_hover_text("Caps GAPI, DirectDraw and OpenGL ES presentations, not video recording FPS. GDI-only drawing is not capped. A cap does not speed up a slow game.");
+                });
+                ui.end_row();
                 ui.label("GPU rendering");
                 crate::controller_ui::ComboBox::from_id_source("game_gpu_renderer").selected_text(match draft.gpu_renderer { None => "Emulator default", Some(false) => "Software", Some(true) => "GPU" }).show_ui(ui, |ui| {
                     crate::controller_ui::selectable_value(ui, &mut draft.gpu_renderer, None, "Emulator default");

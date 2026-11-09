@@ -15,6 +15,14 @@ See [OPTIMIZATIONS.md](OPTIMIZATIONS.md). GPU/software renderer selection is a
 separate supported choice. Frame-limit inheritance and filters are defined in
 [GPU.md](GPU.md), not duplicated here.
 
+Per-game Graphics settings list **Screen**, **Rotate display**, then **Frame rate
+limit**, with an explanation under each option on desktop and Android (Screen
+remains hidden for Gizmondo on Android). Screen changes the dimensions reported
+to the game and applies at the next launch; rotation turns the presented image
+and adapts touch/directional input without changing those dimensions. These
+settings are independent. Frame-limit inheritance and its existing help remain
+unchanged.
+
 ## Adding data to an installed game
 
 Every PocketPC and Gizmondo game has **Add/Replace Data** in its library tile

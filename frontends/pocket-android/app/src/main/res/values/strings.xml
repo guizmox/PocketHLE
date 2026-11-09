@@ -21,9 +21,10 @@
     <string name="menu_about">About</string>
 
     <!-- Preferences -->
-    <string name="pref_screen_title">Screen geometry</string>
+    <string name="pref_screen_title">Screen</string>
+    <string name="pref_screen_summary">Screen size reported to the game. Choose the size the game was designed for; this does not rotate the picture. Restart the game to apply.</string>
     <string name="pref_rotation_title">Rotate display</string>
-    <string name="pref_rotation_summary">Turn the picture without changing what the game thinks its screen is. Use 90° for a landscape game that only renders correctly at 240x320.</string>
+    <string name="pref_rotation_summary">Turns the picture without changing the screen size reported to the game. Use this if the picture is sideways. Touch and direction controls follow the rotation.</string>
 
     <string-array name="cpu_backend_entries">
         <item>Stub (safe)</item>

@@ -4,9 +4,9 @@
         <ListPreference android:key="dpad_deadzone" android:title="D-pad dead zone" android:entries="@array/dpad_deadzone_entries" android:entryValues="@array/dpad_deadzone_values" android:defaultValue="large" app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>
     <PreferenceCategory android:key="graphics_category" android:title="Graphics">
-        <ListPreference android:key="frame_rate_limit" android:title="Frame rate limit" android:persistent="false" />
         <ListPreference android:key="screen" android:title="@string/pref_screen_title" android:entries="@array/screen_entries" android:entryValues="@array/screen_values" android:defaultValue="portrait" />
         <ListPreference android:key="rotation" android:title="@string/pref_rotation_title" android:summary="@string/pref_rotation_summary" android:entries="@array/rotation_entries" android:entryValues="@array/rotation_values" android:defaultValue="none" />
+        <ListPreference android:key="frame_rate_limit" android:title="Frame rate limit" android:persistent="false" />
         <ListPreference android:key="executable_heap" android:title="Executable heap" android:persistent="false" />
         <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering" android:summary="Host OpenGL; restart the game to apply. Falls back to software if unavailable." android:defaultValue="inherit" />
     </PreferenceCategory>
