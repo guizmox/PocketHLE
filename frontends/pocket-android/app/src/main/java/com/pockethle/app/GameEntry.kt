@@ -85,6 +85,7 @@ data class GameSettings(
     val pocketpcRandomSeed: String = "",
     val pocketpcPlatformType: String = "",
     val pocketpcGapiColumns: Boolean = false,
+    val pocketpcEglRgba8888Only: Boolean = false,
     val storageCardDir: String? = null,
     val originalJson: String = "{}",
 ) {
@@ -114,6 +115,7 @@ data class GameSettings(
         put("pocketpc_random_seed", pocketpcRandomSeed)
         put("pocketpc_platform_type", pocketpcPlatformType)
         put("pocketpc_gapi_columns", pocketpcGapiColumns)
+        put("pocketpc_egl_rgba8888_only", pocketpcEglRgba8888Only)
         if (storageCardDir == null) remove("storage_card_dir") else put("storage_card_dir", storageCardDir)
     }
 
@@ -155,6 +157,7 @@ data class GameSettings(
             pocketpcRandomSeed = obj.optString("pocketpc_random_seed", ""),
             pocketpcPlatformType = obj.optString("pocketpc_platform_type", ""),
             pocketpcGapiColumns = obj.optBoolean("pocketpc_gapi_columns", false),
+            pocketpcEglRgba8888Only = obj.optBoolean("pocketpc_egl_rgba8888_only", false),
             storageCardDir = if (obj.isNull("storage_card_dir")) null else obj.optString("storage_card_dir"),
             originalJson = obj.toString(),
         )

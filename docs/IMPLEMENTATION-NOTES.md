@@ -5594,39 +5594,132 @@ Temporary desktop profiling, per-program aggregation and delivery-specific
 notes were subsequently removed/merged into the owning guides. Functional
 regression tests and the pre-existing opt-in Android diagnostics are retained.
 
-The subsequent enlarged GoForce/Denied Reality logo in water was reproduced
-in Siege's attract demo. Bounded local texture captures identified a static HUD
-logo bound to sampler 0 of the water compositor, where the freshly generated
-DSDT texture belonged. Introducing an RGBA8 window configuration made the
-engine choose a 32-bit main window and a separate 16-bit offscreen context.
-Its process-wide binding cache then skipped a bind on returning to the main
-context. Binding state must remain context-local; sharing it would violate EGL
-and break other applications.
-
-The virtual WinCE device reports a native RGB565 screen. RGBA8 is now advertised
-for offscreen pbuffers only, and native window creation validates that surface
-capability. Siege falls back to its RGB565 window path and reuses its context;
-the water compositor receives the generated field rather than the HUD logo.
-A separate generic correction applies EGL 1.1 configuration sorting before
-truncation, including the nonzero requested-component rule. Neither correction
-recognizes a game, executable, shader hash or texture ID. RGBA8 offscreen alpha
-and context-local state are retained. An application requiring an RGBA8 native
-window instead of accepting the modeled 16-bit visual will now find no such
-configuration; this is an intentional correction of an over-advertised
-capability, not a guarantee that all applications support the fallback.
-
-Validation for this follow-up: 727 WinCE API unit tests passed, all 18 selected
-EGL lifecycle tests passed including native/software variants, and both RGBA8
-pbuffer alpha/mismatched-context tests passed. CLI/Unicorn checking, rustfmt
-and diff whitespace checks passed.
-
-Local Mesa native-GL runs reached the Siege demo with the expected water
-textures and started the Doom outdoor fixture. Temporary per-call/texture
-capture probes were removed from delivered sources. Physical Windows/Android
-rendering and motion remain user validation, not inferred from these runs.
+The subsequent water-logo investigation and the withdrawal of the first
+RGBA8-window restriction are recorded below. The earlier single-game water fix
+must not be read as a combined Siege/Doom compatibility result.
 
 The cleanup pass retained functional tests and passed 247 regular GLES tests,
 330 regular/native GLES tests with the same pre-existing snapshot discrepancy
 excluded, 726 WinCE API tests and all 19 selected EGL lifecycle tests. GLES
 ARM64 Android checking and CLI/Unicorn checking pass; complete desktop/Android
 packages and physical-device conformance remain separate validation levels.
+
+
+### Water-logo follow-up and alpha regression (2026-11-09)
+
+The attempted water fix restricted RGBA8 to pbuffers and made Siege use an
+RGB565 window. That removed the visible logo locally, but was not a valid
+combined fix: Doom explicitly requests WINDOW_BIT|PBUFFER_BIT and alpha=8
+for an offscreen rendering configuration. Filtering out the window capability
+removed its alpha passes and restored white sky/water. Starting the executable
+was insufficient visual validation. The restriction is withdrawn; RGBA8 window
+and pbuffer capabilities are retained. A regression selection case now covers
+the combined surface mask with an explicit alpha requirement.
+
+Local native-GL captures with RGBA8 restored show the outdoor Doom floor/sky
+passes returning. EGL 1.1 color-component sorting is retained independently.
+Siege's water-logo issue remains open: captures show the water compositor
+sampling a HUD logo after a shared-context switch instead of the generated
+DSDT field. Context bindings and constants must not be made share-group global
+as a shortcut. Merely removing force16bitrendertargets/forcerestrictedwatershader
+from a local test copy of SIEGE.CFS did not establish a valid fix. Those game
+configuration experiments and all temporary probes are excluded from delivery.
+A trial native-window RGBA rejection also failed Siege startup/presentation
+and is excluded. No combined Siege+Doom fix is claimed by this rollback.
+
+Further investigation executed the supplied NVIDIA EGL configuration chooser
+against its original configuration tables, with only display validation and CRT
+services supplied by a local test harness. Both the 2006 integrated GLES/EGL
+library and the 2007 separate EGL library distinguish native display formats.
+With their RGB565 display table, an RGB8 window request has no match, while
+RGBA8 pbuffers remain available. An alpha=8 WINDOW_BIT|PBUFFER_BIT request also
+has no match. With their RGBA8888 display tables, both requests can match.
+The older driver restricts window capability to the native color format; the
+newer 32-bit table also allows other RGB window formats. These are controlled
+executions of vendor code, not captures from physical GoForce hardware.
+
+Siege enumerates the complete config count and explicitly searches returned
+pbuffer configurations for exact color/depth sizes. Adding more configurations
+or changing their sort order therefore cannot hide RGB565 from this search.
+The supplied game configuration forces its offscreen targets to 16 bits, even
+when the main window selected RGBA8. Its native texture-binding cache is global:
+copying the generated field in the secondary context updates that cache, then
+the main context skips the bind that would replace its HUD texture. Executing
+glBindTexture from both supplied driver versions with two preallocated contexts
+confirms that the binding writes themselves remain context-local. Neither test
+emulates complete vendor GPU submission, and no driver-state leak is assumed.
+
+A 147-second software-renderer run reproduces the enlarged GoForce badge in the
+water beyond the menu; the restored-alpha Doom run renders its outdoor floor
+and sky. Synthetic software/native-GL tests additionally copy and update an
+RGBA pbuffer image shared with an RGB565 context: image contents propagate,
+while bindings remain local. This rules out using global bindings or a GPU-only
+shader change as an established correction. A generic native-display format
+profile was a separate configuration proposal at that stage; it was not an
+automatic combined fix or enabled in production. The executable/cache patch remains
+excluded, as do the local vendor-oracle and profiling tools.
+
+A subsequent diagnostic build exposed only RGBA8888 configurations, for both
+window and pbuffer surfaces, without changing either executable. In that same
+configuration, a 77-second native-GL Siege run and a 147-second software run
+rendered the water without the enlarged badge; outdoor Doom captures retained
+the floor and sky in both renderers. The native-GL host was Mesa llvmpipe, not a
+physical GPU. The prototype is not the vendor's complete configuration catalog:
+it deliberately omits RGB565. It demonstrates a common compatibility profile,
+not a correction to the client's binding cache or to AR10/AR11 arithmetic.
+Making it the universal default would remove a capability required by clients
+that enumerate an exact RGB565 format. The prototype was initially kept outside
+production pending a decision about
+an explicit per-application compatibility setting; that choice was subsequently
+approved and is documented below.
+
+The final retained changes from this investigation are the normative EGL
+selection ordering and cross-format shared-image regression tests, together
+with restoration of RGBA8 window support. Validation: 727 ordinary WinCE API
+tests passed (16 native/optional tests ignored); the 19 existing selected EGL
+lifecycle tests and both new copy/binding tests also passed when explicitly
+run with native GL. These checks do not establish physical-device parity or
+an automatic combined Siege/Doom correction.
+
+
+### Optional EGL surface-format profile (2026-11-09)
+
+Integrated on top of upstream 41ac3f25, preserving the new desktop controller
+menus and display-option order/help. The per-game PocketPC setting documented
+in GPU.md implements the approved RGBA8888-only catalog. Default remains the
+mixed catalog, with RGBA8 WINDOW_BIT restored to retain Doom's alpha selection.
+No executable, asset, native client cache or combiner arithmetic is patched.
+
+A bounded native-driver oracle additionally executes the supplied 2007 ARM
+MakeCurrent, glBindTexture, program upload, glDrawArrays entry and sampler-state
+selection code against preallocated contexts and resident textures. It loads the
+original water program, then switches A→B→A without rebinding. The native GPU
+shadow sampler address returns to A's texture; an explicit bind to B's texture
+changes that address as a control. Allocation/channel/namespace services are
+mocked. Execution stops after sampler selection; it does not execute full draw
+submission, native texture copying or physical GPU pixels. It supports keeping
+bindings context-local, but is not complete vendor-driver conformance evidence.
+
+The profile is a compatibility choice affecting available formats, not evidence
+that a generic AR10/AR11 decoding defect has been corrected. Physical Windows
+and Android rendering/performance remain device validation.
+
+Validation of the integrated profile: 730 ordinary WinCE API tests passed
+(17 optional/native tests ignored); all 23 EGL lifecycle tests passed with native
+GL enabled, including RGBA window/pbuffer rendering, catalog validation and
+session/parent isolation. All 217 pocket-library tests and five Kotlin settings
+tests passed. JNI host checking without default features, CLI/Unicorn checking,
+rustfmt and whitespace checks passed. Full desktop packaging and an Android APK
+were not built in this environment.
+
+The integrated setter was exercised in Siege's running demo (77 seconds through
+the native GL backend and 147 seconds in the software renderer), and in Doom's
+outdoor scene through both backends. Captures retain water without the enlarged
+logo and Doom's floor/sky passes. Native GL uses Mesa llvmpipe here; these runs
+are visual regression checks, not physical GPU benchmarks. Temporary capture
+hooks were removed after building the local test executable and are excluded
+from the source patch. Default remains unchanged for unrelated games; Siege
+requires explicitly selecting RGBA8888 only.
+
+A further native-GL Doom outdoor capture with the profile disabled also retains
+its floor/sky passes, validating the restored default RGBA8 window capability.

@@ -63,21 +63,38 @@ Intel 2700G depth-bias profiles. CLI launches retain their existing default.
 
 ## EGL surfaces and shared objects
 
-Configuration 1 is RGB565 and supports native windows, GDI pixmaps and
-pbuffers, matching the WinCE screen's 16-bit visual (`GetDeviceCaps(BITSPIXEL)`).
-Configuration 2 is RGBA8888 for alpha-capable offscreen pbuffers; it does not
-advertise window/pixmap support, and creating a native window with it returns
-EGL_BAD_MATCH. This separates the native screen visual from offscreen alpha
-storage without dropping the alpha passes used by applications.
+By default, configuration 1 is RGB565 and configuration 2 is RGBA8888.
+Both support windows and pbuffers; only RGB565 supports native GDI pixmaps.
+An application may request WINDOW_BIT|PBUFFER_BIT with alpha=8 while creating
+only an offscreen image. Removing RGBA8 window capability prevents such clients
+from selecting their alpha passes (as observed in DoomGLES).
 
-`eglChooseConfig` filters first, then sorts before applying the caller's output
-capacity. EGL 1.1 section 3.4.1 prefers more bits in explicitly requested nonzero
-color components, then smaller total buffer size and configuration ID (the
-other sort criteria are equal for these configurations). Omitted, zero and
-DONT_CARE color components do not affect that color preference. Attribute
-queries, configuration IDs and readback describe the actual attachments.
-Incompatible context/surface pairs return EGL_BAD_MATCH. Selecting alpha can
-enable additional application passes; it does not imply software rendering.
+`eglChooseConfig` filters first, then sorts before truncating the output. EGL 1.1
+prefers more bits in explicitly requested nonzero color components, then a
+smaller total buffer size and configuration ID (other criteria are equal here).
+Omitted, zero and DONT_CARE components do not affect that color preference.
+Queries, configuration IDs and readback describe the actual attachments.
+Incompatible context/surface pairs return EGL_BAD_MATCH.
+
+Each PocketPC game's **Graphics → OpenGL ES surface format** offers **Default
+(RGB565 + RGBA8888)** and **RGBA8888 only** on desktop and Android. The persisted
+`pocketpc_egl_rgba8888_only` boolean defaults to false. The opt-in profile exposes
+only configuration 2 consistently through enumeration, selection, queries and
+creation; configuration 1 then returns EGL_BAD_CONFIG. It keeps RGBA8 windows
+and pbuffers available and does not advertise EGL pixmaps. This can help clients
+whose offscreen and onscreen format choices otherwise take incompatible client
+state-cache paths. It does not repair the client's cache or change AR10/AR11
+arithmetic, and is not selected by game name, executable or shader signature.
+
+The choice is fixed before the first eglInitialize and stays fixed through
+termination/reinitialization; suspended parent sessions retain their own choice.
+A new session resets to the default. Both frontends apply it only to PocketPC,
+in software and GPU modes. CLI launches retain the default. There is no per-draw
+profile branch or pixel comparison. Games requiring an exact RGB565 EGL format
+or an EGL pixmap may fail with this option enabled; alpha-capable surfaces can
+also enable different guest rendering passes and affect performance. Keep the
+default unless needed. Direct GAPI/GX/GDI RGB565 memory and presentation are not
+changed by the EGL catalog choice.
 
 EGL share groups own named textures, buffers and NV program bodies. Bindings,
 constants, enables and texture object zero are local to each context. Bound

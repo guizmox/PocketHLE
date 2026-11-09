@@ -5,6 +5,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class InternalResolutionSettingsTest {
+    @Test fun eglFormatProfileDefaultsOffAndRoundTripsWithoutChangingOtherSettings() {
+        assertFalse(GameSettings.fromJson(JSONObject()).pocketpcEglRgba8888Only)
+        val original=JSONObject().put("pocketpc_gapi_columns",true).put("gpu_renderer",false).put("future_setting","kept")
+        for (enabled in listOf(false,true)) {
+            val saved=GameSettings.fromJson(original).copy(pocketpcEglRgba8888Only=enabled).toJson()
+            val restored=GameSettings.fromJson(saved)
+            assertEquals(enabled,restored.pocketpcEglRgba8888Only)
+            assertTrue(restored.pocketpcGapiColumns)
+            assertEquals(false,restored.gpuRenderer)
+            assertEquals("kept",saved.getString("future_setting"))
+        }
+    }
+
     @Test fun globalFrameLimitAndOptionalGameLimitRemainIndependent() {
         assertEquals("60", LauncherConfig.fromJson(JSONObject()).frameRateLimit)
         assertNull(GameSettings.fromJson(JSONObject()).frameRateLimit)

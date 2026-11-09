@@ -740,6 +740,7 @@ fn run_process_inner(
         entry.settings.screen.resolve_image(image.as_ref().ok())
     };
     emu.set_screen_size(screen_width, screen_height);
+    emu.set_egl_rgba8888_only(!is_gizmondo && entry.settings.pocketpc_egl_rgba8888_only);
     emu.set_pocketpc_gapi_columns(if is_gizmondo {
         (screen_width, screen_height) == (320, 240)
             && image

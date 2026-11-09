@@ -149,6 +149,11 @@ impl Emulator {
         pocket_winceapi::gles::set_internal_resolution(scale);
     }
 
+    /// Per-session EGL format profile; configure after loading, before guest execution.
+    pub fn set_egl_rgba8888_only(&mut self, enabled: bool) {
+        pocket_winceapi::gles::set_egl_rgba8888_only(enabled);
+    }
+
     /// Halt the emulator the first time an unimplemented API is hit.
     /// Useful for the tracing CLI mode.
     pub fn set_halt_on_unimplemented(&mut self, halt: bool) {

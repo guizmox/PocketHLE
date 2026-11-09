@@ -526,6 +526,7 @@ impl Runner {
             game.settings.screen.resolve_image(metadata.as_ref())
         };
         emu.set_screen_size(screen_w, screen_h);
+        emu.set_egl_rgba8888_only(!is_gizmondo && game.settings.pocketpc_egl_rgba8888_only);
         emu.set_pocketpc_gapi_columns(if is_gizmondo {
             (screen_w, screen_h) == (320, 240)
                 && metadata.as_ref().is_some_and(pocket_library::analysis::uses_rotated_gizmondo_lcd)

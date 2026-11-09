@@ -708,3 +708,240 @@ fn shared_images_update_while_texture_zero_stays_context_local_gpu() {
     let _g = guard();
     coherent_shared_images_and_local_zero(true);
 }
+
+fn copied_shared_image_preserves_context_bindings(gpu: bool) {
+    reset_for_test(8, 8);
+    let (mut cpu, mut k) = (fresh_cpu(), fresh_kernel());
+    set_gpu_renderer(gpu);
+    quad(&mut cpu);
+    with_ctx(|c| {
+        texture(c, 17, [255, 0, 0, 255]);
+        texture(c, 19, [0, 0, 255, 255]);
+    });
+    assert_eq!(render(&mut cpu), [0, 0, 255, 255]);
+
+    let attrs = SCRATCH + 0x100;
+    for (index, value) in [EGL_WIDTH, 8, EGL_HEIGHT, 8, EGL_NONE]
+        .into_iter()
+        .enumerate()
+    {
+        cpu.write_mem(attrs + index as u32 * 4, &value.to_le_bytes())
+            .unwrap();
+    }
+    let surface = call(
+        &mut cpu,
+        &mut k,
+        egl_create_pbuffer,
+        &[DISPLAY_HANDLE, CONFIG_RGBA_HANDLE, attrs],
+    );
+    let other = call(
+        &mut cpu,
+        &mut k,
+        egl_create_context,
+        &[DISPLAY_HANDLE, CONFIG_RGBA_HANDLE, CONTEXT_HANDLE, 0],
+    );
+    assert_ne!(surface, 0);
+    assert_ne!(other, 0);
+    bind(&mut cpu, &mut k, other, surface);
+    with_ctx(|c| {
+        c.clear_color = [0., 1., 0., 0.25];
+        c.clear(GL_COLOR_BUFFER_BIT);
+        c.bind_texture(GL_TEXTURE_2D, 17);
+    });
+    call(
+        &mut cpu,
+        &mut k,
+        gl_copy_tex_image_2d,
+        &[GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, 8, 8, 0],
+    );
+    assert_eq!(with_ctx(|c| c.take_error()), GL_NO_ERROR);
+
+    bind(&mut cpu, &mut k, CONTEXT_HANDLE, SURFACE_HANDLE);
+    // A copy updates the shared image, not the incoming context's binding.
+    assert_eq!(
+        with_ctx(|c| c.query_state(0x8069).unwrap().numbers()),
+        vec![19.]
+    );
+    assert_eq!(render(&mut cpu), [0, 0, 255, 255]);
+    with_ctx(|c| c.bind_texture(GL_TEXTURE_2D, 17));
+    assert_eq!(render(&mut cpu), [0, 255, 0, 255]);
+
+    bind(&mut cpu, &mut k, other, surface);
+    with_ctx(|c| {
+        c.clear_color = [1., 0., 0., 0.5];
+        c.clear(GL_COLOR_BUFFER_BIT);
+    });
+    call(
+        &mut cpu,
+        &mut k,
+        gl_copy_tex_sub_image_2d,
+        &[GL_TEXTURE_2D, 0, 0, 0, 0, 0, 8, 8],
+    );
+    assert_eq!(with_ctx(|c| c.take_error()), GL_NO_ERROR);
+    bind(&mut cpu, &mut k, CONTEXT_HANDLE, SURFACE_HANDLE);
+    assert_eq!(render(&mut cpu), [255, 0, 0, 255]);
+}
+
+#[test]
+fn copied_shared_images_keep_bindings_local_software() {
+    let _g = guard();
+    copied_shared_image_preserves_context_bindings(false);
+}
+
+#[test]
+#[ignore = "requires host OpenGL; cross-format shared texture copies"]
+fn copied_shared_images_keep_bindings_local_gpu() {
+    let _g = guard();
+    copied_shared_image_preserves_context_bindings(true);
+}
+
+#[test]
+fn rgba_only_catalog_is_consistent_and_scoped_to_the_session() {
+    let _g = guard();
+    reset_for_session();
+    let (mut cpu, mut k) = (fresh_cpu(), fresh_kernel());
+    set_egl_rgba8888_only(true);
+    call(&mut cpu, &mut k, egl_initialize, &[DISPLAY_HANDLE, 0, 0]);
+    let out = SCRATCH + 0x100;
+    let num = out + 8;
+    assert_eq!(
+        call(
+            &mut cpu,
+            &mut k,
+            egl_get_configs,
+            &[DISPLAY_HANDLE, out, 2, num]
+        ),
+        EGL_TRUE
+    );
+    assert_eq!(cpu.read_u32_le(num).unwrap(), 1);
+    assert_eq!(cpu.read_u32_le(out).unwrap(), CONFIG_RGBA_HANDLE);
+    for (pairs, expected) in [
+        (vec![], 1),
+        (
+            vec![
+                (EGL_ALPHA_SIZE, 8),
+                (EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT),
+            ],
+            1,
+        ),
+        (vec![(EGL_CONFIG_ID, 1)], 0),
+        (vec![(EGL_SURFACE_TYPE, EGL_PIXMAP_BIT)], 0),
+    ] {
+        super::tests::write_egl_attributes(&mut cpu, &pairs);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                egl_choose_config,
+                &[DISPLAY_HANDLE, SCRATCH, out, 2, num]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(cpu.read_u32_le(num).unwrap(), expected);
+    }
+    // A hidden config is invalid through every entry point, not just enumeration.
+    for handler in [
+        egl_get_config_attrib as crate::Handler,
+        egl_create_context,
+        egl_create_window_surface,
+        egl_create_pbuffer,
+        egl_create_pixmap,
+    ] {
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                handler,
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0]
+            ),
+            0
+        );
+        assert_eq!(call(&mut cpu, &mut k, egl_get_error, &[]), EGL_BAD_CONFIG);
+    }
+    set_egl_rgba8888_only(false);
+    assert_eq!(egl_config::Config::handles(), &[CONFIG_RGBA_HANDLE]);
+    call(&mut cpu, &mut k, egl_terminate, &[DISPLAY_HANDLE]);
+    set_egl_rgba8888_only(false);
+    call(&mut cpu, &mut k, egl_initialize, &[DISPLAY_HANDLE, 0, 0]);
+    assert_eq!(egl_config::Config::handles(), &[CONFIG_RGBA_HANDLE]);
+
+    let parent = suspend();
+    reset_for_session();
+    assert_eq!(
+        egl_config::Config::handles(),
+        &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE]
+    );
+    resume(parent);
+    assert_eq!(egl_config::Config::handles(), &[CONFIG_RGBA_HANDLE]);
+    reset_for_session();
+    call(&mut cpu, &mut k, egl_initialize, &[DISPLAY_HANDLE, 0, 0]);
+    assert_eq!(
+        call(
+            &mut cpu,
+            &mut k,
+            egl_get_configs,
+            &[DISPLAY_HANDLE, out, 2, num]
+        ),
+        EGL_TRUE
+    );
+    assert_eq!(cpu.read_u32_le(num).unwrap(), 2);
+    assert_eq!(cpu.read_u32_le(out).unwrap(), CONFIG_HANDLE);
+}
+
+fn rgba_profile_window_and_pbuffer(gpu: bool) {
+    reset_for_session();
+    set_egl_rgba8888_only(true);
+    let (mut cpu, mut k) = (fresh_cpu(), fresh_kernel());
+    k.framebuffer.resize(8, 8);
+    set_gpu_renderer(gpu);
+    call(&mut cpu, &mut k, egl_initialize, &[DISPLAY_HANDLE, 0, 0]);
+    let context = call(
+        &mut cpu,
+        &mut k,
+        egl_create_context,
+        &[DISPLAY_HANDLE, CONFIG_RGBA_HANDLE, 0, 0],
+    );
+    assert_ne!(context, 0);
+    let window = call(
+        &mut cpu,
+        &mut k,
+        egl_create_window_surface,
+        &[DISPLAY_HANDLE, CONFIG_RGBA_HANDLE, 1, 0],
+    );
+    assert_ne!(window, 0);
+    super::tests::write_egl_attributes(&mut cpu, &[(EGL_WIDTH, 8), (EGL_HEIGHT, 8)]);
+    let pbuffer = call(
+        &mut cpu,
+        &mut k,
+        egl_create_pbuffer,
+        &[DISPLAY_HANDLE, CONFIG_RGBA_HANDLE, SCRATCH],
+    );
+    assert_ne!(pbuffer, 0);
+    for surface in [window, pbuffer, window] {
+        bind(&mut cpu, &mut k, context, surface);
+        with_ctx(|c| {
+            assert_eq!(c.gpu_active(), gpu);
+            assert!(!c.target.rgb565);
+            c.clear_color = [0.25, 0.5, 0.75, 0.25];
+            c.clear(GL_COLOR_BUFFER_BIT);
+            c.sync_gpu();
+            for (actual, expected) in c.target.color[..4].iter().zip([64u8, 128, 191, 64]) {
+                assert!(actual.abs_diff(expected) <= 1, "{actual} != {expected}");
+            }
+        });
+    }
+    reset_for_session();
+}
+
+#[test]
+fn rgba_only_profile_renders_window_and_pbuffer_software() {
+    let _g = guard();
+    rgba_profile_window_and_pbuffer(false);
+}
+
+#[test]
+#[ignore = "requires host OpenGL"]
+fn rgba_only_profile_renders_window_and_pbuffer_gpu() {
+    let _g = guard();
+    rgba_profile_window_and_pbuffer(true);
+}

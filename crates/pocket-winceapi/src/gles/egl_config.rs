@@ -20,6 +20,16 @@ pub(super) struct Config {
     rgba: bool,
 }
 impl Config {
+    pub(super) fn handles() -> &'static [u32] {
+        SURFACES.with(|s| {
+            if s.borrow().rgba8888_only {
+                &[CONFIG_RGBA_HANDLE][..]
+            } else {
+                &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE][..]
+            }
+        })
+    }
+
     pub(super) fn current() -> Self {
         Self {
             depth: with_ctx(|c| c.state.depth_bits() as i32),
@@ -28,6 +38,9 @@ impl Config {
     }
 
     pub(super) fn from_handle(handle: u32) -> Option<Self> {
+        if !Self::handles().contains(&handle) {
+            return None;
+        }
         let rgba = match handle {
             CONFIG_HANDLE => false,
             CONFIG_RGBA_HANDLE => true,
@@ -78,15 +91,9 @@ impl Config {
             }
             EGL_STENCIL_SIZE | EGL_SAMPLES | EGL_SAMPLE_BUFFERS => 0,
             EGL_DEPTH_SIZE => self.depth,
-            // The native WinCE visual is 16-bit RGB565 (GetDeviceCaps).
-            // Alpha-capable RGBA8 images are offscreen render targets.
             EGL_SURFACE_TYPE => {
-                (EGL_PBUFFER_BIT
-                    | if self.rgba {
-                        0
-                    } else {
-                        EGL_WINDOW_BIT | EGL_PIXMAP_BIT
-                    }) as i32
+                (EGL_WINDOW_BIT | EGL_PBUFFER_BIT | if self.rgba { 0 } else { EGL_PIXMAP_BIT })
+                    as i32
             }
             EGL_CONFIG_ID => self.id(),
             EGL_RENDERABLE_TYPE => 1,

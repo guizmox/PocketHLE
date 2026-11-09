@@ -113,6 +113,16 @@ class GameSettingsActivity : HostKeyActivity() {
                 identityField("pocketpc_oem_info", "OEM model (readable text)", current.pocketpcOemInfo) {current=current.copy(pocketpcOemInfo=it)}
                 identityField("pocketpc_platform_type", "Platform type (readable text)", current.pocketpcPlatformType) {current=current.copy(pocketpcPlatformType=it)}
                 findPreference<androidx.preference.PreferenceCategory>("graphics_category")!!.addPreference(ListPreference(requireContext()).apply {
+                    key="pocketpc_egl_rgba8888_only";title="OpenGL ES surface format";isPersistent=false
+                    entries=arrayOf("Default (RGB565 + RGBA8888)","RGBA8888 only")
+                    entryValues=arrayOf("false","true");value=current.pocketpcEglRgba8888Only.toString()
+                    summaryProvider=androidx.preference.Preference.SummaryProvider<ListPreference> { "${it.entry}\nDefault lets the game choose 16-bit or 32-bit surfaces. Try RGBA8888 only if water or other effects show incorrect textures. Games that require 16-bit surfaces may not start. Applies to software and GPU rendering. Restart the game to apply." }
+                    dialogTitle="OpenGL ES surface format"
+                    setOnPreferenceChangeListener { _, value ->
+                        current=current.copy(pocketpcEglRgba8888Only=value.toString()=="true");writeGameSettings();true
+                    }
+                })
+                findPreference<androidx.preference.PreferenceCategory>("graphics_category")!!.addPreference(ListPreference(requireContext()).apply {
                     key="pocketpc_gapi_columns";title="GAPI display compatibility";isPersistent=false
                     entries=arrayOf("Linear scanlines (default)","Columns (early portrait LCD)")
                     entryValues=arrayOf("false","true");value=current.pocketpcGapiColumns.toString()
@@ -233,7 +243,9 @@ class GameSettingsActivity : HostKeyActivity() {
             val frameLimitSaved = saved != null && saved.has("frame_rate_limit") && (if (saved.isNull("frame_rate_limit")) null else saved.optString("frame_rate_limit")) == current.frameRateLimit
             val heapSaved = saved != null &&
                 (if (saved.isNull("executable_heap")) null else saved.optBoolean("executable_heap")) == current.executableHeap
-            if (result?.optBoolean("ok", false) != true || !gpuSaved || !frameLimitSaved || !heapSaved) {
+            val eglFormatSaved = saved != null && saved.has("pocketpc_egl_rgba8888_only") &&
+                saved.optBoolean("pocketpc_egl_rgba8888_only") == current.pocketpcEglRgba8888Only
+            if (result?.optBoolean("ok", false) != true || !gpuSaved || !frameLimitSaved || !heapSaved || !eglFormatSaved) {
                 android.widget.Toast.makeText(context, "Could not save settings. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             }
         }

@@ -162,6 +162,8 @@ struct EglImage {
 }
 struct EglSurfaces {
     initialized: bool,
+    rgba8888_only: bool,
+    config_locked: bool,
     contexts: HashMap<u32, EglContext>,
     groups: HashMap<u32, SharedObjects>,
     current: u32,
@@ -200,6 +202,8 @@ impl EglSurfaces {
         );
         Self {
             initialized: false,
+            rgba8888_only: false,
+            config_locked: false,
             contexts: HashMap::new(),
             groups: HashMap::new(),
             current: 0,
@@ -371,6 +375,20 @@ pub fn set_intel2700g_depth_bias(enabled: bool) {
 pub fn set_internal_resolution(scale: u8) {
     with_ctx(|c| c.set_internal_resolution(scale));
     update_stored_contexts(|c| c.set_internal_resolution(scale));
+}
+
+/// Select the advertised EGL formats before the first eglInitialize of a session.
+/// Keep the catalog stable even across eglTerminate/reinitialize, while pending
+/// contexts may still refer to it. Session reset and parent suspension own it.
+pub fn set_egl_rgba8888_only(enabled: bool) {
+    SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.config_locked && s.rgba8888_only != enabled {
+            log::warn!("EGL surface format changes require a new session");
+            return;
+        }
+        s.rgba8888_only = enabled;
+    });
 }
 
 pub fn set_gpu_renderer(enabled: bool) {
@@ -1997,11 +2015,11 @@ fn gl_compressed_tex_sub_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 
 // ---- EGL -------------------------------------------------------------------
 //
-// One display/config; context and offscreen-surface handles are unique per run.
+// One display; context and offscreen-surface handles are unique per run.
 
 /// The single `EGLDisplay` we hand out.
 const DISPLAY_HANDLE: u32 = 0x4547_0001;
-/// The single `EGLConfig`.
+/// The RGB565 configuration; the optional profile exposes only RGBA8888.
 const CONFIG_HANDLE: u32 = 0x4547_0002;
 const CONFIG_RGBA_HANDLE: u32 = 0x4547_0005;
 /// First window surface; later windows receive fresh handles.
@@ -2040,16 +2058,25 @@ fn egl_initialize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     if minor != 0 {
         ctx.cpu.write_mem(minor, &1i32.to_le_bytes())?;
     }
-    SURFACES.with(|s| s.borrow_mut().initialized = true);
+    SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        s.initialized = true;
+        s.config_locked = true;
+    });
     if with_ctx(|c| c.gpu_requested()) {
         set_gpu_renderer(true);
     }
     log::info!(
-        "eglInitialize() -> EGL 1.1 (PocketHLE {})",
+        "eglInitialize() -> EGL 1.1 (PocketHLE {}; surface formats: {})",
         with_ctx(|c| if c.gpu_active() {
             "host GPU"
         } else {
             "software"
+        }),
+        SURFACES.with(|s| if s.borrow().rgba8888_only {
+            "RGBA8888 only"
+        } else {
+            "RGB565 + RGBA8888"
         })
     );
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
@@ -2125,13 +2152,7 @@ fn egl_get_configs(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    egl_config_output(
-        ctx,
-        configs,
-        size,
-        num,
-        &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE],
-    )
+    egl_config_output(ctx, configs, size, num, egl_config::Config::handles())
 }
 
 fn egl_choose_config(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -2151,7 +2172,7 @@ fn egl_choose_config(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let matched = egl_config::read_pairs(ctx, attribs).and_then(|pairs| {
         let mut matched = Vec::new();
         // Filter first, then apply EGL configuration ordering before truncation.
-        for handle in [CONFIG_HANDLE, CONFIG_RGBA_HANDLE] {
+        for &handle in egl_config::Config::handles() {
             if egl_config::Config::from_handle(handle)
                 .unwrap()
                 .matches(&pairs)?
@@ -3452,6 +3473,7 @@ fn reset_for_test(width: u32, height: u32) {
     SURFACES.with(|s| {
         let mut s = s.borrow_mut();
         s.initialized = true;
+        s.config_locked = true;
         // Most GL bridge tests start with an already-created, current EGL setup.
         s.adopt_test_context();
         s.context_alive = true;
@@ -5926,7 +5948,7 @@ mod tests {
         assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), EGL_SUCCESS);
     }
 
-    fn write_egl_attributes(cpu: &mut StubCpu, pairs: &[(u32, u32)]) {
+    pub(super) fn write_egl_attributes(cpu: &mut StubCpu, pairs: &[(u32, u32)]) {
         let mut bytes = Vec::new();
         for &(key, value) in pairs {
             bytes.extend(key.to_le_bytes());
@@ -6055,11 +6077,14 @@ mod tests {
             (vec![], CONFIG_HANDLE),
             (
                 vec![(EGL_RED_SIZE, 5), (EGL_GREEN_SIZE, 6), (EGL_DEPTH_SIZE, 16)],
-                CONFIG_HANDLE,
+                CONFIG_RGBA_HANDLE,
             ),
-            (vec![(EGL_ALPHA_SIZE, 8)], 0),
+            (vec![(EGL_ALPHA_SIZE, 8)], CONFIG_RGBA_HANDLE),
             (
-                vec![(EGL_ALPHA_SIZE, 8), (EGL_SURFACE_TYPE, EGL_PBUFFER_BIT)],
+                vec![
+                    (EGL_ALPHA_SIZE, 8),
+                    (EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT),
+                ],
                 CONFIG_RGBA_HANDLE,
             ),
             (vec![(EGL_STENCIL_SIZE, 8)], 0),
@@ -6147,8 +6172,8 @@ mod tests {
                 }
             }
         }
-        // The native WinCE window has the RGB565 visual; RGBA8 is offscreen.
-        assert_eq!(
+        // RGBA8 windows stay available to clients requesting window+pbuffer alpha.
+        assert_ne!(
             call(
                 &mut cpu,
                 &mut kernel,
@@ -6157,16 +6182,13 @@ mod tests {
             ),
             EGL_NO_SURFACE
         );
-        assert_eq!(
-            call(&mut cpu, &mut kernel, egl_get_error, &[]),
-            EGL_BAD_MATCH
-        );
+        assert_eq!(call(&mut cpu, &mut kernel, egl_get_error, &[]), EGL_SUCCESS);
         assert_ne!(
             call(
                 &mut cpu,
                 &mut kernel,
                 egl_create_window_surface,
-                &[DISPLAY_HANDLE, CONFIG_HANDLE, 1, 0]
+                &[DISPLAY_HANDLE, CONFIG_HANDLE, 2, 0]
             ),
             EGL_NO_SURFACE
         );

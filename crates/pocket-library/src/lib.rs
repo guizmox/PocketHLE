@@ -624,6 +624,9 @@ pub struct GameSettings {
     /// Emulate a portrait LCD with positive column pitch and negative vertical pitch.
     #[serde(default)]
     pub pocketpc_gapi_columns: bool,
+    /// Offer only RGBA8888 EGL surfaces. Opt-in PocketPC compatibility profile.
+    #[serde(default)]
+    pub pocketpc_egl_rgba8888_only: bool,
     /// Experimental OpenGL host rasterization; None inherits the global choice.
     #[serde(default)]
     pub gpu_renderer: Option<bool>,
@@ -799,6 +802,7 @@ impl Default for GameSettings {
             pocketpc_random_seed: String::new(),
             pocketpc_platform_type: String::new(),
             pocketpc_gapi_columns: false,
+            pocketpc_egl_rgba8888_only: false,
             gpu_renderer: None,
             cpu_backend: CpuBackendPref::default(),
             max_slices: default_max_slices(),
@@ -7281,4 +7285,22 @@ fn pocketpc_nv_combiners_preserve_default_and_round_trip_disabled() {
         restored.pocketpc_intel2700g_depth_bias,
         config.pocketpc_intel2700g_depth_bias
     );
+}
+
+#[cfg(test)]
+#[test]
+fn egl_format_profile_defaults_off_and_round_trips_independently() {
+    let inherited: GameSettings = serde_json::from_str("{}").unwrap();
+    assert!(!inherited.pocketpc_egl_rgba8888_only);
+    for enabled in [false, true] {
+        let settings = GameSettings {
+            pocketpc_egl_rgba8888_only: enabled,
+            pocketpc_gapi_columns: true,
+            gpu_renderer: Some(false),
+            ..Default::default()
+        };
+        let restored: GameSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored, settings);
+    }
 }

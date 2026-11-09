@@ -3074,6 +3074,20 @@ impl PocketLauncher {
 
 
                 if !is_gizmondo {
+                    ui.label("OpenGL ES surface format");
+                    crate::controller_ui::ComboBox::from_id_source("pocketpc_egl_surface_format")
+                        .selected_text(if draft.pocketpc_egl_rgba8888_only { "RGBA8888 only" } else { "Default (RGB565 + RGBA8888)" })
+                        .show_ui(ui, |ui| {
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_egl_rgba8888_only, false, "Default (RGB565 + RGBA8888)");
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_egl_rgba8888_only, true, "RGBA8888 only");
+                        });
+                    ui.end_row();
+                    ui.label("");
+                    ui.vertical(|ui| {
+                        ui.set_max_width(380.0);
+                        ui.add(egui::Label::new("Default lets the game choose 16-bit or 32-bit surfaces. Try RGBA8888 only if water or other effects show incorrect textures. Games that require 16-bit surfaces may not start. Applies to software and GPU rendering. Restart the game to apply.").wrap(true));
+                    });
+                    ui.end_row();
                     ui.label("GAPI display compatibility");
                     crate::controller_ui::ComboBox::from_id_source("pocketpc_gapi_layout")
                         .selected_text(if draft.pocketpc_gapi_columns { "Rotated LCD columns" } else { "Linear scanlines (default)" })
