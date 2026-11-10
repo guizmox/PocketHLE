@@ -286,6 +286,19 @@ impl Default for PipelineState {
 }
 
 pub(crate) const GOFORCE4500_DEPTH_TOLERANCE: f32 = 1. / 12.;
+// Bound the empirical visibility margin in window depth. The old relative
+// margin exposed occluded body panels in Chicane when geometry approached the
+// camera. This is a compatibility bound, not a measured SC-10 precision value.
+pub(crate) const GOFORCE4500_MAX_DEPTH_TOLERANCE: f32 = 1. / 4096.;
+
+pub(crate) fn goforce4500_replay_depth(z: f32, w: f32) -> f32 {
+    let relative = GOFORCE4500_DEPTH_TOLERANCE * (z - w);
+    if w > 0. {
+        z + relative.max(-2. * GOFORCE4500_MAX_DEPTH_TOLERANCE * w)
+    } else {
+        z + relative
+    }
+}
 const INTEL2700G_DEPTH_TOLERANCE_UNITS: f32 = 16.;
 
 impl PipelineState {
@@ -1659,6 +1672,21 @@ mod tests {
             forward.intel2700g_depth_color_pass().unwrap().polygon_units,
             -16.
         );
+    }
+
+    #[test]
+    fn goforce_visibility_margin_is_bounded_near_and_relative_far() {
+        for w in [0.125, 1., 64.] {
+            for depth in [0., 0.5, 0.9, 0.999, 1.] {
+                let z = (2. * depth - 1.) * w;
+                let actual = (z - goforce4500_replay_depth(z, w)) / (2. * w);
+                let expected = ((1. - depth) / 12.).min(GOFORCE4500_MAX_DEPTH_TOLERANCE);
+                assert!((actual - expected).abs() < 1e-7);
+            }
+        }
+        // The normal homogeneous clipper still rejects geometry behind the eye.
+        assert_eq!(goforce4500_replay_depth(0., 0.), 0.);
+        assert!(goforce4500_replay_depth(-2., 1.) < -1.);
     }
 
     #[test]

@@ -3631,7 +3631,7 @@ impl Context {
                 let mut draw = |mut tri: [Vertex; 3]| {
                     if replay != 0 && !pass.intel2700g_depth_bias {
                         for v in &mut tri {
-                            v.pos[2] += raster::GOFORCE4500_DEPTH_TOLERANCE * (v.pos[2] - v.pos[3]);
+                            v.pos[2] = raster::goforce4500_replay_depth(v.pos[2], v.pos[3]);
                         }
                     }
                     raster::draw_triangle(&mut self.target, pass, &sample, stages, tri);
@@ -4541,8 +4541,8 @@ mod tests {
             c.set_client_state(GL_VERTEX_ARRAY, true);
             for (z, color) in [
                 (0., [0., 0., 1., 1.]),
-                (0.04, [1., 0., 0., 1.]),
-                (0.2, [0., 1., 0., 1.]),
+                (0.00025, [1., 0., 0., 1.]),
+                (0.001, [0., 1., 0., 1.]),
             ] {
                 let mut mem = FakeMem {
                     base: BASE,

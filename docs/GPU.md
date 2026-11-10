@@ -157,10 +157,14 @@ There is no game-name, texture-ID, binary or terrain detection and no new settin
 PocketPC profiles, including GoForce 5500 and Intel 2700G, do not enable it.
 
 A normal draw establishes the nearest unbiased depth. A second color-only pass
-uses `z' = z + (z - w) / 12` in clip space. The resulting window-depth margin is
-`(1 - depth) / 12`: it approaches zero at the far plane, unlike a constant bias
-that exposes distant submerged triangles. Clipping remains enabled, including
-at the near plane. This pass never changes the depth attachment, so its margin
+uses `z' = z + max((z - w) / 12, -2 * w / 4096)` for vertices in front
+of the eye. The resulting vertex window-depth margin is
+`min((1 - depth) / 12, 1 / 4096)`. It approaches zero at the far plane,
+unlike a constant bias that exposes distant submerged triangles. The absolute
+bound prevents the former relative margin from growing large enough to reveal
+hidden near-camera body panels in Chicane. The transformation happens before
+clipping and interpolation; it is not a per-fragment tolerance test. Clipping
+remains enabled, including at the near plane. This pass never changes the depth attachment, so its margin
 cannot accumulate across draws. The ordinary pass retains the original color
 where the replay is clipped or rejected.
 
@@ -172,23 +176,29 @@ when the session changes to another profile. EGL continues to advertise and use
 its depth attachment; the rejected depthless experiment is not retained.
 
 Software reuses transformed vertices. Native GL/GLES reuses uploaded vertex/index
-buffers, shader and textures, changing only the existing depth-range uniform and
-depth-write mask for the additional draw, then restoring both. There is no new
+buffers, shader and textures. The depth-range uniform also carries the replay
+bound; ordinary draws, including Intel replays, set that component to zero.
+The additional draw changes this uniform and the depth-write mask, then restores
+both. The vertex shader bounds the displacement only during the 4500 replay. There is no new
 shader variant, texture upload, calibration or GPU readback. The shared code
 serves desktop and Android, native resolution and internal scaling. Presentation,
 screenshots and recordings retain their existing paths.
 
-The coefficient is empirical. Original driver CPU submission and original map
+Both the relative coefficient and the absolute bound are empirical, not claims
+of a 12-bit depth buffer or a recovered hardware register. Original driver CPU submission and original map
 heights agree with the captured intersecting meshes, but physical GoForce
 rasterization has not been verified. Nearby hidden surfaces can become visible;
-other Gizmondo titles need visual regression testing. Eligible geometry is
+other Gizmondo titles need visual regression testing. Bounding the tolerance can
+also reveal intersections previously hidden by the broader approximation. Eligible geometry is
 rasterized twice, increasing GPU work (or CPU work in software mode). There is
 no additional rendering pass outside the 4500 profile.
 
-The reproduced Battlestations interior patches disappear in software and native
-GL, while the large triangular shoreline fins from the rejected fixed-offset
-experiment are avoided. Some shore intersections shift slightly. Validation and
-local measurement limits are recorded in [the note](../proof/battlestations-midway/README.md).
+The earlier Battlestations observations and their measurement limits are recorded
+in [the original note](../proof/battlestations-midway/README.md). The bounded
+revision was compared on Chicane car geometry and successive Battlestations
+island views; the shared validation record is
+[here](../proof/goforce4500-bounded-depth/README.md). Some shore intersections
+still shift, and no original SC-10 rasterizer fidelity is claimed.
 
 ## Native fixed-point vertex attributes
 
