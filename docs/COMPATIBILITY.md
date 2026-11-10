@@ -13,7 +13,7 @@ variants remain separate entries under their supplied display names.
 
 For detailed reported Gizmondo results and known issues, use the
 [Gizmondo compatibility table](GIZMONDO.md#reported-game-compatibility).
-Reproducible checked-in captures and probes live under [proof](../proof/).
+Reproducible checked-in captures and probes live under [proof](../proof).
 See [validation levels](README.md#validation-levels) when reporting new results.
 
 Only title names and platform grouping are published here. Local paths, registry

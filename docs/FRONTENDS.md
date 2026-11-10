@@ -1,7 +1,15 @@
 # Frontends, controls and image geometry
 
-This is the current UI policy reference. Platform build instructions remain in
-[ANDROID-BUILD.md](ANDROID-BUILD.md) and [STEAMDECK.md](STEAMDECK.md).
+Current settings and input policy for desktop, Deck and Android. Build/signing
+instructions belong to [Build and release](BUILD.md); Deck installation belongs
+to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
+
+- [Launch profiles](#desktop-runtime-launch-profiles) and [toolbar](#desktop-button-toolbar)
+- [Library data](#adding-data-to-an-installed-game), [removal](#removing-library-games) and [captures](#desktop-capture-gallery)
+- [Image fitting](#image-geometry-and-input) and [Android touch controls](#android-controls)
+- [Factory bindings](#factory-input-profiles) and [assignment editor](#visual-input-editor--desktop-and-android)
+- [Stylus modes](#pocketpc-right-stick-stylus-modes) and [Center tap](#center-tap)
+- [Focus and dialogs](#desktop-focus-and-import-launch-settings-prompt)
 
 ## Shared settings
 
@@ -11,9 +19,14 @@ fields. Device/platform settings, renderer choice and frame limits apply at the
 next launch unless an individual live control explicitly says otherwise.
 
 Host optimizations are permanently active; no user optimization switches remain.
-See [OPTIMIZATIONS.md](OPTIMIZATIONS.md). GPU/software renderer selection is a
+See [always-on execution optimizations](AGENTS.md#always-on-execution-optimizations). GPU/software renderer selection is a
 separate supported choice. Frame-limit inheritance and filters are defined in
 [GPU.md](GPU.md), not duplicated here.
+
+PocketPC options holds the global PocketPC processor/device identity fields;
+Gizmondo options holds its hardware activations. Stylus speed remains in the
+input editors. Emulator Settings separates graphics, recording where supported,
+diagnostics and miscellaneous settings.
 
 Per-game Graphics settings list **Screen**, **Rotate display**, then **Frame rate
 limit**, with an explanation under each option on desktop and Android (Screen
@@ -22,6 +35,61 @@ to the game and applies at the next launch; rotation turns the presented image
 and adapts touch/directional input without changing those dimensions. These
 settings are independent. Frame-limit inheritance and its existing help remain
 unchanged.
+
+## Desktop runtime launch profiles
+
+One `pockethle-gui` executable supports the standard profile and `--steam-deck`.
+There is no Steam Deck Cargo feature or second main file. The argument is parsed
+before opening the library, initializing SDL or selecting updates. A runtime
+LauncherProfile belongs to each Library handle, including clones, staging
+imports, background reload/import jobs and the game runner/children. It chooses
+config.json or config-steamdeck.json without process-global state; catalogue and
+per-game manifests remain shared. CLI and Android callers of Library::open keep
+the Standard profile. Backups continue to include both existing settings files.
+
+Both desktop profiles start windowed at 1280x800 physical pixels, capped to the
+monitor; only an explicit positional CLI display argument of 0 requests fullscreen.
+Under Wine/Proton, the launcher preserves its existing XInput hints. Native Linux is not forced
+to use XInput. Windows Deck-profile updates under Proton choose the Windows archive; native
+Linux chooses the Linux archive. There is no separate Deck package or update
+platform. Colors controller help is shown whenever a controller is
+connected, independent of launch profile. The unused layout argument and old
+Deck-specific migration functions/tests are removed. See STEAMDECK.md for Steam
+shortcut setup; old executable targets must be changed to pockethle-gui.exe with
+--steam-deck. There is no executable-name compatibility shim.
+
+## Desktop button toolbar
+
+Menu/Start remains the immutable filter/recording shortcut; it does not open
+settings. Use the Settings toolbar group, with L3 to switch between toolbar and
+page. There is no separate Start-to-settings action.
+
+The former Game library, Settings and About dropdown hierarchy is replaced by
+direct buttons in four separated groups: Game library, Settings, Features,
+About. Each group has at most two rows; small windows scroll horizontally
+instead of shrinking labels. Startup uses the fixed 1280x800 outer-window policy
+above; the old toolbar-overflow startup widening and its state/helpers are removed.
+Controller focus reveals the selected button.
+Directions use button geometry within the toolbar; L3 switches between toolbar
+and page, and A activates the focused button. The footer lists these controls.
+The former F6 section-switch shortcut, interception and help were removed.
+F6 remains assignable and retains the existing in-game Colors GPS action.
+
+Features contains Upscale ×2, Filter, Rotation, Fullscreen, Screenshot and
+Recording. Filter and Rotation advance their existing carousels and display
+the current mode; F9/F7 use the same actions. Upscale/fullscreen show their
+active state. Recording shows a red Stop video button while active, and a
+disabled Saving video state while encoding. Captures remain game-only and
+backup/restore remain disabled while a game/import is active. Filter changes
+are synchronized into any open settings draft before saving.
+
+About is a dedicated page retaining version, project links and acknowledgments.
+Back/B/Escape return to the originating page without discarding its draft.
+Return to game remains available above the buttons while a session runs behind
+a settings page. Fullscreen gameplay still hides host chrome. Legacy toolbar
+menus, nested-menu expansion state and their obsolete tests were removed;
+settings combo boxes retain their popup navigation. Android's settings layout
+is unchanged by this desktop-only toolbar.
 
 ## Adding data to an installed game
 
@@ -90,6 +158,73 @@ Left selects Cancel, right selects Delete, South accepts the selected choice,
 and East cancels. Repeated directional input does not toggle the selection.
 In the viewer, East still leaves fullscreen or closes playback; it never deletes.
 
+## Library tile metadata
+
+Desktop and Android tiles show resolution followed by a compact graphics API hint
+(OpenGL ES, Direct3D Mobile, DirectDraw, GAPI, GapiDraw, SDL or GDI). The shared detector
+inspects the selected executable, resolves COREDLL ordinals through the same
+bundled ARM/MIPS maps as runtime, and recognizes explicit graphics symbol strings
+when GetProcAddress is used. GDI menu drawing does not override stronger 3D or
+framebuffer evidence. SDL and GapiDraw are identified as middleware without guessing their video backend.
+This remains a static hint rather than proof of the active rendering path; no
+DLL traversal, game-name rules, options or metadata migration are introduced.
+Missing evidence leaves only resolution. Existing games benefit after restarting
+the updated launcher, without reimport or a new Refresh button.
+
+A second line, “Custom settings”, appears for saved per-game overrides or runtime
+settings different from standard defaults. Explicit per-game overrides count
+as custom even when their value currently equals the global setting. The CPU
+baseline follows the global default; explicit Normal controls equal default
+controls. Non-default screen/rotation settings count, including those selected
+automatically during import. The marker describes the saved configuration, not a
+history of user edits; restoring the defaults removes it.
+
+## Android catalogue loading
+
+Library activity resumes reread the current saved catalogue/settings on an IO
+coroutine, keeping the existing cards usable until the refreshed snapshot is
+ready. Concurrent refresh requests are coalesced. Switching platform tabs only
+filters the in-memory snapshot. An unchanged snapshot does not rebind the cards
+or decode their artwork again. The JNI list response supplies `is_gizmondo` once
+per entry; the filter and card adapter never call the per-game classifier, which
+would reopen/migrate the entire catalogue for every card.
+
+Custom-settings badges are still computed from current settings/config at each
+refresh. Graphics API detection uses a process-local cache keyed by executable
+path, byte length and modification time, including unknown results. Replacing an
+executable invalidates its label; restarting the app starts a fresh cache. Cold
+loading still analyses executables once and resolves display metadata, but this
+work no longer blocks the UI thread. No persistent derived-data database or new
+user refresh requirement is introduced.
+
+## Image geometry and input
+
+Sample the produced image directly; use the platform presentation grid for
+display fitting and the logical guest size for input coordinates. Apply inverse rotation once, through the same display rectangle.
+Internal GLES scaling must not change guest hitboxes or the emulated LCD size.
+Prefer integer enlargement according to the platform's presentation policy;
+when the produced image is too large, downscale proportionally rather than clip.
+A 320x240 display grid, a native VGA image and an internal-resolution multiplier
+must not be treated as interchangeable zoom definitions.
+
+Android display size is automatic: the former Display scale preference and its
+configuration field have been removed. PocketPC chooses the largest whole-number
+multiple of 240x320 (portrait) or 320x240 (landscape) for standard-aspect images that fits the reserved game area, regardless
+of the internal GLES rendering resolution. All fitting integer steps are allowed,
+without a four-step cap. Thus a 320x240 guest can display at 960x720 whether GLES
+produces 320x240, 640x480, 960x720 or 1280x960. Sample the high-density texture
+directly; never first resolve it to QVGA. Native VGA uses the same presentation
+steps. If space decreases, drop to the previous integer step. Only viewports too
+small for one QVGA step use proportional downscaling; nonstandard aspect ratios
+retain their native grid.
+Gizmondo retains automatic produced-image integer fitting, and controller fullscreen
+retains its own aspect-fit geometry. Rendering, pointer overlays and inverse input
+mapping use the same shared rectangle; internal density never changes guest hitboxes.
+
+Controls reserve their own area and do not overlap the touchable game image.
+Big controls may reduce the fitted game scale. Do not copy a Gizmondo overflow
+option onto the PocketPC touchscreen layout.
+
 ## Desktop and Gizmondo controls
 
 The desktop Gizmondo panel uses the PocketPC-style dark/translucent design,
@@ -126,91 +261,8 @@ resizing and fullscreen controls remain available.
 Ending a game while its options are visible uses the same session cleanup. A
 queued game-to-game launch retains the original library snapshot.
 
-## Image geometry and input
-
-Sample the produced image directly; use the platform presentation grid for
-display fitting and the logical guest size for input coordinates. Apply inverse rotation once, through the same display rectangle.
-Internal GLES scaling must not change guest hitboxes or the emulated LCD size.
-Prefer integer enlargement according to the platform's presentation policy;
-when the produced image is too large, downscale proportionally rather than clip.
-A 320x240 display grid, a native VGA image and an internal-resolution multiplier
-must not be treated as interchangeable zoom definitions.
-
-Android display size is automatic: the former Display scale preference and its
-configuration field have been removed. PocketPC chooses the largest whole-number
-multiple of 240x320 (portrait) or 320x240 (landscape) for standard-aspect images that fits the reserved game area, regardless
-of the internal GLES rendering resolution. All fitting integer steps are allowed,
-without a four-step cap. Thus a 320x240 guest can display at 960x720 whether GLES
-produces 320x240, 640x480, 960x720 or 1280x960. Sample the high-density texture
-directly; never first resolve it to QVGA. Native VGA uses the same presentation
-steps. If space decreases, drop to the previous integer step. Only viewports too
-small for one QVGA step use proportional downscaling; nonstandard aspect ratios
-retain their native grid.
-Gizmondo retains automatic produced-image integer fitting, and controller fullscreen
-retains its own aspect-fit geometry. Rendering, pointer overlays and inverse input
-mapping use the same shared rectangle; internal density never changes guest hitboxes.
-
-Controls reserve their own area and do not overlap the touchable game image.
-Big controls may reduce the fitted game scale. Do not copy a Gizmondo overflow
-option onto the PocketPC touchscreen layout.
-
-## Controller button labels in the UI
-
-Desktop controller input uses bundled, statically linked SDL3 (sdl3 crate 0.22.0).
-Input IDs and saved bindings stay positional (South/East/West/North); guest
-commands on the mapping diagram remain guest commands. UI prompts and physical
-input rows obtain their face-button markings from SDL_GetGamepadButtonLabel on
-the opened gamepad. There is no PocketHLE name/vendor lookup or Nintendo/Xbox/
-PlayStation translation table. The selected controller supplies the labels;
-accepted button input activates that device. Device removal and SDL mapping
-changes refresh the metadata. Unknown markings use explicit position names
-(Bottom/Right/Left/Top button), never an assumed Xbox letter. This applies to
-navigation hints, the update notification, the virtual keyboard, import
-display-settings prompt, full file-dialog help and overwrite/back prompt,
-capture gallery/viewer, Colors startup, binding assistant/inspection and the
-per-game stylus-grid cell labels.
-Shoulder help uses generic Left/Right shoulder terminology rather than Xbox
-LB/RB markings; SDL supplies face-button labels, not every auxiliary inscription.
-Keyboard A/B shortcuts in the import prompt are still literal keyboard keys.
-
-Android retains native Android input. ControllerLabels queries the active input
-device's KeyCharacterMap display label for each normalized face-button keycode;
-when Android supplies no printable label, it uses the same explicit position
-names. A system keycode named BUTTON_A is not itself evidence that the hardware
-button is printed A. No device-name or vendor heuristic is used. Android cannot
-guarantee physical markings when its driver supplies incomplete or normalized
-metadata; neither platform can recover hardware hidden behind a virtual controller.
-Android binding rows, selected-input summaries, assignment messages and per-game
-stylus-grid cells use this helper; effective
-bindings, reserved inputs and guest commands are unchanged.
-
-SDL3 also owns queued PCM playback in the desktop capture viewer through a
-paused-by-default audio device stream. Queue size is measured in source PCM bytes;
-seek clears the stream, playback resumes/pauses it, and dropping it closes the
-device and balances the audio-subsystem initialization on the playback worker.
-CPAL remains the emulator's game-audio backend. No second SDL2 desktop input or
-capture-audio dependency is retained.
-
-## Desktop input lifecycle
-
-Native frame-ready notifications wake UI processing; coalesce notifications,
-not button edges or axis values. Preserve source ownership/refcounts, release
-ordering, focus loss, disconnect behavior and the latest-image mailbox contract.
-Keyboard/mouse correction is hardware-confirmed for the reported Windows case;
-controller/wheel/touch follow-ups have narrower validation (see GPU.md).
-Menus/dialogues still need their ordinary explicit redraws and navigation.
-
 ## Android controls
 
-
-Desktop and Android now have a dedicated **PocketPC options** menu, alongside
-**Gizmondo options**. The global PocketPC processor and device identity fields
-move there. Stylus speed remains in the input editors on Android and desktop.
-Per-game device identity settings and their override behavior are unchanged.
-
-Emulator Settings separates graphics, recording where supported, diagnostics
-and miscellaneous settings. Host optimizations are fixed implementation behavior;
-the former four user-selectable optimization switches have been removed.
 
 Android's **Display and controls** has separate global Normal/Big choices for
 PocketPC arrows and stylus stick, and for Gizmondo arrows. Gizmondo has a D-pad,
@@ -298,48 +350,92 @@ Oval action buttons and the stylus wrapper reject only new touches outside their
 oval; ongoing MOVE/UP/CANCEL and split multitouch dispatch keep their existing
 behavior. Mapping/steering previews use the same control view and geometry.
 
-## Windows/Linux native service parity
+## Controller button labels in the UI
 
-Windows and Linux build the same pocket-desktop binary source (eframe/egui), use
-identical Gizmondo and Pocket PC layouts, library tabs, import policies, GPU
-options, filters, screenshots, game settings, information panels and credits.
-SDL controller handling and software/GPU geometry code are shared.
+Desktop controller input uses bundled, statically linked SDL3 (sdl3 crate 0.22.0).
+Input IDs and saved bindings stay positional (South/East/West/North); guest
+commands on the mapping diagram remain guest commands. UI prompts and physical
+input rows obtain their face-button markings from SDL_GetGamepadButtonLabel on
+the opened gamepad. There is no PocketHLE name/vendor lookup or Nintendo/Xbox/
+PlayStation translation table. The selected controller supplies the labels;
+accepted button input activates that device. Device removal and SDL mapping
+changes refresh the metadata. Unknown markings use explicit position names
+(Bottom/Right/Left/Top button), never an assumed Xbox letter. This applies to
+navigation hints, the update notification, the virtual keyboard, import
+display-settings prompt, full file-dialog help and overwrite/back prompt,
+capture gallery/viewer, Colors startup, binding assistant/inspection and the
+per-game stylus-grid cell labels.
+Shoulder help uses generic Left/Right shoulder terminology rather than Xbox
+LB/RB markings; SDL supplies face-button labels, not every auxiliary inscription.
+Keyboard A/B shortcuts in the import prompt are still literal keyboard keys.
 
-The simulated GPS controls previously had a Windows-only cfg gate. The gate
-is removed from the UI and simulated position setup: manual and Eiffel Tower
-fixes are now available on Linux as well. Host GPS consent remains Windows-only
-because Linux has no native location provider in this tree. Host Bluetooth,
-camera, battery and Internet implementations depend on the platform; identical
-settings do not imply those native services have Linux parity.
+Android retains native Android input. ControllerLabels queries the active input
+device's KeyCharacterMap display label for each normalized face-button keycode;
+when Android supplies no printable label, it uses the same explicit position
+names. A system keycode named BUTTON_A is not itself evidence that the hardware
+button is printed A. No device-name or vendor heuristic is used. Android cannot
+guarantee physical markings when its driver supplies incomplete or normalized
+metadata; neither platform can recover hardware hidden behind a virtual controller.
+Android binding rows, selected-input summaries, assignment messages and per-game
+stylus-grid cells use this helper; effective
+bindings, reserved inputs and guest commands are unchanged.
 
-Build with the same default Cargo features on both systems. A Linux build with
---no-default-features disables real CPU, audio and static video: it is not the
-same functional release. Linux file dialogs use GTK3; display/input is X11 or
-Wayland. Full desktop UI and physical native devices require device testing.
-No actual Windows/Linux visual comparison has been performed in this package.
+SDL3 also owns queued PCM playback in the desktop capture viewer through a
+paused-by-default audio device stream. Queue size is measured in source PCM bytes;
+seek clears the stream, playback resumes/pauses it, and dropping it closes the
+device and balances the audio-subsystem initialization on the playback worker.
+CPAL remains the emulator's game-audio backend. No second SDL2 desktop input or
+capture-audio dependency is retained.
 
-## Desktop recording under encoder load
+## Factory input profiles
 
-Recording cadence is independent of the emulated game's FPS limit. Capture keeps
-its selected display resolution and input overlays. Capture and muxing use the
-same nearest 30/60 FPS time slots, so small early/late VSync jitter does not discard
-otherwise on-time paints. Very fast Unlimited paints still produce at most one
-capture per output slot; a pause does not trigger a burst of new captures.
-The desktop MP4 path uses four conversion slice workers and four H.264 workers
-(with four encoder slices). These stages execute sequentially, not as eight
-simultaneous encoding tasks. Conversion borrows the input through refcounted
-frame views without another full RGBA copy; odd dimensions retain the existing
-edge-extension policy. When an MP4 capture is missed,
-the writer advances audio and represents the held image through video timestamp
-spacing. It does not re-encode the same pixels in every missing 30/60 FPS slot.
-A final timestamped image preserves each segment's duration at stop or resize.
-AVI retains its constant-rate MJPEG sample repetition. An overloaded encoder can
-still capture fewer new images than the requested rate; the fix prevents redundant
-catch-up work from causing an escalating backlog, without lowering resolution or
-changing the game renderer.
+The effective default map is profile-specific. Explicit saved short/long
+assignments take precedence; restoring defaults clears those overrides. Existing
+serialized device-button IDs and guest VKs are preserved. `center_tap`,
+`rotate_screen` and desktop-only `screenshot` are additional host commands,
+consumed by the frontend before any guest-key dispatch.
 
-HARDWARE DIAG's TIMETEST EGL pacing assertions require a 60 FPS per-game limit;
-Unlimited/120 FPS are useful for performance benchmarks, not that contract test.
+| Input | PocketPC default | Gizmondo default |
+| --- | --- | --- |
+| Keyboard 1 / 2 / 3 / 4 | P1 / P2 / P3 / P4 | L1 / R1 / unassigned / unassigned |
+| Keyboard Tab | Center tap | Unassigned |
+| Keyboard T | TURBO | Unassigned |
+| Keyboard F1–F5 | Unassigned | Home / Volume / Brightness / Geofence / Power |
+| Keyboard P | Stylus click / mode (customizable) | Unassigned |
+| Controller L1 / R1 | P1 / P2 | Volume / Home |
+| Controller L2 / R2 | P3 / P4 | L1 / R1 |
+| Controller North / South | A / Action | Stop / Play |
+| Controller East / West | B / C | Forward / Rewind |
+| Left-stick click / right-stick click | Esc / reserved stylus click and mode switch | Unassigned / unassigned |
+| Guide/Mode short press | Tab | Unassigned |
+| Extra/Misc1 short press | Rotation | Rotation |
+
+Guide and Extra remain customizable, with no default hold. Screenshot is an
+optional desktop assignment with no controller default; F10 remains its dedicated
+host key. Android hides and ignores Screenshot assignments imported from desktop.
+View short toggles fullscreen and View long returns to the library for both
+profiles. Menu short cycles filters; Menu long records on desktop and has no
+Android action. View/Menu remain immutable. PocketPC also reserves all four right-stick directions
+and R3, including their short/long overrides. Extra has no standard Android key
+adapter; its configured action only runs if that input is delivered by the OS.
+
+PocketPC lists use ACTION, TAB (Soft1/VK_TAB), ESC (Soft2/VK_ESCAPE), TURBO, A,
+B, C and P1–P4. Diagram captions use compact Act, Tab, Esc and direction names.
+Gizmondo face labels are Play, Stop, Forward and Rewind; shoulder commands are
+L1/R1. The official manual calls the backward media button Rewind. Brightness
+remains a freely assignable guest command, never a fixed View/System gesture.
+Source: https://fcc.report/FCC-ID/THGGZ2056/591669.pdf (Quick Start Guide, page 33).
+
+The serialized legacy keyboard base map is retained for compatibility. The
+shared profile fallback supplies the effective defaults above without rewriting
+custom keys. Exact obsolete factory controller maps containing Extra-to-Esc are
+migrated out of the shared map; custom assignments are preserved. The common
+fixture is `frontends/pocket-desktop/assets/input/deck-input-defaults.json`.
+
+Before egui builds input state, desktop normalizes only physical number-row
+key events (0–9), so Shift and AZERTY symbols do not change the assigned input.
+Letter layout and committed Text remain unchanged. Android digit names come
+from key codes, independently of Unicode characters and modifiers.
 
 ## Visual input editor — desktop and Android
 
@@ -522,76 +618,20 @@ RightThumb aliases. Gizmondo omits the legacy Turbo helper from choices and
 missing-command reports; legacy explicitly configured Turbo bindings display as Brightness because both
 send VK_F3. Pocket PC keeps its existing Turbo helper.
 
-## Library tile metadata
+### Android input-editor selection
 
-Desktop and Android tiles show resolution followed by a compact graphics API hint
-(OpenGL ES, Direct3D Mobile, DirectDraw, GAPI, GapiDraw, SDL or GDI). The shared detector
-inspects the selected executable, resolves COREDLL ordinals through the same
-bundled ARM/MIPS maps as runtime, and recognizes explicit graphics symbol strings
-when GetProcAddress is used. GDI menu drawing does not override stronger 3D or
-framebuffer evidence. SDL and GapiDraw are identified as middleware without guessing their video backend.
-This remains a static hint rather than proof of the active rendering path; no
-DLL traversal, game-name rules, options or metadata migration are introduced.
-Missing evidence leaves only resolution. Existing games benefit after restarting
-the updated launcher, without reimport or a new Refresh button.
+Selecting a skin hotspot or a controller row updates the existing skin, row
+selection and selected-input summary in place. It must not replace the Activity's
+content view merely to select another input. The previous rebuild followed by a
+posted scroll restore could expose the top of the page for one frame, then jump
+back to the saved position.
 
-A second line, “Custom settings”, appears for saved per-game overrides or runtime
-settings different from standard defaults. Explicit per-game overrides count
-as custom even when their value currently equals the global setting. The CPU
-baseline follows the global default; explicit Normal controls equal default
-controls. Non-default screen/rotation settings count, including those selected
-automatically during import. The marker describes the saved configuration, not a
-history of user edits; restoring the defaults removes it.
-
-## Factory input profiles
-
-The effective default map is profile-specific. Explicit saved short/long
-assignments take precedence; restoring defaults clears those overrides. Existing
-serialized device-button IDs and guest VKs are preserved. `center_tap`,
-`rotate_screen` and desktop-only `screenshot` are additional host commands,
-consumed by the frontend before any guest-key dispatch.
-
-| Input | PocketPC default | Gizmondo default |
-| --- | --- | --- |
-| Keyboard 1 / 2 / 3 / 4 | P1 / P2 / P3 / P4 | L1 / R1 / unassigned / unassigned |
-| Keyboard Tab | Center tap | Unassigned |
-| Keyboard T | TURBO | Unassigned |
-| Keyboard F1–F5 | Unassigned | Home / Volume / Brightness / Geofence / Power |
-| Keyboard P | Stylus click / mode (customizable) | Unassigned |
-| Controller L1 / R1 | P1 / P2 | Volume / Home |
-| Controller L2 / R2 | P3 / P4 | L1 / R1 |
-| Controller North / South | A / Action | Stop / Play |
-| Controller East / West | B / C | Forward / Rewind |
-| Left-stick click / right-stick click | Esc / reserved stylus click and mode switch | Unassigned / unassigned |
-| Guide/Mode short press | Tab | Unassigned |
-| Extra/Misc1 short press | Rotation | Rotation |
-
-Guide and Extra remain customizable, with no default hold. Screenshot is an
-optional desktop assignment with no controller default; F10 remains its dedicated
-host key. Android hides and ignores Screenshot assignments imported from desktop.
-View short toggles fullscreen and View long returns to the library for both
-profiles. Menu short cycles filters; Menu long records on desktop and has no
-Android action. View/Menu remain immutable. PocketPC also reserves all four right-stick directions
-and R3, including their short/long overrides. Extra has no standard Android key
-adapter; its configured action only runs if that input is delivered by the OS.
-
-PocketPC lists use ACTION, TAB (Soft1/VK_TAB), ESC (Soft2/VK_ESCAPE), TURBO, A,
-B, C and P1–P4. Diagram captions use compact Act, Tab, Esc and direction names.
-Gizmondo face labels are Play, Stop, Forward and Rewind; shoulder commands are
-L1/R1. The official manual calls the backward media button Rewind. Brightness
-remains a freely assignable guest command, never a fixed View/System gesture.
-Source: https://fcc.report/FCC-ID/THGGZ2056/591669.pdf (Quick Start Guide, page 33).
-
-The serialized legacy keyboard base map is retained for compatibility. The
-shared profile fallback supplies the effective defaults above without rewriting
-custom keys. Exact obsolete factory controller maps containing Extra-to-Esc are
-migrated out of the shared map; custom assignments are preserved. The common
-fixture is `frontends/pocket-desktop/assets/input/deck-input-defaults.json`.
-
-Before egui builds input state, desktop normalizes only physical number-row
-key events (0–9), so Shift and AZERTY symbols do not change the assigned input.
-Letter layout and committed Text remain unchanged. Android digit names come
-from key codes, independently of Unicode characters and modifiers.
+Profile changes, resets and keyboard zoom still rebuild the structural content.
+Their scroll offsets are restored after layout in a one-shot pre-draw callback;
+if restoration changes an offset, that intermediate draw is cancelled. No timed
+post-delay or renderer-specific workaround is used. R3's controller row explicitly
+shows its fixed mode gesture even though it is a reserved input without a normal
+host tap/hold action. This is frontend view-state handling, not a GLES game fix.
 
 ## PocketPC right-stick stylus modes
 
@@ -669,57 +709,6 @@ use the same assignable-command model. F7 remains immutable, while Extra's
 factory Rotation can be replaced or cleared. Android exposes Rotation and
 PocketPC Center tap, but not Screenshot.
 
-## Desktop button toolbar
-
-Menu/Start remains the immutable filter/recording shortcut; it does not open
-settings. Use the Settings toolbar group, with L3 to switch between toolbar and
-page. There is no separate Start-to-settings action.
-
-The former Game library, Settings and About dropdown hierarchy is replaced by
-direct buttons in four separated groups: Game library, Settings, Features,
-About. Each group has at most two rows; small windows scroll horizontally
-instead of shrinking labels. Startup uses the fixed 1280x800 outer-window policy
-above; the old toolbar-overflow startup widening and its state/helpers are removed.
-Controller focus reveals the selected button.
-Directions use button geometry within the toolbar; L3 switches between toolbar
-and page, and A activates the focused button. The footer lists these controls.
-The former F6 section-switch shortcut, interception and help were removed.
-F6 remains assignable and retains the existing in-game Colors GPS action.
-
-Features contains Upscale ×2, Filter, Rotation, Fullscreen, Screenshot and
-Recording. Filter and Rotation advance their existing carousels and display
-the current mode; F9/F7 use the same actions. Upscale/fullscreen show their
-active state. Recording shows a red Stop video button while active, and a
-disabled Saving video state while encoding. Captures remain game-only and
-backup/restore remain disabled while a game/import is active. Filter changes
-are synchronized into any open settings draft before saving.
-
-About is a dedicated page retaining version, project links and acknowledgments.
-Back/B/Escape return to the originating page without discarding its draft.
-Return to game remains available above the buttons while a session runs behind
-a settings page. Fullscreen gameplay still hides host chrome. Legacy toolbar
-menus, nested-menu expansion state and their obsolete tests were removed;
-settings combo boxes retain their popup navigation. Android's settings layout
-is unchanged by this desktop-only toolbar.
-
-## Android catalogue loading
-
-Library activity resumes reread the current saved catalogue/settings on an IO
-coroutine, keeping the existing cards usable until the refreshed snapshot is
-ready. Concurrent refresh requests are coalesced. Switching platform tabs only
-filters the in-memory snapshot. An unchanged snapshot does not rebind the cards
-or decode their artwork again. The JNI list response supplies `is_gizmondo` once
-per entry; the filter and card adapter never call the per-game classifier, which
-would reopen/migrate the entire catalogue for every card.
-
-Custom-settings badges are still computed from current settings/config at each
-refresh. Graphics API detection uses a process-local cache keyed by executable
-path, byte length and modification time, including unknown results. Replacing an
-executable invalidates its label; restarting the app starts a fresh cache. Cold
-loading still analyses executables once and resolves display metadata, but this
-work no longer blocks the UI thread. No persistent derived-data database or new
-user refresh requirement is introduced.
-
 ## Desktop focus and import launch-settings prompt
 
 In control settings, mouse clicks and scrolling must not force navigation focus
@@ -747,62 +736,67 @@ shortcuts remain available and are indicated separately. These actions do not
 depend on an old page focus or the normal launcher confirm/back convention. Other game/library
 input and navigation repeat are suspended while this prompt owns the buttons.
 
-## Android input-editor selection
+## Desktop input lifecycle
 
-Selecting a skin hotspot or a controller row updates the existing skin, row
-selection and selected-input summary in place. It must not replace the Activity's
-content view merely to select another input. The previous rebuild followed by a
-posted scroll restore could expose the top of the page for one frame, then jump
-back to the saved position.
+Native frame-ready notifications wake UI processing; coalesce notifications,
+not button edges or axis values. Preserve source ownership/refcounts, release
+ordering, focus loss, disconnect behavior and the latest-image mailbox contract.
+Keyboard/mouse correction is hardware-confirmed for the reported Windows case;
+controller/wheel/touch follow-ups have narrower validation (see GPU.md).
+Menus/dialogues still need their ordinary explicit redraws and navigation.
 
-Profile changes, resets and keyboard zoom still rebuild the structural content.
-Their scroll offsets are restored after layout in a one-shot pre-draw callback;
-if restoration changes an offset, that intermediate draw is cancelled. No timed
-post-delay or renderer-specific workaround is used. R3's controller row explicitly
-shows its fixed mode gesture even though it is a reserved input without a normal
-host tap/hold action. This is frontend view-state handling, not a GLES game fix.
+## Windows/Linux native service parity
+
+Windows and Linux build the same pocket-desktop binary source (eframe/egui), use
+identical Gizmondo and Pocket PC layouts, library tabs, import policies, GPU
+options, filters, screenshots, game settings, information panels and credits.
+SDL controller handling and software/GPU geometry code are shared.
+
+The simulated GPS controls previously had a Windows-only cfg gate. The gate
+is removed from the UI and simulated position setup: manual and Eiffel Tower
+fixes are now available on Linux as well. Host GPS consent remains Windows-only
+because Linux has no native location provider in this tree. Host Bluetooth,
+camera, battery and Internet implementations depend on the platform; identical
+settings do not imply those native services have Linux parity.
+
+Build with the same default Cargo features on both systems. A Linux build with
+--no-default-features disables real CPU, audio and static video: it is not the
+same functional release. Linux file dialogs use GTK3; display/input is X11 or
+Wayland. Full desktop UI and physical native devices require device testing.
+No actual Windows/Linux visual comparison has been performed in this package.
+
+## Desktop recording under encoder load
+
+Recording cadence is independent of the emulated game's FPS limit. Capture keeps
+its selected display resolution and input overlays. Capture and muxing use the
+same nearest 30/60 FPS time slots, so small early/late VSync jitter does not discard
+otherwise on-time paints. Very fast Unlimited paints still produce at most one
+capture per output slot; a pause does not trigger a burst of new captures.
+The desktop MP4 path uses four conversion slice workers and four H.264 workers
+(with four encoder slices). These stages execute sequentially, not as eight
+simultaneous encoding tasks. Conversion borrows the input through refcounted
+frame views without another full RGBA copy; odd dimensions retain the existing
+edge-extension policy. When an MP4 capture is missed,
+the writer advances audio and represents the held image through video timestamp
+spacing. It does not re-encode the same pixels in every missing 30/60 FPS slot.
+A final timestamped image preserves each segment's duration at stop or resize.
+AVI retains its constant-rate MJPEG sample repetition. An overloaded encoder can
+still capture fewer new images than the requested rate; the fix prevents redundant
+catch-up work from causing an escalating backlog, without lowering resolution or
+changing the game renderer.
+
+HARDWARE DIAG's TIMETEST EGL pacing assertions require a 60 FPS per-game limit;
+Unlimited/120 FPS are useful for performance benchmarks, not that contract test.
 
 ## Frontend APIs and dependency notices
 
-Android import uses the prepared-import transaction (prepare, cabinet/platform
-choice, commit or cancel). The obsolete direct CAB/ZIP/RAR/EXE JNI imports are
-removed on both sides. Android execution uses the streaming session API only;
-the blocking runGame entry point, final-frame JSON/base64 transport and unused
-submission-FPS getter are removed. The unconnected Android renderer screenshot
-request/readback/save path is removed; desktop screenshot functionality remains.
-JNI host callbacks invoked by native code are retained even when no Kotlin UI
-method calls them directly.
+Android imports use the prepared transaction: prepare, cabinet/platform choice,
+then commit or cancel. Execution uses streaming sessions. JNI callbacks invoked
+from native code remain required even when no Kotlin UI method calls them
+directly. Previews use live control/card views rather than parallel layouts.
 
-Android no longer retains the old list row/preview, unused preference widget,
-orphan icons/backgrounds or unreferenced strings. Layout previews use the live
-grid card.
-
-Desktop notices under frontends/pocket-desktop/licenses match the locked SDL3,
-Rust SDL3/sys and bundled HIDAPI dependencies. The obsolete SDL2 notice filenames
-are removed. Both Windows and Linux desktop archives include that notices directory;
-Android does not bundle desktop SDL3. Historical SDL2 guest-ABI references and
-orbclient's target-specific transitive SDL2 dependency are unrelated to the
-removed desktop backend and must not be deleted as if they were dead frontend
-code.
-
-## Desktop runtime launch profiles
-
-One `pockethle-gui` executable supports the standard profile and `--steam-deck`.
-There is no Steam Deck Cargo feature or second main file. The argument is parsed
-before opening the library, initializing SDL or selecting updates. A runtime
-LauncherProfile belongs to each Library handle, including clones, staging
-imports, background reload/import jobs and the game runner/children. It chooses
-config.json or config-steamdeck.json without process-global state; catalogue and
-per-game manifests remain shared. CLI and Android callers of Library::open keep
-the Standard profile. Backups continue to include both existing settings files.
-
-Both desktop profiles start windowed at 1280x800 physical pixels, capped to the
-monitor; only an explicit positional CLI display argument of 0 requests fullscreen. Under Wine/Proton (currently Proton Experimental for the
-user's Deck), it preserves the existing XInput hints. Native Linux is not forced
-to use XInput. Windows Deck-profile updates under Proton choose the Windows archive; native
-Linux chooses the Linux archive. There is no separate Deck package or update
-platform. Colors controller help is shown whenever a controller is
-connected, independent of launch profile. The unused layout argument and old
-Deck-specific migration functions/tests are removed. See STEAMDECK.md for Steam
-shortcut setup; old executable targets must be changed to pockethle-gui.exe with
---steam-deck. There is no executable-name compatibility shim.
+Desktop third-party notices match the locked SDL3, Rust SDL3/sys and bundled
+HIDAPI dependencies. Both Windows and Linux archives include the notices;
+Android does not bundle desktop SDL3. Historical guest SDL2 ABI references and
+orbclient's target-specific transitive dependency are distinct from the desktop
+input/playback backend and are not obsolete merely because they mention SDL2.

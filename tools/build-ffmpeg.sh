@@ -107,6 +107,6 @@ cp "$media_source/COPYING.LGPLv2.1" "$media_prefix/"
 if [[ -f "$project_root/third-party/ffmpeg/README.md" ]]; then
     cp "$project_root/third-party/ffmpeg/README.md" "$media_prefix/BUILD-NOTES.md"
 else
-    cp "$project_root/docs/ANDROID-BUILD.md" "$media_prefix/BUILD-NOTES.md"
+    cp "$project_root/docs/BUILD.md" "$media_prefix/BUILD-NOTES.md"
 fi
 echo "Static FFmpeg installed in $media_prefix"

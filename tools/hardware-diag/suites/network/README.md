@@ -1,6 +1,7 @@
 # PocketHLE NETTEST (ARM WinCE)
 
-Import `dist/PocketHLE-NETTEST.zip` into the game library and launch it.
+Run **Network (HTTP / HTTPS)** from the single
+[HARDWARE DIAG application](../../README.md).
 It resolves all nine WinINet exports dynamically, then downloads example.com
 once using HTTP (80) and once HTTPS (443). Each request checks the status,
 UTF-16 Content-Length when present, streaming reads, EOF and parent-handle close.
@@ -22,3 +23,10 @@ Rebuild without any proprietary SDK using Python, Clang and LLD:
 Version 2 adds 40 nested session/connection/request create/cascading-close cycles.
 These cycles do not send additional requests to example.com. Pending native
 request cancellation and physical network operation remain separate checks.
+
+## Suite build scope
+
+The local build script generates private fixtures for regressions. Build/import
+`tools/hardware-diag/dist/HARDWARE-DIAG.zip` through the main tool's README for
+normal use. Fixture check counts retain their original revision scope; physical
+provider validation remains separate from an API PASS.

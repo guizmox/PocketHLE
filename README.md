@@ -42,20 +42,20 @@ The project is inspired by [touchHLE](https://github.com/touchHLE/touchHLE) and 
 
 ## Games Tested
 
-See the [Gizmondo compatibility table](docs/GIZMONDO.md#reported-game-compatibility) for reported game results and known issues. The [GTShell guide](docs/GTSHELL.md) covers shell profile setup and Bluetooth file transfer.
+See the [Gizmondo compatibility table](docs/GIZMONDO.md#reported-game-compatibility) for reported game results and known issues. The [GTShell guide](docs/GIZMONDO.md#gtshell-profiles) covers shell profile setup and Bluetooth file transfer.
 
 | Asphalt 4 Elite Racing | Call of Duty 2 |
 | :---: | :---: |
-| ![Asphalt 4 gameplay](./proof/games/asphalt-4-elite-racing.jpg) | ![Call of Duty 2](./proof/games/call-of-duty-2.jpg) |
+| ![Asphalt 4 gameplay](proof/games/asphalt-4-elite-racing.jpg) | ![Call of Duty 2](proof/games/call-of-duty-2.jpg) |
 
 | Zuma Deluxe | Bejeweled |
 | :---: | :---: |
-| ![Zuma Deluxe](./proof/games/zuma-deluxe.jpg) | ![Bejeweled](./proof/games/bejeweled.jpg) |
+| ![Zuma Deluxe](proof/games/zuma-deluxe.jpg) | ![Bejeweled](proof/games/bejeweled.jpg) |
 
 > [!IMPORTANT]
 > The screenshots above are representative game references supplied for the project presentation. The checked-in, reproducible emulator proof currently covers Asphalt 4 WVGA and Call of Duty 2's title-screen boot through the OpenGL ES layer. Zuma Deluxe and Bejeweled have game-specific compatibility work in the codebase, but should not be described as fully verified here without a corresponding checked-in run capture.
 
-Additional compatibility probes and rendering captures are available under [`proof/`](proof/), including Asphalt 2 3D, Crazy Taxi, Diamond Twister, Splinter Cell Conviction and other Windows Mobile titles.
+Additional compatibility probes and rendering captures are available under [`proof/`](proof), including Asphalt 2 3D, Crazy Taxi, Diamond Twister, Splinter Cell Conviction and other Windows Mobile titles.
 
 The [maintainer's compatibility and test library](docs/COMPATIBILITY.md) lists
 **135 entries: 78 PocketPC / Windows Mobile and 57 Gizmondo**, updated from the
@@ -204,74 +204,18 @@ See the [Steam Deck guide](docs/STEAMDECK.md) for details.
 
 ## Build
 
-### Linux
+Use the [build, signing and release guide](docs/BUILD.md) for pinned toolchains,
+Linux/Windows prerequisites, Android/WSL2, static media, tests and public signing.
+For a prepared source checkout with its dependencies installed:
 
-```bash
-# Use Rust 1.90.0, matching the CI checks
-rustup toolchain install 1.90.0
-rustup default 1.90.0
-
-# Native dependencies for the desktop frontend
-sudo apt install -y cmake build-essential pkg-config libclang-dev \
-  libgtk-3-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
-  libxrandr-dev libxinerama-dev libxi-dev libxcursor-dev \
-  libxdamage-dev libxext-dev libxfixes-dev libxss-dev libasound2-dev libssl-dev clang lld python3
-
-# Prepare the default static video dependency
-bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
-
-# Build and test the workspace
-cargo build --release --workspace
-cargo test --workspace
-
-# Build the real CPU backend
-cargo build --release -p pocket-cli --features unicorn
-cargo build --release -p pocket-desktop --features unicorn
+```sh
+cargo build --release --locked -p pocket-desktop
 ```
 
-If `glib-sys` reports missing `glib-2.0.pc`, install `pkg-config libgtk-3-dev`.
-The GTK dependency belongs to the desktop file picker; do not disable GPU or CPU
-features to hide it. For an Android-only build, use the Android scripts below,
-which select `pocket-android-jni` rather than the desktop workspace.
-
-The binaries are written to `target/release/`:
-
-* `pockethle` — command-line frontend;
-* `pockethle-gui` — desktop launcher.
-
-### Windows
-
-Install Rust with the MSVC toolchain and CMake, then run:
-
-```powershell
-cargo build --release --workspace
-cargo build --release -p pocket-cli --features unicorn
-cargo build --release -p pocket-desktop --features unicorn
-```
-
-The resulting binaries are `target\release\pockethle.exe` and `target\release\pockethle-gui.exe`.
-
-### Android
-
-The [Android frontend](frontends/pocket-android) uses real Unicorn ARM emulation
-and static FFmpeg on arm64-v8a and armeabi-v7a. Follow the complete
-[Android build guide](docs/ANDROID-BUILD.md) for Linux or WSL2 prerequisites:
-JDK 17, Rust 1.90.0, SDK 35, NDK r28c, Gradle 8.10.2 and AGP 8.7.3.
-
-```bash
-bash tools/build-android-native.sh 4
-bash tools/build-android-apk.sh
-```
-
-The installable debug APK is
-`frontends/pocket-android/app/build/outputs/apk/debug/app-debug.apk`.
-The build verifies native libraries, APK signature and 16 KiB alignment.
-
-The portrait library offers SD card tiles, rename and separate settings menus.
-Gameplay is immersive landscape with actions on the right, D-pad on the left,
-shoulders and all five Gizmondo function buttons. Gizmondo images use exact integer
-multiples of 320×240; Auto chooses the largest scale that fits. Device/fixed GPS,
-Bluetooth, camera, GPRS/data and the Colors server are configurable from Settings.
+The [Steam Deck guide](docs/STEAMDECK.md) covers installation through Proton;
+Deck uses the Windows package rather than a separate build. The
+[documentation index](docs/README.md) routes settings, controls, graphics,
+compatibility and diagnostics to their current owners.
 
 ## Library
 

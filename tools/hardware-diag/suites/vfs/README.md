@@ -1,11 +1,16 @@
 # VFSTEST v4 — ARM virtual filesystem diagnostic
 
-Import `PocketHLE-VFSTEST.zip` into PocketHLE and run it twice. Each time, wait
-for **PASS** , then press Enter to close
-the dialog. The same program tests files, volumes and interprocess operations.
+Run **Files and storage (VFS)** from the single
+[HARDWARE DIAG application](../../README.md), then run again after restarting
+PocketHLE. Inspect the detailed `\Flash Disk\VFSTEST.TXT` report under the
+configured library root. The same suite tests files, volumes and interprocess
+operations; it does not require importing a separate VFSTEST title.
 
-The report is `\Flash Disk\VFSTEST.TXT`, normally
-`C:\Users\gtristant\Documents\PocketHLE\flash\VFSTEST.TXT`:
+Suite-specific version numbers and check counts below describe their named
+fixture revisions. Read the current integrated reports for the running build;
+these counts are not an assertion that a new build was executed on every host.
+
+The original v4 fixture's expected summary is:
 
 ```text
 VFSTEST_RESULT PASS checks=0x00000082 failures=0x00000000
@@ -37,7 +42,8 @@ Build without the proprietary SDK:
 python tools/hardware-diag/suites/vfs/build.py --clang clang --lld ld.lld
 ```
 
-Output: `tools/hardware-diag/suites/vfs/dist/PocketHLE-VFSTEST.zip`.
+Private fixture output: `tools/hardware-diag/suites/vfs/dist/PocketHLE-VFSTEST.zip`.
+Use the integrated archive for the public diagnostic menu.
 The native regression executes ARM twice and checks cleanup and RAM accounting:
 
 ```text
@@ -81,6 +87,6 @@ errors, write refusal through a read-only stream and full verification after
 reopening. Also tests a Unicode filename, zero-length I/O and a sparse gap
 across a page boundary. No game save is modified.
 
-See `../TEST-COVERAGE.md` for the host failure/forced-exit tests, execution
+See [the historical storage/memory report](../../../../docs/history/VALIDATION.md#storage-memory-validation-2026-10-19) for the host failure/forced-exit tests, execution
 status and remaining platform checks. These guest additions require rebuilding
 the diagnostic; an older installed ZIP does not acquire them from a GUI rebuild.

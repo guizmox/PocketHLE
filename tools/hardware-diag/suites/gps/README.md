@@ -1,7 +1,8 @@
 # ARM GPS1 test
 
-Import `dist/PocketHLE-GPSTEST.zip` into the Gizmondo library. Enable **GPS / host
-location (GPS1)** under Emulator options before launching it. On Windows enable
+Run **GPS: GPS1 + COM8 NMEA** from the single
+[HARDWARE DIAG application](../../README.md). Enable **GPS / host location (GPS1)**
+under Gizmondo options before launching it. On Windows enable
 OS location services and desktop app access; on Android allow precise location
 and try outdoors if acquisition is slow. Approximate location remains supported,
 but may be insufficient for Colors.
@@ -31,3 +32,10 @@ python tools/hardware-diag/suites/gps/build.py --clang clang --lld ld.lld
 
 Version 2 reads the packed snapshot on each of 32 open/read/close cycles.
 This verifies API lifetimes; no-fix snapshots remain valid API results.
+
+## Suite build scope
+
+The local build script generates private fixtures for regressions. Build/import
+`tools/hardware-diag/dist/HARDWARE-DIAG.zip` through the main tool's README for
+normal use. Fixture check counts retain their original revision scope; physical
+provider validation remains separate from an API PASS.

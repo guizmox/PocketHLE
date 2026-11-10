@@ -1,29 +1,24 @@
 # PocketHLE guest RAM diagnostic
 
-`dist/PocketHLE-RAMTEST.zip` is a diagnostic title importable through the GUI.
-It executes real ARM instructions and calls PocketHLE's WinCE APIs without
-requiring a proprietary SDK or commercial assets.
+Run **RAM / paging / TLS / processes** from the single
+[HARDWARE DIAG application](../../README.md). It executes original ARM diagnostic
+code without a proprietary SDK or commercial assets. The integrated console
+returns to the menu after completion; private standalone fixtures may retain
+their acknowledgment dialog.
 
-1. Apply the source patch and rebuild the GUI.
-2. Import `PocketHLE-RAMTEST.zip` as a Gizmondo ZIP game.
-3. Launch it. The final dialog must display **PASS** .
-   Press Enter to close it.
-4. Read `RAMTEST.TXT`. Its final line must be
-   `RAMTEST_RESULT PASS checks=0x00000091 failures=0x00000000` (145 checks).
-5. After closing the dialog, check `flash/DLLTEST.TXT` for a final
-   `DLLTEST_RESULT PASS`. Process exit callbacks write it after acknowledgment. The guest dialog is in English.
-6. Check `flash/DEPTEST.TXT` for `DEPTEST_RESULT PASS` (dependency order and rollback).
-7. Check `flash/PROCTEST.TXT` and `flash/ORPHANTEST.TXT` for
-   `PROCTEST_RESULT PASS` and `ORPHANTEST_RESULT PASS`.
-8. Run it a second time. If it fails, provide the report and `pockethle-gui.log`.
+Inspect `RAMTEST.TXT` and the secondary `DLLTEST.TXT`, `DEPTEST.TXT`,
+`PROCTEST.TXT` and `ORPHANTEST.TXT` reports. The final process-exit callbacks may
+write their PASS after acknowledgment. Run again after restarting PocketHLE and
+retain the detailed report plus application log on failure.
+
+Suite-specific version numbers and check counts below describe their named
+fixture revisions. Read the current integrated reports for the running build;
+these counts are not an assertion that a new build was executed on every host.
 
 The report is created at `\Flash Disk\RAMTEST.TXT` on writable storage. Its host
 copy is `flash/ramtest.txt` below the PocketHLE library root. The EXE's SD card
-remains read-only. To find the report from Windows CMD:
-
-```bat
-powershell -NoProfile -Command "Get-ChildItem 'C:\Users\gtristant\Documents\PocketHLE' -Recurse -Filter RAMTEST.TXT | Select-Object -ExpandProperty FullName"
-```
+remains read-only. Use the configured library root when locating reports; it may differ from the
+Windows Documents default or live inside a Proton prefix.
 
 Version 8 retains the full v7 suite and adds 64 mixed allocation/event/mutex/
 thread/DLL cycles with exact RAM/address-space refunds, plus eight consecutive
@@ -75,7 +70,8 @@ python3 tools/hardware-diag/suites/ram/build.py --clang clang --lld ld.lld
 ```
 
 The script compiles freestanding C and assembles PE32/WinCE headers, imports and
-exports. `dist/GZRT999999` binaries are also integration fixtures; rebuild after
+exports. `dist/GZRT999999` binaries are private integration fixtures, not a second public
+app to import. Rebuild after
 changing C sources.
 
 ```sh
@@ -102,5 +98,5 @@ space restitution, and all-byte zero verification after decommit/recommit.
 The OOM test stops after at most 32 attempts and uses only guest VirtualAlloc
 budgets. It does not intentionally exhaust Android/Windows host memory.
 
-See `../TEST-COVERAGE.md` for host-side regression tests and the remaining
+See [the historical storage/memory report](../../../../docs/history/VALIDATION.md#storage-memory-validation-2026-10-19) for host-side regression tests and the remaining
 platform checks. Rebuild the diagnostic ZIP to obtain these new scenarios.

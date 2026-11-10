@@ -71,8 +71,9 @@ IEEE single-precision rounding give a known result for every block. A benchmark
 PASS verifies computation, not performance.
 
 For comparisons, use the same build, device, ARM backend, clock/power settings
-and diagnostic version. Change the optimization settings in PocketHLE, restart
-the application, repeat the benchmark and compare the median iterations/second.
+and diagnostic version. For an implementation comparison, change only the build
+under test, restart the application and compare the median iterations/second.
+Host optimizations are always enabled; there are no optimization settings to toggle.
 Keep copies of the reports before another run replaces them. This ARM executable
 does not measure the MIPS backend; scores are not directly comparable to
 GLBenchmark's different workloads. Hardware queries, triangle rendering and
@@ -99,13 +100,13 @@ radio probe is a developer example, not another published diagnostic app:
 `cargo run -p pocket-desktop --example hardware-diag-bluetooth-host -- scan`.
 
 `python tools/hardware-diag/run.py --guest` runs the existing host/guest developer
-contract checks. Its hardware-provider limitations remain explicit. The old
-`VALIDATION.md` is a historical report; it does not certify this new application.
+contract checks. Its hardware-provider limitations remain explicit. The
+[original validation report](../../docs/history/VALIDATION.md#original-hardware-diagnostic-validation)
+is historical; it does not certify the current application.
 
-Apply the repository patch, then run the supplied `removed-files.txt` cleanup
-from the repository root. It lists only obsolete tracked files, no directories,
-wildcards, game data or user reports. It does not remove old diagnostic titles
-already imported in your personal PocketHLE library.
+Public use starts with the current `dist/HARDWARE-DIAG.zip`, not a historical
+standalone RAMTEST/GPSTEST/BTTEST ZIP. Suite-directory READMEs explain their
+contracts and private fixture builds; they are not separate installation guides.
 
 Optional bytecode smoke tests (controlled API/clock shims, not real-device or
 PocketHLE conformance results): install `tests/requirements.txt`, build the tool,

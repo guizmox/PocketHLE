@@ -2,7 +2,7 @@
 
 These retained notes preserve ABI details, game reproductions, workload numbers
 and validation limits from earlier deliveries. They are **not a current installation
-recipe or a list of active settings**. Start with [README.md](README.md) and the
+recipe or a list of active settings**. Start with [README.md](../README.md) and the
 current domain guide; consult the relevant note when changing that subsystem.
 Current policy wins over an older snapshot. Dates and reported test counts keep
 their original scope. Do not treat a local test, a past maintainer report or an
@@ -589,7 +589,7 @@ Add a field to one side and add it to the other in the same change.
 
 #### 27. Console-only fullscreen and native GPU reconstruction
 
-Historical shortcut snapshot (superseded by the [current host-key table](FRONTENDS.md#visual-input-editor--desktop-and-android)):
+Historical shortcut snapshot (superseded by the [current host-key table](../FRONTENDS.md#visual-input-editor--desktop-and-android)):
 F11 toggled borderless fullscreen, F10 captured a game screenshot, and Escape
 leaves fullscreen during a game. These shortcuts are consumed by the launcher;
 virtual Gizmondo piano buttons retain their guest key codes. Release held input
@@ -1173,7 +1173,7 @@ validated by a Linux CLI boot or component-parser success.
 #### 42. Desktop Gizmondo options navigation
 
 Historical UI layout (the dropdown hierarchy is now replaced by the
-[desktop button toolbar](FRONTENDS.md#desktop-button-toolbar)):
+[desktop button toolbar](../FRONTENDS.md#desktop-button-toolbar)):
 The desktop Settings menu had Emulator Settings followed immediately by
 Gizmondo options. Screen::GizmondoOptions renders GPS, GPRS/data, Colors server/ID,
 Bluetooth and camera controls; Screen::Settings renders general emulator
@@ -1733,7 +1733,7 @@ Launcher startup preview also requires WinCE EC_VIDEOFRAMEREADY (0x49), as confi
 ##### Native GLES implementation reference
 
 The renderer architecture, memory/resource ownership, fallback contracts,
-optimizations and presentation timing are maintained in [GPU.md](GPU.md).
+optimizations and presentation timing are maintained in [GPU.md](../GPU.md).
 Read that document before modifying pocket-gles or GLES presentation handlers.
 
 ##### Android FPS overlay
@@ -1813,8 +1813,8 @@ The obsolete desktop pocketpc_layout module/source is removed. Side-pad rotation
 
 #### Documentation organization
 
-GPU implementation details live in [GPU.md](GPU.md); the user-facing Gizmondo
-guide is [GIZMONDO.md](GIZMONDO.md). [README.md](README.md) indexes documentation.
+GPU implementation details live in [GPU.md](../GPU.md); the user-facing Gizmondo
+guide is [GIZMONDO.md](../GIZMONDO.md). [README.md](../README.md) indexes documentation.
 Release ZIP notices/manifests are transport metadata, not project documentation.
 Keep tool-local diagnostic READMEs and proof assets with their sources.
 
@@ -2589,7 +2589,7 @@ three API calls' exact PCM and sample rate with both feature configurations.
 
 #### Approved Deck controls (2026-10-22)
 
-Historical mapping snapshot; use the [current factory profiles](FRONTENDS.md#factory-input-profiles) for present behavior.
+Historical mapping snapshot; use the [current factory profiles](../FRONTENDS.md#factory-input-profiles) for present behavior.
 
 View (left/Select): release before 650ms toggles fullscreen; hold sends ESC
 in the original layout. Superseded in 0.4.4: View hold now exits to the
@@ -3094,7 +3094,7 @@ GAPI supplies four button entries: Street Duel's Change menu accepts those four
 and the arrows. Keyboard Ctrl/Space/Shift/Tab/Escape and the separate Return
 are not necessarily bindable in that game; do not patch its whitelist.
 
-Historical user-confirmed mapping (superseded by the [current profiles](FRONTENDS.md#factory-input-profiles)): R2=Action, L2=P1, right stick click R3=P2,
+Historical user-confirmed mapping (superseded by the [current profiles](../FRONTENDS.md#factory-input-profiles)): R2=Action, L2=P1, right stick click R3=P2,
 R1=P3, left stick click L3=P4, L1=ESC. Face buttons A/B/X/Y keep Ctrl/Space/Shift/Tab.
 Move ESC off View long press for PocketPC; View short still toggles fullscreen.
 Preserve Gizmondo's mappings including View long secondary key. RightThumb and
@@ -3122,7 +3122,7 @@ Full Windows GUI, APK and physical Deck controller not run in this environment.
 User supplied complete keybindings.rs and app.rs supersede the previous Deck
 layout. PPC originally used L1=P1, R1=P2, L2=P3, R2=P4, L3=ESC, R3=Action.
 The current mapping and host gestures are maintained in the
-[frontend factory profiles](FRONTENDS.md#factory-input-profiles), not this
+[frontend factory profiles](../FRONTENDS.md#factory-input-profiles), not this
 dated integration snapshot. SDL Guide is normalized to Mode; custom profiles
 retain those stable backend names.
 IMGDECMP: phBM and ppImageRender can both be NULL when pfnImageProgress consumes
@@ -4419,7 +4419,7 @@ software and the native renderer.
 missing. Explicit saved Software choices remain honored. Per-game choices are
 Emulator default / Software / GPU; restart the game after changing the backend.
 Windows uses OpenGL through WGL; Android uses EGL/GLES. Linux uses the shared
-frontend; see [desktop parity](FRONTENDS.md#windowslinux-native-service-parity) for platform limits.
+frontend; see [desktop parity](../FRONTENDS.md#windowslinux-native-service-parity) for platform limits.
 
 Anisotropic filtering offers Off, 2x, 4x and 8x, capped to driver support. It is
 available only with GPU rendering. Upscaling and image filters are presentation
@@ -5321,7 +5321,7 @@ the host-only pixel density.
 build, Cargo feature and fullscreen default. Current PC/Deck use the common
 Windows executable with `--steam-deck`, a normal 1280x800 startup window capped
 to smaller monitors, and a shared Windows update package. See
-[STEAMDECK.md](STEAMDECK.md) and [FRONTENDS.md](FRONTENDS.md).
+[STEAMDECK.md](../STEAMDECK.md) and [FRONTENDS.md](../FRONTENDS.md).
 
 The dedicated Steam Deck build starts fullscreen even when the previous desktop
 configuration was windowed. It requests fullscreen in the initial native window
@@ -5529,9 +5529,9 @@ old delivery; they are not implicitly present in the current checkout.
 
 ## NV combiner and EGL investigation (2026-11-09)
 
-Current contracts are in [GPU.md](GPU.md#egl-surfaces-and-shared-objects), virtual
-WinMM mixer behavior in [AGENTS.md](AGENTS.md#12-audio--two-transports), and the
-retained Android diagnostic interface in [ANDROID-GRAPHICS-DIAGNOSTICS.md](ANDROID-GRAPHICS-DIAGNOSTICS.md).
+Current contracts are in [GPU.md](../GPU.md#egl-surfaces-and-shared-objects), virtual
+WinMM mixer behavior in [AGENTS.md](../AGENTS.md#12-audio--two-transports), and the
+retained Android diagnostic interface in [ANDROID-GRAPHICS-DIAGNOSTICS.md](../ANDROID-GRAPHICS-DIAGNOSTICS.md).
 The following is historical evidence, not a launch recipe or conformance claim.
 
 DoomGLES requested alpha-capable pbuffers and shared NV program bodies. Adding

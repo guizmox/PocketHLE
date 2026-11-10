@@ -3,7 +3,7 @@
 Use this guide to collect graphics timings from the current Android build.
 Rendering and presentation contracts are maintained in [GPU.md](GPU.md);
 build the complete app with matching Rust JNI and Kotlin code as described in
-[ANDROID-BUILD.md](ANDROID-BUILD.md). No old diagnostic or cumulative patch ZIP
+[Build and release](BUILD.md#android). No old diagnostic or cumulative patch ZIP
 is needed.
 
 Shared GLES presentation reports `PRESENTATION=GPU_SHARED (Android)` when active.
@@ -17,7 +17,7 @@ Disable Show IPS and recording so they do not change the presentation path.
 Collect software and GPU runs as described below. For a specific sharing or
 surface-lifecycle issue, a targeted GPU run plus background/resume is useful.
 Neither the log's presence nor an older benchmark establishes a device-wide FPS
-improvement. Earlier implementation/validation records below are historical.
+improvement. Earlier implementation/validation records are kept in the historical archive.
 
 Enable **Emulator Settings > Diagnostics > Graphics diagnostics**, keep **Log
 verbosity = 1**, then start a game. The switch defaults to off and applies at
@@ -126,4 +126,4 @@ desktop timer extension used for the November investigation are removed. Setting
 that old variable no longer activates profiling. Android's pre-existing setting,
 ES timer queries and bounded observations remain available as described above.
 Functional rendering contracts belong to [GPU.md](GPU.md); dated measurements
-and validation limits belong to [IMPLEMENTATION-NOTES.md](IMPLEMENTATION-NOTES.md#nv-combiner-and-egl-investigation-2026-11-09).
+and validation limits belong to [the original investigation](history/IMPLEMENTATION-NOTES.md#nv-combiner-and-egl-investigation-2026-11-09).

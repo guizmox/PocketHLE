@@ -1,12 +1,9 @@
 # CAMTEST v3 — Gizmondo CAM1 camera
 
-Import `dist/PocketHLE-CAMTEST.zip` as a Gizmondo game. Replace the old CAMTEST
-library entry so it cannot run an older AUTORUN.EXE. Name the new entry CAMTEST v3.
+Run **Camera** from the single [HARDWARE DIAG application](../../README.md).
 Enable **Gizmondo options → Camera hardware (CAM1)** and close other camera apps.
-The first report line must be `PocketHLE ARM CAM1 test v3`.
-
-No emulator rebuild is required to run this diagnostic. It adds diagnostic
-coverage only and does not replace any emulator source or earlier API fixes.
+Use the current integrated diagnostic and a compatible PocketHLE build; no
+separate CAMTEST installation or entry rename is needed.
 
 ## Results
 
@@ -45,3 +42,10 @@ a successful nine-session run and eight injected failure scenarios (stale error,
 open, start, preview, stop, format, close, short preview). They verify stage
 identification, bounded reports and guest pixel-buffer release. These hooks are
 not the PocketHLE dispatcher or a physical Windows/Android camera test.
+
+## Suite build scope
+
+The local build script generates private fixtures for regressions. Build/import
+`tools/hardware-diag/dist/HARDWARE-DIAG.zip` through the main tool's README for
+normal use. Fixture check counts retain their original revision scope; physical
+provider validation remains separate from an API PASS.

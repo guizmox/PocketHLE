@@ -57,13 +57,13 @@ Tap coordinates, in guest 240x320 space:
 
 ## Frames
 
-![boot to gameplay](./00-boot-to-gameplay.png)
+![boot to gameplay](00-boot-to-gameplay.png)
 
 | | |
 | --- | --- |
-| ![sound prompt](./01-sound-prompt.png) | ![publisher logo](./02-publisher-logo.png) |
-| ![title](./03-title.png) | ![main menu](./04-main-menu.png) |
-| ![tutorial](./05-tutorial-popup.png) | ![gameplay](./06-gameplay.png) |
+| ![sound prompt](01-sound-prompt.png) | ![publisher logo](02-publisher-logo.png) |
+| ![title](03-title.png) | ![main menu](04-main-menu.png) |
+| ![tutorial](05-tutorial-popup.png) | ![gameplay](06-gameplay.png) |
 
 `06-gameplay.png` is the playable state: the city backdrop, the crane
 swinging an apartment block on its cable, the hoarding, the tree, the

@@ -2,7 +2,7 @@
 
 This is the current graphics guide. Older rasterizer milestones, regression
 investigations and historical test counts are retained in
-[implementation notes](IMPLEMENTATION-NOTES.md#history-gpu), not as current
+[implementation notes](history/IMPLEMENTATION-NOTES.md#history-gpu), not as current
 feature switches or universal compatibility claims.
 
 ## Rendering and presentation

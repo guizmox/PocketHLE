@@ -31,26 +31,6 @@ way — they are all placed on `MONO_PATH` together.
 
 ## Sprite color-key transparency (libgdiplus patch)
 
-Mono's `System.Drawing` uses libgdiplus, whose `ImageAttributes.SetColorKey`
-implementation writes keyed pixels as "transparent white" (alpha 0) through
-`GdipBitmapSetPixel`. On bitmaps without an alpha channel (24bppRgb, which is
-how PNG sprites without alpha decode) the alpha is dropped and the keyed
-pixels render as opaque white, giving sprites white halos.
-
-`libgdiplus-colorkey.patch` fixes this by converting the attribute-processed
-bitmap clone to 32bppARGB before the color-key pass when the source format
-has no alpha. Build and install the patched library with:
-
-```sh
-frontends/pocket-cli/managed-compat/build-libgdiplus.sh
-```
-
-It installs to `/usr/local/lib` (and refreshes the ld cache), which the
-dynamic loader prefers over the distro package. Games using color-key
-transparency must run against a libgdiplus that includes this fix.
-
-## Sprite color-key transparency (libgdiplus patch)
-
 Managed games draw their sprites with `ImageAttributes.SetColorKey`
 (e.g. vAlienAttack keys out black). libgdiplus implements the key by
 writing alpha-0 pixels into a clone of the source bitmap — but when the

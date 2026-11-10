@@ -1,57 +1,63 @@
 # Documentation
 
-Use the domain guides for current behavior. Read a historical note only when
-its subsystem or reproduction is relevant. All documentation prose is English;
-source identifiers, paths and original product names retain their spelling.
+Start here for current behavior. Each subject has one owning guide; link to it
+instead of copying settings, build commands or default bindings into another file.
+Documentation prose is English. Source identifiers and original product names
+retain their spelling.
 
-| Guide | Owns |
+## User and release guides
+
+| Task | Guide |
 | --- | --- |
-| [AGENTS.md](AGENTS.md) | Core architecture, ABI/memory/scheduler invariants and contributor checks |
-| [GPU.md](GPU.md) | Rendering, EGL/NV execution, shared images, pixel authority, resolution, filters and cadence |
-| [FRONTENDS.md](FRONTENDS.md) | Shared settings, input profiles/commands, desktop button toolbar, display/input geometry and platform UI parity |
-| [ANDROID-BUILD.md](ANDROID-BUILD.md) | Android toolchain, packaging, signing and runner checks |
-| [ANDROID-GRAPHICS-DIAGNOSTICS.md](ANDROID-GRAPHICS-DIAGNOSTICS.md) | Android opt-in graphics/NV log collection and measurement limits |
-| [STEAMDECK.md](STEAMDECK.md) | Steam Deck profile through Proton, controller gestures and shared Windows package |
-| [GTSHELL.md](GTSHELL.md) | Optional Gizmondo shell profiles, local XML DOM and separate SD cards |
-| [COMPATIBILITY.md](COMPATIBILITY.md) | Maintainer test-library inventory for PocketPC/Windows Mobile and Gizmondo; evidence limits |
-| [GIZMONDO.md](GIZMONDO.md) | Device services, imports and dated compatibility reports |
-| [COLORS.md](COLORS.md) | Colors save/wallet/server contracts and scoped measurements |
-| [OPTIMIZATIONS.md](OPTIMIZATIONS.md) | Always-on optimizations and architecture guards |
-| [UPDATES.md](UPDATES.md) | Release-check protocol and publishing procedure |
-| [references.md](references.md) | External technical sources |
-| [IMPLEMENTATION-NOTES.md](IMPLEMENTATION-NOTES.md) | Detailed older contracts, regression cases and historical evidence |
+| Install on Steam Deck through Proton | [Steam Deck](STEAMDECK.md) |
+| Configure games, controls, touch layouts and the desktop toolbar | [Frontends](FRONTENDS.md) |
+| Find reported titles and the limits of compatibility evidence | [Compatibility](COMPATIBILITY.md) |
+| Use Gizmondo hardware services, GTShell and Colors | [Gizmondo](GIZMONDO.md) |
+| Build Linux/Windows/Android, sign an APK or publish an update | [Build and release](BUILD.md) |
+| Collect Android graphics/NV logs | [Graphics diagnostics](ANDROID-GRAPHICS-DIAGNOSTICS.md) |
 
-The root [README](../README.md) remains the project overview. Do not duplicate
-current policy across a build recipe, an old delivery note and a settings guide.
-When behavior changes, update its owning guide and link to it from other pages.
+## Contributor references
+
+| Subject | Owner |
+| --- | --- |
+| Architecture, ABI/memory/scheduler contracts, CPU optimizations and primary sources | [Architecture](AGENTS.md) |
+| Rendering, EGL/NV execution, pixel ownership, resolution, filters and pacing | [Graphics](GPU.md) |
+
+The root [README](../README.md) is the project overview. Contributor entry points
+remain [AGENTS.md](../AGENTS.md) and [CLAUDE.md](../CLAUDE.md); neither is another
+architecture copy. The Android source-directory [README](../frontends/pocket-android/README.md)
+is an entry point to these same guides.
+
+## Tool manuals and evidence
+
+Keep operating instructions beside tools that are distributed or used separately:
+
+- [HARDWARE DIAG](../tools/hardware-diag/README.md): fixture generation, integrated
+  suites and optional ARM execution. Individual suite READMEs describe their own
+  tests, not alternate emulator settings or build policy.
+- [Android ADB backup/rescue](../tools/README-android-adb-backup.txt): standalone
+  recovery scripts and their safeguards; this notice also ships with those tools.
+- [Input artwork](../frontends/pocket-desktop/assets/input/README.md): skin sources
+  and hitbox assets, shared with Android.
+- [FFmpeg](../third-party/ffmpeg/README.md) and
+  [OpenH264](../third-party/openh264/README.md): source provenance and relinking
+  notices. License texts remain with the corresponding dependency.
+- [proof](../proof/) and [validation](../validation/) contain dated runs/logs.
+  They are evidence, not current user instructions.
+
+## Historical records
+
+[Implementation notes](history/IMPLEMENTATION-NOTES.md) retain earlier ABI details,
+regressions and investigations with their original anchors. [Validation records](history/VALIDATION.md)
+collect old test counts, measurements and superseded delivery handouts.
+Current guides take precedence over those snapshots. Do not install an old patch
+or recreate a removed setting merely because a historical note mentions it.
 
 ## Validation levels
 
-Keep these separate in every report: source inspection, isolated/unit tests,
-backend build, complete package/CI build, native host-provider test and physical
-gameplay/device validation. Preserve binary version, platform, renderer, internal
-resolution, power state and workload when reporting a performance comparison.
-Do not call a diagnostic benchmark exhaustive API or hardware conformance.
-
-## Diagnostics and benchmarks
-
-[HARDWARE DIAG](../tools/hardware-diag/README.md) is one importable ARM application:
-its menu calls integrated suites. Process/RAM/VFS checks can relaunch the same
-EXE and load private DLL fixtures; that does not make it a launcher for old public
-BTTEST/GPSTEST/VFSTEST applications. Original report filenames remain useful.
-GPS coverage includes the GPS1 interface and COM8 NMEA bridge. Sensor/network
-checks need the corresponding permissions, providers and often a real peer.
-
-```sh
-python tools/hardware-diag/build.py
-python tools/hardware-diag/run.py --guest
-```
-
-Integer, floating-point, memory and GLES cost benchmarks measure selected
-workloads and checked results. Compare the same tool revision and settings;
-use per-test scores as well as the aggregate. Preserve the detailed text reports,
-not just a screenshot. This is not exhaustive CPU/GLES conformance. CI artifacts
-and private integration fixtures have distinct purposes; consult the tool README.
-
-Recorded runs remain under [proof](../proof/). Historical test counts and a
-maintainer's compatibility report are not a new cross-platform test campaign.
+Keep source inspection, isolated/unit tests, backend compilation, complete package/CI
+builds, native host-provider tests and physical gameplay/device validation separate.
+Preserve binary version, platform, renderer, internal resolution, power state and
+workload for performance comparisons. A benchmark or diagnostic PASS is not
+exhaustive CPU/API/hardware conformance. Catalogue membership is not a completed
+playthrough or a new cross-platform compatibility campaign.

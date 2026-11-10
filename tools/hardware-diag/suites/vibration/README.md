@@ -1,6 +1,8 @@
 # PocketHLE ARM VIBTEST
 
-Import `dist/PocketHLE-VIBTEST.zip` into the library and run it on Android.
+Run **Vibration** from the single
+[HARDWARE DIAG application](../../README.md) on Android or a supported desktop
+controller.
 Expect a 0.5-second continuous buzz, regular pulses, then paired pulses.
 The test uses SDK-compatible VIB1 + DeviceIoControl and NLed APIs, closes VIB1
 before waiting, tests invalid motor/null-pointer errors and 64 stop/reopen cycles.
@@ -21,3 +23,10 @@ Build without proprietary SDK libraries:
 
 Version 2 increases motor ON/OFF lifecycle repetition to 64 cycles.
 This validates returned contracts; physical stop on pause/exit still needs a device.
+
+## Suite build scope
+
+The local build script generates private fixtures for regressions. Build/import
+`tools/hardware-diag/dist/HARDWARE-DIAG.zip` through the main tool's README for
+normal use. Fixture check counts retain their original revision scope; physical
+provider validation remains separate from an API PASS.

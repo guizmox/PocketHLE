@@ -5,6 +5,12 @@ access switches apply at the next launch; the guest starts the actual service.
 Windows/Linux share the desktop settings UI, but native hardware bridges are
 platform-specific. See [DESKTOP-PARITY.md](FRONTENDS.md#windowslinux-native-service-parity).
 
+- [Imports](#imports-and-game-information) and [collection ZIPs](#gzga-collection-zip-imports)
+- [Bluetooth](#bluetooth), [GPS](#gps), [camera](#camera) and [controls](#controls-vibration-and-brightness)
+- [Reported compatibility](#reported-game-compatibility)
+- [GTShell profiles](#gtshell-profiles)
+- [Colors startup, saves, wallets and GPS](#colors)
+
 ## Imports and game information
 
 Demo cards prompt **Keep launcher** or **Separate games**. Separate entries own
@@ -94,42 +100,12 @@ and release the decoder's resources. Detailed contracts remain in
 
 ## Diagnostics and compatibility
 
-[Compatibility](GIZMONDO.md#reported-game-compatibility) records maintainer-reported results.
+[Compatibility](#reported-game-compatibility) records maintainer-reported results.
 The RAM and VFS suites in [HARDWARE DIAG](../tools/hardware-diag/README.md)
 exercise memory/process and filesystem contracts. Run hardware tests explicitly;
 they do not run automatically when importing a game. GPU differences and visual
 regression checks are documented in [GPU.md](GPU.md).
 
-
-## Colors language
-
-Normal Colors cards GZGA200015 and GZGA270015 show a **Colors startup** menu
-on every launch on Windows and Android. Demo/ALT cards launch directly and do
-not inherit these language, Fake GPS or server overrides.
-When its card contains several supported `bstrings` languages, the list shows
-only those installed and preselects the previous choice. A missing preference
-falls back to English; a one-language card shows its available language.
-
-**Fake GPS** is disabled initially at each launch. Enable it to replace real
-GPS with either **Near Eiffel Tower (within 800 m)** (one simulated fix per launch)
-or **Manual coordinates** (latitude −90..90, longitude −180..180). Coordinates
-and mode are remembered. Simulated GPS works even when hardware GPS is disabled,
-and skips real location access/permission requests. Other games keep real GPS.
-
-On Android, **Fill GPS** copies the latest known device position, or requests a
-new fix if none is cached. It fills the draft coordinates without enabling Fake
-GPS or saving them until Start. Closing the menu cancels the position request.
-
-The same menu holds **Colors multiplayer server**, retaining the previous value;
-blank restores the public server. **Start** saves these choices and launches;
-**Cancel** discards draft changes. Language, simulated GPS and server editors
-have moved out of Gizmondo options, which retain hardware activations. The
-player-ID editor is hidden; the installation's generated identity is retained.
-
-Supported resources are `bstrings.eng`, `.fre`/`.fra`, `.ger`/`.deu`, `.ita`,
-and `.spa`/`.esp`, case-insensitive, deduplicated by language. Resource redirection
-stays beside the resolved English file, preserves English fallback, and does not
-modify the EXE or original resources. No translations are bundled.
 
 Desktop cartridge BMP artwork preserves its aspect ratio, centred within the
 white SD-card label. Wide images fit its full width; tall images also respect
@@ -392,6 +368,222 @@ game titles. Camera, Bluetooth, location and multiplayer depend on permissions,
 hardware and external services. Regression reports should specify platform,
 software/GPU mode, binary version and the failing action.
 
-See [proof captures](../proof/) for recorded gameplay evidence.
+See [proof captures](../proof) for recorded gameplay evidence.
 
 Catalogue cross-check (names only): https://en.wikipedia.org/wiki/Gizmondo#Game_library
+
+## GTShell profiles
+
+GTShell support is integrated into the normal PocketHLE desktop and Android
+applications. Use the standard build and update channels; no separate application
+ID or fork release endpoint is required. See [Android build](BUILD.md#android)
+and the root [README](../README.md).
+
+### User-provided files
+
+The shell requires its original Flash Disk and Flash Disk2 contents, including
+its executable, native MFC/PMS DLLs, skins and language data. An SD card is optional.
+These files are supplied by the user and are not distributed with PocketHLE.
+Create a version-1 backup profile with:
+
+```sh
+python3 tools/make-gtshell-profile.py --flash-disk "device/flash disk" \
+  --flash-disk2 "device/flash disk2" --sd-card "device/sd card" \
+  --output "gtshell-profile.zip"
+```
+
+Select a different executable explicitly with `--gtshell PATH` when needed.
+Use physical directories, not symlinks or Windows junctions. Restore the ZIP
+through the normal backup menu. Merge without overwrite keeps existing settings.
+Do not restore with replacement over a library you intend to preserve.
+
+`GameSettings.storage_card_dir` optionally selects the SD Card/Storage Card root.
+Relative paths resolve against the library root; missing explicit roots fail
+before execution. The executable installation path remains Flash Disk2. Explicit
+cards expose their real Game directory instead of the imported-game alias.
+Foreground SDCreateProcess children must remain within the canonical card root;
+concurrent CreateProcess retains the existing VFS-resolved launch contract.
+Synchronous children preserve the existing host-session suspend/resume guard.
+
+### Bluetooth file transfer
+
+Enable Classic Bluetooth in PocketHLE on both hosts before launching GTShell.
+In the receiving shell, open **Bluetooth → Receive files** and leave it waiting.
+On the sender, select an image and choose **Send → Bluetooth**, then select the
+receiving host and accept the transfer there. Use the platform Bluetooth
+permissions, discoverability and pairing steps in [GIZMONDO.md](#bluetooth).
+Check received images in the gallery or in `MyPictures` on the profile's Flash Disk.
+
+GTShell uses BTDRT discovery and Winsock RFCOMM. PocketHLE translates discovery
+addresses for the guest and resolves them back to host addresses when connecting.
+The receiving host advertises the logical Gizmondo service UUID through SDP.
+On Windows the OS allocates the physical RFCOMM channel.
+
+The Windows-to-Android image transfer and failure on an interrupted transfer
+have been verified. Android-to-Windows transfer still needs validation with
+the Windows listener change. A host appearing in discovery only confirms that
+its radio was found. Android can report the same read exception for a completed
+transfer and an interrupted link. PocketHLE preserves the socket error in this
+case so a real interruption still reaches the guest.
+
+### Implementation and limits
+
+The per-process kernel MSXML arena implements the shell's read-only DOM operations,
+with synthetic MSXML3 vtables and owned BSTRs. Reads are synchronous through VFS,
+including sharing rules and overlays. UTF-8 and BOM UTF-16 loads are bounded to
+8 MiB, 65536 nodes and depth 256; DTDs/external entities are rejected. Unsupported
+DOM operations and async TRUE return E_NOTIMPL. This is not a complete MSXML
+implementation. Other COM classes keep their existing dispatch path.
+
+The entry classifier recognizes ARM `mov r0, #constant; bx lr` leaf entry points
+even when the PE machine tag says THUMB; genuine Thumb entry behavior is retained.
+No user DLL or EXE bytes are changed.
+
+#### CE shell compatibility APIs
+
+`InternetSetOptionW` accepts the global `INTERNET_OPTION_SETTINGS_CHANGED`
+notification (39). Backends retain the explicit settings of existing sessions;
+there is no cached registry proxy configuration to invalidate. Other options
+return an explicit unsupported-option error rather than false success.
+
+`SendNotifyMessageW` invokes same-thread guest window procedures synchronously
+and queues notifications for other window threads. Broadcast recipients are
+snapshotted top-level windows. Pointer-bearing system messages are rejected.
+`SHCreateShortcut` writes a CE text shortcut through VFS creation/sharing/quota
+rules; it does not overwrite an existing shortcut or create missing directories.
+The shortcut command uses the emulator's existing single-byte CP_ACP mapping
+(Latin-1), including accented Western European characters. An unrepresentable
+command fails with ERROR_NO_UNICODE_TRANSLATION before creating a file; it is
+never silently written as incompatible UTF-8 or with replacement characters.
+
+`AddFontResourceW` loads bounded TrueType/OpenType outlines and TrueType
+collections from guest VFS. Registered faces participate in text rendering and
+`EnumFontFamiliesW` callbacks, including early stop. Fonts and callback storage
+belong to the process and are released at exit. Raster FNT/FON and FOT wrappers
+are not supported. RemoveFontResourceW is outside this batch; registration lasts
+until process exit. This is not a global host font installation. Enumeration
+returns design-unit em size, height and average character width derived from
+the selected font, independently of its requested pixel size. Callback scratch
+storage is also reclaimed if its guest thread terminates before returning.
+
+`RasGetEntryProperties`, `RasSetEntryProperties` and `RasSetEntryDialParams`
+store CE-format phone-book data in the emulated registry. The supported CE
+layouts are RASENTRY 3472 bytes, RASDIALPARAMS 1464 bytes and RASCONN 52 bytes,
+not desktop Windows structures. Properties and opaque device configuration
+persist through the normal registry lifecycle. Passwords remain session-only
+and are excluded from persistent registry snapshots. `RasEnumConnections`
+reports zero connections because this device has no RasDial transport; host
+WinINet routing is not a dial-up connection.
+
+`GetServiceHandle` reports absent services with INVALID_HANDLE_VALUE; in
+particular, BTS1: is not the BTH1: stream driver. `DeregisterService` rejects
+invalid/unowned service handles and never stops a host service. Loading native
+services.exe service DLLs is outside this implementation.
+
+Cryptographic providers, CEDB, TAPI provider registration and scheduled
+application launch are separate work; these APIs do not imply their support.
+
+The contributor reports desktop and Android shell operation. Integration tests
+validate the changed code paths; complete shell workflows, media playback and
+physical device compatibility still require runtime validation.
+
+
+## Colors
+
+### Colors language
+
+Normal Colors cards GZGA200015 and GZGA270015 show a **Colors startup** menu
+on every launch on Windows and Android. Demo/ALT cards launch directly and do
+not inherit these language, Fake GPS or server overrides.
+When its card contains several supported `bstrings` languages, the list shows
+only those installed and preselects the previous choice. A missing preference
+falls back to English; a one-language card shows its available language.
+
+**Fake GPS** is disabled initially at each launch. Enable it to replace real
+GPS with either **Near Eiffel Tower (within 800 m)** (one simulated fix per launch)
+or **Manual coordinates** (latitude −90..90, longitude −180..180). Coordinates
+and mode are remembered. Simulated GPS works even when hardware GPS is disabled,
+and skips real location access/permission requests. Other games keep real GPS.
+
+On Android, **Fill GPS** copies the latest known device position, or requests a
+new fix if none is cached. It fills the draft coordinates without enabling Fake
+GPS or saving them until Start. Closing the menu cancels the position request.
+
+The same menu holds **Colors multiplayer server**, retaining the previous value;
+blank restores the public server. **Start** saves these choices and launches;
+**Cancel** discards draft changes. Language, simulated GPS and server editors
+have moved out of Gizmondo options, which retain hardware activations. The
+player-ID editor is hidden; the installation's generated identity is retained.
+
+Supported resources are `bstrings.eng`, `.fre`/`.fra`, `.ger`/`.deu`, `.ita`,
+and `.spa`/`.esp`, case-insensitive, deduplicated by language. Resource redirection
+stays beside the resolved English file, preserves English fallback, and does not
+modify the EXE or original resources. No translations are bundled.
+
+### Startup action
+
+Windows/Linux/Steam Deck and Android show **Unlock Turf Wars + Tag Editor**
+in the existing Colors startup dialog. On Deck, X invokes the same action.
+It runs before starting the game, off the UI thread; Start and repeated actions
+are disabled until it finishes. It never runs automatically on later launches.
+
+- Decrypt and validate `config.cfg` and an existing `Save/SaveFile.isv` before
+  changing either file.
+- Set `TurfWarUnlocked=1` and `TagEditorUnlocked=1`, preserving all other config settings.
+- Leave the entire ISV byte-identical, regardless of Money or ServerMoney.
+- Never contact the server, grant money, or change registration identity.
+- Repeated clicks keep both unlock flags enabled, including when Turf Wars was already unlocked by an earlier version. They preserve pending solo
+  gains, previous online purchases, and the synchronization checkpoint.
+- If no save exists, do not invent one. Preserve missions and all other settings.
+
+Only a changed original config gets a unique `config.cfg-before-turf-*.bak`.
+Config replacement is atomic. Unknown/corrupt formats, ambiguous case variants
+and symlinks are rejected before writing. Use `GameEntry::gizmondo_flash_dir`.
+
+### Independent solo and online wallets
+
+The previous local funding policy is removed. Unlock never writes Money or
+ServerMoney. Existing saves previously granted 75,000 are preserved, not reset.
+A server starting-money floor of 75,000 (configurable) applies only to new online
+registrations. Existing online accounts are not topped up on reconnect.
+
+`pocket-core::colors_wallet` adapts only the supplied retail executable, SHA-256
+`065c6f62e793210e7889cab087495a42a84c77b7b41899410156017cb43d7a92`.
+Unknown versions remain unchanged. The checked patch changes only the loaded
+image; the EXE on disk is never modified. It uses original encrypted save routines
+to preserve solo Money and checkpoint ServerMoney to solo Money. The online
+amount stays in the online user object. Only positive subsequent solo earnings
+are added to the online amount; solo spending does not debit the online wallet.
+No graphics paths are changed.
+
+Original ARM functions: balance reader 0x17cd8, save writer 0x17ef4,
+response parser 0xf1a9c, registration builder 0xe6880, sync builder 0xe66d4.
+The mode-2 registration/sync ACK also checkpoints the local balance. Ordinary
+refreshes retain the original game's checkpoint timing. This does not add
+transaction IDs or exactly-once recovery after network failures to the legacy
+protocol, nor authenticate offline earnings.
+
+### Turf Wars server coordinates
+
+The client requires positive turf IDs. The companion server's wire-coordinate
+bias converts between those IDs and signed storage coordinates without changing
+GPS degrees, projection or ownership. A server still returning incompatible
+coordinates can cause a transfer error even when image download succeeds;
+updating PocketHLE alone does not fix that server response. See the
+[original protocol investigation](history/VALIDATION.md#colors-startup-presentation-and-turf-wars-transfer-error)
+for ARM observations and the limits of its local HTTP/SQLite validation.
+
+### Explicit Eiffel Tower GPS refresh
+
+In Colors only, with Fake GPS and Near Eiffel Tower selected, desktop/Deck **F6**
+chooses a new simulated position within 800 m. Holding it does not repeat.
+F12 remains the ordinary fullscreen shortcut. Geofence (guest VK 0x73) also
+requests the refresh on desktop/Deck and Android while retaining the guest key
+events. Other games and manual/host GPS modes keep their ordinary input behavior.
+The new fix reaches the game on its next GPS read; no extra server request is
+introduced and stored manual coordinates are not changed.
+
+The [validation archive](history/VALIDATION.md#colors-investigation-records)
+preserves codec/ARM routine evidence, save round trips, wallet scenarios and
+performance measurements. Those original runs do not certify current physical
+Windows, Deck or Android operation.
