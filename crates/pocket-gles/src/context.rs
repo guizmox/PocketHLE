@@ -3611,10 +3611,15 @@ impl Context {
                 .combiner_programs
                 .active()
                 .is_none()
-                .then(|| self.state.goforce_depth_color_pass())
+                .then(|| {
+                    self.state
+                        .goforce_depth_color_pass()
+                        .or_else(|| self.state.intel2700g_depth_color_pass())
+                })
                 .flatten()
                 .map(|mut pass| {
-                    // Apply the same clip-depth transform as the GPU before clipping.
+                    // GoForce applies its clip-depth transform below before clipping.
+                    // Intel retains the original depth range and uses constant offset.
                     pass.depth_range = (0., 1.);
                     pass
                 });
@@ -3624,7 +3629,7 @@ impl Context {
             {
                 // Stream primitives in their original order without allocating a triangle list.
                 let mut draw = |mut tri: [Vertex; 3]| {
-                    if replay != 0 {
+                    if replay != 0 && !pass.intel2700g_depth_bias {
                         for v in &mut tri {
                             v.pos[2] += raster::GOFORCE4500_DEPTH_TOLERANCE * (v.pos[2] - v.pos[3]);
                         }

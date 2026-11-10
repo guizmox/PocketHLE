@@ -7,3 +7,7 @@ crates\pocket-winceapi\src\gles\egl_config.rs
 crates\pocket-winceapi\src\gles\lifecycle_tests.rs
 docs\GPU.md
 proof\battlestations-midway\README.md
+proof\thps2-hangar\README.md
+proof\thps2-hangar\after.png
+proof\thps2-hangar\before.png
+proof\thps2-hangar\live.png

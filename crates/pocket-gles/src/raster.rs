@@ -286,8 +286,48 @@ impl Default for PipelineState {
 }
 
 pub(crate) const GOFORCE4500_DEPTH_TOLERANCE: f32 = 1. / 12.;
+const INTEL2700G_DEPTH_TOLERANCE_UNITS: f32 = 16.;
 
 impl PipelineState {
+    /// Empirical 2700G tolerance for nearly coplanar opaque fragments, including
+    /// reversed depth. THPS2 submits fixed-point projected decals whose depth
+    /// crosses their backing surface as the camera moves. This is a profile
+    /// approximation, not a measured MBX register value. Preserve the nearest
+    /// real depth and reject translucent fragments to avoid blending twice.
+    pub fn intel2700g_depth_color_pass(&self) -> Option<Self> {
+        if !self.intel2700g_depth_bias
+            || !self.depth_test
+            || !self.depth_write
+            || self.depth_range != (0., 1.)
+            || !matches!(self.depth_func, CompareFunc::Lequal | CompareFunc::Gequal)
+            || self.logic_op
+            || self.polygon_offset
+            || (self.blend
+                && (self.blend_src != BlendFactor::SrcAlpha
+                    || self.blend_dst != BlendFactor::OneMinusSrcAlpha))
+            || (self.alpha_test
+                && !self
+                    .alpha_func
+                    .test(255., (self.alpha_ref.clamp(0., 1.) * 255. + 0.5).floor()))
+            || !self.color_mask.iter().any(|enabled| *enabled)
+        {
+            return None;
+        }
+        let mut pass = self.clone();
+        pass.depth_write = false;
+        pass.alpha_test = true;
+        pass.alpha_func = CompareFunc::Equal;
+        pass.alpha_ref = 1.;
+        pass.polygon_offset = true;
+        pass.polygon_factor = 0.;
+        pass.polygon_units = if self.depth_func == CompareFunc::Gequal {
+            INTEL2700G_DEPTH_TOLERANCE_UNITS
+        } else {
+            -INTEL2700G_DEPTH_TOLERANCE_UNITS
+        };
+        Some(pass)
+    }
+
     /// A second opaque color pass expands clip depth away from the far plane.
     /// Keep the original depth: tolerance must not accumulate with draw order
     /// or pull subsequent geometry towards the camera.
@@ -1567,6 +1607,58 @@ mod tests {
             color,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn intel_depth_tolerance_preserves_explicit_and_translucent_policies() {
+        let base = PipelineState {
+            depth_test: true,
+            depth_func: CompareFunc::Gequal,
+            intel2700g_depth_bias: true,
+            blend: true,
+            blend_src: BlendFactor::SrcAlpha,
+            blend_dst: BlendFactor::OneMinusSrcAlpha,
+            ..Default::default()
+        };
+        let pass = base.intel2700g_depth_color_pass().unwrap();
+        assert!(!pass.depth_write);
+        assert_eq!(
+            pass.polygon_units / pass.polygon_offset_resolution(),
+            1. / 4096.
+        );
+        assert_eq!(pass.alpha_func, CompareFunc::Equal);
+        assert_eq!(pass.alpha_ref, 1.);
+        assert!(pass.intel2700g_depth_color_pass().is_none());
+        for change in 0..10 {
+            let mut state = base.clone();
+            match change {
+                0 => state.intel2700g_depth_bias = false,
+                1 => state.depth_test = false,
+                2 => state.depth_write = false,
+                3 => state.depth_range = (0.2, 0.8),
+                4 => state.depth_func = CompareFunc::Greater,
+                5 => state.logic_op = true,
+                6 => state.polygon_offset = true,
+                7 => state.blend_dst = BlendFactor::One,
+                8 => {
+                    state.alpha_test = true;
+                    state.alpha_func = CompareFunc::Less;
+                    state.alpha_ref = 1.;
+                }
+                9 => state.color_mask = [false; 4],
+                _ => unreachable!(),
+            }
+            assert!(
+                state.intel2700g_depth_color_pass().is_none(),
+                "case {change}"
+            );
+        }
+        let mut forward = base;
+        forward.depth_func = CompareFunc::Lequal;
+        assert_eq!(
+            forward.intel2700g_depth_color_pass().unwrap().polygon_units,
+            -16.
+        );
     }
 
     #[test]

@@ -2916,9 +2916,19 @@ impl Renderer {
         let (offset_factor, mut offset_units) = state.polygon_offset_parameters();
         let compatibility_pass = (self.combiner.is_none()
             && matches!(mode, GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN))
-        .then(|| state.goforce_depth_color_pass())
+        .then(|| {
+            state
+                .goforce_depth_color_pass()
+                .or_else(|| state.intel2700g_depth_color_pass())
+        })
         .flatten();
-        if state.intel2700g_depth_bias && state.polygon_offset && offset_units != 0. {
+        let mut replay_offset_units = compatibility_pass
+            .as_ref()
+            .filter(|pass| pass.polygon_offset)
+            .map_or(0., |pass| pass.polygon_offset_parameters().1);
+        if state.intel2700g_depth_bias
+            && ((state.polygon_offset && offset_units != 0.) || replay_offset_units != 0.)
+        {
             let step = match self.depth_bias_step {
                 Some((format, step)) if format == self.depth_format => step,
                 _ => {
@@ -2928,6 +2938,7 @@ impl Renderer {
                 }
             };
             offset_units /= state.polygon_offset_resolution() * step;
+            replay_offset_units /= state.polygon_offset_resolution() * step;
         }
         let _gpu_diagnostic = diagnostic::Timer::scope(&self.diagnostic);
         self.scratch.clear();
@@ -2977,6 +2988,7 @@ impl Renderer {
             && !state.logic_op
             && affine_texture_coordinates(vertices, stages, transforms, stream);
         let simple_eligible = self.simple_available
+            && replay_offset_units == 0.
             && affine
             && target.rgb565
             && !state.fog
@@ -3007,6 +3019,7 @@ impl Renderer {
             self.select_simple_program(false)?;
         }
         let untextured = combiner.is_none()
+            && replay_offset_units == 0.
             && !simple
             && stages.is_empty()
             && target.rgb565
@@ -3749,6 +3762,12 @@ impl Renderer {
                 // Reuse uploaded vertices, indices, textures and shader uniforms.
                 // The nearest unbiased depth from the first pass remains intact.
                 (self.gl.DepthMask)(0);
+                if replay_offset_units != 0. {
+                    self.toggle(GL_POLYGON_OFFSET_FILL, true);
+                    (self.gl.PolygonOffset)(0., replay_offset_units);
+                    self.uniform_1i(self.loc("alphaMode"), 2);
+                    self.uniform_1f(self.loc("alphaRef"), 255.);
+                }
                 self.uniform_2f(
                     self.loc("depthRange"),
                     pass.depth_range.0,
@@ -3767,6 +3786,22 @@ impl Renderer {
                     (self.gl.DrawArrays)(draw_mode, 0, count as i32);
                 }
                 (self.gl.DepthMask)(state.depth_write as u8);
+                if replay_offset_units != 0. {
+                    self.toggle(GL_POLYGON_OFFSET_FILL, state.polygon_offset);
+                    (self.gl.PolygonOffset)(offset_factor, offset_units);
+                    self.uniform_1i(
+                        self.loc("alphaMode"),
+                        if state.alpha_test {
+                            compare(state.alpha_func) as i32 - GL_NEVER as i32
+                        } else {
+                            7
+                        },
+                    );
+                    self.uniform_1f(
+                        self.loc("alphaRef"),
+                        (state.alpha_ref.clamp(0., 1.) * 255. + 0.5).floor(),
+                    );
+                }
                 self.uniform_2f(
                     self.loc("depthRange"),
                     state.depth_range.0,
@@ -7806,6 +7841,168 @@ mod tests {
         gpu.read(&mut target).unwrap();
         assert_eq!(target.color.len(), 64 * 48 * 4);
     }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES; Intel opaque depth tolerance and state restoration"]
+    fn host_intel_depth_tolerance_preserves_depth_alpha_and_scaling() {
+        for es in [false, true] {
+            for format in [0x81a5, 0x81a6] {
+                for scale in [1, 2] {
+                    for rgb565 in [false, true] {
+                        for reversed in [false, true] {
+                            let mut gpu = if es {
+                                Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+                            } else {
+                                Renderer::new(32, 32).unwrap()
+                            };
+                            gpu.depth_format = format;
+                            gpu.resize(16, 16).unwrap();
+                            gpu.resize(32, 32).unwrap();
+                            gpu.set_render_scale(scale).unwrap();
+                            gpu.set_surface_rgb565(rgb565).unwrap();
+                            let error = if rgb565 { 5 } else { 1 };
+                            let mut state = PipelineState {
+                                viewport: (0, 0, 32, 32),
+                                depth_test: true,
+                                depth_func: if reversed {
+                                    CompareFunc::Gequal
+                                } else {
+                                    CompareFunc::Lequal
+                                },
+                                intel2700g_depth_bias: true,
+                                blend: true,
+                                blend_src: BlendFactor::SrcAlpha,
+                                blend_dst: BlendFactor::OneMinusSrcAlpha,
+                                ..Default::default()
+                            };
+                            let mut cpu = RenderTarget::with_format(32, 32, rgb565);
+                            let mut native = RenderTarget::with_format(32, 32, rgb565);
+                            let clear = if reversed { 0. } else { 1. };
+                            cpu.clear_depth(clear, None);
+                            gpu.clear(
+                                32,
+                                32,
+                                &state,
+                                [0.; 4],
+                                clear,
+                                GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                            )
+                            .unwrap();
+                            let sign = if reversed { -1. } else { 1. };
+                            // The color replay can expose the slightly separated decal,
+                            // but cannot move stored depth or accumulate the tolerance.
+                            // A half-transparent overlay must blend only once.
+                            for (z, color, expected) in [
+                                (0., [0., 0., 1., 1.], [0, 0, 255]),
+                                (sign * 0.0003, [1., 0., 0., 1.], [255, 0, 0]),
+                                (sign * 0.0007, [0., 1., 0., 1.], [255, 0, 0]),
+                                (sign * 0.0003, [0., 1., 0., 0.5], [255, 0, 0]),
+                                (0., [0., 1., 0., 0.5], [128, 128, 0]),
+                            ] {
+                                let vertices = triangle(color, z);
+                                raster::draw_triangle(
+                                    &mut cpu,
+                                    &state,
+                                    &|_, _, _| None,
+                                    &[],
+                                    vertices,
+                                );
+                                let pass = state.intel2700g_depth_color_pass().unwrap();
+                                raster::draw_triangle(
+                                    &mut cpu,
+                                    &pass,
+                                    &|_, _, _| None,
+                                    &[],
+                                    vertices,
+                                );
+                                gpu.draw(
+                                    &native,
+                                    &state,
+                                    GL_TRIANGLES,
+                                    &vertices,
+                                    &[],
+                                    &HashMap::new(),
+                                    [0; 6],
+                                )
+                                .unwrap();
+                                gpu.read(&mut native).unwrap();
+                                let at = (16 * 32 + 16) * 4;
+                                for (actual, label) in [
+                                    (&cpu.color[at..at + 3], "software"),
+                                    (&native.color[at..at + 3], "native"),
+                                ] {
+                                    for (a, e) in actual.iter().zip(expected) {
+                                        assert!(a.abs_diff(e)<=error,"{label} rgb565={rgb565} es={es} format={format:x} scale={scale} reversed={reversed} z={z} actual={actual:?}");
+                                    }
+                                }
+                                assert_eq!(cpu.depth[16 * 32 + 16], 0.5);
+                            }
+                            // The extra pass must restore depth writes, alpha testing,
+                            // polygon offset and uniform state before an ordinary draw.
+                            state.intel2700g_depth_bias = false;
+                            let nearer = triangle([0., 0., 1., 0.5], -sign * 0.01);
+                            let hidden = triangle([1., 1., 1., 1.], -sign * 0.005);
+                            for vertices in [nearer, hidden] {
+                                raster::draw_triangle(
+                                    &mut cpu,
+                                    &state,
+                                    &|_, _, _| None,
+                                    &[],
+                                    vertices,
+                                );
+                                gpu.draw(
+                                    &native,
+                                    &state,
+                                    GL_TRIANGLES,
+                                    &vertices,
+                                    &[],
+                                    &HashMap::new(),
+                                    [0; 6],
+                                )
+                                .unwrap();
+                            }
+                            gpu.read(&mut native).unwrap();
+                            let at = (16 * 32 + 16) * 4;
+                            let result = native.color[at..at + 3].to_vec();
+                            // Compare against ordinary coplanar draws on the same
+                            // format. Sequential RGB565 blends round differently
+                            // from RGBA8 and from software's intermediate rounding.
+                            gpu.clear(
+                                32,
+                                32,
+                                &state,
+                                [0.; 4],
+                                clear,
+                                GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                            )
+                            .unwrap();
+                            for vertices in [
+                                triangle([0., 0., 1., 1.], 0.),
+                                triangle([1., 0., 0., 1.], 0.),
+                                triangle([0., 1., 0., 0.5], 0.),
+                                nearer,
+                                hidden,
+                            ] {
+                                gpu.draw(
+                                    &native,
+                                    &state,
+                                    GL_TRIANGLES,
+                                    &vertices,
+                                    &[],
+                                    &HashMap::new(),
+                                    [0; 6],
+                                )
+                                .unwrap();
+                            }
+                            gpu.read(&mut native).unwrap();
+                            assert_eq!(result, native.color[at..at + 3]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     #[ignore = "requires native GL/GLES; validates the GoForce visibility approximation"]

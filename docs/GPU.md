@@ -68,7 +68,7 @@ settings, immediately above **GPU rendering**, on desktop and Android:
 | --- | --- |
 | Generic OpenGL ES (1.1, Common) | Standard behavior; no Intel bias or NVIDIA combiners. This is the default. |
 | NVIDIA GoForce 5500 (OpenGL ES 1.1, Common) | Allows detected clients to use AR10/AR11 combiners; standard depth bias. |
-| Intel 2700G (OpenGL ES 1.0, Common-Lite) | Enables the Intel depth-bias model; NVIDIA combiners disabled. |
+| Intel 2700G (OpenGL ES 1.0, Common-Lite) | Enables the Intel depth-bias model and opaque coplanar tolerance; NVIDIA combiners disabled. |
 
 The persisted per-game `gpu_compatibility_profile` enum replaces both global
 compatibility booleans. Old global values are ignored, not inherited; existing
@@ -98,17 +98,55 @@ title check, binary patch or disabled depth testing.
 
 Software applies that normalized constant directly. Native GL/GLES measures
 the host polygon-offset step once per renderer/depth format on the first
-nonzero Intel-biased draw, using a temporary 2x2 target. The measured step is
-cached; subsequent draws use native polygon offset without readbacks, shader
-depth writes or additional rendering passes. The setup preserves the live
+nonzero Intel-biased draw or eligible tolerance replay, using a temporary 2x2
+target. The measured step is cached; explicit guest polygon offsets use native
+polygon offset without readbacks, shader depth writes or additional rendering
+passes. The setup preserves the live
 surface, clears its temporary resources and invalidates only the affected
-host state caches. It does not run for an inactive profile or zero bias.
+host state caches. It does not run for an inactive profile or a draw needing
+neither nonzero offset nor tolerance.
 
 The stronger constant offset can change shadows or decals in other applications
 using this profile. Foreground occlusion remains enabled. The ordinary GLES
 offset policy, guest depth-bit queries, render scaling, presentation, screenshots
 and recordings retain their existing paths. Shared code serves desktop and
 Android; native GL/GLES tests cover both depth formats and 1x/2x rendering.
+
+### Intel 2700G opaque coplanar tolerance
+
+The same existing Intel profile also permits a bounded color-only replay for
+nearly coplanar opaque triangles. This is an **empirical compatibility
+approximation**, not a measured MBX register value or exact GLES depth semantics.
+THPS2's fixed-point projected decals cross their backing ramp's submitted depth
+as the camera moves, with reversed `GEQUAL` testing and no polygon offset. A
+normal draw preserves the nearest real depth; a second draw may contribute color
+within `16 / 65536` of that depth, towards the camera. It never writes depth,
+so the tolerance does not accumulate across draws. The sign is reversed for
+`LEQUAL` versus `GEQUAL`. There is no game, executable or texture identification.
+
+Eligibility requires enabled depth testing and writes, the default depth range,
+`LEQUAL` or `GEQUAL`, no explicit polygon offset, no logic operation and at least
+one writable color channel. Blending must be disabled or standard
+`SRC_ALPHA, ONE_MINUS_SRC_ALPHA`. The replay accepts only fully opaque fragments
+and only when the original alpha test also accepts them; translucent fragments
+therefore retain their original single-pass behavior. Points, lines, strict
+`LESS`/`GREATER` tests, additive/multiplicative effects and NV combiners keep their
+existing paths. The explicit GeoRally EX depth-bias model above is unchanged.
+
+Software reuses transformed vertices and the existing constant-offset rasterizer.
+Native GL/GLES reuses buffers, textures and the current general/affine shader,
+temporarily setting alpha rejection, depth-write mask and calibrated polygon
+offset, then restoring host state. Alpha-test-free fast shader variants are not
+used for these draws. There is no per-draw readback, new texture upload, shader
+depth write or format/presentation change. Both backends, render scaling and the
+shared desktop/Android implementation use the same rule.
+
+Eligible triangles are rasterized twice: this has a real GPU cost, or CPU cost
+in software mode. Nearby hidden opaque surfaces within the tolerance can become
+visible or change overlap order in other Intel-profile games. Generic and NVIDIA
+profiles do not enable this Intel approximation. See the
+[THPS2 validation record](../proof/thps2-hangar/README.md) for before/after images,
+measured costs and the limits of local testing.
 
 ## GoForce 4500 visibility approximation
 
