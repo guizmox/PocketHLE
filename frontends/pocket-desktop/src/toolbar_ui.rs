@@ -44,7 +44,7 @@ pub struct State<'a> {
 fn button(ui: &mut Ui, action: Action, state: &State<'_>, width: f32) -> bool {
     use Action::*;
     let label = match action {
-        Library => "Library".into(),
+        Library => "Library (F8)".into(),
         Import => "Import".into(),
         Backup => "Backup".into(),
         Restore => "Restore".into(),
@@ -323,7 +323,7 @@ mod tests {
         let mut nav = Navigation::default();
         let (output, _, _) = frame(&ctx, &mut nav, &state(), 1280.0, vec![]);
         let labels = [
-            "Library",
+            "Library (F8)",
             "Import",
             "Backup",
             "Restore",
@@ -425,7 +425,7 @@ mod tests {
             .unwrap();
         assert!(focused
             .rect
-            .contains(text_rect(&output.shapes, "Library").center()));
+            .contains(text_rect(&output.shapes, "Library (F8)").center()));
         nav.press("DPadDown");
         let (output, _, _) = frame(&ctx, &mut nav, &state, 1280.0, vec![]);
         nav.release("DPadDown");
