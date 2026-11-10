@@ -1387,6 +1387,7 @@ enum SpecializedShader {
 type ProgramState = (u32, HashMap<String, i32>, HashMap<i32, Vec<u32>>);
 
 pub struct Renderer {
+    renderer_name: String,
     diagnostic: Option<std::rc::Rc<RefCell<diagnostic::Timer>>>,
     host: Host,
     gl: Gl,
@@ -1608,6 +1609,7 @@ impl Renderer {
             let compressed_formats = formats.into_iter().map(|n| n as u32).collect();
             let diagnostic = diagnostic::Timer::new(&host, &gl);
             let mut r = Self {
+                renderer_name: String::new(),
                 diagnostic,
                 host,
                 gl,
@@ -1808,10 +1810,16 @@ impl Renderer {
                 CStr::from_ptr(p.cast()).to_string_lossy().into_owned()
             };
             log::info!("GLES host OpenGL renderer: {label}");
+            r.renderer_name = label;
             r.check()?;
             Ok(r)
         }
     }
+    /// Driver identity captured while this renderer's host context was current.
+    pub fn renderer_name(&self) -> &str {
+        &self.renderer_name
+    }
+
     unsafe fn compile_program(&mut self, vertex: &str, fragment: &str) -> Result<u32, String> {
         let program = (self.gl.CreateProgram)();
         if program == 0 {
@@ -4310,6 +4318,25 @@ gl_FragColor=c;}
 mod tests {
     use super::*;
     use crate::raster;
+    #[test]
+    #[ignore = "requires native OpenGL/GLES; cached host renderer identity"]
+    fn host_renderer_identity_matches_the_current_desktop_and_es_driver() {
+        for es in [false, true] {
+            let renderer = if es {
+                Renderer::new_es_for_test(8, 8).unwrap()
+            } else {
+                Renderer::new(8, 8).unwrap()
+            };
+            unsafe {
+                let ptr = (renderer.gl.GetString)(0x1f01);
+                assert!(!ptr.is_null());
+                let expected = CStr::from_ptr(ptr.cast()).to_string_lossy();
+                assert!(!expected.is_empty());
+                assert_eq!(renderer.renderer_name(), expected);
+            }
+        }
+    }
+
     #[test]
     #[ignore = "requires native OpenGL/GLES; specialized fragment equivalence"]
     fn simple_fragment_matches_complete_rgb565_for_textures_alpha_and_blending() {

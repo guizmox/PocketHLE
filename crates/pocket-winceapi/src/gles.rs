@@ -1714,13 +1714,10 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let name = ctx.arg_u32(0)?;
     let text = match name {
         pocket_gles::GL_VENDOR => "PocketHLE",
-        pocket_gles::GL_RENDERER => with_ctx(|c| {
-            if c.gpu_active() {
-                "PocketHLE GPU rasterizer"
-            } else {
-                "PocketHLE Software Rasterizer"
-            }
-        }),
+        pocket_gles::GL_RENDERER => {
+            let renderer = with_ctx(|c| c.renderer_name().to_owned());
+            return Ok(DispatchOutcome::ReturnedR0(intern_string(ctx, &renderer)?));
+        }
         pocket_gles::GL_VERSION => "OpenGL ES-CL 1.1",
         // The ARB combine tokens and operations are identical to GLES 1.1 core.
         // Older clients (including OGLESVirgin) still query the extension name.
@@ -4122,6 +4119,68 @@ mod tests {
             );
             assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
         }
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL; renderer identity and backend transitions"]
+    fn native_renderer_query_preserves_guest_pointers_and_emulated_capabilities() {
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let software = call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_string,
+            &[pocket_gles::GL_RENDERER],
+        );
+        set_gpu_renderer(true);
+        assert!(with_ctx(|c| c.gpu_active()));
+        let expected = with_ctx(|c| c.renderer_name().to_owned());
+        assert!(!expected.is_empty());
+        assert_ne!(expected, "PocketHLE Software Rasterizer");
+        let gpu = call(
+            &mut cpu,
+            &mut kernel,
+            gl_get_string,
+            &[pocket_gles::GL_RENDERER],
+        );
+        assert_ne!(gpu, software);
+        let mut bytes = expected.into_bytes();
+        bytes.push(0);
+        assert_eq!(cpu.read_mem(gpu, bytes.len() as u32).unwrap(), bytes);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_get_string,
+                &[pocket_gles::GL_RENDERER]
+            ),
+            gpu
+        );
+        for (query, text) in [
+            (pocket_gles::GL_VENDOR, "PocketHLE"),
+            (pocket_gles::GL_VERSION, "OpenGL ES-CL 1.1"),
+        ] {
+            let ptr = call(&mut cpu, &mut kernel, gl_get_string, &[query]);
+            assert_eq!(
+                cpu.read_mem(ptr, text.len() as u32 + 1).unwrap(),
+                [text.as_bytes(), &[0]].concat()
+            );
+        }
+        set_gpu_renderer(false);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_get_string,
+                &[pocket_gles::GL_RENDERER]
+            ),
+            software
+        );
+        assert_eq!(cpu.read_mem(gpu, bytes.len() as u32).unwrap(), bytes);
     }
 
     #[test]
@@ -7484,6 +7543,7 @@ mod tests {
             ),
             pointer
         );
+        assert!(!with_ctx(|c| c.gpu_active()));
     }
 
     #[test]
@@ -7832,10 +7892,12 @@ mod tests {
             &[pocket_gles::GL_RENDERER],
         );
         assert_ne!(renderer, 0);
+        let mut expected_renderer = with_ctx(|c| c.renderer_name().as_bytes().to_vec());
+        expected_renderer.push(0);
         assert_eq!(
-            cpu.read_mem(renderer, b"PocketHLE GPU rasterizer\0".len() as u32)
+            cpu.read_mem(renderer, expected_renderer.len() as u32)
                 .unwrap(),
-            b"PocketHLE GPU rasterizer\0".to_vec()
+            expected_renderer
         );
 
         let vertices: [f32; 9] = [-0.9, -0.9, 0., 0.9, -0.9, 0., 0., 0.9, 0.];

@@ -24,6 +24,21 @@ zero-copy. The correct path depends on pixel authority and the consumer.
 Initialization failure may select software; runtime GPU failure must be reported,
 not silently hidden by continuing with stale software depth or color state.
 
+## Renderer identity
+
+Guest `glGetString(GL_RENDERER)` returns the active host OpenGL renderer name
+when a native renderer exists, or `PocketHLE Software Rasterizer` in PocketHLE's
+software mode. The host name is captured once during renderer initialization
+and follows the current EGL surface's renderer; querying it does not bind a
+context or synchronize GPU work. Guest strings retain the existing process-owned
+allocation cache, so earlier returned pointers survive a backend change.
+
+This identifies the host OpenGL implementation, including ANGLE or a host
+software renderer such as llvmpipe when present; it is not a host GPU inventory.
+Guest `GL_VENDOR`, `GL_VERSION` and extensions still describe PocketHLE's emulated
+API. The shared implementation applies to desktop and Android. Games which
+branch on renderer-name substrings can consequently select different paths.
+
 ## Authority and lifetimes
 
 - Preserve CPU/GPU authority epochs, immutable snapshots, leases and ready/done

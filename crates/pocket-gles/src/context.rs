@@ -694,6 +694,13 @@ impl Context {
             .map_or(MAX_TEXTURE_UNITS, |g| g.texture_coordinate_capacity())
     }
 
+    /// Querying identity must not create, bind or synchronize a host context.
+    pub fn renderer_name(&self) -> &str {
+        self.gpu
+            .as_ref()
+            .map_or("PocketHLE Software Rasterizer", |gpu| gpu.renderer_name())
+    }
+
     pub fn gpu_active(&self) -> bool {
         self.gpu.is_some()
     }
