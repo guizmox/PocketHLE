@@ -663,8 +663,21 @@ object on every level change.
 **Voice groups.** `play_voice_with` takes `VoiceParams { looped, group,
 volume }`. The groups exist so `stopMusics` can silence music without
 cutting the sound effects that are still playing — JumpyBall calls it on
-every level change. Voice mixing is `#[cfg(feature = "audio-cpal")]`;
-without that feature `play_voice` degrades to `push_samples`.
+every level change. Voice mixing is shared by CPAL and Android's `AudioTap`:
+each voice retains its own sample rate and channel count and is resampled to the
+output format.
+Do not route PlaySound/HSS voices through the untyped legacy PCM ring. Fade
+alternates 22050 Hz menu effects and 8000 Hz sounds; interpreting both at the
+first announced output rate changes pitch and duration after a menu transition.
+Looping, gain, group pause/stop and channel configuration use the same mixer on
+both outputs. A waveOut-only flush preserves the output format while independent
+voices remain. Full engine flush clears those voices as well.
+
+The regression tests exercise the Android pull path without a physical device:
+repeat an effect after a lower-rate clip, mix mono/stereo sources and waveOut,
+preview without consumption, and preserve loop/group controls and cleanup.
+Source capture alone cannot validate this: it records each clip's input format,
+whereas the defect was in the samples delivered at the announced output rate.
 
 **`--dump-audio-to` records at submission time**, inside
 `add_voice`/`push_samples` — not as a real-time mixdown. A capture WAV
