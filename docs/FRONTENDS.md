@@ -720,7 +720,7 @@ loading still analyses executables once and resolves display metadata, but this
 work no longer blocks the UI thread. No persistent derived-data database or new
 user refresh requirement is introduced.
 
-## Desktop focus and import display prompt
+## Desktop focus and import launch-settings prompt
 
 In control settings, mouse clicks and scrolling must not force navigation focus
 back to the first registered page widget. A clicked skin hotspot may own an egui
@@ -736,8 +736,11 @@ viewport-bounded fixed dimensions and an internal scroll area. Assignment labels
 and feedback do not resize or reposition the window. Cancel assignment retains
 its place while disabled outside capture, keeping the controls stationary.
 
-The modal **PocketPC display settings** prompt after import consumes its own
-controller buttons: **South = Not Now**, **East = Settings**. Their displayed
+The modal **PocketPC launch settings** prompt combines screen/orientation help,
+conditional FPS advice and a GPU-profile reminder for detected OpenGL ES titles.
+The shared detector and GPU profile policy are described in
+[the graphics guide](GPU.md#pocketpc-graphics-compatibility-options).
+It consumes its own controller buttons: **South = Not Now**, **East = Settings**. Their displayed
 markings come from the active controller (for example, Deck A/B or Switch B/A),
 with explicit positions as the unknown-label fallback. Literal keyboard A/B
 shortcuts remain available and are indicated separately. These actions do not

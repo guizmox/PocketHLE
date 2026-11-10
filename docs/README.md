@@ -13,6 +13,7 @@ source identifiers, paths and original product names retain their spelling.
 | [ANDROID-GRAPHICS-DIAGNOSTICS.md](ANDROID-GRAPHICS-DIAGNOSTICS.md) | Android opt-in graphics/NV log collection and measurement limits |
 | [STEAMDECK.md](STEAMDECK.md) | Steam Deck profile through Proton, controller gestures and shared Windows package |
 | [GTSHELL.md](GTSHELL.md) | Optional Gizmondo shell profiles, local XML DOM and separate SD cards |
+| [COMPATIBILITY.md](COMPATIBILITY.md) | Maintainer test-library inventory for PocketPC/Windows Mobile and Gizmondo; evidence limits |
 | [GIZMONDO.md](GIZMONDO.md) | Device services, imports and dated compatibility reports |
 | [COLORS.md](COLORS.md) | Colors save/wallet/server contracts and scoped measurements |
 | [OPTIMIZATIONS.md](OPTIMIZATIONS.md) | Always-on optimizations and architecture guards |

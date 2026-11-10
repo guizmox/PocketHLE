@@ -345,6 +345,10 @@ that diagnostic watchdog masked the original freeze in earlier local tests.
 
 ## Reported game compatibility
 
+The complete maintainer catalogue, including prototypes, utilities and PocketPC
+software, is listed in [the test-library inventory](COMPATIBILITY.md). Its names
+do not replace the reported results and known issues below.
+
 The baseline records maintainer-reported results from 2026-10-12.
 Later observations are identified in the individual rows. Results apply to the
 build and settings tested and do not cover every mode or every release variant.

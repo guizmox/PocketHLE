@@ -4419,7 +4419,7 @@ software and the native renderer.
 missing. Explicit saved Software choices remain honored. Per-game choices are
 Emulator default / Software / GPU; restart the game after changing the backend.
 Windows uses OpenGL through WGL; Android uses EGL/GLES. Linux uses the shared
-frontend; see [desktop parity](FRONTENDS.md#native-service-parity) for platform limits.
+frontend; see [desktop parity](FRONTENDS.md#windowslinux-native-service-parity) for platform limits.
 
 Anisotropic filtering offers Off, 2x, 4x and 8x, capped to driver support. It is
 available only with GPU rendering. Upscaling and image filters are presentation

@@ -61,29 +61,6 @@ branch on renderer-name substrings can consequently select different paths.
 
 ## PocketPC graphics compatibility options
 
-**Intel 2700G depth-bias compatibility** retains the reference driver's integer
-encoding: ignore the slope factor, arithmetic-shift the signed 16.16 units,
-and clamp the signed magnitude. The constant offset is modeled in the 16.16
-primitive-input domain, independently of the advertised 24-bit depth storage.
-This is an inferred hardware model, based on the driver's fixed-point vertex
-and command path, rather than a claim of bit-exact 2700G rasterization. It
-restores the continuous projected headlight pass in GeoRally EX without a
-title check, binary patch or disabled depth testing.
-
-Software applies that normalized constant directly. Native GL/GLES measures
-the host polygon-offset step once per renderer/depth format on the first
-nonzero Intel-biased draw, using a temporary 2x2 target. The measured step is
-cached; subsequent draws use native polygon offset without readbacks, shader
-depth writes or additional rendering passes. The setup preserves the live
-surface, clears its temporary resources and invalidates only the affected
-host state caches. It does not run for an inactive profile or zero bias.
-
-The stronger constant offset can change shadows or decals in other applications
-using this profile. Foreground occlusion remains enabled. The ordinary GLES
-offset policy, guest depth-bit queries, render scaling, presentation, screenshots
-and recordings retain their existing paths. Shared code serves desktop and
-Android; native GL/GLES tests cover both depth formats and 1x/2x rendering.
-
 PocketPC games select **GPU compatibility profile** in their own **Graphics**
 settings, immediately above **GPU rendering**, on desktop and Android:
 
@@ -107,6 +84,31 @@ identifies OpenGL ES, the GPU compatibility profile. The FPS detector and messag
 are shared across desktop and Android. Import advice does not select a GPU profile
 or use game names. NVIDIA selection gates extension advertisement and entry points;
 it permits existing program detection rather than forcing combiner rendering.
+
+### Intel 2700G depth-bias model
+
+**Intel 2700G depth-bias compatibility** retains the reference driver's integer
+encoding: ignore the slope factor, arithmetic-shift the signed 16.16 units,
+and clamp the signed magnitude. The constant offset is modeled in the 16.16
+primitive-input domain, independently of the advertised 24-bit depth storage.
+This is an inferred hardware model, based on the driver's fixed-point vertex
+and command path, rather than a claim of bit-exact 2700G rasterization. It
+restores the continuous projected headlight pass in GeoRally EX without a
+title check, binary patch or disabled depth testing.
+
+Software applies that normalized constant directly. Native GL/GLES measures
+the host polygon-offset step once per renderer/depth format on the first
+nonzero Intel-biased draw, using a temporary 2x2 target. The measured step is
+cached; subsequent draws use native polygon offset without readbacks, shader
+depth writes or additional rendering passes. The setup preserves the live
+surface, clears its temporary resources and invalidates only the affected
+host state caches. It does not run for an inactive profile or zero bias.
+
+The stronger constant offset can change shadows or decals in other applications
+using this profile. Foreground occlusion remains enabled. The ordinary GLES
+offset policy, guest depth-bit queries, render scaling, presentation, screenshots
+and recordings retain their existing paths. Shared code serves desktop and
+Android; native GL/GLES tests cover both depth formats and 1x/2x rendering.
 
 ## PVRTC texture capability
 
