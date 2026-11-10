@@ -1725,7 +1725,7 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         // The ARB combine tokens and operations are identical to GLES 1.1 core.
         // Older clients (including OGLESVirgin) still query the extension name.
         pocket_gles::GL_EXTENSIONS => {
-            "GL_ARB_texture_env_combine GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_dxt1 GL_ANGLE_texture_compression_dxt3 GL_ANGLE_texture_compression_dxt5 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format"
+            "GL_ARB_texture_env_combine GL_IMG_texture_compression_pvrtc GL_AMD_compressed_ATC_texture GL_ATI_texture_compression_atitc GL_EXT_texture_compression_dxt1 GL_ANGLE_texture_compression_dxt3 GL_ANGLE_texture_compression_dxt5 GL_EXT_texture_lod_bias GL_SGIS_texture_lod GL_OES_compressed_paletted_texture GL_OES_query_matrix GL_OES_point_size_array GL_OES_point_sprite GL_OES_read_format"
         }
         _ => {
             with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
@@ -4075,6 +4075,56 @@ mod tests {
     pub(super) const SCRATCH: u32 = 0x2000_0000;
 
     #[test]
+    fn advertised_pvrtc_formats_accept_uploads_and_whole_level_replacement() {
+        use pocket_gles::*;
+        let _g = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        for format in [
+            GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG,
+            GL_COMPRESSED_RGB_PVRTC_2BPPV1_IMG,
+            GL_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG,
+            GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG,
+        ] {
+            let size = texture::compressed_image_size(format, 16, 8).unwrap() as u32;
+            cpu.write_mem(SCRATCH, &vec![0; size as usize]).unwrap();
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_compressed_tex_image_2d,
+                &[GL_TEXTURE_2D, 0, format, 16, 8, 0, size, SCRATCH],
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_compressed_tex_sub_image_2d,
+                &[GL_TEXTURE_2D, 0, 0, 0, 16, 8, format, size, SCRATCH],
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_compressed_tex_sub_image_2d,
+                &[GL_TEXTURE_2D, 0, 0, 0, 8, 8, format, size, SCRATCH],
+            );
+            assert_eq!(
+                call(&mut cpu, &mut kernel, gl_get_error, &[]),
+                GL_INVALID_OPERATION
+            );
+            let mip_size = texture::compressed_image_size(format, 1, 1).unwrap() as u32;
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_compressed_tex_image_2d,
+                &[GL_TEXTURE_2D, 1, format, 1, 1, 0, mip_size, SCRATCH],
+            );
+            assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        }
+    }
+
+    #[test]
     fn compressed_format_queries_and_extension_names_match_decoders() {
         use pocket_gles::*;
         let _g = guard();
@@ -4091,6 +4141,7 @@ mod tests {
             .find(|s| s.contains("GL_EXT_texture_compression_dxt1"))
             .unwrap();
         let names: std::collections::HashSet<_> = text.split_whitespace().collect();
+        assert!(names.contains("GL_IMG_texture_compression_pvrtc"));
         assert!(names.contains("GL_ANGLE_texture_compression_dxt3"));
         assert!(names.contains("GL_ANGLE_texture_compression_dxt5"));
         assert!(!names.contains("GL_EXT_texture_compression_s3tc"));

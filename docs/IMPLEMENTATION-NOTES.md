@@ -5014,8 +5014,9 @@ small mip levels; decode those physical dimensions then crop to logical size.
 Require power-of-two dimensions, reject short payloads and nonzero borders.
 The existing native compressed upload path may be used when the host supports
 the format; otherwise both backends consume the same decoded RGBA data.
-This adds full-image upload formats, not compressed subimage support; do not
-advertise the complete IMG extension until its remaining entry points conform.
+This initial addition covered full-image uploads only. Whole-level compressed
+replacement is now implemented and tested; the current capability advertisement
+and restrictions are documented in GPU.md.
 Spec: https://registry.khronos.org/OpenGL/extensions/IMG/IMG_texture_compression_pvrtc.txt
 Dependency notices are retained under licenses/texture2ddecoder/.
 

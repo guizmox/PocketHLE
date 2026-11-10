@@ -61,6 +61,21 @@ The PocketPC switch does not alter Gizmondo's existing policy. Both launchers
 explicitly configure the session gate, independently of the GoForce driver and
 Intel 2700G depth-bias profiles. CLI launches retain their existing default.
 
+## PVRTC texture capability
+
+Both renderers expose `GL_IMG_texture_compression_pvrtc` alongside its four
+PVRTC1 RGB/RGBA 2bpp/4bpp formats in `GL_COMPRESSED_TEXTURE_FORMATS`. Full
+uploads, explicit small mip levels and whole-level compressed replacement use
+the shared texture validation/decoding path. Partial PVRTC rectangles remain
+invalid, as required by the extension. A host without native PVRTC support uses
+the existing decoder and uploads RGBA texels; host extension support does not
+control the guest capability.
+
+Clients such as DoomGLES 2700G check the extension string before loading their
+compressed assets. Listing the formats without the extension leaves those
+textures unloaded. Advertising this implemented capability is shared across
+platforms and does not require a device profile or game-specific detection.
+
 ## EGL surfaces and shared objects
 
 By default, configuration 1 is RGB565 and configuration 2 is RGBA8888.
