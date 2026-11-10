@@ -324,8 +324,13 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitPreparedImport<
         let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
         let pending = take_prepared_import(&root, token as u64)?;
         let mut library = Library::open(&root)?;
+        let before = pocket_library::import_setup::Presence::read(library.games(), &root);
         let entries = library.apply_prepared_import(pending, allow_updates != 0)?;
-        let values = entries
+        let setup_requests = library.config().first_import_setup.requests(
+            before,
+            pocket_library::import_setup::Presence::read(&entries, &root),
+        );
+        let mut values = entries
             .iter()
             .map(|entry| -> anyhow::Result<serde_json::Value> {
                 let mut value = serde_json::to_value(entry)?;
@@ -344,6 +349,9 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitPreparedImport<
                 Ok(value)
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
+        if let Some(first) = values.first_mut() {
+            first["first_import_setup"] = serde_json::to_value(setup_requests)?;
+        }
         if entries.len() == 1 && !entries[0].source_cab.starts_with("gzga-collection:") {
             Ok(serde_json::to_string(&values[0])?)
         } else {
@@ -537,6 +545,33 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_readConfig<'local>(
         Ok(j) => new_jstring(&env, j),
         Err(e) => new_jstring(&env, error_json(&format!("readConfig: {e:#}"))),
     }
+}
+
+/// Finish first-import setup by merging only the selected fields into current settings.
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_finishImportSetup<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    choices_json: JString<'local>,
+) -> jstring {
+    let result = (|| -> anyhow::Result<()> {
+        let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
+        let body = jstring_to_string(&mut env, choices_json).context("missing setup choices")?;
+        let choices: pocket_library::import_setup::Choices = serde_json::from_str(&body)?;
+        pocket_library::import_setup::save(
+            &root,
+            pocket_library::LauncherProfile::Standard,
+            &choices,
+        )?;
+        Ok(())
+    })();
+    new_jstring(
+        &env,
+        result
+            .map(|_| "{\"ok\":true}".to_owned())
+            .unwrap_or_else(|error| error_json(&format!("finishImportSetup: {error:#}"))),
+    )
 }
 
 #[no_mangle]

@@ -110,6 +110,30 @@ offset policy, guest depth-bit queries, render scaling, presentation, screenshot
 and recordings retain their existing paths. Shared code serves desktop and
 Android; native GL/GLES tests cover both depth formats and 1x/2x rendering.
 
+## Native fixed-point vertex attributes
+
+Advertising `GL_FIXED` fetch does not guarantee that the host preserves exact
+16.16 coordinates. During renderer creation, supported hosts undergo one small
+private framebuffer check against the existing float conversion. It covers
+positive, negative, fractional and extreme values, plus implicit components of
+two-, three- and four-component arrays. Float equality and deliberate inequality
+are controls; failure or an inconclusive check disables native fixed fetch for
+that renderer. There is no driver-name or application-name selection.
+
+The existing stream builder then converts fixed components to `GL_FLOAT` before
+upload, preserving capture, VBO bindings, strides and index semantics. Other
+native attribute types remain eligible. Transforms, lighting and rasterization
+still run on the host GPU. The check is shared by desktop and Android and does
+not change the Intel depth-bias model or Gizmondo driver rules.
+
+This addresses PowerVR SDK Vase/Trilinear backgrounds on hosts where fixed `1.0`
+arrives above `1.0` and is clipped. It does not move clip planes, add coordinate
+epsilons or modify guest binaries. Validation uses a temporary 8x3 RGBA target,
+at most three tiny readbacks, and releases its resources before guest rendering.
+The result is stored per renderer; no validation or readback occurs per draw.
+Hosts that pass retain native fetch. Failed hosts pay CPU conversion costs for
+fixed streams, with four bytes per component before and after conversion.
+
 ## PVRTC texture capability
 
 Both renderers expose `GL_IMG_texture_compression_pvrtc` alongside its four

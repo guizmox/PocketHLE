@@ -88,6 +88,9 @@ object NativeBridge {
     /** Persists the launcher config from a JSON blob. */
     @JvmStatic external fun writeConfig(libraryRoot: String, configJson: String): String
 
+    /** Merge first-import choices without replacing unrelated settings or game data. */
+    @JvmStatic external fun finishImportSetup(libraryRoot: String, choicesJson: String): String
+
     /** Returns the per-game settings as JSON. */
     @JvmStatic external fun readGameSettings(libraryRoot: String, id: String): String
 

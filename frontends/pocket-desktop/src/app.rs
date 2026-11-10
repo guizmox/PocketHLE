@@ -2,6 +2,8 @@
 
 #[path = "stylus_controls_ui.rs"]
 mod stylus_controls_ui;
+#[path = "import_setup_ui.rs"]
+mod import_setup_ui;
 #[path = "add_data_ui.rs"]
 mod add_data_ui;
 #[path = "add_data_prompt.rs"]
@@ -298,6 +300,8 @@ pub struct PocketLauncher {
     data_game: Option<String>,
     demo_import: Option<(String, String)>,
     pending_import: Option<PreparedImport>,
+    first_import_setups: std::collections::VecDeque<pocket_library::import_setup::Platform>,
+    first_import_setup: Option<import_setup_ui::ImportSetupDraft>,
     pocketpc_import_options: std::collections::VecDeque<(String, pocket_library::gpu_profile::ImportAdvice)>,
     updating_import: bool,
     library_busy: bool,
@@ -758,11 +762,14 @@ pub enum UiEvent {
 #[derive(Debug)]
 pub struct ImportedGames {
     entries: Vec<GameEntry>,
+    first_import_setups: Vec<pocket_library::import_setup::Platform>,
     pocketpc_import_options: Vec<(String, pocket_library::gpu_profile::ImportAdvice)>,
 }
 
 impl ImportedGames {
-    fn analyze(entries: Vec<GameEntry>, library: &Library, existing_ids: &[String]) -> Self {
+    fn analyze(entries: Vec<GameEntry>, library: &Library, existing_ids: &[String], before: pocket_library::import_setup::Presence) -> Self {
+        let first_import_setups = library.config().first_import_setup.requests(
+            before, pocket_library::import_setup::Presence::read(&entries, library.root()));
         let pocketpc_import_options = entries
             .iter()
             .filter(|game| !existing_ids.contains(&game.id) && !library.is_demo_card(&game.id))
@@ -774,6 +781,7 @@ impl ImportedGames {
             .collect();
         Self {
             entries,
+            first_import_setups,
             pocketpc_import_options,
         }
     }
@@ -933,6 +941,8 @@ impl PocketLauncher {
             data_game: None,
             demo_import: None,
             pending_import: None,
+            first_import_setups: Default::default(),
+            first_import_setup: None,
             pocketpc_import_options: Default::default(),
             updating_import: false,
             library_busy: false,
@@ -1140,7 +1150,9 @@ impl PocketLauncher {
                 UiEvent::ImportFinished(Ok(ImportedGames {
                     entries,
                     pocketpc_import_options,
+                    first_import_setups,
                 })) => {
+                    self.first_import_setups.extend(first_import_setups);
                     self.pocketpc_import_options.extend(pocketpc_import_options);
                     self.library_busy = false;
                     let updated = self.updating_import;
@@ -2259,8 +2271,10 @@ impl PocketLauncher {
             std::thread::spawn(move || {
                 let result = Library::open_with_profile(root, profile)
                     .and_then(|mut lib| {
+                        let before = pocket_library::import_setup::Presence::read(lib.games(), lib.root());
+                        let existing_ids: Vec<_> = lib.games().iter().map(|game| game.id.clone()).collect();
                         let entries = lib.apply_prepared_import(pending, false)?;
-                        Ok(ImportedGames::analyze(entries, &lib, &[]))
+                        Ok(ImportedGames::analyze(entries, &lib, &existing_ids, before))
                     })
                     .map_err(|e| e.to_string());
                 let _ = tx.send(UiEvent::ImportFinished(result));
@@ -2313,8 +2327,9 @@ impl PocketLauncher {
                     .and_then(|mut lib| {
                         let existing_ids: Vec<_> =
                             lib.games().iter().map(|game| game.id.clone()).collect();
+                        let before = pocket_library::import_setup::Presence::read(lib.games(), lib.root());
                         let entries = lib.apply_prepared_import(pending, true)?;
-                        Ok(ImportedGames::analyze(entries, &lib, &existing_ids))
+                        Ok(ImportedGames::analyze(entries, &lib, &existing_ids, before))
                     })
                     .map_err(|e| e.to_string());
                 let _ = tx.send(UiEvent::ImportFinished(result));
@@ -4667,6 +4682,16 @@ impl PocketLauncher {
                         if down && matches!(control.as_str(),"South"|"East") {self.deck_library_actions.push(control.clone());ctx.request_repaint();}
                         continue;
                     }
+                    if self.first_import_setup.is_some() && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+                        if down {
+                            if control == "East" {
+                                if let Some(setup) = self.first_import_setup.as_mut() { setup.skip = true; }
+                            } else { self.controller_ui.press(&control); }
+                        } else { self.controller_ui.release(&control); }
+                        ctx.request_repaint();
+                        continue;
+                    }
                     if self.screen==Screen::Library && !self.library_busy && !self.pocketpc_import_options.is_empty() && self.rename_draft.is_none()
                         && self.file_dialog.is_none() && Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) {
                         if down && matches!(control.as_str(),"South"|"East") {self.deck_library_actions.push(control.clone());ctx.request_repaint();}
@@ -5452,10 +5477,12 @@ impl PocketLauncher {
                         .map_err(|e| e.to_string())?;
                     return Ok(None);
                 }
+                let before = pocket_library::import_setup::Presence::read(lib.games(), lib.root());
+                let existing_ids: Vec<_> = lib.games().iter().map(|game| game.id.clone()).collect();
                 let entries = lib
                     .apply_prepared_import(pending, false)
                     .map_err(|e| e.to_string())?;
-                Ok(Some(ImportedGames::analyze(entries, &lib, &[])))
+                Ok(Some(ImportedGames::analyze(entries, &lib, &existing_ids, before)))
             })();
             if let Some(result) = result.transpose() {
                 let _ = tx.send(UiEvent::ImportFinished(result));
@@ -6158,6 +6185,9 @@ impl eframe::App for PocketLauncher {
                     }
                 }
             }
+            return;
+        }
+        if self.ui_first_import_setup(ctx) {
             return;
         }
         if self.ui_pocketpc_import_options(ctx) {

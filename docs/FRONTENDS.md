@@ -36,6 +36,34 @@ and adapts touch/directional input without changing those dimensions. These
 settings are independent. Frame-limit inheritance and its existing help remain
 unchanged.
 
+## First-import setup
+
+After the first successful import of a new platform, a one-time assistant offers
+its global defaults. A multi-game ZIP or demo card opens one assistant, not one
+per title. Existing libraries and updates to installed games do not restart it.
+**Keep current settings** completes setup without changing the current choices.
+The `first_import_setup.gizmondo` and `first_import_setup.pocket_pc` configuration
+flags remember completion independently, including after games are removed.
+
+Desktop and Android offer Gizmondo supersampling and camera, Bluetooth, GPS and
+Internet/data bridges, initialized from the saved configuration. Supersampling
+uses the existing global OpenGL ES setting: enabling it starts at 2x unless a
+higher scale is already selected, and enables GPU rendering. It can also affect
+PocketPC GPU games; individual game renderer overrides remain effective. Hardware
+choices do not bypass host permissions.
+
+Android additionally offers Gizmondo Normal/Big directional controls and control
+overlap. **Big controls can reduce the game image size.** Allowing overlap keeps
+a larger game image, but controls may cover it. PocketPC instead keeps controls
+separate from the game image and offers Classic/Controller layouts and Normal/Big
+sizes. Its preview can be switched between portrait and landscape without
+changing the device orientation. Previews use the actual touch layout components;
+no game runs during setup. The existing PocketPC per-game display advice follows
+this assistant where applicable.
+
+Saving merges these choices into the latest profile configuration and preserves
+unrelated and unknown settings; game executables and library entries are unchanged.
+
 ## Desktop runtime launch profiles
 
 One `pockethle-gui` executable supports the standard profile and `--steam-deck`.

@@ -35,6 +35,7 @@ pub mod colors_save;
 pub mod frame_pacing;
 pub mod frame_rate;
 pub mod gpu_profile;
+pub mod import_setup;
 pub mod input_gestures;
 pub use frame_rate::FrameRateLimit;
 
@@ -1079,6 +1080,9 @@ pub struct LauncherConfig {
     /// Host-only GLES resolution: 1=native, 2=double all, 3=double QVGA only, 4=triple QVGA only, 5=quadruple QVGA only.
     #[serde(default = "default_gles_internal_resolution")]
     pub gles_internal_resolution: u8,
+    /// One-time first-import setup completion, independent for each platform.
+    #[serde(default)]
+    pub first_import_setup: import_setup::Completed,
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     /// Default CPU backend used when importing a new game.
@@ -1392,6 +1396,7 @@ impl Default for LauncherConfig {
             gizmondo_identity_revision: identity_revision(),
             gpu_renderer: true,
             gles_internal_resolution: 1,
+            first_import_setup: Default::default(),
             schema_version: 1,
             default_cpu_backend: CpuBackendPref::default(),
             verbosity: 1,

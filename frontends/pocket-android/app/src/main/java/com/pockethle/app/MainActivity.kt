@@ -46,7 +46,7 @@ class MainActivity : HostKeyActivity() {
     private var pendingDataGameId: String? = null
 
     private fun pickData(entry: GameEntry) {
-        if (!libraryBusy && addDataModel.step.value == AddDataModel.Step.Idle) {
+        if (!libraryBusy && !firstImportActive && addDataModel.step.value == AddDataModel.Step.Idle) {
             pendingDataGameId = entry.id
             addDataPicker.launch(arrayOf("*/*"))
         }
@@ -140,6 +140,13 @@ class MainActivity : HostKeyActivity() {
         super.onStop()
     }
 
+    private val firstImportQueue = java.util.ArrayDeque<String>()
+    private var firstImportDialog: ImportSetupDialog? = null
+    private var firstImportLoading = false
+    private var restoredFirstImport: JSONObject? = null
+    private val firstImportActive: Boolean
+        get() = firstImportQueue.isNotEmpty() || firstImportDialog != null || firstImportLoading
+
     private val importOptionsQueue = java.util.ArrayDeque<JSONObject>()
     private var importOptionsDialog: AlertDialog? = null
     private var waitingForImportSettings = false
@@ -205,6 +212,18 @@ class MainActivity : HostKeyActivity() {
         setSupportActionBar(findViewById<Toolbar>(R.id.toolbar))
 
         rootDir = LibraryPaths.root(this)
+        savedInstanceState?.getString("first_import_queue")?.let { raw ->
+            runCatching { JSONArray(raw) }.getOrNull()?.let { queue ->
+                for (i in 0 until queue.length()) queue.optString(i).takeIf { it in listOf("gizmondo", "pocket_pc") }?.let { firstImportQueue.addLast(it) }
+            }
+        }
+        restoredFirstImport = savedInstanceState?.getString("first_import_draft")?.let { runCatching { JSONObject(it) }.getOrNull() }
+        savedInstanceState?.getString("import_options_queue")?.let { raw ->
+            runCatching { JSONArray(raw) }.getOrNull()?.let { queue ->
+                for (i in 0 until queue.length()) queue.optJSONObject(i)?.let { importOptionsQueue.addLast(it) }
+            }
+        }
+        waitingForImportSettings = savedInstanceState?.getBoolean("waiting_import_settings", false) ?: false
         pendingDataGameId = savedInstanceState?.getString("add_data_game_id")
         addDataModel = androidx.lifecycle.ViewModelProvider(this)[AddDataModel::class.java]
         emptyState = findViewById(R.id.empty_state)
@@ -238,7 +257,7 @@ class MainActivity : HostKeyActivity() {
         })
 
         findViewById<FloatingActionButton>(R.id.fab_import).setOnClickListener {
-            if (!libraryBusy) importGame.launch(arrayOf("application/vnd.ms-cab-compressed", "application/x-rar-compressed", "application/zip", "application/octet-stream", "*/*"))
+            if (!libraryBusy && !firstImportActive) importGame.launch(arrayOf("application/vnd.ms-cab-compressed", "application/x-rar-compressed", "application/zip", "application/octet-stream", "*/*"))
         }
         lifecycleScope.launch {
             pendingReleaseUpdate = withContext(Dispatchers.IO) {
@@ -257,7 +276,7 @@ class MainActivity : HostKeyActivity() {
 
     private fun showReleaseUpdate() {
         val update = pendingReleaseUpdate ?: return
-        if (ReleaseUpdates.announced || libraryBusy || importOptionsDialog != null || importOptionsQueue.isNotEmpty() || dataDialog?.isShowing == true || isFinishing || isDestroyed ||
+        if (ReleaseUpdates.announced || libraryBusy || firstImportActive || importOptionsDialog != null || importOptionsQueue.isNotEmpty() || dataDialog?.isShowing == true || isFinishing || isDestroyed ||
             !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         ReleaseUpdates.announced = true
         pendingReleaseUpdate = null
@@ -274,7 +293,7 @@ class MainActivity : HostKeyActivity() {
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        if (libraryBusy) return true
+        if (libraryBusy || firstImportActive) return true
         return when (item.itemId) {
             R.id.action_backup -> { saveLibraryBackup(); true }
             R.id.action_restore -> { restoreBackup.launch(arrayOf("application/zip", "application/octet-stream", "*/*")); true }
@@ -306,6 +325,10 @@ class MainActivity : HostKeyActivity() {
     }
 
     override fun onSaveInstanceState(out: Bundle) {
+        out.putString("first_import_queue", JSONArray(firstImportQueue.toList()).toString())
+        out.putString("first_import_draft", (firstImportDialog?.snapshot() ?: restoredFirstImport)?.toString())
+        out.putString("import_options_queue", JSONArray(importOptionsQueue.toList()).toString())
+        out.putBoolean("waiting_import_settings", waitingForImportSettings)
         out.putString("add_data_game_id", pendingDataGameId)
         out.putBoolean("gizmondo_tab", gizmondoTab); super.onSaveInstanceState(out)
     }
@@ -387,6 +410,8 @@ class MainActivity : HostKeyActivity() {
     }
 
     override fun onDestroy() {
+        firstImportDialog?.dispose()
+        firstImportDialog = null
         importOptionsDialog?.setOnDismissListener(null)
         importOptionsDialog?.dismiss()
         importOptionsDialog = null
@@ -564,11 +589,72 @@ class MainActivity : HostKeyActivity() {
     }
 
     private fun enqueueImportOptions(entries: List<JSONObject>) {
-        entries.filter { it.optString("import_settings_message").isNotBlank() }.forEach { importOptionsQueue.addLast(it) }
+        entries.forEach { entry ->
+            entry.optJSONArray("first_import_setup")?.let { platforms ->
+                for (i in 0 until platforms.length()) {
+                    val platform = platforms.optString(i)
+                    if (platform in listOf("gizmondo", "pocket_pc") && !firstImportQueue.contains(platform)) firstImportQueue.addLast(platform)
+                }
+            }
+            if (entry.optString("import_settings_message").isNotBlank()
+                && importOptionsQueue.none { it.optString("id") == entry.optString("id") }) {
+                importOptionsQueue.addLast(JSONObject().put("id", entry.optString("id"))
+                    .put("display_name", entry.optString("display_name"))
+                    .put("import_settings_message", entry.optString("import_settings_message")))
+            }
+        }
         showNextImportOptions()
     }
 
+    private fun showNextFirstImportSetup() {
+        if (firstImportDialog != null || firstImportLoading || libraryBusy || waitingForImportSettings
+            || isFinishing || isDestroyed || !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
+        val platform = firstImportQueue.peekFirst() ?: return
+        firstImportLoading = true
+        lifecycleScope.launch {
+            val read = withContext(Dispatchers.IO) { runCatching { JSONObject(NativeBridge.readConfig(rootDir)) } }
+            firstImportLoading = false
+            read.fold(onSuccess = { raw ->
+                if (raw.has("error")) {
+                    firstImportQueue.pollFirst()
+                    Snackbar.make(recycler, raw.optString("error"), Snackbar.LENGTH_LONG).show()
+                    showNextImportOptions()
+                    return@fold
+                }
+                if (raw.optJSONObject("first_import_setup")?.optBoolean(platform, false) == true) {
+                    firstImportQueue.pollFirst(); restoredFirstImport = null
+                    showNextImportOptions(); return@fold
+                }
+                lateinit var setup: ImportSetupDialog
+                setup = ImportSetupDialog(this@MainActivity, platform, LauncherConfig.fromJson(raw),
+                    ::handleHostKeyEvent, restoredFirstImport?.takeIf { it.optString("platform") == platform }) { choices ->
+                    lifecycleScope.launch {
+                        val saved = withContext(Dispatchers.IO) {
+                            runCatching {
+                                val result = JSONObject(NativeBridge.finishImportSetup(rootDir, choices.toString()))
+                                check(result.optBoolean("ok", false)) { result.optString("error", "Could not save settings") }
+                            }
+                        }
+                        saved.fold(onSuccess = {
+                            setup.dispose(); firstImportDialog = null
+                            firstImportQueue.pollFirst(); restoredFirstImport = null
+                            showNextImportOptions()
+                        }, onFailure = { setup.failed(it.message ?: "Unknown error") })
+                    }
+                }
+                restoredFirstImport = null
+                firstImportDialog = setup
+                setup.show()
+            }, onFailure = {
+                firstImportQueue.pollFirst()
+                Snackbar.make(recycler, it.message ?: "Could not read setup settings", Snackbar.LENGTH_LONG).show()
+                showNextImportOptions()
+            })
+        }
+    }
+
     private fun showNextImportOptions() {
+        if (firstImportActive) { showNextFirstImportSetup(); return }
         if (isFinishing || isDestroyed || libraryBusy || waitingForImportSettings || importOptionsDialog != null) return
         val entry = importOptionsQueue.peekFirst() ?: return
         val dialog = AlertDialog.Builder(this).setTitle("PocketPC launch settings")
@@ -593,10 +679,8 @@ class MainActivity : HostKeyActivity() {
         try {
             if (raw.trimStart().startsWith("[")) {
                 val entries = GameEntry.listFromJson(raw)
-                if (confirmName) {
-                    val imported = JSONArray(raw)
-                    enqueueImportOptions((0 until imported.length()).map { imported.getJSONObject(it) })
-                }
+                val imported = JSONArray(raw)
+                enqueueImportOptions((0 until imported.length()).map { imported.getJSONObject(it) })
                 gizmondoTab = entries.firstOrNull()?.isGizmondo ?: true
                 findViewById<com.google.android.material.tabs.TabLayout>(R.id.platform_tabs).getTabAt(if (gizmondoTab) 0 else 1)?.select()
                 Snackbar.make(recycler, if (confirmName) "Imported ${entries.size} separate games." else "Imported or updated ${entries.size} games. Saves and settings kept.", Snackbar.LENGTH_LONG).show()
@@ -613,7 +697,7 @@ class MainActivity : HostKeyActivity() {
                 AlertDialog.Builder(this).setTitle("Import demo card")
                     .setMessage("Keep the original launcher or create a separate directory and library entry for each game?")
                     .setCancelable(false)
-                    .setNegativeButton("Keep launcher") { _,_ -> editGameName(id,name,"Confirm game name") }
+                    .setNegativeButton("Keep launcher") { _,_ -> editGameName(id,name,"Confirm game name") { enqueueImportOptions(listOf(obj)) } }
                     .setPositiveButton("Separate games") { _,_ ->
                         setLibraryBusy("Separating demo card games…")
                         lifecycleScope.launch {
@@ -626,13 +710,17 @@ class MainActivity : HostKeyActivity() {
                             }
                             split.fold(onSuccess={ entries ->
                                 refreshLibrary()
+                                enqueueImportOptions(listOf(obj))
                                 Snackbar.make(recycler,"Imported ${entries.size} separate games. Names can be edited from each game menu.",Snackbar.LENGTH_LONG).show()
-                            },onFailure={ e -> Snackbar.make(recycler,"Could not split card: ${e.message}",Snackbar.LENGTH_LONG).show() })
+                            },onFailure={ e ->
+                                enqueueImportOptions(listOf(obj))
+                                Snackbar.make(recycler,"Could not split card: ${e.message}",Snackbar.LENGTH_LONG).show()
+                            })
                         }
                     }.show()
             } else if (confirmName) editGameName(id, name, "Confirm game name") {
                 enqueueImportOptions(listOf(obj))
-            }
+            } else enqueueImportOptions(listOf(obj))
             Snackbar.make(
                 recycler,
                 if (confirmName) getString(R.string.import_success, name) else "Updated $name; saves and settings kept.",
@@ -674,7 +762,7 @@ class MainActivity : HostKeyActivity() {
     private var launchPending = false
 
     private fun launchGame(entry: GameEntry) {
-        if (libraryBusy || launchPending) return
+        if (libraryBusy || firstImportActive || launchPending) return
         launchPending = true
         lifecycleScope.launch {
             try {
@@ -922,7 +1010,7 @@ class MainActivity : HostKeyActivity() {
     }
 
     private fun startGame(entry: GameEntry) {
-        if (libraryBusy) return
+        if (libraryBusy || firstImportActive) return
         startActivity(
             Intent(this, GameActivity::class.java)
                 .putExtra(GameActivity.EXTRA_GAME_ID, entry.id)
