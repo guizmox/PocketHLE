@@ -3934,6 +3934,71 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[ignore = "requires native GL/GLES; exact fixed clip boundaries and stream format transitions"]
+    fn gpu_fixed_clip_boundaries_match_float_with_client_arrays_and_vbos() {
+        for es in [false, true] {
+            for rgb565 in [false, true] {
+                for scale in [1, 2] {
+                    let mut c = native_ctx(es);
+                    c.target = raster::RenderTarget::with_format(64, 64, rgb565);
+                    c.gpu.as_mut().unwrap().set_surface_rgb565(rgb565).unwrap();
+                    c.set_internal_resolution(scale);
+                    c.state.intel2700g_depth_bias = true;
+                    c.set_client_state(GL_VERTEX_ARRAY, true);
+                    let buffer = c.gen_buffers(1)[0];
+                    for ty in [GL_FIXED, GL_FLOAT, GL_FIXED] {
+                        for size in [2, 3, 4] {
+                            for z in [-1., 1.] {
+                                let mut bytes = Vec::new();
+                                for (x, y) in [(-1., -1.), (1., -1.), (-1., 1.), (1., 1.)] {
+                                    for value in [x, y, z, 1.].into_iter().take(size as usize) {
+                                        bytes.extend(if ty == GL_FIXED {
+                                            fixed::from_f32(value).to_le_bytes()
+                                        } else {
+                                            value.to_le_bytes()
+                                        });
+                                    }
+                                }
+                                let mut mem = FakeMem { base: BASE, bytes };
+                                for vbo in [false, true] {
+                                    c.bind_buffer(GL_ARRAY_BUFFER, if vbo { buffer } else { 0 });
+                                    if vbo {
+                                        c.buffer_data(
+                                            GL_ARRAY_BUFFER,
+                                            mem.bytes.len(),
+                                            Some(&mem.bytes),
+                                            GL_DYNAMIC_DRAW,
+                                        );
+                                    }
+                                    c.set_vertex_pointer(size, ty, 0, if vbo { 0 } else { BASE });
+                                    c.current_color = if vbo {
+                                        [0., 1., 0., 1.]
+                                    } else {
+                                        [1., 0., 0., 1.]
+                                    };
+                                    c.clear_color = [0., 0., 0., 1.];
+                                    c.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                                    c.draw_arrays(&mut mem, GL_TRIANGLE_STRIP, 0, 4);
+                                    c.sync_gpu();
+                                    let expected = if vbo {
+                                        [0, 255, 0, 255]
+                                    } else {
+                                        [255, 0, 0, 255]
+                                    };
+                                    assert!(c.target.color.chunks_exact(4).all(|p| p == expected), "es={es}, rgb565={rgb565}, scale={scale}, ty={ty}, size={size}, z={z}, vbo={vbo}");
+                                    assert!(c.gpu_active());
+                                    assert_eq!(c.take_error(), GL_NO_ERROR);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     #[ignore = "requires native GL/GLES2; Colors snapshots, indices and stream/fallback switching"]
     fn gpu_colors_stream_refreshes_mutable_guest_data_and_reuses_storage() {
         let indices = [

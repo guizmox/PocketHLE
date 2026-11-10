@@ -1,6 +1,7 @@
 //! OpenGL 2.1 / GLES 2 offscreen rasterizer. Guest pointers never reach a driver.
 mod depth_bias;
 mod diagnostic;
+mod fixed_vertices;
 mod platform;
 mod readback;
 mod resolve;
@@ -1815,6 +1816,26 @@ impl Renderer {
             log::info!("GLES host OpenGL renderer: {label}");
             r.renderer_name = label;
             r.check()?;
+            if r.native_fixed {
+                // An advertised format is insufficient: some hosts move exact
+                // 16.16 clip-boundary coordinates outside the visible volume.
+                // Keep the existing float conversion when native fetch differs.
+                r.native_fixed = match fixed_vertices::validate(&mut r) {
+                    Ok(valid) => valid,
+                    Err(error) => {
+                        log::warn!("Native GL_FIXED validation unavailable: {error}");
+                        false
+                    }
+                };
+                log::info!(
+                    "GLES GL_FIXED vertex conversion: {}",
+                    if r.native_fixed {
+                        "native (validated)"
+                    } else {
+                        "CPU float conversion (native validation failed)"
+                    }
+                );
+            }
             Ok(r)
         }
     }
