@@ -5,6 +5,25 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class InternalResolutionSettingsTest {
+    @Test fun gpuCompatibilityProfilePersistsWithoutInheritingRetiredGlobalOptions() {
+        assertEquals("generic", GameSettings.fromJson(JSONObject()).gpuCompatibilityProfile)
+        for (profile in listOf("generic", "nvidia_goforce5500", "intel2700g")) {
+            val original = JSONObject().put("gpu_compatibility_profile", profile)
+                .put("gpu_renderer", false).put("future_setting", "kept")
+            val saved = GameSettings.fromJson(original).copy(screen = "landscape").toJson()
+            assertEquals(profile, GameSettings.fromJson(saved).gpuCompatibilityProfile)
+            assertEquals(false, GameSettings.fromJson(saved).gpuRenderer)
+            assertEquals("kept", saved.getString("future_setting"))
+        }
+        val legacy = JSONObject().put("pocketpc_intel2700g_depth_bias", true)
+            .put("pocketpc_nv_combiners", true).put("future_setting", "kept")
+        val saved = LauncherConfig.fromJson(legacy).toJson()
+        assertFalse(saved.has("pocketpc_intel2700g_depth_bias"))
+        assertFalse(saved.has("pocketpc_nv_combiners"))
+        assertEquals("kept", saved.getString("future_setting"))
+        assertEquals("generic", GameSettings.fromJson(legacy).gpuCompatibilityProfile)
+    }
+
     @Test fun eglFormatProfileDefaultsOffAndRoundTripsWithoutChangingOtherSettings() {
         assertFalse(GameSettings.fromJson(JSONObject()).pocketpcEglRgba8888Only)
         val original=JSONObject().put("pocketpc_gapi_columns",true).put("gpu_renderer",false).put("future_setting","kept")

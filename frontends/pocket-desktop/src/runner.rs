@@ -364,10 +364,9 @@ impl Runner {
                 .unwrap_or(launcher_config.gpu_renderer),
         );
         emu.set_gizmondo_goforce_driver(is_gizmondo);
-        emu.set_nv_combiner_allowed(is_gizmondo || launcher_config.pocketpc_nv_combiners);
-        emu.set_intel2700g_depth_bias(
-            !is_gizmondo && launcher_config.pocketpc_intel2700g_depth_bias,
-        );
+        let profile = game.settings.gpu_compatibility_profile;
+        emu.set_nv_combiner_allowed(is_gizmondo || profile.nvidia_combiners());
+        emu.set_intel2700g_depth_bias(!is_gizmondo && profile.intel_depth_bias());
         emu.set_gles_internal_resolution(launcher_config.gles_internal_resolution);
         log::info!("Gizmondo GPS configuration: gizmondo={} host_enabled={} fixed_enabled={} latitude={} longitude={}",is_gizmondo,launcher_config.gps_enabled,launcher_config.gps_fixed_enabled,launcher_config.gps_fixed_latitude,launcher_config.gps_fixed_longitude);
         let hardware = (

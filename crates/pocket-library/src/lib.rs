@@ -32,7 +32,9 @@ pub mod add_data;
 pub mod backup;
 pub mod center_tap;
 pub mod colors_save;
+pub mod frame_pacing;
 pub mod frame_rate;
+pub mod gpu_profile;
 pub mod input_gestures;
 pub use frame_rate::FrameRateLimit;
 
@@ -627,6 +629,9 @@ pub struct GameSettings {
     /// Offer only RGBA8888 EGL surfaces. Opt-in PocketPC compatibility profile.
     #[serde(default)]
     pub pocketpc_egl_rgba8888_only: bool,
+    /// PocketPC-only vendor compatibility, independent of the host renderer.
+    #[serde(default)]
+    pub gpu_compatibility_profile: gpu_profile::GpuCompatibilityProfile,
     /// Experimental OpenGL host rasterization; None inherits the global choice.
     #[serde(default)]
     pub gpu_renderer: Option<bool>,
@@ -803,6 +808,7 @@ impl Default for GameSettings {
             pocketpc_platform_type: String::new(),
             pocketpc_gapi_columns: false,
             pocketpc_egl_rgba8888_only: false,
+            gpu_compatibility_profile: Default::default(),
             gpu_renderer: None,
             cpu_backend: CpuBackendPref::default(),
             max_slices: default_max_slices(),
@@ -1052,13 +1058,6 @@ pub struct LauncherConfig {
 
     #[serde(default = "default_pocketpc_processor")]
     pub pocketpc_processor: String,
-    /// Reproduce the Intel 2700G WinCE driver's constant polygon depth bias.
-    /// All PocketPC applications may opt in; Gizmondo always keeps standard ES.
-    #[serde(default)]
-    pub pocketpc_intel2700g_depth_bias: bool,
-    /// Allow detected PocketPC clients to use NVIDIA AR10/AR11 programs.
-    #[serde(default = "default_pocketpc_nv_combiners")]
-    pub pocketpc_nv_combiners: bool,
     #[serde(default = "default_recording_format")]
     pub recording_format: String,
     /// Video recording JPEG quality preset: low, medium or high.
@@ -1368,10 +1367,6 @@ fn default_pocketpc_processor() -> String {
     "pxa270".into()
 }
 
-fn default_pocketpc_nv_combiners() -> bool {
-    true
-}
-
 fn default_desktop_vsync() -> bool {
     true
 }
@@ -1388,8 +1383,6 @@ impl Default for LauncherConfig {
             frame_rate_limit: FrameRateLimit::Fps60,
             desktop_vsync: true,
             pocketpc_processor: default_pocketpc_processor(),
-            pocketpc_intel2700g_depth_bias: false,
-            pocketpc_nv_combiners: true,
             recording_quality: default_recording_quality(),
             recording_format: default_recording_format(),
             device_preset_id: default_device_preset_id(),
@@ -4398,7 +4391,6 @@ mod tests {
         let default = LauncherConfig::default();
         assert!(default.gpu_renderer);
         assert_eq!(default.gles_internal_resolution, 1);
-        assert!(!default.pocketpc_intel2700g_depth_bias);
         let mut old_config = serde_json::to_value(&default).unwrap();
         old_config
             .as_object_mut()
@@ -7241,50 +7233,6 @@ fn android_directional_control_size_is_global_and_round_trips() {
         .as_object()
         .unwrap()
         .contains_key("android_pocketpc_controls_size"));
-}
-
-#[test]
-fn intel2700g_compatibility_is_opt_in_and_round_trips() {
-    let mut config = LauncherConfig::default();
-    let mut old = serde_json::to_value(&config).unwrap();
-    old.as_object_mut()
-        .unwrap()
-        .remove("pocketpc_intel2700g_depth_bias");
-    assert!(
-        !serde_json::from_value::<LauncherConfig>(old)
-            .unwrap()
-            .pocketpc_intel2700g_depth_bias
-    );
-    config.pocketpc_intel2700g_depth_bias = true;
-    let restored: LauncherConfig =
-        serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
-    assert!(restored.pocketpc_intel2700g_depth_bias);
-    assert_eq!(
-        restored.gles_internal_resolution,
-        config.gles_internal_resolution
-    );
-    assert_eq!(restored.gpu_renderer, config.gpu_renderer);
-}
-
-#[test]
-fn pocketpc_nv_combiners_preserve_default_and_round_trip_disabled() {
-    let mut config = LauncherConfig::default();
-    assert!(config.pocketpc_nv_combiners);
-    let mut old = serde_json::to_value(&config).unwrap();
-    old.as_object_mut().unwrap().remove("pocketpc_nv_combiners");
-    assert!(
-        serde_json::from_value::<LauncherConfig>(old)
-            .unwrap()
-            .pocketpc_nv_combiners
-    );
-    config.pocketpc_nv_combiners = false;
-    let restored: LauncherConfig =
-        serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
-    assert!(!restored.pocketpc_nv_combiners);
-    assert_eq!(
-        restored.pocketpc_intel2700g_depth_bias,
-        config.pocketpc_intel2700g_depth_bias
-    );
 }
 
 #[cfg(test)]

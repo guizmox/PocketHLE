@@ -84,20 +84,29 @@ offset policy, guest depth-bit queries, render scaling, presentation, screenshot
 and recordings retain their existing paths. Shared code serves desktop and
 Android; native GL/GLES tests cover both depth formats and 1x/2x rendering.
 
-The PocketPC options panel exposes **NVIDIA GoForce 5500 AR10/AR11 combiners**
-immediately below Intel 2700G depth-bias compatibility, on desktop and Android.
-It is a global PocketPC setting, applied on the next launch in software and GPU
-modes. The persisted `pocketpc_nv_combiners` flag defaults to true, including
-when absent from older configuration files, preserving detected-client behavior.
+PocketPC games select **GPU compatibility profile** in their own **Graphics**
+settings, immediately above **GPU rendering**, on desktop and Android:
 
-Disabling it gates extension advertisement and NV entry points and disables
-active combiner state in the session's contexts. New EGL contexts and client
-state resets preserve the gate. Enabling it permits the existing client detection;
-it does not force combiner rendering on applications that do not request it.
+| Profile | Compatibility behavior |
+| --- | --- |
+| Generic OpenGL ES (1.1, Common) | Standard behavior; no Intel bias or NVIDIA combiners. This is the default. |
+| NVIDIA GoForce 5500 (OpenGL ES 1.1, Common) | Allows detected clients to use AR10/AR11 combiners; standard depth bias. |
+| Intel 2700G (OpenGL ES 1.0, Common-Lite) | Enables the Intel depth-bias model; NVIDIA combiners disabled. |
 
-The PocketPC switch does not alter Gizmondo's existing policy. Both launchers
-explicitly configure the session gate, independently of the GoForce driver and
-Intel 2700G depth-bias profiles. CLI launches retain their existing default.
+The persisted per-game `gpu_compatibility_profile` enum replaces both global
+compatibility booleans. Old global values are ignored, not inherited; existing
+entries without the new field use Generic. Selection applies on the next launch
+in software and GPU modes and is ignored for Gizmondo. Gizmondo's existing driver
+and combiner policy and standalone CLI defaults are unchanged. The version/profile
+labels identify compatibility targets; they do not remove supported API entry
+points or change the host renderer identity.
+
+An imported PocketPC game receives one combined launch-settings prompt for
+screen/orientation, optional FPS advice and, when the existing executable analysis
+identifies OpenGL ES, the GPU compatibility profile. The FPS detector and message
+are shared across desktop and Android. Import advice does not select a GPU profile
+or use game names. NVIDIA selection gates extension advertisement and entry points;
+it permits existing program detection rather than forcing combiner rendering.
 
 ## PVRTC texture capability
 

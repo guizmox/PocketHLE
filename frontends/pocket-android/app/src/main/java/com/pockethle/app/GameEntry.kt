@@ -71,6 +71,7 @@ data class GameSettings(
     val rotation: String,
     val frameRateLimit: String? = null,
     val gpuRenderer: Boolean? = null,
+    val gpuCompatibilityProfile: String = "generic",
     val executableHeap: Boolean? = null,
     val dpadDeadzone: String = "large",
     val pocketpcTouchSteering: Boolean = false,
@@ -95,6 +96,7 @@ data class GameSettings(
         optJSONObject("stylus_stick")?.apply { remove("enabled");remove("controller") }
         put("frame_rate_limit", frameRateLimit ?: JSONObject.NULL)
         put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
+        put("gpu_compatibility_profile", gpuCompatibilityProfile)
         put("executable_heap", executableHeap ?: JSONObject.NULL)
         put("dpad_deadzone", dpadDeadzone)
         put("cpu_backend", cpuBackend)
@@ -158,6 +160,7 @@ data class GameSettings(
             pocketpcPlatformType = obj.optString("pocketpc_platform_type", ""),
             pocketpcGapiColumns = obj.optBoolean("pocketpc_gapi_columns", false),
             pocketpcEglRgba8888Only = obj.optBoolean("pocketpc_egl_rgba8888_only", false),
+            gpuCompatibilityProfile = obj.optString("gpu_compatibility_profile", "generic").takeIf { it in listOf("generic", "nvidia_goforce5500", "intel2700g") } ?: "generic",
             storageCardDir = if (obj.isNull("storage_card_dir")) null else obj.optString("storage_card_dir"),
             originalJson = obj.toString(),
         )
@@ -216,6 +219,8 @@ data class LauncherConfig(
     val keybindingsJson: String?,
 ) {
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
+        remove("pocketpc_intel2700g_depth_bias")
+        remove("pocketpc_nv_combiners")
         remove("android_display_scale") // Discard the removed manual presentation preference.
         remove("optimizations")
         remove("anisotropic_filtering")

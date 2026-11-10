@@ -50,6 +50,17 @@ class GameSettingsActivity : HostKeyActivity() {
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
             findPreference<androidx.preference.PreferenceCategory>("device_identity_category")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
+            findPreference<ListPreference>("gpu_compatibility_profile")?.apply {
+                isVisible = !NativeBridge.isGizmondoGame(rootDir, gameId)
+                entries = arrayOf("Generic OpenGL ES (1.1, Common)", "NVIDIA GoForce 5500 (OpenGL ES 1.1, Common)", "Intel 2700G (OpenGL ES 1.0, Common-Lite)")
+                entryValues = arrayOf("generic", "nvidia_goforce5500", "intel2700g")
+                value = current.gpuCompatibilityProfile
+                summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { "${it.entry}\nChoose the GPU targeted by this game. Applies in software and GPU rendering on the next launch." }
+                setOnPreferenceChangeListener { _, newValue ->
+                    current = current.copy(gpuCompatibilityProfile = newValue.toString())
+                    writeGameSettings(); true
+                }
+            }
             if (!NativeBridge.isGizmondoGame(rootDir, gameId)) {
                 val controlsCategory = findPreference<androidx.preference.PreferenceCategory>("controls_category")!!
                 val identityCategory = findPreference<androidx.preference.PreferenceCategory>("device_identity_category")!!

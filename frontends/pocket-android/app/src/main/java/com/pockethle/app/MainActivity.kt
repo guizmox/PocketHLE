@@ -140,6 +140,14 @@ class MainActivity : HostKeyActivity() {
         super.onStop()
     }
 
+    private val importOptionsQueue = java.util.ArrayDeque<JSONObject>()
+    private var importOptionsDialog: AlertDialog? = null
+    private var waitingForImportSettings = false
+    private val importSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        waitingForImportSettings = false
+        showNextImportOptions()
+    }
+
     private val importGame = registerForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
@@ -243,12 +251,13 @@ class MainActivity : HostKeyActivity() {
     override fun onResume() {
         super.onResume()
         if (!libraryBusy) refreshLibrary()
+        showNextImportOptions()
         showReleaseUpdate()
     }
 
     private fun showReleaseUpdate() {
         val update = pendingReleaseUpdate ?: return
-        if (ReleaseUpdates.announced || libraryBusy || dataDialog?.isShowing == true || isFinishing || isDestroyed ||
+        if (ReleaseUpdates.announced || libraryBusy || importOptionsDialog != null || importOptionsQueue.isNotEmpty() || dataDialog?.isShowing == true || isFinishing || isDestroyed ||
             !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         ReleaseUpdates.announced = true
         pendingReleaseUpdate = null
@@ -317,7 +326,7 @@ class MainActivity : HostKeyActivity() {
         editGameName(entry.id, entry.displayName, "Rename game")
     }
 
-    private fun editGameName(id: String, detectedName: String, title: String) {
+    private fun editGameName(id: String, detectedName: String, title: String, afterClose: (() -> Unit)? = null) {
         val input = android.widget.EditText(this).apply { setText(detectedName); selectAll(); isSingleLine = true }
         val dialog = AlertDialog.Builder(this).setTitle(title).setView(input)
             .setNegativeButton(android.R.string.cancel,null).setPositiveButton("Save",null).create()
@@ -330,6 +339,7 @@ class MainActivity : HostKeyActivity() {
                 else input.error=result?.optString("error") ?: "Could not save settings"
             }
         }
+        dialog.setOnDismissListener { afterClose?.invoke() }
         dialog.show()
     }
 
@@ -377,6 +387,9 @@ class MainActivity : HostKeyActivity() {
     }
 
     override fun onDestroy() {
+        importOptionsDialog?.setOnDismissListener(null)
+        importOptionsDialog?.dismiss()
+        importOptionsDialog = null
         dataDialog?.dismiss()
         dataDialog = null
         busyDialog?.dismiss()
@@ -550,12 +563,42 @@ class MainActivity : HostKeyActivity() {
         }
     }
 
+    private fun enqueueImportOptions(entries: List<JSONObject>) {
+        entries.filter { it.optString("import_settings_message").isNotBlank() }.forEach { importOptionsQueue.addLast(it) }
+        showNextImportOptions()
+    }
+
+    private fun showNextImportOptions() {
+        if (isFinishing || isDestroyed || libraryBusy || waitingForImportSettings || importOptionsDialog != null) return
+        val entry = importOptionsQueue.peekFirst() ?: return
+        val dialog = AlertDialog.Builder(this).setTitle("PocketPC launch settings")
+            .setMessage("${entry.optString("display_name")}\n\n${entry.optString("import_settings_message")}")
+            .setNegativeButton("Not now", null)
+            .setPositiveButton("Settings") { _, _ ->
+                waitingForImportSettings = true
+                importSettings.launch(Intent(this, GameSettingsActivity::class.java)
+                    .putExtra(GameSettingsActivity.EXTRA_GAME_ID, entry.getString("id"))
+                    .putExtra(GameSettingsActivity.EXTRA_GAME_NAME, entry.optString("display_name")))
+            }.create()
+        importOptionsDialog = dialog
+        dialog.setOnDismissListener {
+            importOptionsQueue.pollFirst()
+            importOptionsDialog = null
+            recycler.post { showNextImportOptions() }
+        }
+        dialog.show()
+    }
+
     private fun handleImportResult(raw: String, confirmName: Boolean = true) {
         try {
             if (raw.trimStart().startsWith("[")) {
                 val entries = GameEntry.listFromJson(raw)
-                gizmondoTab = true
-                findViewById<com.google.android.material.tabs.TabLayout>(R.id.platform_tabs).getTabAt(0)?.select()
+                if (confirmName) {
+                    val imported = JSONArray(raw)
+                    enqueueImportOptions((0 until imported.length()).map { imported.getJSONObject(it) })
+                }
+                gizmondoTab = entries.firstOrNull()?.isGizmondo ?: true
+                findViewById<com.google.android.material.tabs.TabLayout>(R.id.platform_tabs).getTabAt(if (gizmondoTab) 0 else 1)?.select()
                 Snackbar.make(recycler, if (confirmName) "Imported ${entries.size} separate games." else "Imported or updated ${entries.size} games. Saves and settings kept.", Snackbar.LENGTH_LONG).show()
                 return
             }
@@ -587,7 +630,9 @@ class MainActivity : HostKeyActivity() {
                             },onFailure={ e -> Snackbar.make(recycler,"Could not split card: ${e.message}",Snackbar.LENGTH_LONG).show() })
                         }
                     }.show()
-            } else if (confirmName) editGameName(id, name, "Confirm game name")
+            } else if (confirmName) editGameName(id, name, "Confirm game name") {
+                enqueueImportOptions(listOf(obj))
+            }
             Snackbar.make(
                 recycler,
                 if (confirmName) getString(R.string.import_success, name) else "Updated $name; saves and settings kept.",

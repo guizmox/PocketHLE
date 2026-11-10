@@ -298,7 +298,7 @@ pub struct PocketLauncher {
     data_game: Option<String>,
     demo_import: Option<(String, String)>,
     pending_import: Option<PreparedImport>,
-    pocketpc_import_options: std::collections::VecDeque<(String, bool)>,
+    pocketpc_import_options: std::collections::VecDeque<(String, pocket_library::gpu_profile::ImportAdvice)>,
     updating_import: bool,
     library_busy: bool,
     restore_archive: Option<std::path::PathBuf>,
@@ -758,7 +758,7 @@ pub enum UiEvent {
 #[derive(Debug)]
 pub struct ImportedGames {
     entries: Vec<GameEntry>,
-    pocketpc_import_options: Vec<(String, bool)>,
+    pocketpc_import_options: Vec<(String, pocket_library::gpu_profile::ImportAdvice)>,
 }
 
 impl ImportedGames {
@@ -768,9 +768,8 @@ impl ImportedGames {
             .filter(|game| !existing_ids.contains(&game.id) && !library.is_demo_card(&game.id))
             .filter(|game| !is_gizmondo_game(game, library.root()))
             .map(|game| {
-                let may_run_fast =
-                    crate::frame_pacing::may_run_fast(&game.executable_path(library.root()));
-                (game.id.clone(), may_run_fast)
+                let advice = pocket_library::gpu_profile::ImportAdvice::analyze(&game.executable_path(library.root()));
+                (game.id.clone(), advice)
             })
             .collect();
         Self {
@@ -2327,7 +2326,7 @@ impl PocketLauncher {
         if self.screen != Screen::Library || self.rename_draft.is_some() {
             return false;
         }
-        let Some((id, may_run_fast)) = self.pocketpc_import_options.front() else {
+        let Some((id, advice)) = self.pocketpc_import_options.front() else {
             return false;
         };
         let Some(game) = self.library.games().iter().find(|game| &game.id == id) else {
@@ -2344,18 +2343,14 @@ impl PocketLauncher {
         self.controller_ui.stop_repeat();
         crate::controller_ui::claim_modal_input(ctx);
         egui::CentralPanel::default().show(ctx, |_| {});
-        egui::Window::new("PocketPC display settings")
+        egui::Window::new("PocketPC launch settings")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_max_width(380.0);
                 ui.strong(&game.display_name);
-                ui.label("PocketPC games were designed for different screen sizes and orientations. If the game appears sideways, stretched, or cut off, you can adjust Screen and Rotate display in its launch settings.");
-                if *may_run_fast {
-                    ui.label("This game may run too fast at higher frame rates. If that happens, try setting an FPS limit in the same settings.");
-                }
-                ui.label("Would you like to open the launch settings now?");
+                ui.label(advice.message());
                 ui.horizontal(|ui| {
                     dismiss |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx, "Not Now ({South})")).clicked();
                     open_settings |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx, "Settings ({East})")).clicked();
@@ -2569,14 +2564,6 @@ impl PocketLauncher {
                 ui.add(egui::Label::new("Identity reported to ARM PocketPC games; applies next launch. Does not change CPU speed or backend. MIPS games retain MIPS identity.").wrap(true));
                 ui.end_row();
         });
-        ui.separator();
-        ui.heading("Graphics compatibility");
-        crate::controller_ui::checkbox(ui, &mut draft.pocketpc_intel2700g_depth_bias,
-            "Intel 2700G depth-bias compatibility");
-        ui.add(egui::Label::new("Use if projected lights or ground decals show through foreground objects. Reproduces the original WinCE driver's integer constant bias without its slope term, with 24-bit depth. Applies to PocketPC games on the next launch, in software and GPU modes.").wrap(true));
-        crate::controller_ui::checkbox(ui, &mut draft.pocketpc_nv_combiners,
-            "NVIDIA GoForce 5500 AR10/AR11 combiners");
-        ui.add(egui::Label::new("Enable NVIDIA GoForce 5500 combiner programs for PocketPC games that request them. Applies on the next launch, in software and GPU modes.").wrap(true));
         } else {
         let library_root = self.library.root().display().to_string();
         ui.add_space(10.0);
@@ -3063,6 +3050,17 @@ impl PocketLauncher {
                         .on_hover_text("Caps GAPI, DirectDraw and OpenGL ES presentations, not video recording FPS. GDI-only drawing is not capped. A cap does not speed up a slow game.");
                 });
                 ui.end_row();
+                if !is_gizmondo {
+                    ui.label("GPU compatibility profile");
+                    crate::controller_ui::ComboBox::from_id_source("game_gpu_compatibility_profile")
+                        .selected_text(draft.gpu_compatibility_profile.label())
+                        .show_ui(ui, |ui| {
+                            for profile in pocket_library::gpu_profile::GpuCompatibilityProfile::ALL {
+                                crate::controller_ui::selectable_value(ui, &mut draft.gpu_compatibility_profile, profile, profile.label());
+                            }
+                        }).response.on_hover_text("Choose the GPU targeted by this game. Applies in software and GPU rendering on the next launch.");
+                    ui.end_row();
+                }
                 ui.label("GPU rendering");
                 crate::controller_ui::ComboBox::from_id_source("game_gpu_renderer").selected_text(match draft.gpu_renderer { None => "Emulator default", Some(false) => "Software", Some(true) => "GPU" }).show_ui(ui, |ui| {
                     crate::controller_ui::selectable_value(ui, &mut draft.gpu_renderer, None, "Emulator default");

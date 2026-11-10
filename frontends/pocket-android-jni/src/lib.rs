@@ -323,11 +323,31 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitPreparedImport<
     let result = (|| -> anyhow::Result<String> {
         let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
         let pending = take_prepared_import(&root, token as u64)?;
-        let entries = Library::open(&root)?.apply_prepared_import(pending, allow_updates != 0)?;
+        let mut library = Library::open(&root)?;
+        let entries = library.apply_prepared_import(pending, allow_updates != 0)?;
+        let values = entries
+            .iter()
+            .map(|entry| -> anyhow::Result<serde_json::Value> {
+                let mut value = serde_json::to_value(entry)?;
+                value["is_gizmondo"] = pocket_library::is_gizmondo_game(entry, &root).into();
+                if allow_updates == 0
+                    && !pocket_library::is_gizmondo_game(entry, &root)
+                    && !library.is_demo_card(&entry.id)
+                {
+                    value["import_settings_message"] =
+                        pocket_library::gpu_profile::ImportAdvice::analyze(
+                            &entry.executable_path(&root),
+                        )
+                        .message()
+                        .into();
+                }
+                Ok(value)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         if entries.len() == 1 && !entries[0].source_cab.starts_with("gzga-collection:") {
-            Ok(serde_json::to_string(&entries[0])?)
+            Ok(serde_json::to_string(&values[0])?)
         } else {
-            Ok(serde_json::to_string(&entries)?)
+            Ok(serde_json::to_string(&values)?)
         }
     })();
     new_jstring(
