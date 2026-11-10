@@ -163,6 +163,7 @@ struct EglImage {
 }
 struct EglSurfaces {
     initialized: bool,
+    depthless_configs: bool,
     rgba8888_only: bool,
     config_locked: bool,
     contexts: HashMap<u32, EglContext>,
@@ -203,6 +204,7 @@ impl EglSurfaces {
         );
         Self {
             initialized: false,
+            depthless_configs: false,
             rgba8888_only: false,
             config_locked: false,
             contexts: HashMap::new(),
@@ -330,7 +332,11 @@ pub fn set_gizmondo_goforce_driver(enabled: bool) {
         }
     });
     SURFACES.with(|s| {
-        for group in s.borrow_mut().groups.values_mut() {
+        let mut s = s.borrow_mut();
+        if !s.config_locked {
+            s.depthless_configs = enabled;
+        }
+        for group in s.groups.values_mut() {
             group.set_goforce_profile(enabled);
         }
     });
@@ -1683,7 +1689,13 @@ fn gl_capability(pname: u32) -> Option<Vec<f32>> {
         pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH
         | pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH
         | pocket_gles::GL_MAX_TEXTURE_STACK_DEPTH => vec![16.],
-        pocket_gles::GL_DEPTH_BITS => vec![with_ctx(|c| c.state.depth_bits() as f32)],
+        pocket_gles::GL_DEPTH_BITS => vec![with_ctx(|c| {
+            if c.target.has_depth {
+                c.state.depth_bits() as f32
+            } else {
+                0.
+            }
+        })],
         pocket_gles::GL_STENCIL_BITS => vec![0.],
         pocket_gles::GL_ALPHA_BITS => vec![with_ctx(|c| if c.target.rgb565 { 0. } else { 8. })],
         pocket_gles::GL_RED_BITS | pocket_gles::GL_BLUE_BITS => {
@@ -2021,6 +2033,8 @@ const DISPLAY_HANDLE: u32 = 0x4547_0001;
 /// The RGB565 configuration; the optional profile exposes only RGBA8888.
 const CONFIG_HANDLE: u32 = 0x4547_0002;
 const CONFIG_RGBA_HANDLE: u32 = 0x4547_0005;
+const CONFIG_NODEPTH_HANDLE: u32 = 0x4547_0006;
+const CONFIG_RGBA_NODEPTH_HANDLE: u32 = 0x4547_0007;
 /// First window surface; later windows receive fresh handles.
 const SURFACE_HANDLE: u32 = 0x4547_0003;
 /// First context handle; subsequent creations receive distinct handles.
@@ -2285,7 +2299,7 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
             largest: false,
             mipmap: false,
             deleted: false,
-            buffers: Some(SurfaceBuffers::new_rgb565(w, h)),
+            buffers: Some(egl_config::Config::buffers(config, w, h)),
         });
         image.config = config;
         image.width = w;
@@ -2293,24 +2307,20 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
         image.window = Some(window);
         if active == handle {
             with_ctx(|c| {
-                if c.target.rgb565 != (config == CONFIG_HANDLE) {
-                    let mut replacement = if config == CONFIG_HANDLE {
-                        SurfaceBuffers::new_rgb565(w, h)
-                    } else {
-                        SurfaceBuffers::new(w, h)
-                    };
+                if c.target.rgb565 == egl_config::Config::is_rgba(config)
+                    || c.target.has_depth != egl_config::Config::has_depth(config)
+                {
+                    let mut replacement = egl_config::Config::buffers(config, w, h);
                     c.exchange_surface(&mut replacement);
                 } else {
                     c.target.resize(w, h);
                 }
             });
         } else if let Some(b) = image.buffers.as_mut() {
-            if b.target.rgb565 != (config == CONFIG_HANDLE) {
-                *b = if config == CONFIG_HANDLE {
-                    SurfaceBuffers::new_rgb565(w, h)
-                } else {
-                    SurfaceBuffers::new(w, h)
-                };
+            if b.target.rgb565 == egl_config::Config::is_rgba(config)
+                || b.target.has_depth != egl_config::Config::has_depth(config)
+            {
+                *b = egl_config::Config::buffers(config, w, h);
             } else {
                 b.target.resize(w, h);
             }
@@ -2318,12 +2328,16 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
         handle
     });
     if handle != 0 {
+        let depth = egl_config::Config::from_handle(config)
+            .unwrap()
+            .attribute(pocket_gles::EGL_DEPTH_SIZE)
+            .unwrap();
         log::info!(
-            "eglCreateWindowSurface() -> {w}×{h} {}",
-            if config == CONFIG_HANDLE {
-                "RGB565"
-            } else {
+            "eglCreateWindowSurface() -> {w}×{h} {} depth={depth}",
+            if egl_config::Config::is_rgba(config) {
                 "RGBA8888"
+            } else {
+                "RGB565"
             }
         );
     }
@@ -2372,13 +2386,7 @@ fn egl_query_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    let id: i32 = SURFACES.with(|s| {
-        if s.borrow().contexts[&handle].config == CONFIG_HANDLE {
-            1
-        } else {
-            2
-        }
-    });
+    let id = SURFACES.with(|s| egl_config::Config::config_id(s.borrow().contexts[&handle].config));
     ctx.cpu.write_mem(out, &id.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
@@ -2422,11 +2430,7 @@ fn allocate_surface(width: u32, height: u32, pixmap: Option<u32>, config: u32) -
                 largest: false,
                 mipmap: false,
                 deleted: false,
-                buffers: Some(if config == CONFIG_HANDLE {
-                    SurfaceBuffers::new_rgb565(width, height)
-                } else {
-                    SurfaceBuffers::new(width, height)
-                }),
+                buffers: Some(egl_config::Config::buffers(config, width, height)),
             },
         );
         handle
@@ -2486,7 +2490,7 @@ fn egl_create_pixmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     if !egl_surface_args(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if ctx.arg_u32(1)? == CONFIG_RGBA_HANDLE {
+    if egl_config::Config::is_rgba(ctx.arg_u32(1)?) {
         set_egl_error(pocket_gles::EGL_BAD_MATCH);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -2770,13 +2774,7 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let value: i32 = match attribute {
         pocket_gles::EGL_WIDTH => w as i32,
         pocket_gles::EGL_HEIGHT => h as i32,
-        EGL_CONFIG_ID => {
-            if config == CONFIG_HANDLE {
-                1
-            } else {
-                2
-            }
-        }
+        EGL_CONFIG_ID => egl_config::Config::config_id(config),
         pocket_gles::EGL_LARGEST_PBUFFER => largest as i32,
         0x3080 | 0x3081 => 0x305c, // NO_TEXTURE
         0x3082 => mipmap as i32,
@@ -6180,6 +6178,124 @@ mod tests {
     #[ignore = "requires native OpenGL"]
     fn gpu_egl_rgba_pbuffer_preserves_alpha_and_rejects_mismatched_context() {
         rgba_pbuffer_roundtrip(true);
+    }
+
+    #[test]
+    fn goforce_egl_selects_depthless_surfaces_without_changing_other_profiles() {
+        use pocket_gles::*;
+        fn read_u32(cpu: &mut StubCpu, addr: u32) -> u32 {
+            u32::from_le_bytes(cpu.read_mem(addr, 4).unwrap().try_into().unwrap())
+        }
+        let _g = guard();
+        reset_for_session();
+        assert_eq!(
+            egl_config::Config::handles(),
+            &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE]
+        );
+        set_gizmondo_goforce_driver(true);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_initialize,
+            &[DISPLAY_HANDLE, 0, 0],
+        );
+        for (attrs, expected) in [
+            (
+                vec![(EGL_RED_SIZE, 1), (EGL_GREEN_SIZE, 1), (EGL_BLUE_SIZE, 1)],
+                CONFIG_RGBA_NODEPTH_HANDLE,
+            ),
+            (vec![(EGL_DEPTH_SIZE, 16)], CONFIG_HANDLE),
+            (
+                vec![(EGL_ALPHA_SIZE, 8), (EGL_DEPTH_SIZE, 16)],
+                CONFIG_RGBA_HANDLE,
+            ),
+        ] {
+            write_egl_attributes(&mut cpu, &attrs);
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_choose_config,
+                    &[DISPLAY_HANDLE, SCRATCH, SCRATCH + 0x100, 1, SCRATCH + 0x104]
+                ),
+                EGL_TRUE
+            );
+            assert_eq!(read_u32(&mut cpu, SCRATCH + 0x100), expected);
+        }
+        // Two same-color contexts/surfaces with different attachments must
+        // restore the selected surface's depth capability on each rebind.
+        let mut pairs = Vec::new();
+        for config in [CONFIG_RGBA_NODEPTH_HANDLE, CONFIG_RGBA_HANDLE] {
+            let context = call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_context,
+                &[DISPLAY_HANDLE, config, 0, 0],
+            );
+            assert_ne!(context, 0);
+            write_egl_attributes(&mut cpu, &[(EGL_WIDTH, 8), (EGL_HEIGHT, 8)]);
+            let surface = call(
+                &mut cpu,
+                &mut kernel,
+                egl_create_pbuffer,
+                &[DISPLAY_HANDLE, config, SCRATCH],
+            );
+            assert_ne!(surface, 0);
+            pairs.push((context, surface, config));
+        }
+        for index in [0, 1, 0] {
+            let (context, surface, config) = pairs[index];
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_make_current,
+                    &[DISPLAY_HANDLE, surface, surface, context]
+                ),
+                EGL_TRUE
+            );
+            let expected = if index == 0 { 0 } else { 16 };
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_get_config_attrib,
+                    &[DISPLAY_HANDLE, config, EGL_DEPTH_SIZE, SCRATCH + 0x100]
+                ),
+                EGL_TRUE
+            );
+            assert_eq!(read_u32(&mut cpu, SCRATCH + 0x100), expected);
+            call(
+                &mut cpu,
+                &mut kernel,
+                gl_get_integerv,
+                &[GL_DEPTH_BITS, SCRATCH + 0x100],
+            );
+            assert_eq!(read_u32(&mut cpu, SCRATCH + 0x100), expected);
+            call(&mut cpu, &mut kernel, gl_enable, &[GL_DEPTH_TEST]);
+            assert!(with_ctx(|c| c.state.depth_test));
+            assert_eq!(with_ctx(|c| c.target.has_depth), index != 0);
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_query_surface,
+                    &[DISPLAY_HANDLE, surface, EGL_CONFIG_ID, SCRATCH + 0x100]
+                ),
+                EGL_TRUE
+            );
+            assert_eq!(
+                read_u32(&mut cpu, SCRATCH + 0x100),
+                egl_config::Config::config_id(config) as u32
+            );
+        }
+        reset_for_test(8, 8);
+        assert_eq!(
+            egl_config::Config::handles(),
+            &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE]
+        );
     }
 
     #[test]

@@ -322,6 +322,8 @@ pub struct RenderTarget {
     pub color: Vec<u8>,
     /// Window-space depth in `[0, 1]`, smaller is nearer.
     pub depth: Vec<f32>,
+    /// EGL may select a surface without depth storage, independently of GL state.
+    pub has_depth: bool,
 }
 
 impl RenderTarget {
@@ -333,6 +335,7 @@ impl RenderTarget {
             rgb565: false,
             color: vec![0u8; px * 4],
             depth: vec![1.0f32; px],
+            has_depth: true,
         }
     }
 
@@ -351,7 +354,9 @@ impl RenderTarget {
         if width == self.width && height == self.height {
             return;
         }
+        let has_depth = self.has_depth;
         *self = Self::with_format(width, height, self.rgb565);
+        self.has_depth = has_depth;
     }
 
     /// `glClear(GL_COLOR_BUFFER_BIT)` honouring the scissor box.
@@ -416,6 +421,9 @@ impl RenderTarget {
 
     /// `glClear(GL_DEPTH_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_depth(&mut self, value: f32, scissor: Option<(i32, i32, i32, i32)>) {
+        if !self.has_depth {
+            return;
+        }
         match self.scissor_bounds(scissor) {
             None => {}
             Some((x0, y0, x1, y1)) if self.covers_all(x0, y0, x1, y1) => {
@@ -927,7 +935,8 @@ fn raster_clipped(
             // Coplanar UI layers otherwise fail LEQUAL at scattered pixels.
             let z = (sv[2].z + w0 * (sv[0].z - sv[2].z) + w1 * (sv[1].z - sv[2].z) + offset)
                 .clamp(0., 1.);
-            if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
+            if target.has_depth && state.depth_test && !state.depth_func.test(z, target.depth[idx])
+            {
                 continue;
             }
 
@@ -1097,7 +1106,7 @@ fn write_fragment(
     if target.rgb565 {
         target.color[ci + 3] = 255;
     }
-    if state.depth_test && state.depth_write {
+    if target.has_depth && state.depth_test && state.depth_write {
         target.depth[idx] = z;
     }
     true
@@ -1149,7 +1158,7 @@ fn primitive_fragment(
     sprite: Option<([f32; 2], f32)>,
 ) -> bool {
     let idx = y as usize * target.width as usize + x as usize;
-    if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
+    if target.has_depth && state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
         return false;
     }
     let coordinate = |unit: usize| {

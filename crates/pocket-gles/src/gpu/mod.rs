@@ -2890,6 +2890,19 @@ impl Renderer {
     ) -> Result<(), String> {
         let _diagnostic =
             crate::graphics_diagnostic::Span::new(crate::graphics_diagnostic::Stage::Submit);
+        // Enabling GL_DEPTH_TEST cannot create an EGL depth attachment. Keep
+        // the guest enable/mask state intact while drawing depthless surfaces.
+        let depthless;
+        let state = if !target.has_depth && (state.depth_test || state.depth_write) {
+            depthless = PipelineState {
+                depth_test: false,
+                depth_write: false,
+                ..state.clone()
+            };
+            &depthless
+        } else {
+            state
+        };
         // A sampled high unit still needs its white fallback when its image
         // is incomplete and therefore absent from the enabled stage list.
         let wide_draw = stages.iter().any(|s| s.unit >= 4)

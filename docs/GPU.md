@@ -159,10 +159,47 @@ from selecting their alpha passes (as observed in DoomGLES).
 
 `eglChooseConfig` filters first, then sorts before truncating the output. EGL 1.1
 prefers more bits in explicitly requested nonzero color components, then a
-smaller total buffer size and configuration ID (other criteria are equal here).
+smaller total buffer size, smaller depth size and configuration ID (other
+criteria are equal here).
 Omitted, zero and DONT_CARE components do not affect that color preference.
 Queries, configuration IDs and readback describe the actual attachments.
 Incompatible context/surface pairs return EGL_BAD_MATCH.
+
+### Gizmondo depthless configurations
+
+The GoForce 4500 profile also offers depthless counterparts to the existing
+RGB565 and RGBA8888 configurations. The existing handles and IDs 1/2 retain
+their depth buffers; IDs 3/4 have depth size zero. Color quality choices remain
+available. Other device profiles keep their existing configuration catalogs.
+The catalog is fixed before the first initialization and follows the existing
+per-session/suspended-parent lifetime.
+
+The original Gizmondo `libGLES_CM.dll` supplied for validation (SHA-256
+`fbfaac966d0e7aacfb6f93cd71894bf8265a62bb5a7543e8f8050d2305bccd6d`)
+contains RGB565 configurations with depth sizes 16 and 0. Executing its ARM
+`eglChooseConfig` and sorting routines with RGB minima of one selects depth
+zero; adding a minimum depth of 16 selects the other configuration. PocketHLE
+retains its RGBA8888 enhancement while reproducing that attachment selection.
+Battlestations: Midway requests only those RGB minima. Forcing a depth buffer
+caused its intersecting water and terrain meshes to occlude each other instead
+of following the application's drawing order. No title detection, geometry
+change or depth-bias adjustment is used.
+
+Depth presence belongs to the surface and survives resize, parking and binding
+another surface. `GL_DEPTH_BITS` returns zero without an attachment. Guest depth
+enables and masks remain queryable and unchanged, but depth tests, writes and
+clears have no effect on a depthless surface in either renderer. Native depth
+storage may remain allocated internally; it is not exposed as a guest attachment.
+The shared implementation serves desktop and Android and preserves color,
+supersampling, screenshots and recording paths.
+
+This changes the result for GoForce 4500 applications which omit a depth request:
+they can now select painter-order rendering, as on the reference driver, rather
+than receiving forced depth occlusion. Applications needing depth must request
+it. Tests cover explicit depth requests, surface/context switches and both
+renderers at 1x/2x; they do not replace regression testing other Gizmondo titles.
+
+### PocketPC surface-format selection
 
 Each PocketPC game's **Graphics → OpenGL ES surface format** offers **Default
 (RGB565 + RGBA8888)** and **RGBA8888 only** on desktop and Android. The persisted
