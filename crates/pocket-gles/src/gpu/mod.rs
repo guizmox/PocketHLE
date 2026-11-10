@@ -1,4 +1,5 @@
 //! OpenGL 2.1 / GLES 2 offscreen rasterizer. Guest pointers never reach a driver.
+mod depth_bias;
 mod diagnostic;
 mod platform;
 mod readback;
@@ -1428,6 +1429,7 @@ pub struct Renderer {
     color: u32,
     depth: u32,
     depth_format: u32,
+    depth_bias_step: Option<(u32, f32)>,
     white: u32,
     width: u32,
     height: u32,
@@ -1647,6 +1649,7 @@ impl Renderer {
                 color: 0,
                 depth: 0,
                 depth_format: if depth24 { 0x81a6 } else { 0x81a5 },
+                depth_bias_step: None,
                 white: 0,
                 width: 0,
                 height: 0,
@@ -2889,6 +2892,18 @@ impl Renderer {
         self.last_wide_draw = wide_draw;
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
+        let (offset_factor, mut offset_units) = state.polygon_offset_parameters();
+        if state.intel2700g_depth_bias && state.polygon_offset && offset_units != 0. {
+            let step = match self.depth_bias_step {
+                Some((format, step)) if format == self.depth_format => step,
+                _ => {
+                    let step = unsafe { depth_bias::measure(self)? };
+                    self.depth_bias_step = Some((self.depth_format, step));
+                    step
+                }
+            };
+            offset_units /= state.polygon_offset_resolution() * step;
+        }
         let _gpu_diagnostic = diagnostic::Timer::scope(&self.diagnostic);
         self.scratch.clear();
         // Packed guest streams already retain their native component count.
@@ -3213,13 +3228,7 @@ impl Renderer {
                     state.color_mask[3] as u8,
                 );
                 self.toggle(GL_POLYGON_OFFSET_FILL, state.polygon_offset);
-                let (factor, mut units) = state.polygon_offset_parameters();
-                // Preserve the virtual 24-bit constant bias on ES2 hosts that
-                // only provide a 16-bit depth attachment.
-                if state.intel2700g_depth_bias && self.depth_format == 0x81a5 {
-                    units *= 65535. / 16777215.;
-                }
-                (self.gl.PolygonOffset)(factor, units);
+                (self.gl.PolygonOffset)(offset_factor, offset_units);
                 self.pipeline = Some(state.clone());
             }
             let lighting = transforms.filter(|t| t.lighting.enabled);
@@ -6475,6 +6484,9 @@ mod tests {
                         GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
                     )
                     .unwrap();
+                    // Neither the profile alone nor an unbiased draw needs
+                    // any host resolution measurement.
+                    let previous_step = gpu.depth_bias_step;
                     let foreground = triangle([0., 0., 1., 1.], -0.2);
                     gpu.draw(
                         &target,
@@ -6486,6 +6498,7 @@ mod tests {
                         [0; 6],
                     )
                     .unwrap();
+                    assert_eq!(gpu.depth_bias_step, previous_step);
                     let mut light = triangle([1., 0., 0., 1.], 0.3);
                     light[0].pos[2] = 0.2;
                     light[1].pos[2] = 0.4;
@@ -6532,6 +6545,52 @@ mod tests {
                         &[0, 255, 0, 255],
                         "coplanar es={es} format={format:x} scale={scale}"
                     );
+                    let measured = gpu.depth_bias_step;
+                    assert_eq!(measured.map(|x| x.0), Some(format));
+                    // A slightly separated decal needs fixed-input bias, not
+                    // merely an offset large enough to separate identical Z.
+                    state.polygon_units = -32.;
+                    let light = triangle([1., 0., 0., 1.], -0.2 + 1. / 2048.);
+                    // Clear the earlier green triangle's biased depth and
+                    // repeat against the original unbiased surface.
+                    gpu.clear(
+                        32,
+                        32,
+                        &state,
+                        [0.; 4],
+                        1.,
+                        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                    )
+                    .unwrap();
+                    state.polygon_offset = false;
+                    gpu.draw(
+                        &target,
+                        &state,
+                        GL_TRIANGLES,
+                        &foreground,
+                        &[],
+                        &HashMap::new(),
+                        [0; 6],
+                    )
+                    .unwrap();
+                    state.polygon_offset = true;
+                    gpu.draw(
+                        &target,
+                        &state,
+                        GL_TRIANGLES,
+                        &light,
+                        &[],
+                        &HashMap::new(),
+                        [0; 6],
+                    )
+                    .unwrap();
+                    gpu.read(&mut target).unwrap();
+                    assert_eq!(
+                        &target.color[pixel..pixel + 4],
+                        &[255, 0, 0, 255],
+                        "separated es={es} format={format:x} scale={scale}"
+                    );
+                    assert_eq!(gpu.depth_bias_step, measured);
                 }
             }
         }

@@ -293,6 +293,16 @@ impl PipelineState {
         }
     }
 
+    /// Model the bias in the 16.16 domain of the 2700G primitive input,
+    /// independently of the precision advertised for its depth attachment.
+    pub fn polygon_offset_resolution(&self) -> f32 {
+        if self.intel2700g_depth_bias {
+            65536.
+        } else {
+            65535.
+        }
+    }
+
     pub fn depth_bits(&self) -> u32 {
         if self.intel2700g_depth_bias {
             24
@@ -834,11 +844,7 @@ fn raster_clipped(
             - (sv[2].x - sv[0].x) * (sv[1].z - sv[0].z))
             / area;
         let (factor, units) = state.polygon_offset_parameters();
-        let resolution = if state.intel2700g_depth_bias {
-            16777215.
-        } else {
-            65535.
-        };
+        let resolution = state.polygon_offset_resolution();
         factor * dx.abs().max(dy.abs()) + units / resolution
     } else {
         0.
@@ -1590,6 +1596,43 @@ mod tests {
         }
         assert_eq!(scene(true), [0, 0, 255, 255]);
         assert_eq!(scene(false), [255, 0, 255, 255]);
+    }
+
+    #[test]
+    fn intel2700g_bias_uses_fixed_input_precision_not_depth_storage_precision() {
+        let mut target = RenderTarget::new(32, 32);
+        let mut state = PipelineState {
+            viewport: (0, 0, 32, 32),
+            depth_test: true,
+            intel2700g_depth_bias: true,
+            ..Default::default()
+        };
+        assert_eq!(state.depth_bits(), 24);
+        assert_eq!(state.polygon_offset_resolution(), 65536.);
+        let triangle = |z, color| {
+            [(-0.9, -0.9), (0.9, -0.9), (0., 0.9)].map(|(x, y)| primitive_vertex(x, y, z, color))
+        };
+        draw_triangle(
+            &mut target,
+            &state,
+            &|_, _, _| None,
+            &[],
+            triangle(0., [0., 0., 1., 1.]),
+        );
+        state.polygon_offset = true;
+        state.polygon_factor = -512.;
+        state.polygon_units = -32.;
+        draw_triangle(
+            &mut target,
+            &state,
+            &|_, _, _| None,
+            &[],
+            triangle(1. / 2048., [0., 1., 0., 1.]),
+        );
+        let pixel = (16 * 32 + 16) * 4;
+        assert_eq!(&target.color[pixel..pixel + 4], &[0, 255, 0, 255]);
+        state.intel2700g_depth_bias = false;
+        assert_eq!(state.polygon_offset_resolution(), 65535.);
     }
 
     #[test]
