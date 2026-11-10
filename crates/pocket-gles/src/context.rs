@@ -555,6 +555,7 @@ impl Context {
         fresh.nv_combiner_client = self.nv_combiner_client;
         fresh.nv_combiner_allowed = self.nv_combiner_allowed;
         fresh.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;
+        fresh.state.goforce4500_depth_tolerance = self.state.goforce4500_depth_tolerance;
         std::mem::swap(&mut fresh.target, &mut self.target);
         std::mem::swap(&mut fresh.gpu, &mut self.gpu);
         fresh.gpu_failed = self.gpu_failed;
@@ -782,9 +783,6 @@ impl Context {
     /// use this for pbuffers, pixmaps, reads or a retried/failed presentation.
     /// Guest clear values, masks, scissor and all other GL state stay unchanged.
     pub fn discard_window_depth(&mut self) {
-        if !self.target.has_depth {
-            return;
-        }
         if let Some(gpu) = self.gpu.as_mut() {
             if let Err(error) =
                 gpu.discard_window_depth(self.target.width, self.target.height, &self.state)
@@ -2538,11 +2536,6 @@ impl Context {
         } else {
             mask
         };
-        let mask = if self.target.has_depth {
-            mask
-        } else {
-            mask & !GL_DEPTH_BUFFER_BIT
-        };
         // Standard ES has no stencil attachment in this configuration.
         if mask & (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT) == 0 {
             return;
@@ -3614,32 +3607,53 @@ impl Context {
                 _ => {}
             }
 
-            // Stream primitives in their original order without allocating a triangle list.
-            let mut draw = |tri| {
-                raster::draw_triangle(&mut self.target, &self.state, &sample, &stages, tri);
-            };
-            match mode {
-                GL_TRIANGLES => {
-                    for c in verts.chunks_exact(3) {
-                        draw([c[0], c[1], c[2]]);
-                    }
-                }
-                GL_TRIANGLE_STRIP => {
-                    for i in 2..verts.len() {
-                        // Preserve alternating winding and the provoking vertex.
-                        if i % 2 == 0 {
-                            draw([verts[i - 2], verts[i - 1], verts[i]]);
-                        } else {
-                            draw([verts[i - 1], verts[i - 2], verts[i]]);
+            let compatibility_pass = self
+                .combiner_programs
+                .active()
+                .is_none()
+                .then(|| self.state.goforce_depth_color_pass())
+                .flatten()
+                .map(|mut pass| {
+                    // Apply the same clip-depth transform as the GPU before clipping.
+                    pass.depth_range = (0., 1.);
+                    pass
+                });
+            for (replay, pass) in std::iter::once(&self.state)
+                .chain(compatibility_pass.as_ref())
+                .enumerate()
+            {
+                // Stream primitives in their original order without allocating a triangle list.
+                let mut draw = |mut tri: [Vertex; 3]| {
+                    if replay != 0 {
+                        for v in &mut tri {
+                            v.pos[2] += raster::GOFORCE4500_DEPTH_TOLERANCE * (v.pos[2] - v.pos[3]);
                         }
                     }
-                }
-                GL_TRIANGLE_FAN => {
-                    for i in 2..verts.len() {
-                        draw([verts[0], verts[i - 1], verts[i]]);
+                    raster::draw_triangle(&mut self.target, pass, &sample, stages, tri);
+                };
+                match mode {
+                    GL_TRIANGLES => {
+                        for c in verts.chunks_exact(3) {
+                            draw([c[0], c[1], c[2]]);
+                        }
                     }
+                    GL_TRIANGLE_STRIP => {
+                        for i in 2..verts.len() {
+                            // Preserve alternating winding and the provoking vertex.
+                            if i % 2 == 0 {
+                                draw([verts[i - 2], verts[i - 1], verts[i]]);
+                            } else {
+                                draw([verts[i - 1], verts[i - 2], verts[i]]);
+                            }
+                        }
+                    }
+                    GL_TRIANGLE_FAN => {
+                        for i in 2..verts.len() {
+                            draw([verts[0], verts[i - 1], verts[i]]);
+                        }
+                    }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(),
             }
         })();
         verts.clear();
@@ -3938,70 +3952,6 @@ mod tests {
         });
         c.gpu_requested = true;
         c
-    }
-
-    fn depthless_surface_draw_order(gpu: Option<bool>) {
-        let mut c = ctx();
-        #[cfg(unix)]
-        if let Some(es) = gpu {
-            c = native_ctx(es);
-        }
-        #[cfg(not(unix))]
-        let _ = gpu;
-        c.state.depth_test = true;
-        c.state.depth_write = true;
-        c.set_client_state(GL_VERTEX_ARRAY, true);
-        for scale in [1, 2] {
-            c.set_internal_resolution(scale);
-            for has_depth in [true, false, true] {
-                c.target.has_depth = has_depth;
-                c.clear_color = [0., 0., 0., 1.];
-                c.clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-                for (z, color) in [(-0.5, [1., 0., 0., 1.]), (0.5, [0., 1., 0., 1.])] {
-                    c.current_color = color;
-                    let mut mem = FakeMem {
-                        base: BASE,
-                        bytes: floats(&[-1., -1., z, 1., -1., z, -1., 1., z, 1., 1., z]),
-                    };
-                    c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
-                    c.draw_arrays(&mut mem, GL_TRIANGLE_STRIP, 0, 4);
-                }
-                c.sync_gpu();
-                assert_eq!(
-                    pixel(&c, 32, 32),
-                    if has_depth {
-                        [255, 0, 0, 255]
-                    } else {
-                        [0, 255, 0, 255]
-                    }
-                );
-                assert!(c.state.depth_test && c.state.depth_write);
-                assert_eq!(c.take_error(), GL_NO_ERROR);
-            }
-        }
-        c.target.has_depth = false;
-        c.target.resize(32, 32);
-        assert!(!c.target.has_depth);
-        let mut parked = SurfaceBuffers::new(8, 8);
-        c.park_surface(&mut parked);
-        assert!(c.target.has_depth);
-        assert!(!parked.target.has_depth);
-        c.exchange_surface(&mut parked);
-        assert!(!c.target.has_depth);
-    }
-
-    #[test]
-    fn software_depthless_surface_ignores_depth_without_changing_guest_state() {
-        depthless_surface_draw_order(None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[ignore = "requires native GL/GLES; depthless surface and depthful transitions"]
-    fn native_depthless_surface_ignores_depth_without_changing_guest_state() {
-        for es in [false, true] {
-            depthless_surface_draw_order(Some(es));
-        }
     }
 
     #[cfg(unix)]
@@ -4577,6 +4527,34 @@ mod tests {
     }
 
     #[test]
+    fn goforce_color_replay_preserves_depth_and_keeps_distant_geometry_hidden() {
+        for profile in [false, true] {
+            let mut c = Context::new(32, 32);
+            c.state.depth_test = true;
+            c.state.goforce4500_depth_tolerance = profile;
+            c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+            c.set_client_state(GL_VERTEX_ARRAY, true);
+            for (z, color) in [
+                (0., [0., 0., 1., 1.]),
+                (0.04, [1., 0., 0., 1.]),
+                (0.2, [0., 1., 0., 1.]),
+            ] {
+                let mut mem = FakeMem {
+                    base: BASE,
+                    bytes: floats(&[-1., -1., z, 1., -1., z, 1., 1., z, -1., 1., z]),
+                };
+                c.current_color = color;
+                c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+                assert_eq!(c.take_error(), GL_NO_ERROR);
+            }
+            let pixel = 16 * 32 + 16;
+            let expected = if profile { [255, 0, 0] } else { [0, 0, 255] };
+            assert_eq!(&c.target.color[pixel * 4..pixel * 4 + 3], &expected);
+            assert_eq!(c.target.depth[pixel], 0.5);
+        }
+    }
+
+    #[test]
     #[ignore = "requires native OpenGL/GLES; client-state lifetime and texture caches"]
     fn client_state_reset_preserves_surface_policy_and_invalidates_reused_texture_names() {
         for es in [false, true] {
@@ -4592,6 +4570,7 @@ mod tests {
             c.set_internal_resolution(2);
             c.gizmondo_goforce_20051013 = true;
             c.state.intel2700g_depth_bias = true;
+            c.state.goforce4500_depth_tolerance = true;
             let mut mem = FakeMem {
                 base: BASE,
                 bytes: quad_floats(),
@@ -4624,6 +4603,7 @@ mod tests {
                 assert_eq!(c.internal_resolution, 2);
                 assert!(c.gizmondo_goforce_20051013);
                 assert!(c.state.intel2700g_depth_bias);
+                assert!(c.state.goforce4500_depth_tolerance);
             }
         }
     }

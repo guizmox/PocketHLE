@@ -110,6 +110,48 @@ offset policy, guest depth-bit queries, render scaling, presentation, screenshot
 and recordings retain their existing paths. Shared code serves desktop and
 Android; native GL/GLES tests cover both depth formats and 1x/2x rendering.
 
+## GoForce 4500 visibility approximation
+
+The Gizmondo GoForce 4500 profile applies a bounded visibility approximation to
+opaque fixed-function triangles. It is an interpretation for compatibility, not
+an observed SC-10 hardware rule or a claim of exact OpenGL ES depth semantics.
+There is no game-name, texture-ID, binary or terrain detection and no new setting.
+PocketPC profiles, including GoForce 5500 and Intel 2700G, do not enable it.
+
+A normal draw establishes the nearest unbiased depth. A second color-only pass
+uses `z' = z + (z - w) / 12` in clip space. The resulting window-depth margin is
+`(1 - depth) / 12`: it approaches zero at the far plane, unlike a constant bias
+that exposes distant submerged triangles. Clipping remains enabled, including
+at the near plane. This pass never changes the depth attachment, so its margin
+cannot accumulate across draws. The ordinary pass retains the original color
+where the replay is clipped or rejected.
+
+Blending, logic operations, explicit polygon offsets or non-default depth ranges,
+non-LESS/LEQUAL tests, disabled depth writes, points, lines and NV combiner programs
+retain their original paths. Alpha rejection and color masks remain effective.
+The profile follows newly created, parked and reset EGL contexts and is cleared
+when the session changes to another profile. EGL continues to advertise and use
+its depth attachment; the rejected depthless experiment is not retained.
+
+Software reuses transformed vertices. Native GL/GLES reuses uploaded vertex/index
+buffers, shader and textures, changing only the existing depth-range uniform and
+depth-write mask for the additional draw, then restoring both. There is no new
+shader variant, texture upload, calibration or GPU readback. The shared code
+serves desktop and Android, native resolution and internal scaling. Presentation,
+screenshots and recordings retain their existing paths.
+
+The coefficient is empirical. Original driver CPU submission and original map
+heights agree with the captured intersecting meshes, but physical GoForce
+rasterization has not been verified. Nearby hidden surfaces can become visible;
+other Gizmondo titles need visual regression testing. Eligible geometry is
+rasterized twice, increasing GPU work (or CPU work in software mode). There is
+no additional rendering pass outside the 4500 profile.
+
+The reproduced Battlestations interior patches disappear in software and native
+GL, while the large triangular shoreline fins from the rejected fixed-offset
+experiment are avoided. Some shore intersections shift slightly. Validation and
+local measurement limits are recorded in [the note](../proof/battlestations-midway/README.md).
+
 ## Native fixed-point vertex attributes
 
 Advertising `GL_FIXED` fetch does not guarantee that the host preserves exact
@@ -159,47 +201,10 @@ from selecting their alpha passes (as observed in DoomGLES).
 
 `eglChooseConfig` filters first, then sorts before truncating the output. EGL 1.1
 prefers more bits in explicitly requested nonzero color components, then a
-smaller total buffer size, smaller depth size and configuration ID (other
-criteria are equal here).
+smaller total buffer size and configuration ID (other criteria are equal here).
 Omitted, zero and DONT_CARE components do not affect that color preference.
 Queries, configuration IDs and readback describe the actual attachments.
 Incompatible context/surface pairs return EGL_BAD_MATCH.
-
-### Gizmondo depthless configurations
-
-The GoForce 4500 profile also offers depthless counterparts to the existing
-RGB565 and RGBA8888 configurations. The existing handles and IDs 1/2 retain
-their depth buffers; IDs 3/4 have depth size zero. Color quality choices remain
-available. Other device profiles keep their existing configuration catalogs.
-The catalog is fixed before the first initialization and follows the existing
-per-session/suspended-parent lifetime.
-
-The original Gizmondo `libGLES_CM.dll` supplied for validation (SHA-256
-`fbfaac966d0e7aacfb6f93cd71894bf8265a62bb5a7543e8f8050d2305bccd6d`)
-contains RGB565 configurations with depth sizes 16 and 0. Executing its ARM
-`eglChooseConfig` and sorting routines with RGB minima of one selects depth
-zero; adding a minimum depth of 16 selects the other configuration. PocketHLE
-retains its RGBA8888 enhancement while reproducing that attachment selection.
-Battlestations: Midway requests only those RGB minima. Forcing a depth buffer
-caused its intersecting water and terrain meshes to occlude each other instead
-of following the application's drawing order. No title detection, geometry
-change or depth-bias adjustment is used.
-
-Depth presence belongs to the surface and survives resize, parking and binding
-another surface. `GL_DEPTH_BITS` returns zero without an attachment. Guest depth
-enables and masks remain queryable and unchanged, but depth tests, writes and
-clears have no effect on a depthless surface in either renderer. Native depth
-storage may remain allocated internally; it is not exposed as a guest attachment.
-The shared implementation serves desktop and Android and preserves color,
-supersampling, screenshots and recording paths.
-
-This changes the result for GoForce 4500 applications which omit a depth request:
-they can now select painter-order rendering, as on the reference driver, rather
-than receiving forced depth occlusion. Applications needing depth must request
-it. Tests cover explicit depth requests, surface/context switches and both
-renderers at 1x/2x; they do not replace regression testing other Gizmondo titles.
-
-### PocketPC surface-format selection
 
 Each PocketPC game's **Graphics → OpenGL ES surface format** offers **Default
 (RGB565 + RGBA8888)** and **RGBA8888 only** on desktop and Android. The persisted

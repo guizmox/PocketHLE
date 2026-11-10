@@ -580,8 +580,19 @@ fn host_render_policies_apply_to_parked_contexts_and_mipmap_without_texture_is_l
     bind(&mut cpu, &mut k, b, SURFACE_HANDLE);
     with_ctx(|c| {
         assert!(c.gizmondo_goforce_20051013);
+        assert!(c.state.goforce4500_depth_tolerance);
         assert!(c.state.intel2700g_depth_bias);
     });
+    let fresh = create(&mut cpu, &mut k, 0);
+    bind(&mut cpu, &mut k, fresh, SURFACE_HANDLE);
+    with_ctx(|c| {
+        assert!(c.gizmondo_goforce_20051013);
+        assert!(c.state.goforce4500_depth_tolerance);
+    });
+    set_gizmondo_goforce_driver(false);
+    with_ctx(|c| assert!(!c.state.goforce4500_depth_tolerance));
+    bind(&mut cpu, &mut k, b, SURFACE_HANDLE);
+    with_ctx(|c| assert!(!c.state.goforce4500_depth_tolerance));
     let attrs = [EGL_WIDTH, 2, EGL_HEIGHT, 2, 0x3082, 1, EGL_NONE];
     cpu.write_mem(
         SCRATCH,

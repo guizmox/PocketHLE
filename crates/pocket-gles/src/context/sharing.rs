@@ -59,6 +59,7 @@ impl Context {
         c.nv_combiner_client = self.nv_combiner_client;
         c.nv_combiner_allowed = self.nv_combiner_allowed;
         c.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;
+        c.state.goforce4500_depth_tolerance = self.state.goforce4500_depth_tolerance;
         c
     }
     pub fn set_egl_gpu_policy(&mut self, enabled: bool) {

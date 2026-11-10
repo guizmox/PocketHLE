@@ -2890,19 +2890,6 @@ impl Renderer {
     ) -> Result<(), String> {
         let _diagnostic =
             crate::graphics_diagnostic::Span::new(crate::graphics_diagnostic::Stage::Submit);
-        // Enabling GL_DEPTH_TEST cannot create an EGL depth attachment. Keep
-        // the guest enable/mask state intact while drawing depthless surfaces.
-        let depthless;
-        let state = if !target.has_depth && (state.depth_test || state.depth_write) {
-            depthless = PipelineState {
-                depth_test: false,
-                depth_write: false,
-                ..state.clone()
-            };
-            &depthless
-        } else {
-            state
-        };
         // A sampled high unit still needs its white fallback when its image
         // is incomplete and therefore absent from the enabled stage list.
         let wide_draw = stages.iter().any(|s| s.unit >= 4)
@@ -2927,6 +2914,10 @@ impl Renderer {
         self.resize(target.width, target.height)?;
         self.host.make_current()?;
         let (offset_factor, mut offset_units) = state.polygon_offset_parameters();
+        let compatibility_pass = (self.combiner.is_none()
+            && matches!(mode, GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN))
+        .then(|| state.goforce_depth_color_pass())
+        .flatten();
         if state.intel2700g_depth_bias && state.polygon_offset && offset_units != 0. {
             let step = match self.depth_bias_step {
                 Some((format, step)) if format == self.depth_format => step,
@@ -3753,6 +3744,34 @@ impl Renderer {
                 } else {
                     (self.gl.DrawArrays)(draw_mode, 0, count as i32);
                 }
+            }
+            if let Some(pass) = compatibility_pass {
+                // Reuse uploaded vertices, indices, textures and shader uniforms.
+                // The nearest unbiased depth from the first pass remains intact.
+                (self.gl.DepthMask)(0);
+                self.uniform_2f(
+                    self.loc("depthRange"),
+                    pass.depth_range.0,
+                    pass.depth_range.1,
+                );
+                if indexed {
+                    let count = stream.map_or(self.indices.len(), |s| s.indices.len());
+                    (self.gl.DrawElements)(
+                        draw_mode,
+                        count as i32,
+                        GL_UNSIGNED_SHORT,
+                        std::ptr::null(),
+                    );
+                } else {
+                    let count = stream.map_or(self.scratch.len() / layout.floats, |s| s.count);
+                    (self.gl.DrawArrays)(draw_mode, 0, count as i32);
+                }
+                (self.gl.DepthMask)(state.depth_write as u8);
+                self.uniform_2f(
+                    self.loc("depthRange"),
+                    state.depth_range.0,
+                    state.depth_range.1,
+                );
             }
             self.dirty = true;
             // NVIDIA drivers can stall in glGetError after each draw. Check at
@@ -7786,6 +7805,103 @@ mod tests {
         target.resize(64, 48);
         gpu.read(&mut target).unwrap();
         assert_eq!(target.color.len(), 64 * 48 * 4);
+    }
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires native GL/GLES; validates the GoForce visibility approximation"]
+    fn host_goforce_depth_tolerance_keeps_nearest_depth_and_restores_state() {
+        for es in [false, true] {
+            for format in [0x81a5, 0x81a6] {
+                for scale in [1, 2] {
+                    let mut gpu = if es {
+                        Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
+                    } else {
+                        Renderer::new(32, 32).unwrap()
+                    };
+                    gpu.depth_format = format;
+                    gpu.resize(16, 16).unwrap();
+                    gpu.resize(32, 32).unwrap();
+                    gpu.set_render_scale(scale).unwrap();
+                    let mut state = PipelineState {
+                        viewport: (0, 0, 32, 32),
+                        depth_test: true,
+                        goforce4500_depth_tolerance: true,
+                        ..Default::default()
+                    };
+                    let mut cpu = RenderTarget::new(32, 32);
+                    let mut native = RenderTarget::new(32, 32);
+                    gpu.clear(
+                        32,
+                        32,
+                        &state,
+                        [0.; 4],
+                        1.,
+                        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
+                    )
+                    .unwrap();
+                    // Within tolerance becomes visible; a later surface beyond the
+                    // original depth plus the margin must still remain hidden.
+                    for (z, color, expected) in [
+                        (0., [0., 0., 1., 1.], [0, 0, 255]),
+                        (0.04, [1., 0., 0., 1.], [255, 0, 0]),
+                        (0.2, [0., 1., 0., 1.], [255, 0, 0]),
+                    ] {
+                        let vertices = triangle(color, z);
+                        raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], vertices);
+                        if let Some(mut pass) = state.goforce_depth_color_pass() {
+                            pass.depth_range = (0., 1.);
+                            let mut replay = vertices;
+                            for v in &mut replay {
+                                v.pos[2] +=
+                                    raster::GOFORCE4500_DEPTH_TOLERANCE * (v.pos[2] - v.pos[3]);
+                            }
+                            raster::draw_triangle(&mut cpu, &pass, &|_, _, _| None, &[], replay);
+                        }
+                        gpu.draw(
+                            &native,
+                            &state,
+                            GL_TRIANGLES,
+                            &vertices,
+                            &[],
+                            &HashMap::new(),
+                            [0; 6],
+                        )
+                        .unwrap();
+                        gpu.read(&mut native).unwrap();
+                        let pixel = (16 * 32 + 16) * 4;
+                        assert_eq!(&cpu.color[pixel..pixel + 3], &expected);
+                        for (a, b) in native.color[pixel..pixel + 3].iter().zip(expected) {
+                            assert!(
+                                a.abs_diff(b) <= 1,
+                                "es={es} scale={scale} z={z}: {:?}",
+                                &native.color[pixel..pixel + 3]
+                            );
+                        }
+                        assert_eq!(cpu.depth[16 * 32 + 16], 0.5);
+                    }
+                    state.goforce4500_depth_tolerance = false;
+                    let nearer = triangle([0., 1., 0., 1.], -0.001);
+                    let hidden = triangle([1., 1., 0., 1.], -0.0005);
+                    for vertices in [nearer, hidden] {
+                        gpu.draw(
+                            &native,
+                            &state,
+                            GL_TRIANGLES,
+                            &vertices,
+                            &[],
+                            &HashMap::new(),
+                            [0; 6],
+                        )
+                        .unwrap();
+                    }
+                    gpu.read(&mut native).unwrap();
+                    assert_eq!(
+                        &native.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 3],
+                        &[0, 255, 0]
+                    );
+                }
+            }
+        }
     }
 }
 

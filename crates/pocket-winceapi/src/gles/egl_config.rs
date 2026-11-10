@@ -22,54 +22,16 @@ pub(super) struct Config {
 impl Config {
     pub(super) fn handles() -> &'static [u32] {
         SURFACES.with(|s| {
-            let s = s.borrow();
-            match (s.rgba8888_only, s.depthless_configs) {
-                (true, true) => &[CONFIG_RGBA_HANDLE, CONFIG_RGBA_NODEPTH_HANDLE][..],
-                (true, false) => &[CONFIG_RGBA_HANDLE][..],
-                (false, true) => &[
-                    CONFIG_HANDLE,
-                    CONFIG_RGBA_HANDLE,
-                    CONFIG_NODEPTH_HANDLE,
-                    CONFIG_RGBA_NODEPTH_HANDLE,
-                ][..],
-                (false, false) => &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE][..],
+            if s.borrow().rgba8888_only {
+                &[CONFIG_RGBA_HANDLE][..]
+            } else {
+                &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE][..]
             }
         })
     }
 
-    pub(super) fn is_rgba(handle: u32) -> bool {
-        matches!(handle, CONFIG_RGBA_HANDLE | CONFIG_RGBA_NODEPTH_HANDLE)
-    }
-
-    pub(super) fn has_depth(handle: u32) -> bool {
-        !matches!(handle, CONFIG_NODEPTH_HANDLE | CONFIG_RGBA_NODEPTH_HANDLE)
-    }
-
-    pub(super) fn config_id(handle: u32) -> i32 {
-        match handle {
-            CONFIG_NODEPTH_HANDLE => 3,
-            CONFIG_RGBA_NODEPTH_HANDLE => 4,
-            _ => {
-                if Self::is_rgba(handle) {
-                    2
-                } else {
-                    1
-                }
-            }
-        }
-    }
-
-    pub(super) fn buffers(handle: u32, width: u32, height: u32) -> SurfaceBuffers {
-        let mut buffers = if Self::is_rgba(handle) {
-            SurfaceBuffers::new(width, height)
-        } else {
-            SurfaceBuffers::new_rgb565(width, height)
-        };
-        buffers.target.has_depth = Self::has_depth(handle);
-        buffers
-    }
-
     pub(super) fn current() -> Self {
+        // GoForce visibility compatibility must not remove the depth attachment.
         Self {
             depth: with_ctx(|c| c.state.depth_bits() as i32),
             rgba: false,
@@ -80,21 +42,21 @@ impl Config {
         if !Self::handles().contains(&handle) {
             return None;
         }
+        let rgba = match handle {
+            CONFIG_HANDLE => false,
+            CONFIG_RGBA_HANDLE => true,
+            _ => return None,
+        };
         Some(Self {
-            rgba: Self::is_rgba(handle),
-            depth: if Self::has_depth(handle) {
-                Self::current().depth
-            } else {
-                0
-            },
+            rgba,
+            ..Self::current()
         })
     }
     fn id(&self) -> i32 {
-        match (self.rgba, self.depth == 0) {
-            (false, false) => 1,
-            (true, false) => 2,
-            (false, true) => 3,
-            (true, true) => 4,
+        if self.rgba {
+            2
+        } else {
+            1
         }
     }
 
@@ -150,10 +112,8 @@ impl Config {
 
     /// EGL 1.1 section 3.4.1: prefer more bits in explicitly requested
     /// nonzero color components, then the smaller overall color buffer.
-    /// Prefer the smaller depth attachment after the color criteria. The
-    /// dated GoForce catalog includes a depthless choice and selects it when
-    /// applications request only color; keep that choice independent of format.
-    pub(super) fn sort_key(&self, pairs: &[(u32, i32)]) -> (std::cmp::Reverse<i32>, i32, i32, i32) {
+    /// All other sort criteria are identical for our two configurations.
+    pub(super) fn sort_key(&self, pairs: &[(u32, i32)]) -> (std::cmp::Reverse<i32>, i32, i32) {
         let attrs: HashMap<_, _> = pairs.iter().copied().collect();
         let color_bits = [EGL_RED_SIZE, EGL_GREEN_SIZE, EGL_BLUE_SIZE, EGL_ALPHA_SIZE]
             .into_iter()
@@ -163,7 +123,6 @@ impl Config {
         (
             std::cmp::Reverse(color_bits),
             self.attribute(EGL_BUFFER_SIZE).unwrap(),
-            self.depth,
             self.id(),
         )
     }
@@ -271,6 +230,19 @@ pub(super) fn read_pairs(ctx: &mut CallCtx<'_>, mut ptr: u32) -> Result<Vec<(u32
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn goforce_visibility_preserves_depth_for_both_color_configurations() {
+        let _g = super::super::tests::guard();
+        reset_for_test(8, 8);
+        set_gizmondo_goforce_driver(true);
+        for handle in [CONFIG_HANDLE, CONFIG_RGBA_HANDLE] {
+            let config = Config::from_handle(handle).unwrap();
+            assert_eq!(config.attribute(EGL_DEPTH_SIZE), Some(16));
+            assert_eq!(config.matches(&[(EGL_DEPTH_SIZE, 16)]), Ok(true));
+        }
+        set_gizmondo_goforce_driver(false);
+    }
+
     #[test]
     fn matching_uses_minimum_exact_mask_and_dont_care_rules() {
         let c = Config {

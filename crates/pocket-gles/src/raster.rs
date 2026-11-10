@@ -239,6 +239,8 @@ pub struct PipelineState {
     /// Original Intel 2700G WinCE driver: integer constant bias, no slope term.
     /// Opt-in driver compatibility; standard ES behavior is the default.
     pub intel2700g_depth_bias: bool,
+    /// GoForce 4500 approximation, not a measured hardware rule.
+    pub goforce4500_depth_tolerance: bool,
 }
 
 impl Default for PipelineState {
@@ -278,11 +280,38 @@ impl Default for PipelineState {
             polygon_factor: 0.,
             polygon_units: 0.,
             intel2700g_depth_bias: false,
+            goforce4500_depth_tolerance: false,
         }
     }
 }
 
+pub(crate) const GOFORCE4500_DEPTH_TOLERANCE: f32 = 1. / 12.;
+
 impl PipelineState {
+    /// A second opaque color pass expands clip depth away from the far plane.
+    /// Keep the original depth: tolerance must not accumulate with draw order
+    /// or pull subsequent geometry towards the camera.
+    pub fn goforce_depth_color_pass(&self) -> Option<Self> {
+        if !self.goforce4500_depth_tolerance
+            || !self.depth_test
+            || !self.depth_write
+            || self.depth_range != (0., 1.)
+            || !matches!(self.depth_func, CompareFunc::Less | CompareFunc::Lequal)
+            || self.blend
+            || self.logic_op
+            || self.polygon_offset
+            || self.intel2700g_depth_bias
+            || !self.color_mask.iter().any(|enabled| *enabled)
+        {
+            return None;
+        }
+        let mut pass = self.clone();
+        pass.goforce4500_depth_tolerance = false;
+        pass.depth_write = false;
+        pass.depth_range = (-GOFORCE4500_DEPTH_TOLERANCE, 1.);
+        Some(pass)
+    }
+
     /// The reference WinCE CL driver ignores factor and arithmetic-shifts its
     /// signed 16.16 units before encoding a sign + 16-bit magnitude register.
     pub fn polygon_offset_parameters(&self) -> (f32, f32) {
@@ -322,8 +351,6 @@ pub struct RenderTarget {
     pub color: Vec<u8>,
     /// Window-space depth in `[0, 1]`, smaller is nearer.
     pub depth: Vec<f32>,
-    /// EGL may select a surface without depth storage, independently of GL state.
-    pub has_depth: bool,
 }
 
 impl RenderTarget {
@@ -335,7 +362,6 @@ impl RenderTarget {
             rgb565: false,
             color: vec![0u8; px * 4],
             depth: vec![1.0f32; px],
-            has_depth: true,
         }
     }
 
@@ -354,9 +380,7 @@ impl RenderTarget {
         if width == self.width && height == self.height {
             return;
         }
-        let has_depth = self.has_depth;
         *self = Self::with_format(width, height, self.rgb565);
-        self.has_depth = has_depth;
     }
 
     /// `glClear(GL_COLOR_BUFFER_BIT)` honouring the scissor box.
@@ -421,9 +445,6 @@ impl RenderTarget {
 
     /// `glClear(GL_DEPTH_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_depth(&mut self, value: f32, scissor: Option<(i32, i32, i32, i32)>) {
-        if !self.has_depth {
-            return;
-        }
         match self.scissor_bounds(scissor) {
             None => {}
             Some((x0, y0, x1, y1)) if self.covers_all(x0, y0, x1, y1) => {
@@ -935,8 +956,7 @@ fn raster_clipped(
             // Coplanar UI layers otherwise fail LEQUAL at scattered pixels.
             let z = (sv[2].z + w0 * (sv[0].z - sv[2].z) + w1 * (sv[1].z - sv[2].z) + offset)
                 .clamp(0., 1.);
-            if target.has_depth && state.depth_test && !state.depth_func.test(z, target.depth[idx])
-            {
+            if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
                 continue;
             }
 
@@ -1106,7 +1126,7 @@ fn write_fragment(
     if target.rgb565 {
         target.color[ci + 3] = 255;
     }
-    if target.has_depth && state.depth_test && state.depth_write {
+    if state.depth_test && state.depth_write {
         target.depth[idx] = z;
     }
     true
@@ -1158,7 +1178,7 @@ fn primitive_fragment(
     sprite: Option<([f32; 2], f32)>,
 ) -> bool {
     let idx = y as usize * target.width as usize + x as usize;
-    if target.has_depth && state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
+    if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
         return false;
     }
     let coordinate = |unit: usize| {
@@ -1547,6 +1567,33 @@ mod tests {
             color,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn goforce_depth_tolerance_excludes_blending_and_explicit_depth_policies() {
+        let mut state = PipelineState {
+            depth_test: true,
+            goforce4500_depth_tolerance: true,
+            ..Default::default()
+        };
+        assert!(state.goforce_depth_color_pass().is_some());
+        state.blend = true;
+        assert!(state.goforce_depth_color_pass().is_none());
+        state.blend = false;
+        state.polygon_offset = true;
+        assert!(state.goforce_depth_color_pass().is_none());
+        state.polygon_offset = false;
+        state.depth_func = CompareFunc::Equal;
+        assert!(state.goforce_depth_color_pass().is_none());
+        state.depth_func = CompareFunc::Less;
+        state.depth_write = false;
+        assert!(state.goforce_depth_color_pass().is_none());
+        state.depth_write = true;
+        state.depth_range = (0.5, 1.);
+        assert!(state.goforce_depth_color_pass().is_none());
+        state.depth_range = (0., 1.);
+        state.goforce4500_depth_tolerance = false;
+        assert!(state.goforce_depth_color_pass().is_none());
     }
 
     #[test]
