@@ -21,7 +21,7 @@ use rmp3::{Frame, RawDecoder, MAX_SAMPLES_PER_FRAME};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +70,9 @@ pub struct OpenFile {
     pub host_path: PathBuf,
     pub access: Access,
     pub file: File,
+    // CRT read-ahead belongs to the shared open description, like its cursor.
+    // Win32 I/O synchronizes it before using the underlying file directly.
+    stdio_reader: Option<BufReader<File>>,
     /// Whether the CRT stream was opened in text mode (`fopen` without
     /// `b`). Only the stdio layer in `pocket-winceapi` consults this —
     /// `CreateFileW` has no text mode on Windows CE, so handles opened
@@ -78,6 +81,17 @@ pub struct OpenFile {
     lease: Option<Arc<contracts::Lease>>,
     append: bool,
     for_mapping: bool,
+}
+
+impl OpenFile {
+    fn sync_stdio(&mut self) -> std::io::Result<()> {
+        if let Some(reader) = self.stdio_reader.as_mut() {
+            let position = reader.stream_position()?;
+            self.file.seek(SeekFrom::Start(position))?;
+            self.stdio_reader = None;
+        }
+        Ok(())
+    }
 }
 
 // MPEG Layer III frame size, used to retain a split frame until the next
@@ -1661,6 +1675,7 @@ impl Vfs {
                 host_path,
                 access,
                 file,
+                stdio_reader: None,
                 text_mode: false,
                 lease: None,
                 append: false,
@@ -1698,7 +1713,73 @@ impl Vfs {
         if of.lease.as_ref().is_some_and(|l| l.access & 1 == 0) {
             return None;
         }
+        of.sync_stdio().ok()?;
         of.file.read(buf).ok()
+    }
+
+    /// CRT reads have bounded read-ahead, unlike byte-exact Win32 ReadFile.
+    /// Parsers using fread(1) and feof for each character otherwise lose the
+    /// buffering provided by the CE CRT at every emulated API boundary.
+    pub fn read_stdio(&mut self, handle: u32, buf: &mut [u8]) -> Option<usize> {
+        let Some(open) = self.handles.get(&handle) else {
+            return self.read(handle, buf);
+        };
+        let mut open = open.lock().ok()?;
+        if open
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.access & 1 == 0)
+        {
+            return None;
+        }
+        if buf.is_empty() {
+            return Some(0);
+        }
+        // Mapped bytes can change outside the stream APIs. Keep that path
+        // unbuffered rather than retaining stale data beside a writable view.
+        if open.for_mapping
+            || open
+                .lease
+                .as_ref()
+                .is_some_and(|lease| lease.mapped.load(std::sync::atomic::Ordering::Relaxed) != 0)
+        {
+            open.sync_stdio().ok()?;
+            return open.file.read(buf).ok();
+        }
+        if open.stdio_reader.is_none() {
+            // Buffering is optional if the host cannot allocate a duplicate
+            // descriptor; an already open readable file must remain usable.
+            let Ok(file) = open.file.try_clone() else {
+                return open.file.read(buf).ok();
+            };
+            open.stdio_reader = Some(BufReader::with_capacity(16 * 1024, file));
+        }
+        let reader = open.stdio_reader.as_mut()?;
+        let mut total = 0;
+        // A buffered tail can be shorter than the caller's request without
+        // reaching EOF. fread must continue into the next buffer in that case.
+        while total < buf.len() {
+            match reader.read(&mut buf[total..]) {
+                Ok(0) => break,
+                Ok(count) => total += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) if total == 0 => return None,
+                Err(_) => break,
+            }
+        }
+        Some(total)
+    }
+
+    /// Unconsumed CRT bytes prove that EOF has not been reached without a
+    /// host metadata/position query. Empty buffers retain the live-file check.
+    pub fn has_stdio_read_ahead(&self, handle: u32) -> bool {
+        self.handles.get(&handle).is_some_and(|open| {
+            open.lock().is_ok_and(|open| {
+                open.stdio_reader
+                    .as_ref()
+                    .is_some_and(|reader| !reader.buffer().is_empty())
+            })
+        })
     }
 
     fn write_raw(&mut self, handle: u32, buf: &[u8]) -> Option<usize> {
@@ -1732,6 +1813,7 @@ impl Vfs {
             return Some(buf.len());
         }
         let mut of = self.handles.get(&handle)?.lock().ok()?;
+        of.sync_stdio().ok()?;
         if of.append {
             of.file.seek(SeekFrom::End(0)).ok()?;
         }
@@ -1771,6 +1853,19 @@ impl Vfs {
         of.file.metadata().ok().map(|m| m.len())
     }
 
+    /// Query the logical cursor without discarding CRT read-ahead.
+    pub fn position(&mut self, handle: u32) -> Option<u64> {
+        if let Some(open) = self.ram_handles.get(&handle) {
+            return Some(open.lock().ok()?.position);
+        }
+        let mut open = self.handles.get(&handle)?.lock().ok()?;
+        if let Some(reader) = open.stdio_reader.as_mut() {
+            reader.stream_position().ok()
+        } else {
+            open.file.stream_position().ok()
+        }
+    }
+
     pub fn seek(&mut self, handle: u32, offset: i64, whence: SeekKind) -> Option<u64> {
         if let Some(open) = self.ram_handles.get(&handle) {
             let mut open = open.lock().ok()?;
@@ -1787,6 +1882,9 @@ impl Vfs {
             return Some(open.position);
         }
         let mut of = self.handles.get(&handle)?.lock().ok()?;
+        // Explicit repositioning also discards stale input after another
+        // stream/handle has updated the file, including a zero-distance seek.
+        of.sync_stdio().ok()?;
         let from = match whence {
             SeekKind::Begin => SeekFrom::Start(u64::try_from(offset).ok()?),
             SeekKind::Current => SeekFrom::Current(offset),
@@ -1802,10 +1900,11 @@ impl Vfs {
         let file = self.handles.get(&handle).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid handle")
         })?;
-        file.lock()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "file lock poisoned"))?
-            .file
-            .flush()
+        let mut file = file
+            .lock()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "file lock poisoned"))?;
+        file.sync_stdio()?;
+        file.file.flush()
     }
 
     /// An opaque shared open description, retaining seek/access/device state.
@@ -2835,6 +2934,134 @@ mod tests {
         assert!(ready, "child did not reach the open-handle checkpoint");
         let expected: Vec<u8> = (0..16387).map(|i| (i * 37 + 11) as u8).collect();
         assert_eq!(std::fs::read(dir.path().join("save")).unwrap(), expected);
+    }
+
+    #[test]
+    fn stdio_read_ahead_batches_bytes_and_shares_the_logical_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..40_000).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.path().join("stream.bin"), &data).unwrap();
+        let mut v = Vfs::new();
+        v.mount("\\Data\\", dir.path());
+        let h = v.open("\\Data\\stream.bin", Access::Read, false).unwrap();
+        let alias = 0xd2000000;
+        assert!(v.duplicate_file(h, alias));
+        let mut byte = [0];
+        for expected in &data[..1000] {
+            assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+            assert_eq!(byte[0], *expected);
+            assert!(v.has_stdio_read_ahead(alias));
+        }
+        // One host read covers these 1000 CRT requests, without one seek or
+        // metadata query per byte to implement the buffer itself.
+        assert_eq!(
+            v.handles[&h]
+                .lock()
+                .unwrap()
+                .file
+                .stream_position()
+                .unwrap(),
+            16 * 1024
+        );
+        assert_eq!(v.position(alias), Some(1000));
+        assert!(v.has_stdio_read_ahead(alias));
+        assert!(v.close(h));
+        let mut tail = vec![0; data.len() - 1000];
+        assert_eq!(v.read_stdio(alias, &mut tail), Some(tail.len()));
+        assert_eq!(tail, data[1000..]);
+        assert!(!v.has_stdio_read_ahead(alias));
+        assert_eq!(v.read_stdio(alias, &mut byte), Some(0));
+        assert_eq!(v.seek(alias, -5, SeekKind::End), Some(39_995));
+        assert_eq!(v.read_stdio(alias, &mut byte), Some(1));
+        assert_eq!(byte[0], data[39_995]);
+        assert_eq!(v.seek(alias, -1, SeekKind::Current), Some(39_995));
+        assert_eq!(v.read_stdio(alias, &mut byte), Some(1));
+        assert_eq!(byte[0], data[39_995]);
+        assert_eq!(v.seek(alias, -50_000, SeekKind::Current), None);
+        assert_eq!(v.seek(alias, 0, SeekKind::Current), Some(39_996));
+    }
+
+    #[test]
+    fn stdio_read_ahead_synchronizes_raw_io_writes_flush_and_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stream.bin"), b"abcdefgh").unwrap();
+        let mut v = Vfs::new();
+        v.mount("\\Data\\", dir.path());
+        let h = v
+            .open("\\Data\\stream.bin", Access::ReadWrite, false)
+            .unwrap();
+        let mut byte = [0];
+        assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+        assert_eq!(&byte, b"a");
+        assert!(v.has_stdio_read_ahead(h));
+        assert_eq!(v.read(h, &mut byte), Some(1));
+        assert_eq!(&byte, b"b");
+        assert!(!v.has_stdio_read_ahead(h));
+        assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+        assert_eq!(&byte, b"c");
+        assert_eq!(v.write(h, b"XY"), Some(2));
+        assert_eq!(v.seek(h, 0, SeekKind::Current), Some(5));
+        assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+        assert_eq!(&byte, b"f");
+        v.flush(h).unwrap();
+        assert!(!v.has_stdio_read_ahead(h));
+        assert_eq!(v.seek(h, 0, SeekKind::Current), Some(6));
+        assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+        assert_eq!(&byte, b"g");
+        assert!(v.set_end_of_file(h));
+        assert_eq!(v.size(h), Some(7));
+        assert_eq!(
+            std::fs::read(dir.path().join("stream.bin")).unwrap(),
+            b"abcXYfg"
+        );
+        assert_eq!(v.read_stdio(h, &mut byte), Some(0));
+    }
+
+    #[test]
+    fn stdio_read_ahead_is_disabled_for_mapped_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stream.bin"), b"abcdef").unwrap();
+        let mut v = Vfs::new();
+        v.mount("\\Data\\", dir.path());
+        let h = v
+            .open_file("\\Data\\stream.bin", 3, 3, 3, false, 0)
+            .unwrap()
+            .handle;
+        let mut byte = [0];
+        assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+        assert!(v.has_stdio_read_ahead(h));
+        let mapping = v.mapping_backing(h, 6, true).unwrap();
+        assert!(!v.has_stdio_read_ahead(h));
+        unsafe {
+            mapping.memory.write(1, b"Z").unwrap();
+        }
+        assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+        assert_eq!(&byte, b"Z");
+        assert_eq!(v.seek(h, 0, SeekKind::Current), Some(2));
+        assert!(!v.has_stdio_read_ahead(h));
+    }
+
+    #[test]
+    fn stdio_explicit_seek_refreshes_input_after_another_handle_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stream.bin"), b"abcdef").unwrap();
+        let mut v = Vfs::new();
+        v.mount("\\Data\\", dir.path());
+        let h = v.open("\\Data\\stream.bin", Access::Read, false).unwrap();
+        let writer = v
+            .open("\\Data\\stream.bin", Access::ReadWrite, false)
+            .unwrap();
+        let mut byte = [0];
+        assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+        assert_eq!(&byte, b"a");
+        assert_eq!(v.seek(writer, 1, SeekKind::Begin), Some(1));
+        assert_eq!(v.write(writer, b"Z"), Some(1));
+        assert_eq!(v.position(h), Some(1));
+        assert!(v.has_stdio_read_ahead(h));
+        assert_eq!(v.seek(h, 0, SeekKind::Current), Some(1));
+        assert!(!v.has_stdio_read_ahead(h));
+        assert_eq!(v.read_stdio(h, &mut byte), Some(1));
+        assert_eq!(&byte, b"Z");
     }
 
     #[test]

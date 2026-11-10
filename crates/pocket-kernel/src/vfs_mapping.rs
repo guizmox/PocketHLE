@@ -88,7 +88,8 @@ impl Vfs {
             });
         }
         let memory = if let Some(open) = self.handles.get(&handle) {
-            let open = open.lock().unwrap();
+            let mut open = open.lock().unwrap();
+            open.sync_stdio().map_err(|_| 6u32)?;
             if new_len != old {
                 open.file.set_len(new_len).map_err(|_| 112u32)?;
             }

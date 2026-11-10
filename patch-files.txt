@@ -1,9 +1,4 @@
-crates\pocket-gles\src\context.rs
-crates\pocket-gles\src\gpu\mod.rs
-crates\pocket-gles\src\raster.rs
-crates\pocket-winceapi\src\gles.rs
-crates\pocket-winceapi\src\gles\egl_config.rs
-docs\GPU.md
-proof\battlestations-midway\README.md
-proof\battlestations-midway\after.png
-proof\battlestations-midway\before.png
+crates/pocket-kernel/src/vfs.rs
+crates/pocket-kernel/src/vfs_contract.rs
+crates/pocket-kernel/src/vfs_mapping.rs
+crates/pocket-winceapi/src/coredll.rs

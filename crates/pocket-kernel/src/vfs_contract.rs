@@ -758,6 +758,7 @@ impl Vfs {
                     host_path: path,
                     access: a,
                     file,
+                    stdio_reader: None,
                     text_mode: false,
                     lease: Some(lease.clone()),
                     append,
@@ -858,6 +859,7 @@ impl Vfs {
         let old = self.size(h).unwrap_or(0);
         let pos = if let Some(f) = self.handles.get(&h) {
             let mut f = f.lock().ok()?;
+            f.sync_stdio().ok()?;
             if f.append {
                 old
             } else {
@@ -892,6 +894,9 @@ impl Vfs {
             let Ok(mut f) = f.lock() else {
                 return false;
             };
+            if f.sync_stdio().is_err() {
+                return false;
+            }
             let Ok(p) = f.file.stream_position() else {
                 return false;
             };

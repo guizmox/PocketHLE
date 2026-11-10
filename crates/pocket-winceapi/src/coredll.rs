@@ -9749,7 +9749,7 @@ fn crt_fflush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 /// Sticky FILE error state is independent of EOF and Win32 LastError.
 fn read_stdio_raw(ctx: &mut CallCtx<'_>, stream: u32, bytes: &mut [u8]) -> Option<usize> {
-    let result = ctx.kernel.vfs.read(stream, bytes);
+    let result = ctx.kernel.vfs.read_stdio(stream, bytes);
     if result.is_none() {
         ctx.kernel.crt_stream_errors.insert(stream);
     }
@@ -9893,9 +9893,8 @@ fn crt_fseek(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn crt_ftell(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    use pocket_kernel::vfs::SeekKind;
     let h = ctx.arg_u32(0)?;
-    let pos = ctx.kernel.vfs.seek(h, 0, SeekKind::Current).unwrap_or(0);
+    let pos = ctx.kernel.vfs.position(h).unwrap_or(0);
     let pos = pos.saturating_sub(u64::from(ctx.kernel.crt_pushback.contains_key(&h)));
     Ok(DispatchOutcome::ReturnedR0(pos as u32))
 }
@@ -9914,10 +9913,9 @@ fn crt_ftell(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// to be on the stack, so the game's archive loader walked off the end
 /// of its own tables and faulted before the first frame.
 fn crt_fgetpos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    use pocket_kernel::vfs::SeekKind;
     let h = ctx.arg_u32(0)?;
     let out = ctx.arg_u32(1)?;
-    let Some(pos) = ctx.kernel.vfs.seek(h, 0, SeekKind::Current) else {
+    let Some(pos) = ctx.kernel.vfs.position(h) else {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     };
     let pos = pos.saturating_sub(u64::from(ctx.kernel.crt_pushback.contains_key(&h)));
@@ -9950,10 +9948,12 @@ fn crt_fsetpos(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn crt_feof(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    use pocket_kernel::vfs::SeekKind;
     let h = ctx.arg_u32(0)?;
+    if ctx.kernel.vfs.has_stdio_read_ahead(h) || ctx.kernel.crt_pushback.contains_key(&h) {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let size = ctx.kernel.vfs.size(h).unwrap_or(0);
-    let pos = ctx.kernel.vfs.seek(h, 0, SeekKind::Current).unwrap_or(0);
+    let pos = ctx.kernel.vfs.position(h).unwrap_or(0);
     Ok(DispatchOutcome::ReturnedR0(
         if pos >= size && !ctx.kernel.crt_pushback.contains_key(&h) {
             1
@@ -29052,6 +29052,59 @@ mod tests {
         assert_eq!(
             api!("GetWindowTextLengthW", &[edit]),
             DispatchOutcome::ReturnedR0(10)
+        );
+    }
+
+    #[test]
+    fn stdio_byte_reads_and_eof_queries_keep_read_ahead_and_logical_position() {
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_kernel::vfs::Access;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stream.dat"), b"abcdef").unwrap();
+        let (mut cpu, mut k, mut d) = setup();
+        k.vfs.mount("\\Data\\", dir.path());
+        let h = k
+            .vfs
+            .open("\\Data\\stream.dat", Access::Read, false)
+            .unwrap();
+        macro_rules! api {
+            ($name:literal,$args:expr) => {
+                call(&mut cpu, &mut k, &mut d, "coredll.dll", $name, $args)
+            };
+        }
+        assert_eq!(
+            api!("fgetc", &[h]),
+            DispatchOutcome::ReturnedR0(b'a' as u32)
+        );
+        assert!(k.vfs.has_stdio_read_ahead(h));
+        for _ in 0..100 {
+            assert_eq!(api!("feof", &[h]), DispatchOutcome::ReturnedR0(0));
+            assert!(k.vfs.has_stdio_read_ahead(h));
+        }
+        assert_eq!(api!("ftell", &[h]), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(api!("fseek", &[h, 0, 2]), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(api!("feof", &[h]), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            api!("ungetc", &[b'Z' as u32, h]),
+            DispatchOutcome::ReturnedR0(b'Z' as u32)
+        );
+        assert_eq!(api!("feof", &[h]), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            api!("fgetc", &[h]),
+            DispatchOutcome::ReturnedR0(b'Z' as u32)
+        );
+        assert_eq!(api!("feof", &[h]), DispatchOutcome::ReturnedR0(1));
+        api!("rewind", &[h]);
+        assert_eq!(
+            api!("fgetc", &[h]),
+            DispatchOutcome::ReturnedR0(b'a' as u32)
+        );
+        api!("fflush", &[h]);
+        assert!(!k.vfs.has_stdio_read_ahead(h));
+        assert_eq!(api!("ftell", &[h]), DispatchOutcome::ReturnedR0(1));
+        assert_eq!(
+            api!("fgetc", &[h]),
+            DispatchOutcome::ReturnedR0(b'b' as u32)
         );
     }
 
