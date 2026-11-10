@@ -288,8 +288,9 @@ impl Default for PipelineState {
 pub(crate) const GOFORCE4500_DEPTH_TOLERANCE: f32 = 1. / 12.;
 // Bound the empirical visibility margin in window depth. The old relative
 // margin exposed occluded body panels in Chicane when geometry approached the
-// camera. This is a compatibility bound, not a measured SC-10 precision value.
-pub(crate) const GOFORCE4500_MAX_DEPTH_TOLERANCE: f32 = 1. / 4096.;
+// camera. Coverage protects a batch's visible faces; the cap still limits
+// cross-material occlusion. This is not a measured SC-10 precision value.
+pub(crate) const GOFORCE4500_MAX_DEPTH_TOLERANCE: f32 = 1. / 1024.;
 
 pub(crate) fn goforce4500_replay_depth(z: f32, w: f32) -> f32 {
     let relative = GOFORCE4500_DEPTH_TOLERANCE * (z - w);
@@ -404,6 +405,7 @@ pub struct RenderTarget {
     pub color: Vec<u8>,
     /// Window-space depth in `[0, 1]`, smaller is nearer.
     pub depth: Vec<f32>,
+    pub(crate) visibility: crate::visibility::Coverage,
 }
 
 impl RenderTarget {
@@ -415,6 +417,7 @@ impl RenderTarget {
             rgb565: false,
             color: vec![0u8; px * 4],
             depth: vec![1.0f32; px],
+            visibility: Default::default(),
         }
     }
 
@@ -438,6 +441,7 @@ impl RenderTarget {
 
     /// `glClear(GL_COLOR_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_color(&mut self, rgba: [u8; 4], scissor: Option<(i32, i32, i32, i32)>) {
+        self.visibility.reset();
         let rgba = if self.rgb565 {
             rgb565_pixel(rgba)
         } else {
@@ -469,6 +473,7 @@ impl RenderTarget {
         scissor: Option<(i32, i32, i32, i32)>,
         mask: [bool; 4],
     ) {
+        self.visibility.reset();
         let rgba = if self.rgb565 {
             rgb565_pixel(rgba)
         } else {
@@ -498,6 +503,7 @@ impl RenderTarget {
 
     /// `glClear(GL_DEPTH_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_depth(&mut self, value: f32, scissor: Option<(i32, i32, i32, i32)>) {
+        self.visibility.reset();
         match self.scissor_bounds(scissor) {
             None => {}
             Some((x0, y0, x1, y1)) if self.covers_all(x0, y0, x1, y1) => {
@@ -668,7 +674,7 @@ fn evaluate_combiner(
 /// colour map — a format with no alpha channel at all — on one stage
 /// and a white-RGB circular alpha mask on the next, so only running
 /// both, in order, cuts the ball out of its square.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextureStage {
     /// Which texture unit this is. Selects both the texture
     /// [`SampleFn`] reads and the vertex coordinate set it reads with.
@@ -1132,6 +1138,10 @@ fn write_fragment(
             f32::from(to_byte(state.alpha_ref)),
         )
     {
+        return false;
+    }
+
+    if !target.visibility.accept(idx) {
         return false;
     }
 

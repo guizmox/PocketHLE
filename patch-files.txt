@@ -1,7 +1,9 @@
 crates\pocket-gles\src\context.rs
 crates\pocket-gles\src\context\sharing.rs
 crates\pocket-gles\src\gpu\mod.rs
+crates\pocket-gles\src\lib.rs
 crates\pocket-gles\src\raster.rs
+crates\pocket-gles\src\visibility.rs
 crates\pocket-winceapi\src\gles.rs
 crates\pocket-winceapi\src\gles\egl_config.rs
 crates\pocket-winceapi\src\gles\lifecycle_tests.rs
@@ -10,7 +12,12 @@ proof\battlestations-midway\README.md
 proof\goforce4500-bounded-depth\README.md
 proof\goforce4500-bounded-depth\battlestations.png
 proof\goforce4500-bounded-depth\chicane.png
+proof\goforce4500-coverage\README.md
+proof\goforce4500-coverage\battlestations.png
+proof\goforce4500-coverage\chicane.png
 proof\thps2-hangar\README.md
 proof\thps2-hangar\after.png
 proof\thps2-hangar\before.png
 proof\thps2-hangar\live.png
+patch-files.txt
+remove-files.txt

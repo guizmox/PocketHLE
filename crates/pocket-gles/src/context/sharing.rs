@@ -71,6 +71,7 @@ impl Context {
     }
     /// Texture zero is context-local, including its image and parameters.
     pub fn exchange_shared_objects(&mut self, group: &mut SharedObjects) {
+        self.target.visibility.reset();
         self.combiner_programs
             .exchange_namespace(&mut group.programs);
         let zero = self.textures.remove(&0);

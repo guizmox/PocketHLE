@@ -150,55 +150,65 @@ measured costs and the limits of local testing.
 
 ## GoForce 4500 visibility approximation
 
-The Gizmondo GoForce 4500 profile applies a bounded visibility approximation to
-opaque fixed-function triangles. It is an interpretation for compatibility, not
-an observed SC-10 hardware rule or a claim of exact OpenGL ES depth semantics.
-There is no game-name, texture-ID, binary or terrain detection and no new setting.
-PocketPC profiles, including GoForce 5500 and Intel 2700G, do not enable it.
+The Gizmondo GoForce 4500 profile applies an **empirical visibility approximation**
+to opaque fixed-function triangles. It is not a recovered SC-10 hardware rule or
+exact OpenGL ES depth behavior. There is no game, executable or texture-ID test
+and no new setting. PocketPC profiles, including GoForce 5500 and Intel 2700G,
+keep their separate behavior.
 
-A normal draw establishes the nearest unbiased depth. A second color-only pass
-uses `z' = z + max((z - w) / 12, -2 * w / 4096)` for vertices in front
-of the eye. The resulting vertex window-depth margin is
-`min((1 - depth) / 12, 1 / 4096)`. It approaches zero at the far plane,
-unlike a constant bias that exposes distant submerged triangles. The absolute
-bound prevents the former relative margin from growing large enough to reveal
-hidden near-camera body panels in Chicane. The transformation happens before
-clipping and interpolation; it is not a per-fragment tolerance test. Clipping
-remains enabled, including at the near plane. This pass never changes the depth attachment, so its margin
-cannot accumulate across draws. The ordinary pass retains the original color
-where the replay is clipped or rejected.
+The ordinary draw establishes unbiased depth. A color-only replay uses
+`z' = z + max((z - w) / 12, -2 * w / 1024)` for vertices in front of the eye.
+Its vertex window-depth margin is `min((1 - depth) / 12, 1 / 1024)`;
+it diminishes towards the far plane and never accumulates in the depth buffer.
+The transform precedes clipping and interpolation. It is not a per-fragment
+comparison against a depth texture. Near-plane clipping stays enabled.
 
-Blending, logic operations, explicit polygon offsets or non-default depth ranges,
-non-LESS/LEQUAL tests, disabled depth writes, points, lines and NV combiner programs
-retain their original paths. Alpha rejection and color masks remain effective.
-The profile follows newly created, parked and reset EGL contexts and is cleared
-when the session changes to another profile. EGL continues to advertise and use
-its depth attachment; the rejected depthless experiment is not retained.
+The old bound of `1 / 4096` left visible water/land intersections on a low
+Battlestations flight. Removing the bound exposed Chicane's wheels through its
+body. The revised bound is combined with coverage protection: the replay cannot
+replace pixels already made normally visible by the same consecutive drawing
+batch. A batch is defined by pipeline, modelview/projection, texture bindings,
+image revisions/sampler state and texture stages. These are rendering states,
+not an inferred game or object identity. Material/transform changes start a new
+batch, so the absolute bound remains necessary for cross-batch hidden surfaces.
 
-Software reuses transformed vertices. Native GL/GLES reuses uploaded vertex/index
-buffers, shader and textures. The depth-range uniform also carries the replay
-bound; ordinary draws, including Intel replays, set that component to zero.
-The additional draw changes this uniform and the depth-write mask, then restores
-both. The vertex shader bounds the displacement only during the 4500 replay. There is no new
-shader variant, texture upload, calibration or GPU readback. The shared code
-serves desktop and Android, native resolution and internal scaling. Presentation,
-screenshots and recordings retain their existing paths.
+Native GL/GLES uses internal stencil coverage in a packed D24S8 attachment.
+The upgrade occurs only at a full writable depth clear, preserving live depth
+on partial or masked clears. Hosts retaining D16 or rejecting packed storage
+keep the bounded replay without coverage protection and log this limitation.
+The internal stencil is not advertised as a guest stencil attachment. A batch
+uses an eight-bit reference; storage is cleared only on reference wrap or
+allocation/resize. Stencil testing/writes are restored after the draw. Software
+uses one byte per logical pixel, allocated lazily for eligible geometry.
+Both paths invalidate batch identity on clears, relevant image/cache changes
+and surface/client-state transitions. Ordinary unbiased depth remains intact.
 
-Both the relative coefficient and the absolute bound are empirical, not claims
-of a 12-bit depth buffer or a recovered hardware register. Original driver CPU submission and original map
-heights agree with the captured intersecting meshes, but physical GoForce
-rasterization has not been verified. Nearby hidden surfaces can become visible;
-other Gizmondo titles need visual regression testing. Bounding the tolerance can
-also reveal intersections previously hidden by the broader approximation. Eligible geometry is
-rasterized twice, increasing GPU work (or CPU work in software mode). There is
-no additional rendering pass outside the 4500 profile.
+Eligibility excludes blending, logic operations, explicit polygon offsets,
+non-default depth ranges, tests other than LESS/LEQUAL, disabled depth writes,
+points, lines and NV combiner programs. Alpha rejection and color masks remain
+effective. The profile follows created, parked and reset EGL contexts and does
+not propagate into another device profile.
 
-The earlier Battlestations observations and their measurement limits are recorded
-in [the original note](../proof/battlestations-midway/README.md). The bounded
-revision was compared on Chicane car geometry and successive Battlestations
-island views; the shared validation record is
-[here](../proof/goforce4500-bounded-depth/README.md). Some shore intersections
-still shift, and no original SC-10 rasterizer fidelity is claimed.
+The native replay reuses uploaded vertices/indices, textures and shader; software
+reuses transformed vertices. There is no extra pass beyond the existing replay,
+new shader variant, per-frame readback or instrumentation. Coverage adds stencil
+work and per-batch state comparison; software adds coverage accesses and storage.
+This is not a zero-cost compatibility feature. Render scaling, presentation,
+recordings and screenshots retain their existing paths. Shared code serves
+desktop and Android; physical Android/Windows GPU validation remains required.
+
+The supplied driver, `libgles_cm(2).dll`, identifies GoForce 4500 version
+01.01.0014. Its ARM depth/matrix routines and reconstructed EGL selection do not
+establish the empirical tolerance above. Actual captured water and terrain
+intersect; original matrix arithmetic and a D16 host attachment did not remove
+the observed patch. This evidence must not be described as exact hardware
+emulation. Close hidden surfaces in other titles can still become visible,
+and a compatibility replay can shift shore intersections.
+
+See [the combined validation record](../proof/goforce4500-coverage/README.md)
+for the low-flight and angled-car comparisons, test scope and limitations.
+Earlier experiments remain in [the initial note](../proof/battlestations-midway/README.md)
+and [the bounded revision](../proof/goforce4500-bounded-depth/README.md).
 
 ## Native fixed-point vertex attributes
 

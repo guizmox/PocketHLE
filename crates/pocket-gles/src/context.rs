@@ -332,6 +332,7 @@ fn write_rgb565_target(target: &mut RenderTarget, pixels: &[u8]) -> bool {
     if pixels.len() != target.width as usize * target.height as usize * 2 {
         return false;
     }
+    target.visibility.reset();
     for (dst, src) in target.color.chunks_exact_mut(4).zip(pixels.chunks_exact(2)) {
         let v = u16::from_le_bytes([src[0], src[1]]);
         let (r, g, b) = (
@@ -523,6 +524,11 @@ impl Context {
     }
 
     pub fn park_surface(&mut self, surface: &mut SurfaceBuffers) {
+        self.target.visibility.reset();
+        surface.target.visibility.reset();
+        for gpu in [&mut self.gpu, &mut surface.gpu].into_iter().flatten() {
+            gpu.reset_visibility();
+        }
         std::mem::swap(&mut self.target, &mut surface.target);
         std::mem::swap(&mut self.gpu, &mut surface.gpu);
         std::mem::swap(&mut self.gpu_failed, &mut surface.failed);
@@ -557,6 +563,7 @@ impl Context {
         fresh.state.intel2700g_depth_bias = self.state.intel2700g_depth_bias;
         fresh.state.goforce4500_depth_tolerance = self.state.goforce4500_depth_tolerance;
         std::mem::swap(&mut fresh.target, &mut self.target);
+        fresh.target.visibility.reset();
         std::mem::swap(&mut fresh.gpu, &mut self.gpu);
         fresh.gpu_failed = self.gpu_failed;
         if let Some(gpu) = fresh.gpu.as_ref() {
@@ -672,6 +679,7 @@ impl Context {
         self.gpu_requested = false;
     }
     fn gpu_failure(&mut self, action: &str, error: String) {
+        self.target.visibility.reset();
         if !self.gpu_failed {
             log::error!("GLES GPU {action}: {error}; restart with software rendering if needed");
         }
@@ -1347,6 +1355,7 @@ impl Context {
     }
 
     pub fn delete_textures(&mut self, names: &[u32]) {
+        self.target.visibility.reset();
         if let Some(gpu) = self.gpu.as_mut() {
             let ids: Vec<_> = names
                 .iter()
@@ -3506,6 +3515,24 @@ impl Context {
                 }
                 return;
             }
+            let visibility_replay = self.state.goforce_depth_color_pass().is_some()
+                && self.combiner_programs.active().is_none()
+                && matches!(mode, GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN);
+            if visibility_replay {
+                let key = crate::visibility::Key::new(
+                    &self.state,
+                    std::array::from_fn(|i| self.texture_units[i].bound_texture),
+                    *self.projection.current(),
+                    *self.modelview.current(),
+                    stages,
+                    &self.textures,
+                );
+                self.target
+                    .visibility
+                    .begin(key, (self.target.width * self.target.height) as usize);
+            } else {
+                self.target.visibility.reset();
+            }
             // Decode/generate only once per texture revision, and only in software.
             for stage in stages {
                 let name = self.texture_units[stage.unit].bound_texture;
@@ -3627,6 +3654,9 @@ impl Context {
                 .chain(compatibility_pass.as_ref())
                 .enumerate()
             {
+                if visibility_replay {
+                    self.target.visibility.pass(replay != 0);
+                }
                 // Stream primitives in their original order without allocating a triangle list.
                 let mut draw = |mut tri: [Vertex; 3]| {
                     if replay != 0 && !pass.intel2700g_depth_bias {
@@ -3660,6 +3690,7 @@ impl Context {
                     _ => unreachable!(),
                 }
             }
+            self.target.visibility.finish();
         })();
         verts.clear();
         dense.clear();
@@ -4532,6 +4563,45 @@ mod tests {
     }
 
     #[test]
+    fn goforce_software_coverage_preserves_self_occlusion_across_draws() {
+        for rgb565 in [false, true] {
+            let mut c = if rgb565 {
+                Context::new_rgb565(32, 32)
+            } else {
+                Context::new(32, 32)
+            };
+            c.state.depth_test = true;
+            c.state.goforce4500_depth_tolerance = true;
+            c.set_vertex_pointer(3, GL_FLOAT, 0, BASE);
+            c.set_client_state(GL_VERTEX_ARRAY, true);
+            for (left, right, z, color, name) in [
+                (-1., 1., 0., [0., 0., 1., 1.], 0),
+                (-1., 0., -0.2, [1., 0., 0., 1.], 1),
+                (-1., 0., -0.1995, [1., 1., 0., 1.], 1),
+                (0., 1., 0.001, [1., 0., 0., 1.], 1),
+                (0., 1., 0.2, [0., 1., 0., 1.], 1),
+            ] {
+                c.texture_units[0].bound_texture = name;
+                c.current_color = color;
+                let mut mem = FakeMem {
+                    base: BASE,
+                    bytes: floats(&[left, -1., z, right, -1., z, right, 1., z, left, 1., z]),
+                };
+                c.draw_arrays(&mut mem, GL_TRIANGLE_FAN, 0, 4);
+                assert_eq!(c.take_error(), GL_NO_ERROR);
+            }
+            for x in [8, 24] {
+                assert_eq!(
+                    &c.target.color[(16 * 32 + x) * 4..(16 * 32 + x) * 4 + 3],
+                    &[255, 0, 0]
+                );
+            }
+            assert!((c.target.depth[16 * 32 + 8] - 0.4).abs() < 1e-6);
+            assert_eq!(c.target.depth[16 * 32 + 24], 0.5);
+        }
+    }
+
+    #[test]
     fn goforce_color_replay_preserves_depth_and_keeps_distant_geometry_hidden() {
         for profile in [false, true] {
             let mut c = Context::new(32, 32);
@@ -4541,9 +4611,11 @@ mod tests {
             c.set_client_state(GL_VERTEX_ARRAY, true);
             for (z, color) in [
                 (0., [0., 0., 1., 1.]),
-                (0.00025, [1., 0., 0., 1.]),
-                (0.001, [0., 1., 0., 1.]),
+                (0.001, [1., 0., 0., 1.]),
+                (0.2, [0., 1., 0., 1.]),
             ] {
+                // Different material starts a new visibility batch.
+                c.texture_units[0].bound_texture += 1;
                 let mut mem = FakeMem {
                     base: BASE,
                     bytes: floats(&[-1., -1., z, 1., -1., z, 1., 1., z, -1., 1., z]),
