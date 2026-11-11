@@ -135,11 +135,6 @@ impl Emulator {
         pocket_winceapi::gles::set_gizmondo_goforce_driver(enabled);
     }
 
-    /// Enable the Battlestations-only color replay for the running session.
-    pub fn set_battlestations_depth_compatibility(&mut self, enabled: bool) {
-        pocket_winceapi::gles::set_battlestations_depth_compatibility(enabled);
-    }
-
     /// Session gate for detected NVIDIA AR10/AR11 combiner clients.
     pub fn set_nv_combiner_allowed(&mut self, allowed: bool) {
         pocket_winceapi::gles::set_nv_combiner_allowed(allowed);

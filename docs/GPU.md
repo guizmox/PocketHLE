@@ -148,69 +148,6 @@ profiles do not enable this Intel approximation. See the
 [THPS2 validation record](../proof/thps2-hangar/README.md) for before/after images,
 measured costs and the limits of local testing.
 
-## Battlestations: Midway depth compatibility
-
-Desktop and Android enable an **empirical visibility approximation** for opaque
-fixed-function triangles only in Battlestations: Midway. The launcher identifies
-the game by its Gizmondo title ID (`GZGA200038`, `GZGA270038`, or a catalogue
-alias for the original card). The replay reduces visible blue patches during
-low flight. Other Gizmondo games, including Chicane, use standard depth testing.
-PocketPC profiles keep their separate behavior.
-
-The ordinary draw establishes unbiased depth. A color-only replay uses
-`z' = z + max((z - w) / 12, -2 * w / 1024)` for vertices in front of the eye.
-Its vertex window-depth margin is `min((1 - depth) / 12, 1 / 1024)`;
-it diminishes towards the far plane and never accumulates in the depth buffer.
-The transform precedes clipping and interpolation. It is not a per-fragment
-comparison against a depth texture. Near-plane clipping stays enabled.
-
-The old bound of `1 / 4096` left visible water/land intersections on a low
-Battlestations flight. Removing the bound exposed Chicane's wheels through its
-body. The revised bound is combined with coverage protection: the replay cannot
-replace pixels already made normally visible by the same consecutive drawing
-batch. A batch is defined by pipeline, modelview/projection, texture bindings,
-image revisions/sampler state and texture stages. These are rendering states,
-not an inferred game or object identity. Material/transform changes start a new
-batch, so the absolute bound remains necessary for cross-batch hidden surfaces.
-
-Native GL/GLES uses internal stencil coverage in a packed D24S8 attachment.
-The upgrade occurs only at a full writable depth clear, preserving live depth
-on partial or masked clears. Hosts retaining D16 or rejecting packed storage
-keep the bounded replay without coverage protection and log this limitation.
-The internal stencil is not advertised as a guest stencil attachment. A batch
-uses an eight-bit reference; storage is cleared only on reference wrap or
-allocation/resize. Stencil testing/writes are restored after the draw. Software
-uses one byte per logical pixel, allocated lazily for eligible geometry.
-Both paths invalidate batch identity on clears, relevant image/cache changes
-and surface/client-state transitions. Ordinary unbiased depth remains intact.
-
-Eligibility excludes blending, logic operations, explicit polygon offsets,
-non-default depth ranges, tests other than LESS/LEQUAL, disabled depth writes,
-points, lines and NV combiner programs. Alpha rejection and color masks remain
-effective. The session setting follows created, parked and reset EGL contexts.
-The launcher selects it again for each game.
-
-The native replay reuses uploaded vertices/indices, textures and shader; software
-reuses transformed vertices. There is no extra pass beyond the existing replay,
-new shader variant, per-frame readback or instrumentation. Coverage adds stencil
-work and per-batch state comparison; software adds coverage accesses and storage.
-This is not a zero-cost compatibility feature. Render scaling, presentation,
-recordings and screenshots retain their existing paths. Shared code serves
-desktop and Android; physical Android/Windows GPU validation remains required.
-
-The supplied driver, `libgles_cm(2).dll`, identifies GoForce 4500 version
-01.01.0014. Its ARM depth/matrix routines and reconstructed EGL selection do not
-establish the empirical tolerance above. Actual captured water and terrain
-intersect; original matrix arithmetic and a D16 host attachment did not remove
-the observed patch. This evidence must not be described as exact hardware
-emulation. Close hidden surfaces in other titles can still become visible,
-and a compatibility replay can shift shore intersections.
-
-See [the combined validation record](../proof/goforce4500-coverage/README.md)
-for the low-flight and angled-car comparisons, test scope and limitations.
-Earlier experiments remain in [the initial note](../proof/battlestations-midway/README.md)
-and [the bounded revision](../proof/goforce4500-bounded-depth/README.md).
-
 ## Native fixed-point vertex attributes
 
 Advertising `GL_FIXED` fetch does not guarantee that the host preserves exact

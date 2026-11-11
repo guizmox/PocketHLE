@@ -239,8 +239,6 @@ pub struct PipelineState {
     /// Original Intel 2700G WinCE driver: integer constant bias, no slope term.
     /// Opt-in driver compatibility; standard ES behavior is the default.
     pub intel2700g_depth_bias: bool,
-    /// GoForce 4500 approximation, not a measured hardware rule.
-    pub goforce4500_depth_tolerance: bool,
 }
 
 impl Default for PipelineState {
@@ -280,26 +278,10 @@ impl Default for PipelineState {
             polygon_factor: 0.,
             polygon_units: 0.,
             intel2700g_depth_bias: false,
-            goforce4500_depth_tolerance: false,
         }
     }
 }
 
-pub(crate) const GOFORCE4500_DEPTH_TOLERANCE: f32 = 1. / 12.;
-// Bound the empirical visibility margin in window depth. The old relative
-// margin exposed occluded body panels in Chicane when geometry approached the
-// camera. Coverage protects a batch's visible faces; the cap still limits
-// cross-material occlusion. This is not a measured SC-10 precision value.
-pub(crate) const GOFORCE4500_MAX_DEPTH_TOLERANCE: f32 = 1. / 1024.;
-
-pub(crate) fn goforce4500_replay_depth(z: f32, w: f32) -> f32 {
-    let relative = GOFORCE4500_DEPTH_TOLERANCE * (z - w);
-    if w > 0. {
-        z + relative.max(-2. * GOFORCE4500_MAX_DEPTH_TOLERANCE * w)
-    } else {
-        z + relative
-    }
-}
 const INTEL2700G_DEPTH_TOLERANCE_UNITS: f32 = 16.;
 
 impl PipelineState {
@@ -342,30 +324,6 @@ impl PipelineState {
         Some(pass)
     }
 
-    /// A second opaque color pass expands clip depth away from the far plane.
-    /// Keep the original depth: tolerance must not accumulate with draw order
-    /// or pull subsequent geometry towards the camera.
-    pub fn goforce_depth_color_pass(&self) -> Option<Self> {
-        if !self.goforce4500_depth_tolerance
-            || !self.depth_test
-            || !self.depth_write
-            || self.depth_range != (0., 1.)
-            || !matches!(self.depth_func, CompareFunc::Less | CompareFunc::Lequal)
-            || self.blend
-            || self.logic_op
-            || self.polygon_offset
-            || self.intel2700g_depth_bias
-            || !self.color_mask.iter().any(|enabled| *enabled)
-        {
-            return None;
-        }
-        let mut pass = self.clone();
-        pass.goforce4500_depth_tolerance = false;
-        pass.depth_write = false;
-        pass.depth_range = (-GOFORCE4500_DEPTH_TOLERANCE, 1.);
-        Some(pass)
-    }
-
     /// The reference WinCE CL driver ignores factor and arithmetic-shifts its
     /// signed 16.16 units before encoding a sign + 16-bit magnitude register.
     pub fn polygon_offset_parameters(&self) -> (f32, f32) {
@@ -405,7 +363,6 @@ pub struct RenderTarget {
     pub color: Vec<u8>,
     /// Window-space depth in `[0, 1]`, smaller is nearer.
     pub depth: Vec<f32>,
-    pub(crate) visibility: crate::visibility::Coverage,
 }
 
 impl RenderTarget {
@@ -417,7 +374,6 @@ impl RenderTarget {
             rgb565: false,
             color: vec![0u8; px * 4],
             depth: vec![1.0f32; px],
-            visibility: Default::default(),
         }
     }
 
@@ -441,7 +397,6 @@ impl RenderTarget {
 
     /// `glClear(GL_COLOR_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_color(&mut self, rgba: [u8; 4], scissor: Option<(i32, i32, i32, i32)>) {
-        self.visibility.reset();
         let rgba = if self.rgb565 {
             rgb565_pixel(rgba)
         } else {
@@ -473,7 +428,6 @@ impl RenderTarget {
         scissor: Option<(i32, i32, i32, i32)>,
         mask: [bool; 4],
     ) {
-        self.visibility.reset();
         let rgba = if self.rgb565 {
             rgb565_pixel(rgba)
         } else {
@@ -503,7 +457,6 @@ impl RenderTarget {
 
     /// `glClear(GL_DEPTH_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_depth(&mut self, value: f32, scissor: Option<(i32, i32, i32, i32)>) {
-        self.visibility.reset();
         match self.scissor_bounds(scissor) {
             None => {}
             Some((x0, y0, x1, y1)) if self.covers_all(x0, y0, x1, y1) => {
@@ -674,7 +627,7 @@ fn evaluate_combiner(
 /// colour map — a format with no alpha channel at all — on one stage
 /// and a white-RGB circular alpha mask on the next, so only running
 /// both, in order, cuts the ball out of its square.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct TextureStage {
     /// Which texture unit this is. Selects both the texture
     /// [`SampleFn`] reads and the vertex coordinate set it reads with.
@@ -1138,10 +1091,6 @@ fn write_fragment(
             f32::from(to_byte(state.alpha_ref)),
         )
     {
-        return false;
-    }
-
-    if !target.visibility.accept(idx) {
         return false;
     }
 
@@ -1682,48 +1631,6 @@ mod tests {
             forward.intel2700g_depth_color_pass().unwrap().polygon_units,
             -16.
         );
-    }
-
-    #[test]
-    fn goforce_visibility_margin_is_bounded_near_and_relative_far() {
-        for w in [0.125, 1., 64.] {
-            for depth in [0., 0.5, 0.9, 0.999, 1.] {
-                let z = (2. * depth - 1.) * w;
-                let actual = (z - goforce4500_replay_depth(z, w)) / (2. * w);
-                let expected = ((1. - depth) / 12.).min(GOFORCE4500_MAX_DEPTH_TOLERANCE);
-                assert!((actual - expected).abs() < 1e-7);
-            }
-        }
-        // The normal homogeneous clipper still rejects geometry behind the eye.
-        assert_eq!(goforce4500_replay_depth(0., 0.), 0.);
-        assert!(goforce4500_replay_depth(-2., 1.) < -1.);
-    }
-
-    #[test]
-    fn goforce_depth_tolerance_excludes_blending_and_explicit_depth_policies() {
-        let mut state = PipelineState {
-            depth_test: true,
-            goforce4500_depth_tolerance: true,
-            ..Default::default()
-        };
-        assert!(state.goforce_depth_color_pass().is_some());
-        state.blend = true;
-        assert!(state.goforce_depth_color_pass().is_none());
-        state.blend = false;
-        state.polygon_offset = true;
-        assert!(state.goforce_depth_color_pass().is_none());
-        state.polygon_offset = false;
-        state.depth_func = CompareFunc::Equal;
-        assert!(state.goforce_depth_color_pass().is_none());
-        state.depth_func = CompareFunc::Less;
-        state.depth_write = false;
-        assert!(state.goforce_depth_color_pass().is_none());
-        state.depth_write = true;
-        state.depth_range = (0.5, 1.);
-        assert!(state.goforce_depth_color_pass().is_none());
-        state.depth_range = (0., 1.);
-        state.goforce4500_depth_tolerance = false;
-        assert!(state.goforce_depth_color_pass().is_none());
     }
 
     #[test]

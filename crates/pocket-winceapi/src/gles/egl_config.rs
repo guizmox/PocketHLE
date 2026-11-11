@@ -31,7 +31,6 @@ impl Config {
     }
 
     pub(super) fn current() -> Self {
-        // GoForce visibility compatibility must not remove the depth attachment.
         Self {
             depth: with_ctx(|c| c.state.depth_bits() as i32),
             rgba: false,
@@ -231,7 +230,7 @@ pub(super) fn read_pairs(ctx: &mut CallCtx<'_>, mut ptr: u32) -> Result<Vec<(u32
 mod tests {
     use super::*;
     #[test]
-    fn goforce_visibility_preserves_depth_for_both_color_configurations() {
+    fn goforce_driver_preserves_depth_for_both_color_configurations() {
         let _g = super::super::tests::guard();
         reset_for_test(8, 8);
         set_gizmondo_goforce_driver(true);

@@ -410,11 +410,6 @@ const COMBINE_UNIFORMS: [[&str; 6]; 5] = [
 ];
 #[allow(non_snake_case)]
 struct Gl {
-    StencilFunc: unsafe extern "system" fn(u32, i32, u32),
-    StencilOp: unsafe extern "system" fn(u32, u32, u32),
-    StencilMask: unsafe extern "system" fn(u32),
-    ClearStencil: unsafe extern "system" fn(i32),
-
     CopyTexSubImage2D: Option<unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, i32, i32)>,
     CopyTexImage2D: unsafe extern "system" fn(u32, i32, u32, i32, i32, i32, i32, i32),
     CompressedTexImage2D:
@@ -499,34 +494,6 @@ impl Gl {
                         unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, i32, i32),
                     >(p)
                 })
-            },
-            StencilFunc: {
-                let p = host.load(c"glStencilFunc");
-                if p.is_null() {
-                    return Err("driver lacks glStencilFunc".into());
-                }
-                std::mem::transmute::<*mut c_void, unsafe extern "system" fn(u32, i32, u32)>(p)
-            },
-            StencilOp: {
-                let p = host.load(c"glStencilOp");
-                if p.is_null() {
-                    return Err("driver lacks glStencilOp".into());
-                }
-                std::mem::transmute::<*mut c_void, unsafe extern "system" fn(u32, u32, u32)>(p)
-            },
-            StencilMask: {
-                let p = host.load(c"glStencilMask");
-                if p.is_null() {
-                    return Err("driver lacks glStencilMask".into());
-                }
-                std::mem::transmute::<*mut c_void, unsafe extern "system" fn(u32)>(p)
-            },
-            ClearStencil: {
-                let p = host.load(c"glClearStencil");
-                if p.is_null() {
-                    return Err("driver lacks glClearStencil".into());
-                }
-                std::mem::transmute::<*mut c_void, unsafe extern "system" fn(i32)>(p)
             },
             CopyTexImage2D: {
                 let p = host.load(c"glCopyTexImage2D");
@@ -1463,10 +1430,6 @@ pub struct Renderer {
     color: u32,
     depth: u32,
     depth_format: u32,
-    visibility_stencil: bool,
-    visibility_attempted: bool,
-    visibility_stamp: u8,
-    visibility_group: Option<crate::visibility::Key>,
     depth_bias_step: Option<(u32, f32)>,
     white: u32,
     width: u32,
@@ -1686,10 +1649,6 @@ impl Renderer {
                 rgb565: false,
                 color: 0,
                 depth: 0,
-                visibility_stencil: false,
-                visibility_attempted: false,
-                visibility_stamp: 0,
-                visibility_group: None,
                 depth_format: if depth24 { 0x81a6 } else { 0x81a5 },
                 depth_bias_step: None,
                 white: 0,
@@ -2209,13 +2168,6 @@ impl Renderer {
             (self.gl.Uniform2f)(l, a, b);
         }
     }
-    unsafe fn depth_range_uniform(&mut self, near: f32, far: f32, replay_cap: f32) {
-        self.uniform_4fv(
-            self.loc("depthRange"),
-            1,
-            [near, far, replay_cap, 0.].as_ptr(),
-        );
-    }
     unsafe fn uniform_4fv(&mut self, l: i32, n: i32, p: *const f32) {
         // An inactive uniform needs neither a driver call nor payload/cache work.
         if l < 0 {
@@ -2390,28 +2342,13 @@ impl Renderer {
             (self.gl.FramebufferTexture2D)(0x8d40, 0x8ce0, GL_TEXTURE_2D, self.color, 0);
             (self.gl.FramebufferRenderbuffer)(0x8d40, 0x8d00, 0x8d41, self.depth);
             loop {
-                (self.gl.RenderbufferStorage)(
-                    0x8d41,
-                    if self.visibility_stencil {
-                        0x88f0
-                    } else {
-                        self.depth_format
-                    },
-                    w as i32,
-                    h as i32,
-                );
+                (self.gl.RenderbufferStorage)(0x8d41, self.depth_format, w as i32, h as i32);
                 let error = upload_error(&self.gl)?;
                 let complete = (self.gl.CheckFramebufferStatus)(0x8d40) == 0x8cd5;
                 if error == 0 && complete {
                     break;
                 }
-                if self.visibility_stencil {
-                    self.visibility_stencil = false;
-                    (self.gl.FramebufferRenderbuffer)(0x8d40, 0x8d20, 0x8d41, 0);
-                    log::warn!(
-                        "GoForce visibility coverage resize failed; retaining bounded replay"
-                    );
-                } else if self.depth_format == 0x81a6 {
+                if self.depth_format == 0x81a6 {
                     // Keep ES2 drivers lacking a usable 24-bit attachment usable.
                     self.depth_format = 0x81a5;
                 } else {
@@ -2419,17 +2356,10 @@ impl Renderer {
                 }
             }
             self.pipeline = None;
-            self.visibility_group = None;
             self.scissor(None);
             (self.gl.ColorMask)(1, 1, 1, 1);
             (self.gl.DepthMask)(1);
             (self.gl.ClearColor)(0., 0., 0., 0.);
-            if self.visibility_stencil {
-                (self.gl.StencilMask)(0xff);
-                (self.gl.ClearStencil)(0);
-                (self.gl.Clear)(0x400);
-                self.visibility_stamp = 0;
-            }
             (self.gl.Clear)(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             self.render_scale = scale;
             self.width = w;
@@ -2442,7 +2372,6 @@ impl Renderer {
     /// Source is top-down RGB565; the backing texture is bottom-up and may
     /// have an internal scale. This path is used only for native/GL interop.
     pub fn write_rgb565(&mut self, width: u32, height: u32, pixels: &[u8]) -> Result<(), String> {
-        self.visibility_group = None;
         if !self.rgb565
             || width == 0
             || height == 0
@@ -2526,46 +2455,6 @@ impl Renderer {
         unsafe { self.check() }
     }
 
-    // Upgrade only at a full writable depth clear: replacing ancillary storage
-    // here cannot destroy depth that the guest intended to preserve. The actual
-    // depth precision remains 24 bits; the extra eight bits are internal coverage.
-    unsafe fn prepare_visibility_stencil(&mut self) -> Result<(), String> {
-        if self.visibility_attempted {
-            return Ok(());
-        }
-        if self.depth_format != 0x81a6 {
-            self.visibility_attempted = true;
-            log::warn!("GoForce visibility coverage unavailable with 16-bit host depth; retaining bounded replay");
-            return Ok(());
-        }
-        self.visibility_attempted = true;
-        (self.gl.BindRenderbuffer)(0x8d41, self.depth);
-        (self.gl.RenderbufferStorage)(0x8d41, 0x88f0, self.width as i32, self.height as i32);
-        (self.gl.FramebufferRenderbuffer)(0x8d40, 0x8d20, 0x8d41, self.depth);
-        let complete = (self.gl.CheckFramebufferStatus)(0x8d40) == 0x8cd5;
-        let error = upload_error(&self.gl)?;
-        if complete && error == 0 {
-            self.visibility_stencil = true;
-            self.visibility_stamp = 0;
-            self.scissor(None);
-            (self.gl.StencilMask)(0xff);
-            (self.gl.ClearStencil)(0);
-            (self.gl.Clear)(0x400);
-        } else {
-            log::warn!(
-                "GoForce visibility coverage unavailable on this host; retaining bounded replay"
-            );
-            (self.gl.FramebufferRenderbuffer)(0x8d40, 0x8d20, 0x8d41, 0);
-            (self.gl.RenderbufferStorage)(
-                0x8d41,
-                self.depth_format,
-                self.width as i32,
-                self.height as i32,
-            );
-        }
-        self.check()
-    }
-
     pub fn clear(
         &mut self,
         w: u32,
@@ -2580,15 +2469,6 @@ impl Renderer {
         self.pipeline = None;
         unsafe {
             (self.gl.BindFramebuffer)(0x8d40, self.fbo);
-            self.visibility_group = None;
-            self.toggle(0x0b90, false);
-            if state.goforce4500_depth_tolerance
-                && state.depth_write
-                && state.scissor.is_none()
-                && mask & GL_DEPTH_BUFFER_BIT != 0
-            {
-                self.prepare_visibility_stencil()?;
-            }
             self.scissor(state.scissor);
             (self.gl.ColorMask)(
                 state.color_mask[0] as u8,
@@ -2638,10 +2518,6 @@ impl Renderer {
         Ok(())
     }
 
-    pub(crate) fn reset_visibility(&mut self) {
-        self.visibility_group = None;
-    }
-
     pub fn supports_compressed(&self, format: u32) -> bool {
         let format = native_compressed_format(format);
         self.gl.CompressedTexImage2D.is_some() && self.compressed_formats.contains(&format)
@@ -2663,7 +2539,6 @@ impl Renderer {
         self.invalidate_texture_cache_entries(&names);
     }
     fn invalidate_texture_cache_entries(&mut self, names: &[u32]) {
-        self.visibility_group = None;
         if names.is_empty() || self.host.make_current().is_err() {
             return;
         }
@@ -2677,7 +2552,6 @@ impl Renderer {
         }
     }
     pub fn delete_textures(&mut self, names: &[u32]) {
-        self.visibility_group = None;
         if self.host.make_current().is_err() {
             return;
         }
@@ -3042,11 +2916,7 @@ impl Renderer {
         let (offset_factor, mut offset_units) = state.polygon_offset_parameters();
         let compatibility_pass = (self.combiner.is_none()
             && matches!(mode, GL_TRIANGLES | GL_TRIANGLE_STRIP | GL_TRIANGLE_FAN))
-        .then(|| {
-            state
-                .goforce_depth_color_pass()
-                .or_else(|| state.intel2700g_depth_color_pass())
-        })
+        .then(|| state.intel2700g_depth_color_pass())
         .flatten();
         let mut replay_offset_units = compatibility_pass
             .as_ref()
@@ -3493,7 +3363,11 @@ impl Renderer {
                     self.uniform_matrix4fv(self.loc(name), 1, 0, matrix.as_ptr());
                 }
             }
-            self.depth_range_uniform(state.depth_range.0, state.depth_range.1, 0.);
+            self.uniform_2f(
+                self.loc("depthRange"),
+                state.depth_range.0,
+                state.depth_range.1,
+            );
             self.uniform_1i(
                 self.loc("alphaMode"),
                 if state.alpha_test {
@@ -3830,38 +3704,6 @@ impl Renderer {
                 // The sampled channels are immutable for this entire draw.
                 self.copy_destination(true);
             }
-            let masked_replay = self.visibility_stencil
-                && compatibility_pass
-                    .as_ref()
-                    .is_some_and(|p| p.depth_range.0 < 0.);
-            if masked_replay {
-                let key = crate::visibility::Key::new(
-                    state,
-                    names,
-                    *projection,
-                    *modelview,
-                    stages,
-                    textures,
-                );
-                if self.visibility_group.as_ref() != Some(&key) {
-                    self.visibility_group = Some(key);
-                    self.visibility_stamp = self.visibility_stamp.wrapping_add(1);
-                    if self.visibility_stamp == 0 {
-                        self.scissor(None);
-                        (self.gl.StencilMask)(0xff);
-                        (self.gl.ClearStencil)(0);
-                        (self.gl.Clear)(0x400);
-                        self.scissor(state.scissor);
-                        self.visibility_stamp = 1;
-                    }
-                }
-                self.toggle(0x0b90, true);
-                (self.gl.StencilMask)(0xff);
-                (self.gl.StencilFunc)(GL_ALWAYS, i32::from(self.visibility_stamp), 0xff);
-                (self.gl.StencilOp)(0x1e00, 0x1e00, 0x1e01);
-            } else {
-                self.visibility_group = None;
-            }
             if indexed {
                 let indices = stream
                     .map(|s| s.indices.as_slice())
@@ -3912,29 +3754,16 @@ impl Renderer {
                     (self.gl.DrawArrays)(draw_mode, 0, count as i32);
                 }
             }
-            if let Some(pass) = compatibility_pass {
+            if compatibility_pass.is_some() {
                 // Reuse uploaded vertices, indices, textures and shader uniforms.
                 // The nearest unbiased depth from the first pass remains intact.
                 (self.gl.DepthMask)(0);
-                if masked_replay {
-                    (self.gl.StencilMask)(0);
-                    (self.gl.StencilFunc)(GL_NOTEQUAL, i32::from(self.visibility_stamp), 0xff);
-                }
                 if replay_offset_units != 0. {
                     self.toggle(GL_POLYGON_OFFSET_FILL, true);
                     (self.gl.PolygonOffset)(0., replay_offset_units);
                     self.uniform_1i(self.loc("alphaMode"), 2);
                     self.uniform_1f(self.loc("alphaRef"), 255.);
                 }
-                self.depth_range_uniform(
-                    pass.depth_range.0,
-                    pass.depth_range.1,
-                    if pass.depth_range.0 < 0. {
-                        crate::raster::GOFORCE4500_MAX_DEPTH_TOLERANCE
-                    } else {
-                        0.
-                    },
-                );
                 if indexed {
                     let count = stream.map_or(self.indices.len(), |s| s.indices.len());
                     (self.gl.DrawElements)(
@@ -3964,10 +3793,6 @@ impl Renderer {
                         (state.alpha_ref.clamp(0., 1.) * 255. + 0.5).floor(),
                     );
                 }
-                self.depth_range_uniform(state.depth_range.0, state.depth_range.1, 0.);
-            }
-            if masked_replay {
-                self.toggle(0x0b90, false);
             }
             self.dirty = true;
             // NVIDIA drivers can stall in glGetError after each draw. Check at
@@ -4380,7 +4205,7 @@ TEX_VARYING UV_TYPE uv0,uv1,uv2,uv3;
 #ifdef WIDE_TEXTURES
 TEX_VARYING UV_TYPE uv4,uv5;
 #endif
-VARYING float vFog;uniform vec4 depthRange;
+VARYING float vFog;uniform vec2 depthRange;
 uniform mat4 projectionMatrix,modelviewMatrix,textureMatrix0,textureMatrix1,textureMatrix2,textureMatrix3;
 #ifdef WIDE_TEXTURES
 attribute vec4 tex4,tex5;uniform mat4 textureMatrix4,textureMatrix5;
@@ -4420,8 +4245,6 @@ void main(){
  vec4 clip=projectionMatrix*eye;
  gl_Position=clip;
  gl_Position.z=(depthRange.y-depthRange.x)*clip.z+(depthRange.x+depthRange.y-1.0)*clip.w;
- // Only the GoForce color replay supplies a positive window-depth bound.
- if(depthRange.z>0.0 && clip.w>0.0){gl_Position.z=max(gl_Position.z,clip.z-2.0*depthRange.z*clip.w);}
  vColor=color;vBackColor=objectSpace!=0?color:vec4(normalAndFog.xyz,color.a);
  if(lightingEnabled!=0){
   vec3 n=(normalMatrix*vec4(normalAndFog.xyz,0.0)).xyz;
@@ -8160,210 +7983,6 @@ mod tests {
                             gpu.read(&mut native).unwrap();
                             assert_eq!(result, native.color[at..at + 3]);
                         }
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[ignore = "requires GL/GLES depth-stencil coverage"]
-    fn host_goforce_coverage_repairs_other_batches_without_exposing_hidden_faces() {
-        for es in [false, true] {
-            for scale in [1, 2] {
-                for rgb565 in [false, true] {
-                    let mut gpu = if es {
-                        Renderer::new_es_for_test(32, 32).unwrap()
-                    } else {
-                        Renderer::new(32, 32).unwrap()
-                    };
-                    gpu.set_surface_rgb565(rgb565).unwrap();
-                    gpu.set_render_scale(scale).unwrap();
-                    let state = PipelineState {
-                        viewport: (0, 0, 32, 32),
-                        depth_test: true,
-                        goforce4500_depth_tolerance: true,
-                        ..Default::default()
-                    };
-                    let mut target = RenderTarget::with_format(32, 32, rgb565);
-                    gpu.clear(
-                        32,
-                        32,
-                        &state,
-                        [0.; 4],
-                        1.,
-                        GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
-                    )
-                    .unwrap();
-                    assert!(gpu.visibility_stencil);
-                    // Blue is an earlier batch. Red's exposed left half must be
-                    // protected from its hidden yellow faces. Its right half is
-                    // occluded by blue and can receive the compatibility repair.
-                    for (left, right, z, color, name) in [
-                        (-1., 1., 0., [0., 0., 1., 1.], 0),
-                        (-1., 0., -0.2, [1., 0., 0., 1.], 1),
-                        (-1., 0., -0.1995, [1., 1., 0., 1.], 1),
-                        (0., 1., 0.001, [1., 0., 0., 1.], 1),
-                        (0., 1., 0.2, [0., 1., 0., 1.], 1),
-                    ] {
-                        let vertices = [
-                            [left, -1., z, 1.],
-                            [right, -1., z, 1.],
-                            [right, 1., z, 1.],
-                            [left, 1., z, 1.],
-                        ]
-                        .map(|pos| Vertex {
-                            pos,
-                            color,
-                            ..Default::default()
-                        });
-                        gpu.draw(
-                            &target,
-                            &state,
-                            GL_TRIANGLE_FAN,
-                            &vertices,
-                            &[],
-                            &HashMap::new(),
-                            [name; 6],
-                        )
-                        .unwrap();
-                    }
-                    gpu.read(&mut target).unwrap();
-                    for x in [8, 24] {
-                        assert_eq!(
-                            &target.color[(16 * 32 + x) * 4..(16 * 32 + x) * 4 + 3],
-                            &[255, 0, 0],
-                            "es={es} scale={scale} rgb565={rgb565} x={x}"
-                        );
-                    }
-                    // A normal subsequent draw must not inherit the stencil test.
-                    let standard = PipelineState {
-                        goforce4500_depth_tolerance: false,
-                        ..state.clone()
-                    };
-                    gpu.draw(
-                        &target,
-                        &standard,
-                        GL_TRIANGLES,
-                        &triangle([0., 1., 0., 1.], -0.8),
-                        &[],
-                        &HashMap::new(),
-                        [0; 6],
-                    )
-                    .unwrap();
-                    gpu.read(&mut target).unwrap();
-                    assert_eq!(
-                        &target.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 3],
-                        &[0, 255, 0]
-                    );
-                    assert_eq!(unsafe { gpu.check() }, Ok(()));
-                }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[ignore = "requires native GL/GLES; validates the GoForce visibility approximation"]
-    fn host_goforce_depth_tolerance_keeps_nearest_depth_and_restores_state() {
-        for base_z in [0., 0.998] {
-            for es in [false, true] {
-                for format in [0x81a5, 0x81a6] {
-                    for scale in [1, 2] {
-                        let mut gpu = if es {
-                            Renderer::with_host(Host::es_for_test().unwrap(), 32, 32).unwrap()
-                        } else {
-                            Renderer::new(32, 32).unwrap()
-                        };
-                        gpu.depth_format = format;
-                        gpu.resize(16, 16).unwrap();
-                        gpu.resize(32, 32).unwrap();
-                        gpu.set_render_scale(scale).unwrap();
-                        let mut state = PipelineState {
-                            viewport: (0, 0, 32, 32),
-                            depth_test: true,
-                            goforce4500_depth_tolerance: true,
-                            ..Default::default()
-                        };
-                        let mut cpu = RenderTarget::new(32, 32);
-                        let mut native = RenderTarget::new(32, 32);
-                        state.goforce4500_depth_tolerance = false;
-                        gpu.clear(
-                            32,
-                            32,
-                            &state,
-                            [0.; 4],
-                            1.,
-                            GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT,
-                        )
-                        .unwrap();
-                        state.goforce4500_depth_tolerance = true;
-                        // Within tolerance becomes visible; a later surface beyond the
-                        // original depth plus the margin must still remain hidden.
-                        for (z, color, expected) in [
-                            (0., [0., 0., 1., 1.], [0, 0, 255]),
-                            (0.00005, [1., 0., 0., 1.], [255, 0, 0]),
-                            (0.004, [0., 1., 0., 1.], [255, 0, 0]),
-                        ] {
-                            let vertices = triangle(color, base_z + z);
-                            raster::draw_triangle(&mut cpu, &state, &|_, _, _| None, &[], vertices);
-                            if let Some(mut pass) = state.goforce_depth_color_pass() {
-                                pass.depth_range = (0., 1.);
-                                let mut replay = vertices;
-                                for v in &mut replay {
-                                    v.pos[2] = raster::goforce4500_replay_depth(v.pos[2], v.pos[3]);
-                                }
-                                raster::draw_triangle(
-                                    &mut cpu,
-                                    &pass,
-                                    &|_, _, _| None,
-                                    &[],
-                                    replay,
-                                );
-                            }
-                            gpu.draw(
-                                &native,
-                                &state,
-                                GL_TRIANGLES,
-                                &vertices,
-                                &[],
-                                &HashMap::new(),
-                                [0; 6],
-                            )
-                            .unwrap();
-                            gpu.read(&mut native).unwrap();
-                            let pixel = (16 * 32 + 16) * 4;
-                            assert_eq!(&cpu.color[pixel..pixel + 3], &expected);
-                            for (a, b) in native.color[pixel..pixel + 3].iter().zip(expected) {
-                                assert!(
-                                    a.abs_diff(b) <= 1,
-                                    "es={es} scale={scale} z={z}: {:?}",
-                                    &native.color[pixel..pixel + 3]
-                                );
-                            }
-                            assert_eq!(cpu.depth[16 * 32 + 16], base_z * 0.5 + 0.5);
-                        }
-                        state.goforce4500_depth_tolerance = false;
-                        let nearer = triangle([0., 1., 0., 1.], base_z - 0.001);
-                        let hidden = triangle([1., 1., 0., 1.], base_z - 0.0005);
-                        for vertices in [nearer, hidden] {
-                            gpu.draw(
-                                &native,
-                                &state,
-                                GL_TRIANGLES,
-                                &vertices,
-                                &[],
-                                &HashMap::new(),
-                                [0; 6],
-                            )
-                            .unwrap();
-                        }
-                        gpu.read(&mut native).unwrap();
-                        assert_eq!(
-                            &native.color[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 3],
-                            &[0, 255, 0]
-                        );
                     }
                 }
             }

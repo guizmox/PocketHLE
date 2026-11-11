@@ -1,1 +1,1 @@
-frontends\pocket-desktop\src\frame_pacing.rs
+crates/pocket-gles/src/visibility.rs

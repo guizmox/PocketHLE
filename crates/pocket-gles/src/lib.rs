@@ -24,7 +24,6 @@ pub mod matrix;
 pub mod ordinals;
 pub mod raster;
 pub mod texture;
-mod visibility;
 
 pub use consts::*;
 pub use fixed::{to_f32 as fixed_to_f32, word_to_f32, word_to_f32_bits};

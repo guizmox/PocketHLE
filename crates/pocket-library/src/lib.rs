@@ -1212,14 +1212,6 @@ pub fn is_colors_game(game: &GameEntry, root: &Path) -> bool {
     })
 }
 
-/// Select Battlestations by its Gizmondo title identity across card editions.
-pub fn uses_battlestations_depth_compatibility(game: &GameEntry, root: &Path) -> bool {
-    game_gizmondo_title_id(game, root).is_some_and(|id| {
-        matches!(id.as_str(), "GZGA200038" | "GZGA270038")
-            || gizmondo_titles::original_card_id(&id).as_deref() == Some("GZGA200038")
-    })
-}
-
 /// Languages physically available beside this Colors installation's strings.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ColorsLanguage {
@@ -4571,24 +4563,6 @@ mod tests {
         game.display_name = "Colors".into();
         game.executable = "extracted/GZGA200016/autorun.exe".into();
         assert!(!is_colors_game(&game, root.path()));
-    }
-
-    #[test]
-    fn battlestations_depth_compatibility_uses_title_identity_across_editions() {
-        let root = tempfile::tempdir().unwrap();
-        let mut game: GameEntry = serde_json::from_value(serde_json::json!({
-            "id": "test", "display_name": "Renamed game", "source_cab": "game.zip",
-            "executable": "extracted/gzga200038/autorun.exe", "imported_at": 0
-        }))
-        .unwrap();
-        assert!(uses_battlestations_depth_compatibility(&game, root.path()));
-        for serial in ["GZGA270038", "GZGA900038"] {
-            game.executable = format!("extracted/{serial}/autorun.exe").into();
-            assert!(uses_battlestations_depth_compatibility(&game, root.path()));
-        }
-        game.display_name = "Battlestations: Midway".into();
-        game.executable = "extracted/GZGA200016/autorun.exe".into();
-        assert!(!uses_battlestations_depth_compatibility(&game, root.path()));
     }
 
     #[test]
