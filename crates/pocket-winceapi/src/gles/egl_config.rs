@@ -23,7 +23,7 @@ pub(super) struct Config {
 impl Config {
     pub(super) fn handles() -> &'static [u32] {
         let rgba_only = SURFACES.with(|s| s.borrow().rgba8888_only);
-        match (rgba_only, goforce_5500_extensions()) {
+        match (rgba_only, goforce_5500_enabled()) {
             (true, true) => &[CONFIG_RGBA_HANDLE, CONFIG_RGBA_COLOR_PBUFFER],
             (false, true) => &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE, CONFIG_RGBA_COLOR_PBUFFER],
             (true, false) => &[CONFIG_RGBA_HANDLE],

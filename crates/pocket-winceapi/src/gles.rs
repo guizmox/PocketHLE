@@ -1746,7 +1746,7 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         if pocket_gles::graphics_diagnostic::enabled() {
             nv_combiner::diagnostic_extensions();
         }
-        let vbo = goforce_5500_extensions();
+        let vbo = goforce_5500_enabled();
         let combiners = nv_combiner::enabled();
         if vbo || combiners {
             let mut extensions = text.to_owned();
@@ -3156,7 +3156,7 @@ fn egl_no_surface(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE))
 }
 
-fn goforce_5500_extensions() -> bool {
+fn goforce_5500_enabled() -> bool {
     SURFACES.with(|s| s.borrow().goforce_5500)
 }
 
@@ -3178,7 +3178,7 @@ fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     if name.ends_with("NV") && nv_combiner::is_entry_point(&name) && !nv_combiner::enabled() {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if GOFORCE_5500_VBO_EXPORTS.contains(&name.as_ref()) && !goforce_5500_extensions() {
+    if GOFORCE_5500_VBO_EXPORTS.contains(&name.as_ref()) && !goforce_5500_enabled() {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let address = [
@@ -3601,6 +3601,17 @@ const GOFORCE_5500_VBO_EXPORTS: [&str; 9] = [
     "glGetBufferPointervOES",
 ];
 
+fn goforce_5500_vbo(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if !goforce_5500_enabled() {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_OPERATION));
+        return Ok(VOID);
+    }
+    let pocket_pe::ImportBinding::Name(name) = &ctx.thunk.binding else {
+        return Ok(VOID);
+    };
+    handler_for(name).unwrap()(ctx)
+}
+
 const EGL_NAMED_EXPORTS: &[&str] = &[
     "eglGetDisplay",
     "eglInitialize",
@@ -3655,14 +3666,14 @@ pub fn register(d: &mut WinCeDispatcher) {
             };
             d.register_handler(dll, &name, handler);
         }
-        for name in EXTRA_NAMED_EXPORTS
-            .into_iter()
-            .chain(GOFORCE_5500_VBO_EXPORTS)
-        {
+        for name in EXTRA_NAMED_EXPORTS {
             let Some(handler) = handler_for(name) else {
                 continue;
             };
             d.register_handler(dll, name, handler);
+        }
+        for name in GOFORCE_5500_VBO_EXPORTS {
+            d.register_handler(dll, name, goforce_5500_vbo);
         }
         // Games import these libraries purely by ordinal, so the
         // ordinal spellings the loader produces need to reach the same

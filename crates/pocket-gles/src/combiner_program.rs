@@ -245,6 +245,7 @@ pub struct UnsupportedOperation;
 enum Source {
     Register(usize),
     Primary(usize),
+    Interpolant { unit: usize, component: usize },
     Constant(usize, bool),
     Texture(usize),
     Literal(f32),
@@ -317,6 +318,7 @@ pub struct BasicProgram {
     reads_framebuffer: bool,
     framebuffer_reads: u8,
     output_register: usize,
+    requires_sc15: bool,
 }
 
 impl Program {
@@ -335,7 +337,8 @@ impl Program {
         let mut texture_units = 0;
         let mut coordinate_units = 0;
         let mut routes = Vec::new();
-        let mut has_texture = false;
+        let mut available_texel = 0u8;
+        let mut requires_sc15 = false;
         for stage in &self.stages {
             let operation = stage.texture_operation();
             let unit = match operation {
@@ -370,7 +373,7 @@ impl Program {
                 None
             };
             let color_routes = (stage.texture_routing >> 10) & 0xfffff;
-            if !matches!(color_routes, 0xfffff | 0xa56d7) {
+            if !ar11 && !matches!(color_routes, 0xfffff | 0xa56d7) {
                 return Err(UnsupportedOperation);
             }
             // A stage may read the fragment already in the render target
@@ -392,7 +395,9 @@ impl Program {
             } else {
                 Fetch::Keep
             };
-            has_texture |= !matches!(fetch, Fetch::Keep);
+            if !matches!(fetch, Fetch::Keep) {
+                available_texel = 0xf;
+            }
             let mut calculations = Vec::with_capacity(4);
             // GoForce makes the co-issued alpha result available to RGB.
             for (alpha, mode, operands, outputs) in [
@@ -443,7 +448,33 @@ impl Program {
                 }
                 for channel in if alpha { 3..4 } else { 0..3 } {
                     let [a, b, c, d] = operands.map(|operand| {
-                        compile_term(operand, has_texture, if alpha { 0 } else { channel }, ar11)
+                        let mut term = compile_term(
+                            operand,
+                            available_texel,
+                            if alpha { 0 } else { channel },
+                            ar11,
+                        )?;
+                        if let Source::Primary(component) = term.source {
+                            // RGB and alpha may read independently routed components
+                            // of the interpolated color register. Ignore unused lanes.
+                            requires_sc15 |= !matches!(color_routes, 0xfffff | 0xa56d7);
+                            term.source = match color_routes {
+                                0xfffff | 0xa56d7 => term.source,
+                                _ => match (color_routes >> ((3 - component) * 5)) & 31 {
+                                    selector @ 0..=15 => {
+                                        let unit = (selector & 7) as usize;
+                                        coordinate_units |= 1 << unit;
+                                        Source::Interpolant {
+                                            unit,
+                                            component: (selector >> 3) as usize,
+                                        }
+                                    }
+                                    selector @ 20..=23 => Source::Primary((selector - 20) as usize),
+                                    _ => return Err(UnsupportedOperation),
+                                },
+                            };
+                        }
+                        Ok(term)
                     });
                     let terms = [a?, b?, c?, d?];
                     if paired {
@@ -477,6 +508,18 @@ impl Program {
                             compare_register,
                         });
                     }
+                }
+                // Alpha runs before RGB. It can initialize tex.a even in
+                // a stage that did not fetch a texel.
+                if ar11
+                    && alpha
+                    && !kill
+                    && outputs
+                        .iter()
+                        .any(|o| o.destination == TEXTURE_ALPHA_DESTINATION)
+                {
+                    requires_sc15 |= available_texel == 0;
+                    available_texel |= 1 << 3;
                 }
             }
             stages.push(CompiledStage {
@@ -519,6 +562,7 @@ impl Program {
             reads_framebuffer,
             framebuffer_reads,
             output_register,
+            requires_sc15,
         })
     }
 
@@ -529,7 +573,7 @@ impl Program {
 
 fn compile_term(
     operand: Operand,
-    has_texture: bool,
+    available_texel: u8,
     channel: usize,
     ar11: bool,
 ) -> Result<InputTerm, UnsupportedOperation> {
@@ -543,7 +587,9 @@ fn compile_term(
         index @ 0x20..=0x23 if ar11 => Source::Constant(usize::from(index - 0x20), false),
         index @ 0x20..=0x23 => Source::Constant(usize::from((index - 0x20) >> 1), index & 1 != 0),
         0x40 if component < 4 => Source::Primary(component),
-        0x60 if has_texture && component < 4 => Source::Texture(component),
+        0x60 if component < 4 && available_texel & (1 << component) != 0 => {
+            Source::Texture(component)
+        }
         0x80 if component < if ar11 { 32 } else { 5 } => {
             let magnitude = (component & 15) as f32 * 0.25;
             Source::Literal(if component & 16 == 0 {
@@ -630,6 +676,9 @@ impl BasicProgram {
                     let source = match term.source {
                         Source::Register(index) => format!("p{index}.{channel}"),
                         Source::Primary(component) => format!("primary.{}", swizzle(component)),
+                        Source::Interpolant { unit, component } => {
+                            format!("uv{unit}.{}", ["x", "y"][component])
+                        }
                         Source::Constant(index, alpha) => {
                             let component = if alpha { "a" } else { channel };
                             format!("nvConstants[{index}].{component}")
@@ -721,6 +770,11 @@ impl BasicProgram {
         self.texture_units
     }
 
+    /// Uses additional color routing or a texture-alpha result before any fetch.
+    pub fn requires_sc15(&self) -> bool {
+        self.requires_sc15
+    }
+
     pub fn coordinate_units(&self) -> u8 {
         self.coordinate_units
     }
@@ -730,9 +784,7 @@ impl BasicProgram {
     }
 
     pub fn supports_texture_units(&self, count: usize) -> bool {
-        self.routes
-            .iter()
-            .all(|r| r.texture < count && r.s < count && r.t < count)
+        u32::from(self.coordinate_units | self.texture_units) >> count.min(8) == 0
     }
 
     pub fn evaluate(&self, inputs: &Inputs) -> [f32; 4] {
@@ -746,6 +798,7 @@ impl BasicProgram {
 
     /// Color-only inspection helper. Rasterization uses `evaluate_fragment`
     /// so a rejected fragment cannot become a transparent-black write.
+    /// Coordinate interpolants default to zero in this color-only helper.
     pub fn evaluate_sampled(
         &self,
         primary: [f32; 4],
@@ -753,7 +806,7 @@ impl BasicProgram {
         framebuffer: [f32; 4],
         sample: impl FnMut(TextureRoute) -> [f32; 4],
     ) -> [f32; 4] {
-        self.evaluate_fragment(primary, constants, framebuffer, sample)
+        self.evaluate_fragment(primary, constants, framebuffer, |_, _| 0., sample)
             .unwrap_or([0.; 4])
     }
 
@@ -762,6 +815,7 @@ impl BasicProgram {
         primary: [f32; 4],
         constants: [[f32; 4]; 4],
         framebuffer: [f32; 4],
+        interpolant: impl Fn(usize, usize) -> f32,
         mut sample: impl FnMut(TextureRoute) -> [f32; 4],
     ) -> Option<[f32; 4]> {
         let mut textures = [[0.0; 4]; MAX_PROGRAM_STAGES];
@@ -784,6 +838,7 @@ impl BasicProgram {
                     let value = match term.source {
                         Source::Register(index) => previous[index][channel],
                         Source::Primary(component) => primary[component],
+                        Source::Interpolant { unit, component } => interpolant(unit, component),
                         Source::Constant(index, alpha) => {
                             constants[index][if alpha { 3 } else { channel }]
                         }
@@ -1184,6 +1239,7 @@ mod tests {
                     [1., 1., 1., alpha],
                     [[0.; 4]; 4],
                     [0.; 4],
+                    |_, _| unreachable!(),
                     |_| unreachable!(),
                 );
                 assert_eq!(output.is_none(), (alpha != 0.) == not_equal);
@@ -1253,18 +1309,65 @@ mod tests {
                 assert!(!result.unwrap().supports_texture_units(6));
             }
         }
-        assert!(compile_term(Operand::register(2, [0; 3], [0; 3]), false, 0, false).is_err());
+        assert!(compile_term(Operand::register(2, [0; 3], [0; 3]), 0, 0, false).is_err());
+    }
+
+    #[test]
+    fn ar11_color_interpolation_and_coissued_texture_alpha_need_no_fetch() {
+        let stage = Stage {
+            alpha_output: 0x8070,
+            alpha_inputs: 0x9e41_9d40,
+            flags: 0xef,
+            color_output: 0x9070,
+            color_input_modifiers: 0x7004,
+            color_inputs: 0x8040_ff08,
+            color_input_modes: 0x8881,
+            // Color reads v1.x, v1.y and v2.x. Alpha's selector is unused.
+            texture_routing: 0xc291_4bff,
+        };
+        let program = Program {
+            architecture: Architecture::Ar11,
+            flags: 0,
+            stages: vec![stage],
+        }
+        .compile_basic()
+        .unwrap();
+        assert!(program.requires_sc15());
+        assert_eq!(program.coordinate_units(), 0b110);
+        assert_eq!(program.texture_units(), 0);
+        assert!(!program.supports_texture_units(2));
+        assert!(program.supports_texture_units(3));
+        let shader = program.fragment_function();
+        assert!(shader.contains("uv1.x") && shader.contains("uv2.x"));
+        assert!(shader.find("texel.a=").unwrap() < shader.find("(texel.a*").unwrap());
+        let evaluate = |x| {
+            program.evaluate_fragment(
+                [1.; 4],
+                [[0.5; 4]; 4],
+                [0.; 4],
+                |unit, component| {
+                    if unit == 1 && component == 0 {
+                        x
+                    } else {
+                        0.625
+                    }
+                },
+                |_| unreachable!(),
+            )
+        };
+        assert_eq!(evaluate(0.25), Some([0.; 4]));
+        assert_eq!(evaluate(0.75), Some([0.5, 0.5, 0.5, 0.]));
     }
 
     #[test]
     fn ar11_signed_quarter_literals_cover_the_full_encoding() {
         for code in 0..32 {
-            let term = compile_term(Operand::literal([code; 3]), false, 0, true).unwrap();
+            let term = compile_term(Operand::literal([code; 3]), 0, 0, true).unwrap();
             let expected = (code & 15) as f32 * 0.25 * if code & 16 == 0 { 1. } else { -1. };
             assert!(matches!(term.source, Source::Literal(value) if value == expected));
         }
-        assert!(compile_term(Operand::literal([32; 3]), false, 0, true).is_err());
-        assert!(compile_term(Operand::literal([5; 3]), false, 0, false).is_err());
+        assert!(compile_term(Operand::literal([32; 3]), 0, 0, true).is_err());
+        assert!(compile_term(Operand::literal([5; 3]), 0, 0, false).is_err());
     }
 
     #[test]

@@ -67,7 +67,7 @@ settings, immediately above **GPU rendering**, on desktop and Android:
 | Profile | Compatibility behavior |
 | --- | --- |
 | Generic OpenGL ES (1.1, Common) | Standard behavior; no Intel bias or NVIDIA combiners. This is the default. |
-| NVIDIA GoForce 5500 (OpenGL ES 1.1, Common) | Allows detected clients to use AR10/AR11 combiners; standard depth bias. |
+| NVIDIA GoForce 5500 (OpenGL ES 1.1, Common) | Allows detected clients to use AR10/AR11 combiners, exposes legacy OES VBO entry points and an RGBA8 pbuffer configuration without depth; standard depth bias. |
 | Intel 2700G (OpenGL ES 1.0, Common-Lite) | Enables the Intel depth-bias model and opaque coplanar tolerance; NVIDIA combiners disabled. |
 
 The persisted per-game `gpu_compatibility_profile` enum replaces both global
@@ -256,7 +256,12 @@ and y. Storage tracks six coordinate sets; capacity checks reject unavailable
 sets. AR10 retains its own four-coordinate/two-temporary encoding limits;
 AR11 supports its additional registers and signed quarter-unit immediate
 literals. Supported equality/inequality rejection discards a fragment without
-writing color or depth. This is not complete or bit-exact GoForce conformance.
+writing color or depth. The 5500 profile also supports AR11 color-register
+routing from interpolated coordinate components and co-issued RGB reads of
+texture alpha initialized by the alpha calculation without a texture fetch.
+Coordinate-only inputs do not enable samplers, and active unsupported color
+selectors still reject the program. This is not complete or bit-exact GoForce
+conformance.
 
 Five/six-coordinate GPU programs use separate shader variants and attributes
 8/9, preserving normal/fog/provoking/point locations, ordinary four-coordinate

@@ -128,6 +128,9 @@ fn load(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             return Ok(error(GL_INVALID_OPERATION));
         }
     };
+    if program.requires_sc15() && !super::goforce_5500_enabled() {
+        return Ok(error(GL_INVALID_OPERATION));
+    }
     diagnostic_load("compiled", &bytes, Some(&program));
     if with_ctx(|c| {
         let capacity = c.nv_texture_coordinate_capacity();

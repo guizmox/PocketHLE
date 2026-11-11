@@ -594,9 +594,13 @@ fn evaluate_combiner(
     primary: [f32; 4],
     constants: [[f32; 4]; 4],
     framebuffer: [f32; 4],
-    coordinate: impl Fn(usize) -> (f32, f32, [f32; 4]),
+    coordinates: (
+        impl Fn(usize) -> (f32, f32, [f32; 4]),
+        impl Fn(usize, usize) -> f32,
+    ),
 ) -> Option<[f32; 4]> {
-    program.evaluate_fragment(primary, constants, framebuffer, |route| {
+    let (coordinate, interpolant) = coordinates;
+    program.evaluate_fragment(primary, constants, framebuffer, interpolant, |route| {
         let Some(stage) = stages.iter().find(|stage| stage.unit == route.texture) else {
             return [0., 0., 0., 1.];
         };
@@ -1011,12 +1015,13 @@ fn raster_clipped(
             // rather than up front, because an unused unit's coordinate
             // set must not cost anything per fragment.
             let primary = frag;
+            let interpolant = |unit: usize, c: usize| {
+                p0 * sv[0].texcoord[unit][c]
+                    + p1 * sv[1].texcoord[unit][c]
+                    + p2 * sv[2].texcoord[unit][c]
+            };
             let coordinate = |unit: usize| {
-                let uv = |c: usize| {
-                    p0 * sv[0].texcoord[unit][c]
-                        + p1 * sv[1].texcoord[unit][c]
-                        + p2 * sv[2].texcoord[unit][c]
-                };
+                let uv = |c: usize| interpolant(unit, c);
                 let inv_q = if projective_units & (1 << unit) == 0 {
                     1.
                 } else {
@@ -1049,9 +1054,15 @@ fn raster_clipped(
                 } else {
                     [0.; 4]
                 };
-                let Some(color) =
-                    evaluate_combiner(program, sample, stages, primary, constants, dst, coordinate)
-                else {
+                let Some(color) = evaluate_combiner(
+                    program,
+                    sample,
+                    stages,
+                    primary,
+                    constants,
+                    dst,
+                    (coordinate, interpolant),
+                ) else {
                     continue;
                 };
                 frag = color;
@@ -1230,7 +1241,7 @@ fn primitive_fragment(
             } else {
                 [0.; 4]
             },
-            coordinate,
+            (coordinate, |unit, component| v.texcoord[unit][component]),
         ) else {
             return false;
         };
