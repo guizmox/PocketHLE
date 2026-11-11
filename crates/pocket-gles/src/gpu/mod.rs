@@ -2209,19 +2209,11 @@ impl Renderer {
             (self.gl.Uniform2f)(l, a, b);
         }
     }
-    unsafe fn depth_range_uniform(&mut self, near: f32, far: f32, goforce_replay: bool) {
-        let (replay_cap, near_cap) = if goforce_replay {
-            (
-                crate::raster::GOFORCE4500_MAX_DEPTH_TOLERANCE,
-                crate::raster::GOFORCE4500_NEAR_DEPTH_TOLERANCE,
-            )
-        } else {
-            (0., 0.)
-        };
+    unsafe fn depth_range_uniform(&mut self, near: f32, far: f32, replay_cap: f32) {
         self.uniform_4fv(
             self.loc("depthRange"),
             1,
-            [near, far, replay_cap, near_cap].as_ptr(),
+            [near, far, replay_cap, 0.].as_ptr(),
         );
     }
     unsafe fn uniform_4fv(&mut self, l: i32, n: i32, p: *const f32) {
@@ -3501,7 +3493,7 @@ impl Renderer {
                     self.uniform_matrix4fv(self.loc(name), 1, 0, matrix.as_ptr());
                 }
             }
-            self.depth_range_uniform(state.depth_range.0, state.depth_range.1, false);
+            self.depth_range_uniform(state.depth_range.0, state.depth_range.1, 0.);
             self.uniform_1i(
                 self.loc("alphaMode"),
                 if state.alpha_test {
@@ -3937,7 +3929,11 @@ impl Renderer {
                 self.depth_range_uniform(
                     pass.depth_range.0,
                     pass.depth_range.1,
-                    pass.depth_range.0 < 0.,
+                    if pass.depth_range.0 < 0. {
+                        crate::raster::GOFORCE4500_MAX_DEPTH_TOLERANCE
+                    } else {
+                        0.
+                    },
                 );
                 if indexed {
                     let count = stream.map_or(self.indices.len(), |s| s.indices.len());
@@ -3968,7 +3964,7 @@ impl Renderer {
                         (state.alpha_ref.clamp(0., 1.) * 255. + 0.5).floor(),
                     );
                 }
-                self.depth_range_uniform(state.depth_range.0, state.depth_range.1, false);
+                self.depth_range_uniform(state.depth_range.0, state.depth_range.1, 0.);
             }
             if masked_replay {
                 self.toggle(0x0b90, false);
@@ -4424,12 +4420,8 @@ void main(){
  vec4 clip=projectionMatrix*eye;
  gl_Position=clip;
  gl_Position.z=(depthRange.y-depthRange.x)*clip.z+(depthRange.x+depthRange.y-1.0)*clip.w;
- // Same homogeneous cap as goforce4500_replay_depth in the software rasterizer.
- if(depthRange.z>0.0 && clip.w>0.0){
-  float fade=clamp(64.0*(clip.z-clip.w)+2.0*clip.w,0.0,clip.w);
-  float cap=depthRange.w*clip.w+(depthRange.z-depthRange.w)*fade;
-  gl_Position.z=max(gl_Position.z,clip.z-2.0*cap);
- }
+ // Only the GoForce color replay supplies a positive window-depth bound.
+ if(depthRange.z>0.0 && clip.w>0.0){gl_Position.z=max(gl_Position.z,clip.z-2.0*depthRange.z*clip.w);}
  vColor=color;vBackColor=objectSpace!=0?color:vec4(normalAndFog.xyz,color.a);
  if(lightingEnabled!=0){
   vec3 n=(normalMatrix*vec4(normalAndFog.xyz,0.0)).xyz;
@@ -8212,8 +8204,8 @@ mod tests {
                         (-1., 1., 0., [0., 0., 1., 1.], 0),
                         (-1., 0., -0.2, [1., 0., 0., 1.], 1),
                         (-1., 0., -0.1995, [1., 1., 0., 1.], 1),
-                        (0., 1., 0.0004, [1., 0., 0., 1.], 1),
-                        (0., 1., 0.001, [0., 1., 0., 1.], 2),
+                        (0., 1., 0.001, [1., 0., 0., 1.], 1),
+                        (0., 1., 0.2, [0., 1., 0., 1.], 1),
                     ] {
                         let vertices = [
                             [left, -1., z, 1.],

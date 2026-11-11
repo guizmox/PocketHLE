@@ -286,20 +286,16 @@ impl Default for PipelineState {
 }
 
 pub(crate) const GOFORCE4500_DEPTH_TOLERANCE: f32 = 1. / 12.;
-// A tighter cap for nearby geometry keeps the replay from exposing parts
-// hidden by a different material. These bounds are empirical, not SC-10 units.
-pub(crate) const GOFORCE4500_NEAR_DEPTH_TOLERANCE: f32 = 1. / 4096.;
+// Bound the empirical visibility margin in window depth. The old relative
+// margin exposed occluded body panels in Chicane when geometry approached the
+// camera. Coverage protects a batch's visible faces; the cap still limits
+// cross-material occlusion. This is not a measured SC-10 precision value.
 pub(crate) const GOFORCE4500_MAX_DEPTH_TOLERANCE: f32 = 1. / 1024.;
 
 pub(crate) fn goforce4500_replay_depth(z: f32, w: f32) -> f32 {
     let relative = GOFORCE4500_DEPTH_TOLERANCE * (z - w);
     if w > 0. {
-        // Fade from the near cap to the original cap over [126/128, 127/128]
-        // in window depth. Keep the calculation homogeneous to avoid division.
-        let fade = (64. * (z - w) + 2. * w).clamp(0., w);
-        let cap = GOFORCE4500_NEAR_DEPTH_TOLERANCE * w
-            + (GOFORCE4500_MAX_DEPTH_TOLERANCE - GOFORCE4500_NEAR_DEPTH_TOLERANCE) * fade;
-        z + relative.max(-2. * cap)
+        z + relative.max(-2. * GOFORCE4500_MAX_DEPTH_TOLERANCE * w)
     } else {
         z + relative
     }
@@ -1691,17 +1687,10 @@ mod tests {
     #[test]
     fn goforce_visibility_margin_is_bounded_near_and_relative_far() {
         for w in [0.125, 1., 64.] {
-            for (depth, expected) in [
-                (0., 1. / 4096.),
-                (0.5, 1. / 4096.),
-                (126. / 128., 1. / 4096.),
-                (253. / 256., 5. / 8192.),
-                (127. / 128., 1. / 1536.),
-                (0.999, 0.001 / 12.),
-                (1., 0.),
-            ] {
+            for depth in [0., 0.5, 0.9, 0.999, 1.] {
                 let z = (2. * depth - 1.) * w;
                 let actual = (z - goforce4500_replay_depth(z, w)) / (2. * w);
+                let expected = ((1. - depth) / 12.).min(GOFORCE4500_MAX_DEPTH_TOLERANCE);
                 assert!((actual - expected).abs() < 1e-7);
             }
         }

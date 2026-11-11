@@ -581,6 +581,9 @@ fn run_process_inner(
             .unwrap_or(launcher_config.gpu_renderer),
     );
     emu.set_gizmondo_goforce_driver(is_gizmondo);
+    emu.set_battlestations_depth_compatibility(
+        is_gizmondo && pocket_library::uses_battlestations_depth_compatibility(entry, library_root),
+    );
     let profile = entry.settings.gpu_compatibility_profile;
     emu.set_nv_combiner_allowed(is_gizmondo || profile.nvidia_combiners());
     emu.set_intel2700g_depth_bias(!is_gizmondo && profile.intel_depth_bias());

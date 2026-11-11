@@ -319,14 +319,12 @@ fn update_stored_contexts(mut f: impl FnMut(&mut Context)) {
 pub fn set_gizmondo_goforce_driver(enabled: bool) {
     with_ctx(|c| {
         c.gizmondo_goforce_20051013 = enabled;
-        c.state.goforce4500_depth_tolerance = enabled;
         for tex in c.textures.values_mut() {
             tex.goforce_lod = enabled;
         }
     });
     update_stored_contexts(|c| {
         c.gizmondo_goforce_20051013 = enabled;
-        c.state.goforce4500_depth_tolerance = enabled;
         for tex in c.textures.values_mut() {
             tex.goforce_lod = enabled;
         }
@@ -336,6 +334,15 @@ pub fn set_gizmondo_goforce_driver(enabled: bool) {
             group.set_goforce_profile(enabled);
         }
     });
+}
+
+/// Battlestations: Midway uses an opaque color replay to reduce blue water
+/// patches over terrain during low flight. This empirical depth margin can
+/// expose hidden geometry in other titles. Enable it for Battlestations only,
+/// independently of the GoForce 4500 driver profile.
+pub fn set_battlestations_depth_compatibility(enabled: bool) {
+    with_ctx(|c| c.state.goforce4500_depth_tolerance = enabled);
+    update_stored_contexts(|c| c.state.goforce4500_depth_tolerance = enabled);
 }
 
 /// Recognize clients that query the GoForce extension at runtime.
