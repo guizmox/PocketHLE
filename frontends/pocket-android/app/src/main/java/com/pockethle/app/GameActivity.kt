@@ -398,8 +398,10 @@ class GameActivity : AppCompatActivity() {
     private fun startSession(rootDir: String, id: String) {
         if (!presentationReady) { presentationStart = rootDir to id; return }
         if (isFinishing || isDestroyed) return
+        accelerometer.start()
         val handle = NativeBridge.nativeStartGame(rootDir, id, presentationHandle)
         if (handle == 0L) {
+            accelerometer.stop()
             progress.visibility = View.GONE
             android.widget.Toast.makeText(this, "Could not start the game: see logcat", android.widget.Toast.LENGTH_LONG).show()
             finish()
@@ -450,6 +452,13 @@ class GameActivity : AppCompatActivity() {
         }
     }
 
+    private val accelerometer by lazy {
+        AccelerometerHost(this) {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.rotation
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         (getSystemService(INPUT_SERVICE) as android.hardware.input.InputManager).registerInputDeviceListener(stylusDeviceListener,mainHandler)
@@ -462,7 +471,10 @@ class GameActivity : AppCompatActivity() {
         GpsHost.resume()
         VibrationHost.resume()
         val handle = session
-        if (handle != 0L && !audioRunning) startAudio(handle)
+        if (handle != 0L) {
+            accelerometer.start()
+            if (!audioRunning) startAudio(handle)
+        }
     }
 
     override fun onPause() {
@@ -474,6 +486,7 @@ class GameActivity : AppCompatActivity() {
         CameraHost.pause()
         GpsHost.pause()
         VibrationHost.pause()
+        accelerometer.stop()
         releaseHeldInput()
         stopAudio()
         super.onPause()
@@ -518,6 +531,7 @@ class GameActivity : AppCompatActivity() {
         CameraHost.closeAll()
         GpsHost.closeAll()
         VibrationHost.closeAll()
+        accelerometer.stop()
         finishSession()
         if (!joiningSession && ::sharedEglFactory.isInitialized) {
             if (::glRenderer.isInitialized) glRenderer.stopPresentation()
@@ -543,6 +557,7 @@ class GameActivity : AppCompatActivity() {
         CameraHost.closeAll()
         GpsHost.closeAll()
         VibrationHost.closeAll()
+        accelerometer.stop()
         releaseHeldInput()
         session = 0
         stopAudio()

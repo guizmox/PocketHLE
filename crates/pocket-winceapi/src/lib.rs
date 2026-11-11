@@ -56,6 +56,7 @@ pub mod gles_exports;
 mod gps;
 pub mod gx;
 pub mod hss;
+mod htcsensor;
 mod imgdecmp;
 mod legacy_services;
 #[cfg(feature = "video-static")]
@@ -312,6 +313,7 @@ impl WinCeDispatcher {
         gles::register(&mut d);
         gx::register(&mut d);
         hss::register(&mut d);
+        htcsensor::register(&mut d);
         ole32::register(&mut d);
         msxml::register(&mut d);
         for dll in ["coredll.dll", "ws2.dll"] {

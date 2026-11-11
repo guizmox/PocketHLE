@@ -1060,6 +1060,19 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollGpsNotice<'
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeSetAccelerometer(
+    _env: JNIEnv,
+    _class: JClass,
+    present: jni::sys::jboolean,
+    x: jni::sys::jfloat,
+    y: jni::sys::jfloat,
+    z: jni::sys::jfloat,
+) {
+    let present = present != 0;
+    pocket_core::kernel::accelerometer::publish(present, present.then_some([x, y, z]));
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeSendInput<'local>(
     _env: JNIEnv<'local>,
     _class: JClass<'local>,

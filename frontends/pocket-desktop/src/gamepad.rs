@@ -4,6 +4,7 @@ use sdl3::{
     event::Event as SdlEvent,
     gamepad::{Axis, Button, Gamepad},
     joystick::{HatState, Joystick},
+    sensor::{Sensor, SensorData, SensorType},
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -260,6 +261,31 @@ impl Device {
         matches!(self, Self::Raw(_))
     }
 }
+fn open_host_accelerometer(subsystem: &sdl3::SensorSubsystem) -> Option<Sensor> {
+    subsystem
+        .num_sensors()
+        .ok()?
+        .into_iter()
+        .filter_map(|id| subsystem.open(id).ok())
+        .find(|sensor| sensor.sensor_type() == SensorType::Accelerometer)
+}
+
+fn sample_controller_accelerometer(device: &Device) -> Option<[f32; 3]> {
+    let Device::Controller(controller) = device else {
+        return None;
+    };
+    let sensor = SensorType::Accelerometer;
+    if !controller.connected() || !unsafe { controller.has_sensor(sensor) } {
+        return None;
+    }
+    if !controller.sensor_enabled(sensor) {
+        controller.sensor_set_enabled(sensor, true).ok()?;
+    }
+    let mut axes = [0.0; 3];
+    controller.sensor_get_data(sensor, &mut axes).ok()?;
+    Some(axes)
+}
+
 fn scan(
     controllers: &sdl3::GamepadSubsystem,
     joysticks: &sdl3::JoystickSubsystem,
@@ -379,6 +405,18 @@ fn worker(
     let mut rumble_on = false;
     let mut last_rumble = Instant::now() - Duration::from_secs(1);
     let mut next_scan = Instant::now() + Duration::from_secs(1);
+    let sensors = sdl.sensor().ok();
+    let mut host_accelerometer = sensors.as_ref().and_then(open_host_accelerometer);
+    let mut next_acceleration = Instant::now();
+    let mut acceleration_controller = None;
+    let publish_acceleration = pocket_core::kernel::accelerometer::publish;
+    struct ClearAcceleration;
+    impl Drop for ClearAcceleration {
+        fn drop(&mut self) {
+            pocket_core::kernel::accelerometer::publish(false, None);
+        }
+    }
+    let _clear_acceleration = ClearAcceleration;
     while alive.load(Ordering::Relaxed) {
         state.deadzone = match profile.load(Ordering::Relaxed) {
             0 => pocket_library::DpadDeadzone::Small,
@@ -616,7 +654,42 @@ fn worker(
                 publish(tx, ctx, change, enabled.load(Ordering::Relaxed))?;
             }
         }
+        if Instant::now() >= next_acceleration {
+            let active = enabled.load(Ordering::Relaxed);
+            let current = active.then_some(selected as u32);
+            if current != acceleration_controller {
+                if let Some(Device::Controller(controller)) =
+                    acceleration_controller.and_then(|id| devices.get(&id))
+                {
+                    if controller.sensor_enabled(SensorType::Accelerometer) {
+                        let _ = controller.sensor_set_enabled(SensorType::Accelerometer, false);
+                    }
+                }
+                acceleration_controller = current;
+            }
+            let sample = if active {
+                let sample = host_accelerometer.as_ref().and_then(|sensor| match sensor.get_data() {
+                    Ok(SensorData::Accel(axes)) => Some(axes),
+                    _ => None,
+                });
+                if sample.is_none() {
+                    host_accelerometer = None;
+                }
+                sample.or_else(|| {
+                    current
+                        .and_then(|id| devices.get(&id))
+                        .and_then(sample_controller_accelerometer)
+                })
+            } else {
+                None
+            };
+            publish_acceleration(sample.is_some(), sample);
+            next_acceleration = Instant::now() + Duration::from_millis(16);
+        }
         if Instant::now() >= next_scan {
+            if host_accelerometer.is_none() {
+                host_accelerometer = sensors.as_ref().and_then(open_host_accelerometer);
+            }
             let gone: Vec<_> = devices
                 .iter()
                 .filter(|(_, d)| !d.attached())

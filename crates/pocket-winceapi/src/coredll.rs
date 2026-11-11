@@ -505,6 +505,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "HeapSize", heap_size);
     d.register_handler(dll, "GetProcessHeap", get_process_heap);
     d.register_handler(dll, "VirtualAlloc", virtual_alloc);
+    d.register_handler(dll, "VirtualProtect", virtual_protect);
     d.register_handler(dll, "VirtualFree", virtual_free);
     d.register_handler(dll, "qsort", qsort);
     d.register_handler(dll, "malloc", malloc);
@@ -4606,6 +4607,8 @@ fn get_module_handle_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
         pocket_kernel::WININET_MODULE_HANDLE
     } else if name == "ws2.dll" || name == "ws2" {
         pocket_kernel::WS2_MODULE_HANDLE
+    } else if matches!(name.as_str(), "htcsensorsdk" | "htcsensorsdk.dll") {
+        pocket_kernel::HTCSENSOR_MODULE_HANDLE
     } else if let Some(h) = gles_module_handle(&name) {
         h
     } else {
@@ -4741,6 +4744,12 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             set_thread_error(ctx, 126);
         }
         return Ok(DispatchOutcome::ReturnedR0(handle));
+    }
+    if matches!(
+        name.rsplit(['\\', '/']).next(),
+        Some("htcsensorsdk" | "htcsensorsdk.dll")
+    ) {
+        return Ok(DispatchOutcome::ReturnedR0(pocket_kernel::HTCSENSOR_MODULE_HANDLE));
     }
     if name.ends_with("hss.dll") || name == "hss" {
         let handle = if ctx.kernel.dynamic_exports.contains_key(&HSS_MODULE_HANDLE) {
@@ -4936,6 +4945,7 @@ pub(crate) fn runtime_hle_dll(dll: &str) -> bool {
             | "ole32.dll"
             | "sdlaunch.dll"
             | "hss.dll"
+            | "htcsensorsdk.dll"
             | "oleaut32.dll"
             | "winsock.dll"
             | "ws2.dll"
@@ -10417,6 +10427,18 @@ fn memory_division_virtual_commit_ranges() {
     );
 }
 
+fn virtual_page_permissions(protect: u32) -> Option<Prot> {
+    Some(match protect {
+        1 => Prot::NONE,
+        2 => Prot::READ,
+        4 => Prot::READ | Prot::WRITE,
+        0x10 => Prot::EXEC,
+        0x20 => Prot::EXEC | Prot::READ,
+        0x40 => Prot::EXEC | Prot::READ | Prot::WRITE,
+        _ => return None,
+    })
+}
+
 fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD protect)
     let addr = ctx.arg_u32(0)?;
@@ -10424,17 +10446,9 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 
     let kind = ctx.arg_u32(2)?;
     let protect = ctx.arg_u32(3)?;
-    let prot = match protect {
-        1 => Prot::NONE,
-        2 => Prot::READ,
-        4 => Prot::READ | Prot::WRITE,
-        0x10 => Prot::EXEC,
-        0x20 => Prot::EXEC | Prot::READ,
-        0x40 => Prot::EXEC | Prot::READ | Prot::WRITE,
-        _ => {
-            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
-            return Ok(DispatchOutcome::ReturnedR0(0));
-        }
+    let Some(prot) = virtual_page_permissions(protect) else {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if kind & !0x3000 != 0 || kind & 0x3000 == 0 {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
@@ -10515,6 +10529,80 @@ fn virtual_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         committed.len()
     );
     Ok(DispatchOutcome::ReturnedR0(base))
+}
+
+fn virtual_protect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const PAGE_NOCACHE: u32 = 0x200;
+    const ERROR_INVALID_ADDRESS: u32 = 487;
+    let address = ctx.arg_u32(0)?;
+    let size = ctx.arg_u32(1)?;
+    let protect = ctx.arg_u32(2)?;
+    let old_protect_out = ctx.arg_u32(3)?;
+    // PAGE_NOCACHE is a guest cache policy hint. Retain it for VirtualQuery
+    // and subsequent VirtualProtect calls; the CPU backend needs only R/W/X.
+    let Some(prot) = virtual_page_permissions(protect & !PAGE_NOCACHE)
+        .filter(|&p| p != Prot::NONE || protect & PAGE_NOCACHE == 0)
+    else {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if size == 0
+        || old_protect_out == 0
+        || ctx
+            .cpu
+            .check_guest_access(old_protect_out, 4, Prot::WRITE)
+            .is_err()
+    {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+
+    let start = address & !4095;
+    let Some(end) = address
+        .checked_add(size)
+        .and_then(|end| end.checked_add(4095))
+        .map(|end| end & !4095)
+    else {
+        set_thread_error(ctx, ERROR_INVALID_ADDRESS);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+
+    // Check the full range before changing any page. The heap tracks
+    // commitment separately from CPU mappings, which include reserved pages.
+    let mut old_ranges = Vec::new();
+    let mut allocation = None;
+    let mut page = start;
+    while page < end {
+        let Some([_, base, _, bytes, 0x1000, old, _]) = ctx.kernel.heap.query_virtual(page) else {
+            set_thread_error(ctx, ERROR_INVALID_ADDRESS);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        };
+        if allocation.is_some_and(|previous| previous != base) {
+            set_thread_error(ctx, ERROR_INVALID_ADDRESS);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        }
+        allocation = Some(base);
+        let len = bytes.min(end - page);
+        old_ranges.push((page, len, old));
+        page += len;
+    }
+
+    if ctx.cpu.protect_region(start, end - start, prot).is_err() {
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    // Check the output's original writability above, even when it resides
+    // inside the protected range. A host write can still fail on page-in.
+    if let Err(error) = ctx.cpu.write_mem(old_protect_out, &old_ranges[0].2.to_le_bytes()) {
+        for (base, len, old) in old_ranges {
+            let old = virtual_page_permissions(old & !PAGE_NOCACHE)
+                .expect("committed virtual pages have supported protection");
+            ctx.cpu.protect_region(base, len, old)?;
+        }
+        return Err(error.into());
+    }
+    ctx.kernel.heap.set_virtual_page_protect(start, end - start, protect);
+    Ok(DispatchOutcome::ReturnedR0(1))
 }
 
 fn virtual_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -36979,6 +37067,61 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(ram.ram_pages(), 1);
+    }
+
+    #[test]
+    fn virtual_protect_updates_committed_pages_and_preserves_cache_hint() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        macro_rules! api {
+            ($name:literal, $args:expr) => {
+                call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", $name, $args)
+            };
+        }
+        let base = 0x58f3_0000;
+        let out = 0x1100;
+        assert_eq!(
+            api!("VirtualAlloc", &[base, 0x2000, 0x3000, 0x20]),
+            DispatchOutcome::ReturnedR0(base)
+        );
+        assert_eq!(
+            api!("VirtualProtect", &[base, 0x600, 0x204, out]),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_u32_le(out).unwrap(), 0x20);
+        assert!(cpu.check_guest_access(base, 4096, Prot::WRITE).is_ok());
+        cpu.write_mem(base, b"code").unwrap();
+        assert!(cpu.check_guest_access(base, 1, Prot::EXEC).is_err());
+        assert!(cpu.check_guest_access(base + 4096, 1, Prot::EXEC).is_ok());
+        assert_eq!(
+            api!("VirtualQuery", &[base, out, 28]),
+            DispatchOutcome::ReturnedR0(28)
+        );
+        assert_eq!(cpu.read_u32_le(out + 12).unwrap(), 4096);
+        assert_eq!(cpu.read_u32_le(out + 20).unwrap(), 0x204);
+
+        // Unaligned ranges include both pages. Return the first page's
+        // previous protection, and leave reserved pages untouched on error.
+        assert_eq!(
+            api!("VirtualProtect", &[base + 4095, 2, 0x20, out]),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_u32_le(out).unwrap(), 0x204);
+        assert!(cpu.check_guest_access(base, 8192, Prot::READ | Prot::EXEC).is_ok());
+        assert_eq!(cpu.read_mem(base, 4).unwrap(), b"code");
+        assert!(cpu.check_guest_access(base + 4096, 1, Prot::WRITE).is_err());
+        for args in [
+            [base, 0x2001, 4, out],
+            [base, 1, 4, base],
+            [base, 0, 4, out],
+            [base, 1, 0x104, out],
+            [0xffff_ffff, 2, 4, out],
+        ] {
+            assert_eq!(api!("VirtualProtect", &args), DispatchOutcome::ReturnedR0(0));
+            assert!(cpu.check_guest_access(base, 8192, Prot::READ | Prot::EXEC).is_ok());
+            assert!(cpu.check_guest_access(base, 1, Prot::WRITE).is_err());
+            assert_eq!(cpu.read_u32_le(out).unwrap(), 0x204);
+        }
     }
 
     #[test]

@@ -33,6 +33,7 @@ use pocket_cpu::{
 };
 use pocket_pe::{machine, ImportBinding, ImportSymbol, LoadedImage, ResourceEntry};
 
+pub mod accelerometer;
 pub mod async_keys;
 pub mod audio;
 pub mod bluetooth;
@@ -3760,6 +3761,7 @@ pub const GLES_CM_MODULE_HANDLE: u32 = 0x1000_0004;
 pub const GLES_CL_MODULE_HANDLE: u32 = 0x1000_0005;
 /// Standalone EGL library; shares the client libraries' EGL implementation.
 pub const EGL_MODULE_HANDLE: u32 = 0x1000_000d;
+pub const HTCSENSOR_MODULE_HANDLE: u32 = 0x1000_000e;
 /// Fake `HMODULE` for the Hekkus Sound System compatibility layer.
 pub const HSS_MODULE_HANDLE: u32 = 0x1000_0006;
 /// Fake HMODULE for the resident `aygshell.dll` compatibility module.
@@ -3808,6 +3810,11 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
             if let ImportBinding::Ordinal(ord) = &thunk.binding {
                 aygshell.insert(format!("#{ord}"), thunk.thunk_va);
             }
+        } else if thunk.dll.eq_ignore_ascii_case("htcsensorsdk.dll") {
+            exports
+                .entry(HTCSENSOR_MODULE_HANDLE)
+                .or_insert_with(HashMap::new)
+                .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("hss.dll") {
             let table = exports
                 .entry(HSS_MODULE_HANDLE)
@@ -4143,6 +4150,7 @@ impl Process {
             "libgles_cl.dll",
             "libegl.dll",
             "hss.dll",
+            "htcsensorsdk.dll",
             "ole32.dll",
             "sdlaunch.dll",
             "ws2.dll",

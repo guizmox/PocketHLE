@@ -171,6 +171,8 @@ object NativeBridge {
      */
     const val INPUT_KEYBOARD_ROTATION = 5
 
+    @JvmStatic external fun nativeSetAccelerometer(present: Boolean, x: Float, y: Float, z: Float)
+
     @JvmStatic external fun nativeSendInput(
         handle: Long,
         kind: Int,
