@@ -157,18 +157,22 @@ and no new setting. PocketPC profiles, including GoForce 5500 and Intel 2700G,
 keep their separate behavior.
 
 The ordinary draw establishes unbiased depth. A color-only replay uses
-`z' = z + max((z - w) / 12, -2 * w / 1024)` for vertices in front of the eye.
-Its vertex window-depth margin is `min((1 - depth) / 12, 1 / 1024)`;
-it diminishes towards the far plane and never accumulates in the depth buffer.
+`z' = z + max((z - w) / 12, -2 * w * cap)` for vertices in front of the eye.
+The cap is `1 / 4096` through window depth `126 / 128`, increases linearly
+to `1 / 1024` at `127 / 128`, and stays at that value beyond it.
+The resulting margin still diminishes towards the far plane and never
+accumulates in the depth buffer.
 The transform precedes clipping and interpolation. It is not a per-fragment
 comparison against a depth texture. Near-plane clipping stays enabled.
 
-The old bound of `1 / 4096` left visible water/land intersections on a low
-Battlestations flight. Removing the bound exposed Chicane's wheels through its
-body. The revised bound is combined with coverage protection: the replay cannot
-replace pixels already made normally visible by the same consecutive drawing
-batch. A batch is defined by pipeline, modelview/projection, texture bindings,
-image revisions/sampler state and texture stages. These are rendering states,
+A uniform bound of `1 / 4096` left visible water/land intersections on a low
+Battlestations flight. A uniform `1 / 1024` could expose hidden geometry from
+a different batch through a nearby car body. The depth-dependent cap retains
+the distant margin and reduces these nearby overlaps. Coverage protection also
+prevents the replay from replacing pixels already made normally visible by the
+same consecutive drawing batch. A batch is defined by pipeline,
+modelview/projection, texture bindings, image revisions/sampler state and
+texture stages. These are rendering states,
 not an inferred game or object identity. Material/transform changes start a new
 batch, so the absolute bound remains necessary for cross-batch hidden surfaces.
 
