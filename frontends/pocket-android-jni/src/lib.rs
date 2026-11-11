@@ -289,7 +289,9 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportP
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportExecutable<'local>(
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportExecutable<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     library_root: JString<'local>,
@@ -306,7 +308,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportE
             .context("import no longer pending")?;
         anyhow::ensure!(*owner == root, "import belongs to another library");
         let index = usize::try_from(index).context("invalid executable index")?;
-        anyhow::ensure!(pending.choose_executable(&id, index), "unknown executable choice");
+        anyhow::ensure!(
+            pending.choose_executable(&id, index),
+            "unknown executable choice"
+        );
         Ok(prepared_import_json(token as u64, pending))
     })();
     new_jstring(

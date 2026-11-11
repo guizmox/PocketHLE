@@ -1504,9 +1504,9 @@ fn import_executable_choices(
         .iter()
         .filter_map(|entry| {
             if is_gizmondo_game(entry, root)
-                || updates.iter().any(|old| {
-                    old.id == entry.id && old.platform == Some(GamePlatform::Gizmondo)
-                })
+                || updates
+                    .iter()
+                    .any(|old| old.id == entry.id && old.platform == Some(GamePlatform::Gizmondo))
             {
                 return None;
             }
@@ -1525,7 +1525,10 @@ fn import_executable_choices(
                 return None;
             }
             executables.sort();
-            if let Some(index) = executables.iter().position(|path| *path == entry.executable) {
+            if let Some(index) = executables
+                .iter()
+                .position(|path| *path == entry.executable)
+            {
                 executables.swap(0, index);
             }
             Some(ImportExecutableChoice {
@@ -1832,8 +1835,8 @@ impl Library {
             self.preserve_import_preferences(&mut entry, previous.as_ref(), &directory)?;
             entry.settings.import_executable_selected |= selected;
             if selected {
-                entry.icon = extract_icon_png(&directory, &directory.join(&entry.executable))
-                    .or(entry.icon);
+                entry.icon =
+                    extract_icon_png(&directory, &directory.join(&entry.executable)).or(entry.icon);
             }
             write_json(&directory.join("game.json"), &entry)?;
             prepared.push((entry, directory, previous));
@@ -6754,8 +6757,16 @@ mod tests {
             entry.settings.gpu_compatibility_profile,
             gpu_profile::GpuCompatibilityProfile::Intel2700g
         );
-        library.update_settings(&id, GameSettings::default()).unwrap();
-        assert!(library.get(&id).unwrap().settings.import_executable_selected);
+        library
+            .update_settings(&id, GameSettings::default())
+            .unwrap();
+        assert!(
+            library
+                .get(&id)
+                .unwrap()
+                .settings
+                .import_executable_selected
+        );
     }
 
     #[test]
