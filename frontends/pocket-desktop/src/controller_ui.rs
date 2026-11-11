@@ -705,6 +705,11 @@ pub fn toolbar_focused(ctx: &egui::Context) -> bool {
 /// Page navigation excludes the launcher toolbar while popup controls retain
 /// their own navigation scope. Mouse interaction continues to use real widgets.
 pub fn page_scope<R>(ui: &mut Ui, id: impl Hash, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    // A new egui window measures its contents in a disabled pass.
+    // Register focus only when its controls can receive input.
+    if !ui.is_enabled() {
+        return contents(ui);
+    }
     let id = Id::new(id);
     let entering = widgets(ui.ctx()).page != Some(id);
     if entering {

@@ -1145,6 +1145,9 @@ impl PocketLauncher {
                 UiEvent::ReleaseAvailable(update) => self.release_update = Some(update),
                 UiEvent::ImportPrepared(pending) => {
                     self.pending_import = Some(pending);
+                    self.deck_library_actions.clear();
+                    self.controller_ui.stop_repeat();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     self.status = "Waiting for import confirmation...".into();
                 }
                 UiEvent::ImportFinished(Ok(ImportedGames {
@@ -1270,6 +1273,7 @@ impl PocketLauncher {
         }
         if let Some(message) = self.dependency_notice.clone() {
             egui::Window::new("PocketPC dependency")
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
                 .collapsible(false)
                 .resizable(true)
                 .show(ctx, |ui| {
@@ -2199,26 +2203,36 @@ impl PocketLauncher {
         let Some(pending) = self.pending_import.as_ref() else {
             return;
         };
+        let actions = std::mem::take(&mut self.deck_library_actions);
+        if actions.iter().any(|action| action == "East") {
+            self.pending_import = None;
+            self.library_busy = false;
+            self.status = "Import cancelled.".into();
+            return;
+        }
         if !pending.cabinet_choices().is_empty() {
             let choices = pending.cabinet_choices().to_vec();
             let mut selected = None;
             let mut cancel = false;
             egui::Window::new("Choose installer cabinet")
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("This installer contains several CABs. Which one should be imported?");
-                    for choice in &choices {
-                        if crate::controller_ui::button(
-                            ui,
-                            format!("{} — {}", choice.name, choice.architecture),
-                        )
-                        .clicked()
-                        {
-                            selected = Some(choice.index);
+                    crate::controller_ui::page_scope(ui, "import_cabinet", |ui| {
+                        ui.label("This installer contains several CABs. Which one should be imported?");
+                        for choice in &choices {
+                            if crate::controller_ui::button(
+                                ui,
+                                format!("{} — {}", choice.name, choice.architecture),
+                            )
+                            .clicked()
+                            {
+                                selected = Some(choice.index);
+                            }
                         }
-                    }
-                    cancel = crate::controller_ui::button(ui, "Cancel import").clicked();
+                        cancel = crate::controller_ui::button(ui, "Cancel import").clicked();
+                    });
                 });
             if cancel {
                 self.pending_import = None;
@@ -2242,14 +2256,20 @@ impl PocketLauncher {
         if let Some((id, name)) = pending.platform_choices().first().cloned() {
             let mut choice = None;
             let mut cancel = false;
-            egui::Window::new("Choose game platform").collapsible(false).resizable(false).show(ctx, |ui| {
-                ui.label(format!("No Gizmondo marker was found for \"{name}\". Which platform is this game for?"));
-                ui.horizontal(|ui| {
-                    if crate::controller_ui::button(ui, "Gizmondo").clicked() { choice=Some(pocket_library::GamePlatform::Gizmondo); }
-                    if crate::controller_ui::button(ui, "Pocket PC").clicked() { choice=Some(pocket_library::GamePlatform::PocketPc); }
-                    cancel=crate::controller_ui::button(ui, "Cancel import").clicked();
+            egui::Window::new("Choose game platform")
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    crate::controller_ui::page_scope(ui, "import_platform", |ui| {
+                        ui.label(format!("No Gizmondo marker was found for \"{name}\". Which platform is this game for?"));
+                        ui.horizontal(|ui| {
+                            if crate::controller_ui::button(ui, "Gizmondo").clicked() { choice=Some(pocket_library::GamePlatform::Gizmondo); }
+                            if crate::controller_ui::button(ui, "Pocket PC").clicked() { choice=Some(pocket_library::GamePlatform::PocketPc); }
+                            cancel=crate::controller_ui::button(ui, "Cancel import").clicked();
+                        });
+                    });
                 });
-            });
             if cancel {
                 self.pending_import = None;
                 self.library_busy = false;
@@ -2269,16 +2289,18 @@ impl PocketLauncher {
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
                 .collapsible(false)
                 .show(ctx, |ui| {
-                    ui.label(format!("Which executable should PocketHLE launch for {}?", game.display_name));
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        for (index, exe) in game.executables.iter().enumerate() {
-                            let name = exe.strip_prefix("extracted").unwrap_or(exe);
-                            if crate::controller_ui::button(ui, name.display().to_string()).clicked() {
-                                selected = Some(index);
+                    crate::controller_ui::page_scope(ui, "import_executable", |ui| {
+                        ui.label(format!("Which executable should PocketHLE launch for {}?", game.display_name));
+                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                            for (index, exe) in game.executables.iter().enumerate() {
+                                let name = exe.strip_prefix("extracted").unwrap_or(exe);
+                                if crate::controller_ui::button(ui, name.display().to_string()).clicked() {
+                                    selected = Some(index);
+                                }
                             }
-                        }
+                        });
+                        cancel = crate::controller_ui::button(ui, "Cancel import").clicked();
                     });
-                    cancel = crate::controller_ui::button(ui, "Cancel import").clicked();
                 });
             if cancel {
                 self.pending_import = None;
@@ -2317,28 +2339,35 @@ impl PocketLauncher {
             .map(|game| game.display_name.clone())
             .collect();
         let count = pending.entries().len();
-        let mut update = false;
+        let mut update = actions.iter().any(|action| action == "South");
         let mut cancel = false;
         egui::Window::new("Update existing games?")
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label("These games are already installed:");
-                ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for name in &names {
-                        ui.label(name);
+                crate::controller_ui::page_scope(ui, "import_update", |ui| {
+                    ui.label("These games are already installed:");
+                    ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        for name in &names {
+                            ui.label(name);
+                        }
+                    });
+                    ui.label("Replace their game files and keep saves, names and settings?");
+                    if count > names.len() {
+                        ui.label(format!(
+                            "{} new game(s) will also be imported.",
+                            count - names.len()
+                        ));
                     }
-                });
-                ui.label("Replace their game files and keep saves, names and settings?");
-                if count > names.len() {
-                    ui.label(format!(
-                        "{} new game(s) will also be imported.",
-                        count - names.len()
+                    ui.weak(crate::controller_labels::text(
+                        ctx,
+                        "{South}: update · {East}: cancel",
                     ));
-                }
-                ui.horizontal(|ui| {
-                    cancel = crate::controller_ui::button(ui, "Cancel import").clicked();
-                    update = crate::controller_ui::button(ui, "Update games").clicked();
+                    ui.horizontal(|ui| {
+                        cancel = crate::controller_ui::button(ui, "Cancel import").clicked();
+                        update |= crate::controller_ui::button(ui, "Update games").clicked();
+                    });
                 });
             });
         if cancel {
@@ -2419,14 +2448,26 @@ impl PocketLauncher {
         let Some((id, name)) = self.demo_import.clone() else {
             return;
         };
-        let mut split = false;
-        let mut keep = false;
-        egui::Window::new("Import demo card").collapsible(false).resizable(false).show(ctx,|ui| {
-            ui.label("Keep the original launcher or create a separate library entry for each game?");
-            ui.label("Separate games each have their own directory. Shared card resources are copied.");
-            keep=crate::controller_ui::button(ui, "Keep launcher").clicked();
-            split=crate::controller_ui::button(ui, "Separate games").clicked();
-        });
+        let actions = std::mem::take(&mut self.deck_library_actions);
+        let mut split = actions.iter().any(|action| action == "South");
+        let mut keep = actions.iter().any(|action| action == "East");
+        crate::controller_ui::claim_modal_input(ctx);
+        egui::Window::new("Import demo card")
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Keep the original launcher or create a separate library entry for each game?");
+                ui.label("Separate games each have their own directory. Shared card resources are copied.");
+                keep |= crate::controller_ui::button(
+                    ui,
+                    crate::controller_labels::text(ctx, "Keep launcher ({East})"),
+                ).clicked();
+                split |= crate::controller_ui::button(
+                    ui,
+                    crate::controller_labels::text(ctx, "Separate games ({South})"),
+                ).clicked();
+            });
         if keep {
             self.demo_import = None;
             self.rename_draft = Some((id, name, true));
@@ -4712,6 +4753,38 @@ impl PocketLauncher {
                         if down && matches!(control.as_str(),"South"|"East") {self.deck_library_actions.push(control.clone());ctx.request_repaint();}
                         continue;
                     }
+                    if self.demo_import.is_some()
+                        && !self.library_busy
+                        && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if !down {
+                            self.controller_ui.release(&control);
+                        } else if matches!(control.as_str(), "South" | "East") {
+                            self.deck_library_actions.push(control.clone());
+                            ctx.request_repaint();
+                        }
+                        continue;
+                    }
+                    if let Some(pending) = self.pending_import.as_ref() {
+                        if Some(device) == self.gamepad_selected
+                            && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                        {
+                            let confirming_update = pending.cabinet_choices().is_empty()
+                                && pending.platform_choices().is_empty()
+                                && pending.executable_choices().is_empty()
+                                && !pending.updates().is_empty();
+                            if !down {
+                                self.controller_ui.release(&control);
+                            } else if control == "East" || (control == "South" && confirming_update) {
+                                self.deck_library_actions.push(control.clone());
+                            } else {
+                                self.controller_ui.press(&control);
+                            }
+                            ctx.request_repaint();
+                            continue;
+                        }
+                    }
                     if self.first_import_setup.is_some() && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
                         if down {
@@ -6191,6 +6264,7 @@ impl eframe::App for PocketLauncher {
                 });
             });
             self.ui_import_update(ctx);
+            self.controller_ui.show(ctx);
             if !self.library_busy {
                 self.ui_demo_import(ctx);
             }
