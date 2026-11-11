@@ -81,8 +81,11 @@ points or change the host renderer identity.
 An imported PocketPC game receives one combined launch-settings prompt for
 screen/orientation, optional FPS advice and, when the existing executable analysis
 identifies OpenGL ES, the GPU compatibility profile. The FPS detector and message
-are shared across desktop and Android. Import advice does not select a GPU profile
-or use game names. NVIDIA selection gates extension advertisement and entry points;
+are shared across desktop and Android. For a new PocketPC import, a direct
+`libGLES_CL.dll` import in the executable selects Intel 2700G as the initial
+profile. The user can change it in Graphics settings. Updating an installed
+game preserves its saved profile. NVIDIA selection gates extension advertisement
+and entry points;
 it permits existing program detection rather than forcing combiner rendering.
 
 ### Intel 2700G depth-bias model

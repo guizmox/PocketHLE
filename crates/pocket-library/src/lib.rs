@@ -177,14 +177,17 @@ pub struct GameEntry {
 /// the card by an exact `GZxx######` directory, including empty serial
 /// directories in repacks. The legacy Alien Hominid repack is retained as a narrow fallback.
 pub fn is_gizmondo_game(entry: &GameEntry, library_root: &Path) -> bool {
+    is_gizmondo_at(entry, &entry.extracted_dir(library_root))
+}
+
+fn is_gizmondo_at(entry: &GameEntry, extracted: &Path) -> bool {
     if let Some(platform) = entry.platform {
         return platform == GamePlatform::Gizmondo;
     }
-    let extracted = entry.extracted_dir(library_root);
     entry.source_cab.starts_with("demo-card:")
         || entry.source_cab.starts_with("gzga-collection:")
         || is_gizmondo_title_id(&entry.id)
-        || has_gizmondo_marker(&extracted)
+        || has_gizmondo_marker(extracted)
         || (entry
             .source_cab
             .to_ascii_lowercase()
@@ -2632,6 +2635,9 @@ impl Library {
                 }
             }
         }
+        if previous.is_none() {
+            apply_import_gpu_default(entry, staged);
+        }
         let gizmondo = entry.source_cab.starts_with("gzga-collection:")
             || is_gizmondo_title_id(&entry.id)
             || has_gizmondo_marker(&staged.join("extracted"));
@@ -3018,6 +3024,11 @@ impl Library {
     /// existing game with the same id.
     fn commit_entry(&mut self, id: &str, mut entry: GameEntry) -> Result<&GameEntry, LibraryError> {
         let game_dir = self.root.join("games").join(id);
+        if let Some(previous) = self.library.games.iter().find(|game| game.id == id) {
+            entry.settings.gpu_compatibility_profile = previous.settings.gpu_compatibility_profile;
+        } else {
+            apply_import_gpu_default(&mut entry, &game_dir);
+        }
         if !is_gizmondo_game(&entry, &self.root)
             && entry.executable.file_stem().is_some_and(|name| {
                 name.to_string_lossy()
@@ -4152,6 +4163,26 @@ pub fn accelerated_renderer_build(shortcut_target: &Path) -> Option<PathBuf> {
 
 /// The GL ES driver `path` imports, lower-cased, if it is one PocketHLE
 /// implements.
+fn apply_import_gpu_default(entry: &mut GameEntry, game_dir: &Path) {
+    use gpu_profile::GpuCompatibilityProfile;
+
+    if entry.settings.gpu_compatibility_profile != GpuCompatibilityProfile::Generic
+        || is_gizmondo_at(entry, &game_dir.join("extracted"))
+    {
+        return;
+    }
+    let Ok(image) = pocket_pe::load_file(&game_dir.join(&entry.executable)) else {
+        return;
+    };
+    if image
+        .imports
+        .iter()
+        .any(|import| import.dll.eq_ignore_ascii_case("libgles_cl.dll"))
+    {
+        entry.settings.gpu_compatibility_profile = GpuCompatibilityProfile::Intel2700g;
+    }
+}
+
 fn imported_gles_driver(path: &Path) -> Option<String> {
     let image = pocket_pe::load_file(path).ok()?;
     image
@@ -6582,6 +6613,34 @@ mod tests {
         }
         // Nothing may be left behind for a rejected import.
         assert!(!root.join("games").join("pegcards").exists());
+    }
+
+    #[test]
+    fn common_lite_import_selects_intel_and_keeps_manual_profile_on_update() {
+        use super::gpu_profile::GpuCompatibilityProfile;
+
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("common-lite.exe");
+        write_pe_importing(&exe, &["COREDLL.dll", "libGLES_CL.dll"]);
+        let mut library = Library::open(root.path().join("library")).unwrap();
+
+        let prepared = library.prepare_import(&exe).unwrap();
+        let entries = library.apply_prepared_import(prepared, false).unwrap();
+        assert_eq!(
+            entries[0].settings.gpu_compatibility_profile,
+            GpuCompatibilityProfile::Intel2700g
+        );
+
+        let settings = &mut library.get_mut(&entries[0].id).unwrap().settings;
+        settings.gpu_compatibility_profile = GpuCompatibilityProfile::Generic;
+        library.save().unwrap();
+
+        let prepared = library.prepare_import(&exe).unwrap();
+        let entries = library.apply_prepared_import(prepared, true).unwrap();
+        assert_eq!(
+            entries[0].settings.gpu_compatibility_profile,
+            GpuCompatibilityProfile::Generic
+        );
     }
 
     #[test]
