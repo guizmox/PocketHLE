@@ -582,6 +582,7 @@ fn run_process_inner(
     );
     emu.set_gizmondo_goforce_driver(is_gizmondo);
     let profile = entry.settings.gpu_compatibility_profile;
+    emu.set_goforce_5500_profile(!is_gizmondo && profile.nvidia_combiners());
     emu.set_nv_combiner_allowed(is_gizmondo || profile.nvidia_combiners());
     emu.set_intel2700g_depth_bias(!is_gizmondo && profile.intel_depth_bias());
     emu.set_gles_internal_resolution(launcher_config.gles_internal_resolution);

@@ -598,3 +598,37 @@ pub(super) fn sample_f(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
 pub(super) fn sample_x(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     coverage(c, true)
 }
+
+pub(super) fn get_buffer_sub_data(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (target, offset, size, out) = (
+        ctx.arg_u32(0)?,
+        ctx.arg_u32(1)?,
+        ctx.arg_u32(2)?,
+        ctx.arg_u32(3)?,
+    );
+    with_ctx(|c| {
+        if let Some(data) = c.buffer_sub_data_read(target, offset, size as usize) {
+            if !data.is_empty() {
+                ctx.cpu.write_mem(out, data)?;
+            }
+        }
+        Ok(VOID)
+    })
+}
+
+pub(super) fn get_buffer_pointer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (target, pname, out) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?);
+    // This extension exposes the mapping query even though this driver
+    // provides no buffer mapping entry point.
+    if pname != 0x88bd {
+        with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_ENUM));
+        return Ok(VOID);
+    }
+    if with_ctx(|c| {
+        c.get_buffer_parameter(target, pocket_gles::GL_BUFFER_SIZE)
+            .is_some()
+    }) {
+        ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
+    }
+    Ok(VOID)
+}

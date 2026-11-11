@@ -163,6 +163,7 @@ struct EglImage {
 }
 struct EglSurfaces {
     initialized: bool,
+    goforce_5500: bool,
     rgba8888_only: bool,
     config_locked: bool,
     contexts: HashMap<u32, EglContext>,
@@ -203,6 +204,7 @@ impl EglSurfaces {
         );
         Self {
             initialized: false,
+            goforce_5500: false,
             rgba8888_only: false,
             config_locked: false,
             contexts: HashMap::new(),
@@ -346,6 +348,11 @@ pub fn uses_nv_combiner(image: &pocket_pe::LoadedImage) -> bool {
                 .windows(marker.len())
                 .any(|bytes| bytes == marker)
     })
+}
+
+/// Select the PocketPC GoForce 5500 extension and EGL configuration list.
+pub fn set_goforce_5500_profile(enabled: bool) {
+    SURFACES.with(|s| s.borrow_mut().goforce_5500 = enabled);
 }
 
 /// Set the session capability gate without changing client detection.
@@ -1683,7 +1690,13 @@ fn gl_capability(pname: u32) -> Option<Vec<f32>> {
         pocket_gles::GL_MAX_MODELVIEW_STACK_DEPTH
         | pocket_gles::GL_MAX_PROJECTION_STACK_DEPTH
         | pocket_gles::GL_MAX_TEXTURE_STACK_DEPTH => vec![16.],
-        pocket_gles::GL_DEPTH_BITS => vec![with_ctx(|c| c.state.depth_bits() as f32)],
+        pocket_gles::GL_DEPTH_BITS => vec![with_ctx(|c| {
+            if c.target.depth.is_empty() {
+                0.
+            } else {
+                c.state.depth_bits() as f32
+            }
+        })],
         pocket_gles::GL_STENCIL_BITS => vec![0.],
         pocket_gles::GL_ALPHA_BITS => vec![with_ctx(|c| if c.target.rgb565 { 0. } else { 8. })],
         pocket_gles::GL_RED_BITS | pocket_gles::GL_BLUE_BITS => {
@@ -1729,15 +1742,25 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
     };
-    if name == pocket_gles::GL_EXTENSIONS && pocket_gles::graphics_diagnostic::enabled() {
-        nv_combiner::diagnostic_extensions();
-    }
-    if name == pocket_gles::GL_EXTENSIONS && nv_combiner::enabled() {
-        let extensions = format!("{text} GL_NV_combiner_program");
-        return Ok(DispatchOutcome::ReturnedR0(intern_string(
-            ctx,
-            &extensions,
-        )?));
+    if name == pocket_gles::GL_EXTENSIONS {
+        if pocket_gles::graphics_diagnostic::enabled() {
+            nv_combiner::diagnostic_extensions();
+        }
+        let vbo = goforce_5500_extensions();
+        let combiners = nv_combiner::enabled();
+        if vbo || combiners {
+            let mut extensions = text.to_owned();
+            if vbo {
+                extensions.push_str(" GL_OES_vertex_buffer_object");
+            }
+            if combiners {
+                extensions.push_str(" GL_NV_combiner_program");
+            }
+            return Ok(DispatchOutcome::ReturnedR0(intern_string(
+                ctx,
+                &extensions,
+            )?));
+        }
     }
     Ok(DispatchOutcome::ReturnedR0(intern_string(ctx, text)?))
 }
@@ -2021,6 +2044,7 @@ const DISPLAY_HANDLE: u32 = 0x4547_0001;
 /// The RGB565 configuration; the optional profile exposes only RGBA8888.
 const CONFIG_HANDLE: u32 = 0x4547_0002;
 const CONFIG_RGBA_HANDLE: u32 = 0x4547_0005;
+const CONFIG_RGBA_COLOR_PBUFFER: u32 = 0x4547_0006;
 /// First window surface; later windows receive fresh handles.
 const SURFACE_HANDLE: u32 = 0x4547_0003;
 /// First context handle; subsequent creations receive distinct handles.
@@ -2222,6 +2246,10 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     if !egl_surface_args(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
     }
+    if ctx.arg_u32(1)? == CONFIG_RGBA_COLOR_PBUFFER {
+        set_egl_error(pocket_gles::EGL_BAD_MATCH);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE));
+    }
     // The 2005-10-13 GoForce driver never reads attrib_list here (including
     // its address). Keep that device behavior: applications can reuse their
     // eglChooseConfig list. Other profiles retain EGL attribute validation.
@@ -2372,13 +2400,8 @@ fn egl_query_context(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         set_egl_error(pocket_gles::EGL_BAD_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
     }
-    let id: i32 = SURFACES.with(|s| {
-        if s.borrow().contexts[&handle].config == CONFIG_HANDLE {
-            1
-        } else {
-            2
-        }
-    });
+    let config = SURFACES.with(|s| s.borrow().contexts[&handle].config);
+    let id = egl_config::Config::id(config);
     ctx.cpu.write_mem(out, &id.to_le_bytes())?;
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
@@ -2424,6 +2447,10 @@ fn allocate_surface(width: u32, height: u32, pixmap: Option<u32>, config: u32) -
                 deleted: false,
                 buffers: Some(if config == CONFIG_HANDLE {
                     SurfaceBuffers::new_rgb565(width, height)
+                } else if config == CONFIG_RGBA_COLOR_PBUFFER {
+                    let mut buffers = SurfaceBuffers::new(width, height);
+                    buffers.target.depth.clear();
+                    buffers
                 } else {
                     SurfaceBuffers::new(width, height)
                 }),
@@ -2486,7 +2513,7 @@ fn egl_create_pixmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     if !egl_surface_args(ctx)? {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    if ctx.arg_u32(1)? == CONFIG_RGBA_HANDLE {
+    if ctx.arg_u32(1)? != CONFIG_HANDLE {
         set_egl_error(pocket_gles::EGL_BAD_MATCH);
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -2770,13 +2797,7 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let value: i32 = match attribute {
         pocket_gles::EGL_WIDTH => w as i32,
         pocket_gles::EGL_HEIGHT => h as i32,
-        EGL_CONFIG_ID => {
-            if config == CONFIG_HANDLE {
-                1
-            } else {
-                2
-            }
-        }
+        EGL_CONFIG_ID => egl_config::Config::id(config),
         pocket_gles::EGL_LARGEST_PBUFFER => largest as i32,
         0x3080 | 0x3081 => 0x305c, // NO_TEXTURE
         0x3082 => mipmap as i32,
@@ -3135,6 +3156,10 @@ fn egl_no_surface(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(EGL_NO_SURFACE))
 }
 
+fn goforce_5500_extensions() -> bool {
+    SURFACES.with(|s| s.borrow().goforce_5500)
+}
+
 /// Resolve only known callable GLES thunks, without modifying ordinal tables.
 fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let pointer = ctx.arg_u32(0)?;
@@ -3151,6 +3176,9 @@ fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     }
     let name = String::from_utf8_lossy(&bytes);
     if name.ends_with("NV") && nv_combiner::is_entry_point(&name) && !nv_combiner::enabled() {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if GOFORCE_5500_VBO_EXPORTS.contains(&name.as_ref()) && !goforce_5500_extensions() {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let address = [
@@ -3253,10 +3281,10 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glGetBooleanv" => es11::get_boolean,
         "glGetFixedv" => es11::get_fixed,
         "glGetPointerv" => es11::get_pointer,
-        "glGetBufferParameteriv" => es11::get_buffer,
+        "glGetBufferParameteriv" | "glGetBufferParameterivOES" => es11::get_buffer,
         "glIsEnabled" => es11::is_enabled,
         "glIsTexture" => es11::is_texture,
-        "glIsBuffer" => es11::is_buffer,
+        "glIsBuffer" | "glIsBufferOES" => es11::is_buffer,
         "glColor4ub" => es11::color4ub,
         "glClipPlanef" => es11::clip_f,
         "glClipPlanex" => es11::clip_x,
@@ -3371,11 +3399,13 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         "glReadPixels" => gl_read_pixels,
 
         // buffer objects
-        "glGenBuffers" => gl_gen_buffers,
-        "glDeleteBuffers" => gl_delete_buffers,
-        "glBindBuffer" => gl_bind_buffer,
-        "glBufferData" => gl_buffer_data,
-        "glBufferSubData" => gl_buffer_sub_data,
+        "glGetBufferSubDataOES" => es11::get_buffer_sub_data,
+        "glGetBufferPointervOES" => es11::get_buffer_pointer,
+        "glGenBuffers" | "glGenBuffersOES" => gl_gen_buffers,
+        "glDeleteBuffers" | "glDeleteBuffersOES" => gl_delete_buffers,
+        "glBindBuffer" | "glBindBufferOES" => gl_bind_buffer,
+        "glBufferData" | "glBufferDataOES" => gl_buffer_data,
+        "glBufferSubData" | "glBufferSubDataOES" => gl_buffer_sub_data,
 
         // Matrix-palette skinning (OES_matrix_palette). The rasterizer
         // transforms by the modelview alone, so a skinned mesh renders
@@ -3558,6 +3588,19 @@ const EXTRA_NAMED_EXPORTS: [&str; 45] = [
     "eglSwapIntervalNV",
 ];
 
+// Names used by the early GoForce VBO extension before the core GLES 1.1 spelling.
+const GOFORCE_5500_VBO_EXPORTS: [&str; 9] = [
+    "glGetBufferParameterivOES",
+    "glIsBufferOES",
+    "glGenBuffersOES",
+    "glDeleteBuffersOES",
+    "glBindBufferOES",
+    "glBufferDataOES",
+    "glBufferSubDataOES",
+    "glGetBufferSubDataOES",
+    "glGetBufferPointervOES",
+];
+
 const EGL_NAMED_EXPORTS: &[&str] = &[
     "eglGetDisplay",
     "eglInitialize",
@@ -3612,7 +3655,10 @@ pub fn register(d: &mut WinCeDispatcher) {
             };
             d.register_handler(dll, &name, handler);
         }
-        for name in EXTRA_NAMED_EXPORTS {
+        for name in EXTRA_NAMED_EXPORTS
+            .into_iter()
+            .chain(GOFORCE_5500_VBO_EXPORTS)
+        {
             let Some(handler) = handler_for(name) else {
                 continue;
             };

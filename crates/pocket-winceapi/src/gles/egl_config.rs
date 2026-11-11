@@ -18,22 +18,24 @@ const TRANSPARENT_RGB: i32 = 0x3052;
 pub(super) struct Config {
     depth: i32,
     rgba: bool,
+    pbuffer_only: bool,
 }
 impl Config {
     pub(super) fn handles() -> &'static [u32] {
-        SURFACES.with(|s| {
-            if s.borrow().rgba8888_only {
-                &[CONFIG_RGBA_HANDLE][..]
-            } else {
-                &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE][..]
-            }
-        })
+        let rgba_only = SURFACES.with(|s| s.borrow().rgba8888_only);
+        match (rgba_only, goforce_5500_extensions()) {
+            (true, true) => &[CONFIG_RGBA_HANDLE, CONFIG_RGBA_COLOR_PBUFFER],
+            (false, true) => &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE, CONFIG_RGBA_COLOR_PBUFFER],
+            (true, false) => &[CONFIG_RGBA_HANDLE],
+            (false, false) => &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE],
+        }
     }
 
     pub(super) fn current() -> Self {
         Self {
             depth: with_ctx(|c| c.state.depth_bits() as i32),
             rgba: false,
+            pbuffer_only: false,
         }
     }
 
@@ -43,19 +45,30 @@ impl Config {
         }
         let rgba = match handle {
             CONFIG_HANDLE => false,
-            CONFIG_RGBA_HANDLE => true,
+            CONFIG_RGBA_HANDLE | CONFIG_RGBA_COLOR_PBUFFER => true,
             _ => return None,
         };
         Some(Self {
             rgba,
+            pbuffer_only: handle == CONFIG_RGBA_COLOR_PBUFFER,
             ..Self::current()
         })
     }
-    fn id(&self) -> i32 {
-        if self.rgba {
-            2
+    pub(super) fn id(handle: u32) -> i32 {
+        match handle {
+            CONFIG_RGBA_COLOR_PBUFFER => 3,
+            CONFIG_RGBA_HANDLE => 2,
+            _ => 1,
+        }
+    }
+
+    fn config_id(&self) -> i32 {
+        if self.pbuffer_only {
+            Self::id(CONFIG_RGBA_COLOR_PBUFFER)
+        } else if self.rgba {
+            Self::id(CONFIG_RGBA_HANDLE)
         } else {
-            1
+            Self::id(CONFIG_HANDLE)
         }
     }
 
@@ -90,12 +103,19 @@ impl Config {
                 }
             }
             EGL_STENCIL_SIZE | EGL_SAMPLES | EGL_SAMPLE_BUFFERS => 0,
-            EGL_DEPTH_SIZE => self.depth,
+            EGL_DEPTH_SIZE => {
+                if self.pbuffer_only {
+                    0
+                } else {
+                    self.depth
+                }
+            }
+            EGL_SURFACE_TYPE if self.pbuffer_only => EGL_PBUFFER_BIT as i32,
             EGL_SURFACE_TYPE => {
                 (EGL_WINDOW_BIT | EGL_PBUFFER_BIT | if self.rgba { 0 } else { EGL_PIXMAP_BIT })
                     as i32
             }
-            EGL_CONFIG_ID => self.id(),
+            EGL_CONFIG_ID => self.config_id(),
             EGL_RENDERABLE_TYPE => 1,
             EGL_CONFIG_CAVEAT | EGL_TRANSPARENT_TYPE => EGL_NONE as i32,
             EGL_NATIVE_RENDERABLE | BIND_TO_TEXTURE_RGB | BIND_TO_TEXTURE_RGBA => EGL_FALSE as i32,
@@ -122,7 +142,7 @@ impl Config {
         (
             std::cmp::Reverse(color_bits),
             self.attribute(EGL_BUFFER_SIZE).unwrap(),
-            self.id(),
+            self.config_id(),
         )
     }
 
@@ -162,7 +182,7 @@ impl Config {
         }
         // Validate the whole list even when CONFIG_ID overrides selection.
         if let Some(&id) = attrs.get(&EGL_CONFIG_ID).filter(|&&v| v != DONT_CARE) {
-            return Ok(id == self.id());
+            return Ok(id == self.config_id());
         }
         attrs.entry(EGL_LEVEL).or_insert(0);
         attrs
@@ -243,10 +263,28 @@ mod tests {
     }
 
     #[test]
+    fn goforce_5500_color_pbuffer_is_separate_from_window_configs() {
+        let _g = super::super::tests::guard();
+        reset_for_test(8, 8);
+        assert!(Config::from_handle(CONFIG_RGBA_COLOR_PBUFFER).is_none());
+        set_goforce_5500_profile(true);
+        let config = Config::from_handle(CONFIG_RGBA_COLOR_PBUFFER).unwrap();
+        assert_eq!(config.attribute(EGL_DEPTH_SIZE), Some(0));
+        assert_eq!(config.attribute(EGL_ALPHA_SIZE), Some(8));
+        assert_eq!(config.matches(&[]), Ok(false));
+        assert_eq!(
+            config.matches(&[(EGL_SURFACE_TYPE, EGL_PBUFFER_BIT as i32)]),
+            Ok(true)
+        );
+        set_goforce_5500_profile(false);
+    }
+
+    #[test]
     fn matching_uses_minimum_exact_mask_and_dont_care_rules() {
         let c = Config {
             depth: 16,
             rgba: false,
+            pbuffer_only: false,
         };
         for (pairs, want) in [
             (vec![], true),
@@ -281,7 +319,8 @@ mod tests {
         assert_eq!(
             Config {
                 depth: 24,
-                rgba: false
+                rgba: false,
+                pbuffer_only: false,
             }
             .matches(&[(EGL_DEPTH_SIZE, 24)]),
             Ok(true)
@@ -293,6 +332,7 @@ mod tests {
         let c = Config {
             depth: 16,
             rgba: false,
+            pbuffer_only: false,
         };
         assert_eq!(
             c.matches(&[(EGL_CONFIG_ID, 1), (EGL_STENCIL_SIZE, 8)]),
@@ -315,6 +355,7 @@ mod tests {
         let c = Config {
             depth: 16,
             rgba: false,
+            pbuffer_only: false,
         };
         for pair in [
             (0xdead, 0),

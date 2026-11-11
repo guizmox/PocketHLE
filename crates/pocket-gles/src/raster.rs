@@ -392,7 +392,11 @@ impl RenderTarget {
         if width == self.width && height == self.height {
             return;
         }
+        let has_depth = !self.depth.is_empty();
         *self = Self::with_format(width, height, self.rgb565);
+        if !has_depth {
+            self.depth.clear();
+        }
     }
 
     /// `glClear(GL_COLOR_BUFFER_BIT)` honouring the scissor box.
@@ -457,6 +461,9 @@ impl RenderTarget {
 
     /// `glClear(GL_DEPTH_BUFFER_BIT)` honouring the scissor box.
     pub fn clear_depth(&mut self, value: f32, scissor: Option<(i32, i32, i32, i32)>) {
+        if self.depth.is_empty() {
+            return;
+        }
         match self.scissor_bounds(scissor) {
             None => {}
             Some((x0, y0, x1, y1)) if self.covers_all(x0, y0, x1, y1) => {
@@ -968,7 +975,10 @@ fn raster_clipped(
             // Coplanar UI layers otherwise fail LEQUAL at scattered pixels.
             let z = (sv[2].z + w0 * (sv[0].z - sv[2].z) + w1 * (sv[1].z - sv[2].z) + offset)
                 .clamp(0., 1.);
-            if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
+            if !target.depth.is_empty()
+                && state.depth_test
+                && !state.depth_func.test(z, target.depth[idx])
+            {
                 continue;
             }
 
@@ -1138,7 +1148,7 @@ fn write_fragment(
     if target.rgb565 {
         target.color[ci + 3] = 255;
     }
-    if state.depth_test && state.depth_write {
+    if !target.depth.is_empty() && state.depth_test && state.depth_write {
         target.depth[idx] = z;
     }
     true
@@ -1190,7 +1200,8 @@ fn primitive_fragment(
     sprite: Option<([f32; 2], f32)>,
 ) -> bool {
     let idx = y as usize * target.width as usize + x as usize;
-    if state.depth_test && !state.depth_func.test(z, target.depth[idx]) {
+    if !target.depth.is_empty() && state.depth_test && !state.depth_func.test(z, target.depth[idx])
+    {
         return false;
     }
     let coordinate = |unit: usize| {

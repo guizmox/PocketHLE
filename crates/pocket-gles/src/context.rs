@@ -1168,6 +1168,15 @@ impl Context {
         true
     }
 
+    pub fn buffer_sub_data_read(&mut self, target: u32, offset: u32, size: usize) -> Option<&[u8]> {
+        if !self.validate_buffer_sub_data(target, offset, size) {
+            return None;
+        }
+        let name = self.bound_buffer_name(target).unwrap();
+        let start = offset as usize;
+        Some(&self.buffers[&name].data[start..start + size])
+    }
+
     pub fn validate_buffer_sub_data(&mut self, target: u32, offset: u32, size: usize) -> bool {
         if !matches!(target, GL_ARRAY_BUFFER | GL_ELEMENT_ARRAY_BUFFER) {
             self.set_error(GL_INVALID_ENUM);
@@ -2523,6 +2532,11 @@ impl Context {
     // ---- clearing -------------------------------------------------------
 
     pub fn clear(&mut self, mask: u32) {
+        let mask = if self.target.depth.is_empty() {
+            mask & !GL_DEPTH_BUFFER_BIT
+        } else {
+            mask
+        };
         // ES 1.1 section 4.2.3: reject the whole command before changing buffers.
         if mask & !(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT) != 0 {
             self.set_error(GL_INVALID_VALUE);

@@ -135,6 +135,11 @@ impl Emulator {
         pocket_winceapi::gles::set_gizmondo_goforce_driver(enabled);
     }
 
+    /// Select the PocketPC GoForce 5500 guest capabilities.
+    pub fn set_goforce_5500_profile(&mut self, enabled: bool) {
+        pocket_winceapi::gles::set_goforce_5500_profile(enabled);
+    }
+
     /// Session gate for detected NVIDIA AR10/AR11 combiner clients.
     pub fn set_nv_combiner_allowed(&mut self, allowed: bool) {
         pocket_winceapi::gles::set_nv_combiner_allowed(allowed);

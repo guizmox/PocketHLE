@@ -3237,7 +3237,7 @@ impl Renderer {
                     h.saturating_mul(k),
                 );
                 self.scissor(state.scissor);
-                self.toggle(GL_DEPTH_TEST, state.depth_test);
+                self.toggle(GL_DEPTH_TEST, state.depth_test && !target.depth.is_empty());
                 (self.gl.DepthFunc)(compare(state.depth_func));
                 (self.gl.DepthMask)(state.depth_write as u8);
                 self.toggle(GL_BLEND, state.blend && !state.logic_op);
