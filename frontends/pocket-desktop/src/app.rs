@@ -2262,6 +2262,36 @@ impl PocketLauncher {
             }
             return;
         }
+        if let Some(game) = pending.executable_choices().first() {
+            let mut selected = None;
+            let mut cancel = false;
+            egui::Window::new("Choose game executable")
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("Which executable should PocketHLE launch for {}?", game.display_name));
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for (index, exe) in game.executables.iter().enumerate() {
+                            let name = exe.strip_prefix("extracted").unwrap_or(exe);
+                            if crate::controller_ui::button(ui, name.display().to_string()).clicked() {
+                                selected = Some(index);
+                            }
+                        }
+                    });
+                    cancel = crate::controller_ui::button(ui, "Cancel import").clicked();
+                });
+            if cancel {
+                self.pending_import = None;
+                self.library_busy = false;
+                self.status = "Import cancelled.".into();
+            } else if let Some(index) = selected {
+                let id = game.id.clone();
+                if let Some(pending) = self.pending_import.as_mut() {
+                    pending.choose_executable(&id, index);
+                }
+            }
+            return;
+        }
         if pending.updates().is_empty() {
             let pending = self.pending_import.take().unwrap();
             let profile = self.library.profile();
@@ -5472,6 +5502,7 @@ impl PocketLauncher {
                 if !pending.updates().is_empty()
                     || !pending.platform_choices().is_empty()
                     || !pending.cabinet_choices().is_empty()
+                    || !pending.executable_choices().is_empty()
                 {
                     tx.send(UiEvent::ImportPrepared(pending))
                         .map_err(|e| e.to_string())?;

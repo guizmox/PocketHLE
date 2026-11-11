@@ -83,7 +83,10 @@ screen/orientation, optional FPS advice and, when the existing executable analys
 identifies OpenGL ES, the GPU compatibility profile. The FPS detector and message
 are shared across desktop and Android. For a new PocketPC import, a direct
 `libGLES_CL.dll` import in the executable selects Intel 2700G as the initial
-profile. The user can change it in Graphics settings. Updating an installed
+profile. When an installation contains multiple supported executables, the
+PocketPC import asks which one to launch before offering launch settings.
+The GPU profile is initialized from that selection. The user can change it in
+Graphics settings. Updating an installed
 game preserves its saved profile. NVIDIA selection gates extension advertisement
 and entry points;
 it permits existing program detection rather than forcing combiner rendering.

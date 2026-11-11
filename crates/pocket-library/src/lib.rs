@@ -509,6 +509,9 @@ impl GameEntry {
     /// [`accelerated_renderer_build`].
     pub fn launch_path(&self, library_root: &Path) -> PathBuf {
         let exe = self.executable_path(library_root);
+        if self.settings.import_executable_selected {
+            return exe;
+        }
         accelerated_renderer_build(&exe).unwrap_or(exe)
     }
 
@@ -636,6 +639,8 @@ pub struct GameSettings {
     /// PocketPC-only vendor compatibility, independent of the host renderer.
     #[serde(default)]
     pub gpu_compatibility_profile: gpu_profile::GpuCompatibilityProfile,
+    #[serde(default)]
+    pub import_executable_selected: bool,
     /// Experimental OpenGL host rasterization; None inherits the global choice.
     #[serde(default)]
     pub gpu_renderer: Option<bool>,
@@ -813,6 +818,7 @@ impl Default for GameSettings {
             pocketpc_gapi_columns: false,
             pocketpc_egl_rgba8888_only: false,
             gpu_compatibility_profile: Default::default(),
+            import_executable_selected: false,
             gpu_renderer: None,
             cpu_backend: CpuBackendPref::default(),
             max_slices: default_max_slices(),
@@ -1479,6 +1485,56 @@ pub struct PreparedImport {
     entries: Vec<GameEntry>,
     updates: Vec<GameEntry>,
     cabinet_choices: Vec<InstallerCabinetChoice>,
+    executable_choices: Vec<ImportExecutableChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportExecutableChoice {
+    pub id: String,
+    pub display_name: String,
+    pub executables: Vec<PathBuf>,
+}
+
+fn import_executable_choices(
+    root: &Path,
+    entries: &[GameEntry],
+    updates: &[GameEntry],
+) -> Vec<ImportExecutableChoice> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            if is_gizmondo_game(entry, root)
+                || updates.iter().any(|old| {
+                    old.id == entry.id && old.platform == Some(GamePlatform::Gizmondo)
+                })
+            {
+                return None;
+            }
+            let directory = root.join(entry.relative_dir());
+            let mut executables: Vec<_> = import_tree_files(&directory.join("extracted"))
+                .ok()?
+                .into_iter()
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                        && is_guest_exe(path)
+                })
+                .filter_map(|path| path.strip_prefix(&directory).ok().map(Path::to_path_buf))
+                .collect();
+            if executables.len() < 2 {
+                return None;
+            }
+            executables.sort();
+            if let Some(index) = executables.iter().position(|path| *path == entry.executable) {
+                executables.swap(0, index);
+            }
+            Some(ImportExecutableChoice {
+                id: entry.id.clone(),
+                display_name: entry.display_name.clone(),
+                executables,
+            })
+        })
+        .collect()
 }
 
 /// A CPU cabinet offered by an installer, with matching CPU-neutral resources.
@@ -1496,6 +1552,30 @@ pub struct InstallerCabinetChoice {
 }
 
 impl PreparedImport {
+    pub fn executable_choices(&self) -> &[ImportExecutableChoice] {
+        &self.executable_choices
+    }
+
+    pub fn choose_executable(&mut self, id: &str, index: usize) -> bool {
+        let Some(position) = self
+            .executable_choices
+            .iter()
+            .position(|choice| choice.id == id)
+        else {
+            return false;
+        };
+        let Some(executable) = self.executable_choices[position].executables.get(index) else {
+            return false;
+        };
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
+            return false;
+        };
+        entry.executable = executable.clone();
+        entry.settings.import_executable_selected = true;
+        self.executable_choices.remove(position);
+        true
+    }
+
     pub fn cabinet_choices(&self) -> &[InstallerCabinetChoice] {
         &self.cabinet_choices
     }
@@ -1517,6 +1597,8 @@ impl PreparedImport {
                 updates.push(previous);
             }
         }
+        self.executable_choices =
+            import_executable_choices(self.staging.path(), &entries, &updates);
         self.entries = entries;
         self.updates = updates;
         self.cabinet_choices.clear();
@@ -1548,6 +1630,9 @@ impl PreparedImport {
         }
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
             entry.platform = Some(platform);
+            if platform == GamePlatform::Gizmondo {
+                self.executable_choices.retain(|choice| choice.id != id);
+            }
             return true;
         }
         false
@@ -1654,6 +1739,7 @@ impl Library {
                 entries: Vec::new(),
                 updates: Vec::new(),
                 cabinet_choices: choices.clone(),
+                executable_choices: Vec::new(),
                 staging,
             });
         }
@@ -1687,6 +1773,7 @@ impl Library {
                 updates.push(previous);
             }
         }
+        let executable_choices = import_executable_choices(staging.path(), &entries, &updates);
         Ok(PreparedImport {
             staging,
             target_root: self.root.clone(),
@@ -1695,6 +1782,7 @@ impl Library {
             entries,
             updates,
             cabinet_choices: Vec::new(),
+            executable_choices,
         })
     }
 
@@ -1737,7 +1825,16 @@ impl Library {
                     fs::remove_dir_all(incoming_saves)?;
                 }
             }
+            let selected = entry.settings.import_executable_selected;
+            if previous.is_none() {
+                entry.settings.gpu_compatibility_profile = Default::default();
+            }
             self.preserve_import_preferences(&mut entry, previous.as_ref(), &directory)?;
+            entry.settings.import_executable_selected |= selected;
+            if selected {
+                entry.icon = extract_icon_png(&directory, &directory.join(&entry.executable))
+                    .or(entry.icon);
+            }
             write_json(&directory.join("game.json"), &entry)?;
             prepared.push((entry, directory, previous));
         }
@@ -3122,7 +3219,9 @@ impl Library {
         let game = self
             .get_mut(id)
             .ok_or_else(|| LibraryError::NotFound(id.to_string()))?;
+        let selected_executable = game.settings.import_executable_selected;
         game.settings = settings;
+        game.settings.import_executable_selected = selected_executable;
         let cloned = game.clone();
         let game_dir = self.root.join("games").join(id);
         write_json(&game_dir.join("game.json"), &cloned)?;
@@ -6613,6 +6712,50 @@ mod tests {
         }
         // Nothing may be left behind for a rejected import.
         assert!(!root.join("games").join("pegcards").exists());
+    }
+
+    #[test]
+    fn pocketpc_import_launches_selected_executable_and_uses_its_profile() {
+        use std::io::Write;
+
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("fixture.exe");
+        let archive = root.path().join("pocketpc.zip");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        for (name, imports) in [
+            ("Autorun.exe", &[][..]),
+            ("hardware.exe", &["libGLES_CL.dll"][..]),
+        ] {
+            write_pe_importing(&exe, imports);
+            zip.start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            zip.write_all(&fs::read(&exe).unwrap()).unwrap();
+        }
+        zip.finish().unwrap();
+        let mut library = Library::open(root.path().join("library")).unwrap();
+
+        let mut gizmondo = library.prepare_import(&archive).unwrap();
+        let id = gizmondo.platform_choices()[0].0.clone();
+        assert!(gizmondo.choose_platform(&id, GamePlatform::Gizmondo));
+        assert!(gizmondo.executable_choices().is_empty());
+
+        let mut prepared = library.prepare_import(&archive).unwrap();
+        assert!(prepared.choose_platform(&id, GamePlatform::PocketPc));
+        let candidates = &prepared.executable_choices()[0].executables;
+        let selected = candidates
+            .iter()
+            .position(|path| path.ends_with("hardware.exe"))
+            .unwrap();
+        assert!(prepared.choose_executable(&id, selected));
+        let entries = library.apply_prepared_import(prepared, false).unwrap();
+        let entry = &entries[0];
+        assert!(entry.launch_path(library.root()).ends_with("hardware.exe"));
+        assert_eq!(
+            entry.settings.gpu_compatibility_profile,
+            gpu_profile::GpuCompatibilityProfile::Intel2700g
+        );
+        library.update_settings(&id, GameSettings::default()).unwrap();
+        assert!(library.get(&id).unwrap().settings.import_executable_selected);
     }
 
     #[test]

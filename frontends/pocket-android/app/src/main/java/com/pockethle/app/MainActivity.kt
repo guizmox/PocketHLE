@@ -543,6 +543,37 @@ class MainActivity : HostKeyActivity() {
                 }.show()
             return
         }
+        val executableChoices = obj.optJSONArray("executable_choices")
+        if (executableChoices != null && executableChoices.length() > 0) {
+            val game = executableChoices.getJSONObject(0)
+            val executables = game.getJSONArray("executables")
+            setLibraryBusy("Waiting for executable selection…")
+            busyDialog?.dismiss()
+            busyDialog = null
+            val labels = Array(executables.length()) { executables.getString(it).removePrefix("extracted/") }
+            fun cancelImport() {
+                NativeBridge.cancelPreparedImport(rootDir, token)
+                pendingImportToken = null
+                setLibraryBusy(null)
+            }
+            AlertDialog.Builder(this)
+                .setTitle("Choose executable for ${game.getString("display_name")}")
+                .setCancelable(false)
+                .setItems(labels) { _, index ->
+                    runCatching {
+                        val next = NativeBridge.choosePreparedImportExecutable(rootDir, token, game.getString("id"), index)
+                        val response = JSONObject(next)
+                        if (!response.optBoolean("ok", false)) error(response.optString("error"))
+                        next
+                    }.onSuccess { showPreparedImport(it) }.onFailure { error ->
+                        cancelImport()
+                        showImportError(error.message ?: "Unknown error")
+                    }
+                }
+                .setNegativeButton("Cancel import") { _, _ -> cancelImport() }
+                .show()
+            return
+        }
         val updates = obj.getJSONArray("updates")
         if (updates.length() == 0) {
             commitPreparedImport(token, false)

@@ -226,7 +226,7 @@ fn prepared_import_json(token: u64, pending: &pocket_library::PreparedImport) ->
         .into_iter()
         .map(|(id, display_name)| serde_json::json!({"id":id,"display_name":display_name}))
         .collect();
-    serde_json::json!({"ok":true,"token":token.to_string(),"count":pending.entries().len(),"updates":pending.updates(),"platform_choices":choices,"cabinet_choices":pending.cabinet_choices()}).to_string()
+    serde_json::json!({"ok":true,"token":token.to_string(),"count":pending.entries().len(),"updates":pending.updates(),"platform_choices":choices,"cabinet_choices":pending.cabinet_choices(),"executable_choices":pending.executable_choices()}).to_string()
 }
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportCabinet<'local>(
@@ -285,6 +285,33 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportP
     new_jstring(
         &env,
         result.unwrap_or_else(|e| error_json(&format!("choosePreparedImportPlatform: {e:#}"))),
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_choosePreparedImportExecutable<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    token: jlong,
+    game_id: JString<'local>,
+    index: jint,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
+        let id: String = env.get_string(&game_id)?.into();
+        let mut imports = PREPARED_IMPORTS.lock().unwrap_or_else(|e| e.into_inner());
+        let (owner, pending) = imports
+            .get_mut(&(token as u64))
+            .context("import no longer pending")?;
+        anyhow::ensure!(*owner == root, "import belongs to another library");
+        let index = usize::try_from(index).context("invalid executable index")?;
+        anyhow::ensure!(pending.choose_executable(&id, index), "unknown executable choice");
+        Ok(prepared_import_json(token as u64, pending))
+    })();
+    new_jstring(
+        &env,
+        result.unwrap_or_else(|e| error_json(&format!("choosePreparedImportExecutable: {e:#}"))),
     )
 }
 
