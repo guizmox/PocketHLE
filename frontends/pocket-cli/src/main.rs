@@ -73,6 +73,9 @@ enum Command {
     /// `--cpu stub` is available for trace-only analysis.
     Run {
         path: PathBuf,
+        /// Use the Adreno 200 programmable GLES2 profile.
+        #[arg(long)]
+        adreno200: bool,
         /// CPU backend.
         #[arg(long, default_value = DEFAULT_CPU_BACKEND)]
         cpu: CpuBackend,
@@ -251,6 +254,7 @@ fn main() -> Result<()> {
         Command::RenderDemo { out } => cmd_render_demo(&out),
         Command::Run {
             path,
+            adreno200,
             cpu,
             halt_on_unimplemented,
             max_slices,
@@ -277,6 +281,7 @@ fn main() -> Result<()> {
         } => cmd_run(
             &path,
             cpu,
+            adreno200,
             halt_on_unimplemented,
             max_slices,
             instructions_per_slice,
@@ -552,6 +557,7 @@ fn resolve_message_budget(
 fn cmd_run(
     path: &std::path::Path,
     backend: CpuBackend,
+    adreno200: bool,
     halt_on_unimplemented: bool,
     max_slices: u64,
     instructions_per_slice: u64,
@@ -634,6 +640,7 @@ fn cmd_run(
         return Ok(());
     }
     emu.load_pe(&_launcher.exe)?;
+    emu.set_programmable_gles(adreno200);
     emu.set_gizmondo_audio_compatibility(_launcher.native_screen.is_some());
     // An explicit `--screen` wins; otherwise a launcher that recognised
     // the device the game shipped on picks the geometry, because the

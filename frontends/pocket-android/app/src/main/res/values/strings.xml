@@ -41,7 +41,8 @@
         <item>176x220 (small)</item>
         <item>480x640 (VGA portrait)</item>
         <item>640x480 (VGA landscape)</item>
-        <item>480x800 (WVGA)</item>
+        <item>480x800 (WVGA portrait)</item>
+        <item>800x480 (WVGA landscape)</item>
     </string-array>
     <string-array name="screen_values">
         <item>portrait</item>
@@ -51,6 +52,7 @@
         <item>vga</item>
         <item>vga_landscape</item>
         <item>wvga</item>
+        <item>wvga_landscape</item>
     </string-array>
     <string-array name="rotation_entries">
         <item>0°</item>

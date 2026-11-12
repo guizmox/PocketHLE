@@ -448,6 +448,9 @@ mod native {
         pub fn new() -> Result<Self, String> {
             Self::create(cfg!(target_os = "android"))
         }
+        pub fn new_programmable() -> Result<Self, String> {
+            Self::create(true)
+        }
         #[cfg(test)]
         pub fn es_for_test() -> Result<Self, String> {
             Self::create(true)
@@ -1310,6 +1313,9 @@ mod native {
     impl Host {
         pub fn new() -> Result<Self, String> {
             Self::create(None)
+        }
+        pub fn new_programmable() -> Result<Self, String> {
+            Self::new()
         }
         pub fn shared_source(&self) -> SharedSource {
             self.shared_source.clone()

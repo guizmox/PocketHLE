@@ -52,6 +52,7 @@ pub use directshow::{
 pub mod dlgtemplate;
 pub mod game_dlls;
 pub mod gles;
+pub mod gles2;
 pub mod gles_exports;
 mod gps;
 pub mod gx;
@@ -567,7 +568,10 @@ impl Dispatcher for WinCeDispatcher {
         } else {
             thunk
         };
-        let handler_opt = if coredll::native_import_preferred(kernel, thunk) {
+        let programmable_handler = gles2::handler(thunk);
+        let handler_opt = if programmable_handler.is_some() {
+            programmable_handler
+        } else if coredll::native_import_preferred(kernel, thunk) {
             Some(coredll::native_import as Handler)
         } else {
             self.resolve_handler(thunk).or_else(|| {
@@ -613,7 +617,8 @@ impl Dispatcher for WinCeDispatcher {
                 log::trace!("call {}", thunk.label());
             }
             let mut ctx = CallCtx { cpu, thunk, kernel };
-            if gles::needs_thread_switch(ctx.kernel.current_thread)
+            if programmable_handler.is_none()
+                && gles::needs_thread_switch(ctx.kernel.current_thread)
                 && ["libgles_cm.dll", "libgles_cl.dll", "libegl.dll"]
                     .iter()
                     .any(|dll| thunk.dll.eq_ignore_ascii_case(dll))

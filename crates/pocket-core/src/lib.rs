@@ -145,6 +145,11 @@ impl Emulator {
         pocket_winceapi::gles::set_nv_combiner_allowed(allowed);
     }
 
+    /// Select the separate programmable guest EGL/GLES implementation.
+    pub fn set_programmable_gles(&mut self, enabled: bool) {
+        pocket_winceapi::gles2::set_enabled(enabled);
+    }
+
     /// Opt-in Intel 2700G WinCE depth-bias semantics for the PocketPC profile.
     pub fn set_intel2700g_depth_bias(&mut self, enabled: bool) {
         pocket_winceapi::gles::set_intel2700g_depth_bias(enabled);

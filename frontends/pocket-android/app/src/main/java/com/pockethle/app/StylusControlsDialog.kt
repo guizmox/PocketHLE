@@ -35,7 +35,7 @@ internal class StylusControlsDialog(
     private var stickY=0f
     private var axisNavigationAt=0L
     private val portrait:Boolean by lazy {
-        val landscape=settings.screen in listOf("landscape","vga_landscape","hpc")
+        val landscape=settings.screen in listOf("landscape","vga_landscape","wvga_landscape","hpc")
         val turned=settings.rotation in listOf("cw90","ccw90")
         !(landscape xor turned)
     }

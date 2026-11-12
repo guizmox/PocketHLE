@@ -911,6 +911,8 @@ pub enum ScreenPref {
     VgaLandscape,
     /// 480x800 WVGA Windows Phone display.
     Wvga,
+    /// 800x480 WVGA landscape display.
+    WvgaLandscape,
     /// 480x320 — the Handheld PC / H/PC landscape panel.
     ///
     /// Windows CE's bundled applets (Solitaire among them) are H/PC
@@ -973,7 +975,8 @@ impl ScreenPref {
             ScreenPref::SmallPortrait => "176x220 (small)",
             ScreenPref::Vga => "480x640 (VGA portrait)",
             ScreenPref::VgaLandscape => "640x480 (VGA landscape)",
-            ScreenPref::Wvga => "480x800 (WVGA)",
+            ScreenPref::Wvga => "480x800 (WVGA portrait)",
+            ScreenPref::WvgaLandscape => "800x480 (WVGA landscape)",
             ScreenPref::Hpc => "480x320 (Handheld PC)",
         }
     }
@@ -987,6 +990,7 @@ impl ScreenPref {
             ScreenPref::Vga => (480, 640),
             ScreenPref::VgaLandscape => (640, 480),
             ScreenPref::Wvga => (480, 800),
+            ScreenPref::WvgaLandscape => (800, 480),
             ScreenPref::Hpc => (480, 320),
         }
     }
@@ -4263,8 +4267,7 @@ pub fn accelerated_renderer_build(shortcut_target: &Path) -> Option<PathBuf> {
     Some(chosen)
 }
 
-/// The GL ES driver `path` imports, lower-cased, if it is one PocketHLE
-/// implements.
+/// Infer a profile from the selected executable on a fresh import.
 fn apply_import_gpu_default(entry: &mut GameEntry, game_dir: &Path) {
     use gpu_profile::GpuCompatibilityProfile;
 
@@ -4276,11 +4279,12 @@ fn apply_import_gpu_default(entry: &mut GameEntry, game_dir: &Path) {
     let Ok(image) = pocket_pe::load_file(&game_dir.join(&entry.executable)) else {
         return;
     };
-    if image
-        .imports
-        .iter()
-        .any(|import| import.dll.eq_ignore_ascii_case("libgles_cl.dll"))
-    {
+    let imports = |driver: &str| {
+        image.imports.iter().any(|import| import.dll.eq_ignore_ascii_case(driver))
+    };
+    if imports("libglesv2.dll") {
+        entry.settings.gpu_compatibility_profile = GpuCompatibilityProfile::Adreno200;
+    } else if imports("libgles_cl.dll") {
         entry.settings.gpu_compatibility_profile = GpuCompatibilityProfile::Intel2700g;
     }
 }
@@ -6770,31 +6774,33 @@ mod tests {
     }
 
     #[test]
-    fn common_lite_import_selects_intel_and_keeps_manual_profile_on_update() {
+    fn driver_import_sets_profile_and_reimport_preserves_manual_choice() {
         use super::gpu_profile::GpuCompatibilityProfile;
 
-        let root = tempfile::tempdir().unwrap();
-        let exe = root.path().join("common-lite.exe");
-        write_pe_importing(&exe, &["COREDLL.dll", "libGLES_CL.dll"]);
-        let mut library = Library::open(root.path().join("library")).unwrap();
+        for (dll, expected) in [
+            ("libGLES_CL.dll", GpuCompatibilityProfile::Intel2700g),
+            ("libGLESv2.dll", GpuCompatibilityProfile::Adreno200),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let exe = root.path().join("game.exe");
+            write_pe_importing(&exe, &["COREDLL.dll", dll]);
+            let mut library = Library::open(root.path().join("library")).unwrap();
 
-        let prepared = library.prepare_import(&exe).unwrap();
-        let entries = library.apply_prepared_import(prepared, false).unwrap();
-        assert_eq!(
-            entries[0].settings.gpu_compatibility_profile,
-            GpuCompatibilityProfile::Intel2700g
-        );
+            let prepared = library.prepare_import(&exe).unwrap();
+            let entries = library.apply_prepared_import(prepared, false).unwrap();
+            assert_eq!(entries[0].settings.gpu_compatibility_profile, expected);
 
-        let settings = &mut library.get_mut(&entries[0].id).unwrap().settings;
-        settings.gpu_compatibility_profile = GpuCompatibilityProfile::Generic;
-        library.save().unwrap();
+            let settings = &mut library.get_mut(&entries[0].id).unwrap().settings;
+            settings.gpu_compatibility_profile = GpuCompatibilityProfile::Generic;
+            library.save().unwrap();
 
-        let prepared = library.prepare_import(&exe).unwrap();
-        let entries = library.apply_prepared_import(prepared, true).unwrap();
-        assert_eq!(
-            entries[0].settings.gpu_compatibility_profile,
-            GpuCompatibilityProfile::Generic
-        );
+            let prepared = library.prepare_import(&exe).unwrap();
+            let entries = library.apply_prepared_import(prepared, true).unwrap();
+            assert_eq!(
+                entries[0].settings.gpu_compatibility_profile,
+                GpuCompatibilityProfile::Generic
+            );
+        }
     }
 
     #[test]
@@ -6908,6 +6914,7 @@ mod tests {
             ScreenPref::VgaLandscape,
             ScreenPref::Hpc,
             ScreenPref::Wvga,
+            ScreenPref::WvgaLandscape,
         ] {
             assert_eq!(pref.resolve_image(Some(&image)), pref.size());
         }

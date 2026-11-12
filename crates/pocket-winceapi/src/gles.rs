@@ -427,6 +427,7 @@ pub fn set_gpu_renderer(enabled: bool) {
 }
 
 pub(crate) fn release_gpu() {
+    crate::gles2::set_enabled(false);
     with_ctx(|c| c.release_gpu());
     SURFACES.with(|s| {
         for image in s.borrow_mut().images.values_mut() {
@@ -441,6 +442,7 @@ pub(crate) fn release_gpu() {
 /// runs reusing the same host thread. Dropping the old Context frees all
 /// host-side GL resources; guest memory belongs to the new kernel/CPU.
 pub(crate) fn reset_for_session() {
+    crate::gles2::set_enabled(false);
     color_capture::reset();
     egl_context::set_thread(0);
     SHARED_WINDOW.with(|s| s.take());
@@ -459,6 +461,7 @@ pub(crate) struct SuspendedGles {
     pack: usize,
     unpack: usize,
     surfaces: EglSurfaces,
+    programmable: Option<crate::gles2::Session>,
 }
 
 pub(crate) fn suspend() -> SuspendedGles {
@@ -475,10 +478,12 @@ pub(crate) fn suspend() -> SuspendedGles {
         pack,
         unpack,
         surfaces,
+        programmable: crate::gles2::take_session(),
     }
 }
 
 pub(crate) fn resume(saved: SuspendedGles) {
+    crate::gles2::restore_session(saved.programmable);
     egl_context::set_thread(saved.surfaces.thread);
     CTX.with(|slot| *slot.borrow_mut() = saved.context);
     SURFACES.with(|slot| *slot.borrow_mut() = saved.surfaces);

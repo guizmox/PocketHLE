@@ -52,10 +52,10 @@ class GameSettingsActivity : HostKeyActivity() {
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
             findPreference<ListPreference>("gpu_compatibility_profile")?.apply {
                 isVisible = !NativeBridge.isGizmondoGame(rootDir, gameId)
-                entries = arrayOf("Generic OpenGL ES (1.1, Common)", "NVIDIA GoForce 5500 (OpenGL ES 1.1, Common)", "Intel 2700G (OpenGL ES 1.0, Common-Lite)")
-                entryValues = arrayOf("generic", "nvidia_goforce5500", "intel2700g")
+                entries = arrayOf("Generic OpenGL ES (1.1, Common)", "NVIDIA GoForce 5500 (OpenGL ES 1.1, Common)", "Intel 2700G (OpenGL ES 1.0, Common-Lite)", "Adreno 200 (OpenGL ES 2.0)")
+                entryValues = arrayOf("generic", "nvidia_goforce5500", "intel2700g", "adreno200")
                 value = current.gpuCompatibilityProfile
-                summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { "${it.entry}\nChoose the GPU targeted by this game. Applies in software and GPU rendering on the next launch." }
+                summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { "${it.entry}\nChoose the GPU targeted by this game. Adreno 200 uses the host GPU for OpenGL ES 2.0." }
                 setOnPreferenceChangeListener { _, newValue ->
                     current = current.copy(gpuCompatibilityProfile = newValue.toString())
                     writeGameSettings(); true

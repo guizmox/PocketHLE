@@ -3080,6 +3080,7 @@ impl PocketLauncher {
                                 ScreenPref::Vga,
                                 ScreenPref::VgaLandscape,
                                 ScreenPref::Wvga,
+                                ScreenPref::WvgaLandscape,
                                 ScreenPref::Hpc,
                             ] {
                                 crate::controller_ui::selectable_value(ui, &mut draft.screen, pref, pref.label());
@@ -3144,7 +3145,7 @@ impl PocketLauncher {
                             for profile in pocket_library::gpu_profile::GpuCompatibilityProfile::ALL {
                                 crate::controller_ui::selectable_value(ui, &mut draft.gpu_compatibility_profile, profile, profile.label());
                             }
-                        }).response.on_hover_text("Choose the GPU targeted by this game. Applies in software and GPU rendering on the next launch.");
+                        }).response.on_hover_text("Choose the GPU targeted by this game. Adreno 200 uses the host GPU for OpenGL ES 2.0.");
                     ui.end_row();
                 }
                 ui.label("GPU rendering");

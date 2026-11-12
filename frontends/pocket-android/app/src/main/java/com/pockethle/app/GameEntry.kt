@@ -160,7 +160,11 @@ data class GameSettings(
             pocketpcPlatformType = obj.optString("pocketpc_platform_type", ""),
             pocketpcGapiColumns = obj.optBoolean("pocketpc_gapi_columns", false),
             pocketpcEglRgba8888Only = obj.optBoolean("pocketpc_egl_rgba8888_only", false),
-            gpuCompatibilityProfile = obj.optString("gpu_compatibility_profile", "generic").takeIf { it in listOf("generic", "nvidia_goforce5500", "intel2700g") } ?: "generic",
+            gpuCompatibilityProfile = when (val profile = obj.optString("gpu_compatibility_profile", "generic")) {
+                "generic", "nvidia_goforce5500", "intel2700g", "adreno200" -> profile
+                "qualcomm_snapdragon" -> "adreno200"
+                else -> "generic"
+            },
             storageCardDir = if (obj.isNull("storage_card_dir")) null else obj.optString("storage_card_dir"),
             originalJson = obj.toString(),
         )

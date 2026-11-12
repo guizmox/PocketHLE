@@ -32,6 +32,7 @@ use crate::{
 pub use platform::ExternalContext as ExternalGpuContext;
 #[cfg(unix)]
 pub use platform::ExternalContext as ExternalEglContext;
+pub use platform::Host as ProgrammableHost;
 use platform::Host;
 use std::cell::RefCell;
 thread_local! {

@@ -358,13 +358,17 @@ impl Runner {
                 let _ = emu.set_pocketpc_processor("pxa270");
             }
         }
+        let profile = game.settings.gpu_compatibility_profile;
+        let programmable = !is_gizmondo && profile.programmable_gles();
         emu.set_gpu_renderer(
-            game.settings
-                .gpu_renderer
-                .unwrap_or(launcher_config.gpu_renderer),
+            !programmable
+                && game
+                    .settings
+                    .gpu_renderer
+                    .unwrap_or(launcher_config.gpu_renderer),
         );
         emu.set_gizmondo_goforce_driver(is_gizmondo);
-        let profile = game.settings.gpu_compatibility_profile;
+        emu.set_programmable_gles(programmable);
         emu.set_goforce_5500_profile(!is_gizmondo && profile.nvidia_combiners());
         emu.set_nv_combiner_allowed(is_gizmondo || profile.nvidia_combiners());
         emu.set_intel2700g_depth_bias(!is_gizmondo && profile.intel_depth_bias());

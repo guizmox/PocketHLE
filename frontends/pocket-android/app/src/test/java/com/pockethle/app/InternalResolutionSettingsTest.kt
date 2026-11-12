@@ -7,7 +7,7 @@ import org.junit.Test
 class InternalResolutionSettingsTest {
     @Test fun gpuCompatibilityProfilePersistsWithoutInheritingRetiredGlobalOptions() {
         assertEquals("generic", GameSettings.fromJson(JSONObject()).gpuCompatibilityProfile)
-        for (profile in listOf("generic", "nvidia_goforce5500", "intel2700g")) {
+        for (profile in listOf("generic", "nvidia_goforce5500", "intel2700g", "adreno200")) {
             val original = JSONObject().put("gpu_compatibility_profile", profile)
                 .put("gpu_renderer", false).put("future_setting", "kept")
             val saved = GameSettings.fromJson(original).copy(screen = "landscape").toJson()

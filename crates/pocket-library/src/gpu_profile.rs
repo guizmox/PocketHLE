@@ -8,14 +8,22 @@ pub enum GpuCompatibilityProfile {
     Generic,
     NvidiaGoforce5500,
     Intel2700g,
+    #[serde(alias = "qualcomm_snapdragon")]
+    Adreno200,
 }
 impl GpuCompatibilityProfile {
-    pub const ALL: [Self; 3] = [Self::Generic, Self::NvidiaGoforce5500, Self::Intel2700g];
+    pub const ALL: [Self; 4] = [
+        Self::Generic,
+        Self::NvidiaGoforce5500,
+        Self::Intel2700g,
+        Self::Adreno200,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Self::Generic => "Generic OpenGL ES (1.1, Common)",
             Self::NvidiaGoforce5500 => "NVIDIA GoForce 5500 (OpenGL ES 1.1, Common)",
             Self::Intel2700g => "Intel 2700G (OpenGL ES 1.0, Common-Lite)",
+            Self::Adreno200 => "Adreno 200 (OpenGL ES 2.0)",
         }
     }
     pub fn nvidia_combiners(self) -> bool {
@@ -23,6 +31,10 @@ impl GpuCompatibilityProfile {
     }
     pub fn intel_depth_bias(self) -> bool {
         self == Self::Intel2700g
+    }
+
+    pub fn programmable_gles(self) -> bool {
+        self == Self::Adreno200
     }
 }
 
@@ -62,12 +74,17 @@ mod tests {
             GpuCompatibilityProfile::Generic
         );
         for (profile, flags) in GpuCompatibilityProfile::ALL.into_iter().zip([
-            (false, false),
-            (true, false),
-            (false, true),
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
         ]) {
             assert_eq!(
-                (profile.nvidia_combiners(), profile.intel_depth_bias()),
+                (
+                    profile.nvidia_combiners(),
+                    profile.intel_depth_bias(),
+                    profile.programmable_gles(),
+                ),
                 flags
             );
             let settings = crate::GameSettings {
@@ -93,7 +110,7 @@ mod tests {
         let json = serde_json::to_value(config).unwrap();
         assert!(json.get("pocketpc_intel2700g_depth_bias").is_none());
         assert!(json.get("pocketpc_nv_combiners").is_none());
-        let ids = ["generic", "nvidia_goforce5500", "intel2700g"];
+        let ids = ["generic", "nvidia_goforce5500", "intel2700g", "adreno200"];
         for (profile, id) in GpuCompatibilityProfile::ALL.into_iter().zip(ids) {
             assert_eq!(serde_json::to_value(profile).unwrap(), id);
         }
