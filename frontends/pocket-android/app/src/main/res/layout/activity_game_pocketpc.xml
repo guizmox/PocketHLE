@@ -41,11 +41,7 @@
             <TextView android:id="@+id/fps_overlay" style="@style/GameFpsOverlay" />
             <TextView android:id="@+id/ips_overlay" style="@style/GameFpsOverlay" />
 
-            <ProgressBar
-                android:id="@+id/progress"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center" />
+            <include layout="@layout/game_loading" />
             <TextView
                 android:id="@+id/status"
                 android:layout_width="match_parent"

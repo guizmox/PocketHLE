@@ -359,6 +359,7 @@ pub struct PocketLauncher {
     config_draft: Option<LauncherConfig>,
     game_settings_draft: Option<(String, GameSettings)>,
     last_frame_texture: Option<egui::TextureHandle>,
+    loading_logo: Option<egui::TextureHandle>,
     uploaded_image_id: Option<u64>,
     /// Latest native guest framebuffer, retained for input and filtered screenshots.
     last_frame_snapshot: Option<FrameSnapshot>,
@@ -985,6 +986,7 @@ impl PocketLauncher {
             config_draft: None,
             game_settings_draft: None,
             last_frame_texture: None,
+            loading_logo: None,
             uploaded_image_id: None,
             last_frame_snapshot: None,
             last_frame_status: None,
@@ -3579,8 +3581,51 @@ impl PocketLauncher {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
 
+    fn paint_game_loading(&mut self, ui: &egui::Ui, screen: Rect) {
+        if self.running_game.is_none() || !screen.is_positive() {
+            return;
+        }
+        let painter = ui.painter().with_clip_rect(screen.intersect(ui.clip_rect()));
+        painter.rect_filled(screen, 0.0, Color32::BLACK);
+        let logo = self.loading_logo.get_or_insert_with(|| {
+            let image = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
+                .expect("embedded PocketHLE logo is valid")
+                .into_rgba8();
+            let size = [image.width() as usize, image.height() as usize];
+            ui.ctx().load_texture(
+                "game_loading_logo",
+                egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                egui::TextureOptions::LINEAR,
+            )
+        });
+        let size = (screen.width().min(screen.height()) * 0.22).min(44.0);
+        let caption = painter.layout_no_wrap(
+            "Loading...".into(),
+            egui::FontId::proportional(12.0),
+            Color32::from_gray(180),
+        );
+        let gap = 8.0;
+        let top = screen.center().y - (size + gap + caption.size().y) * 0.5;
+        let logo_rect = Rect::from_center_size(
+            Pos2::new(screen.center().x, top + size * 0.5),
+            Vec2::splat(size),
+        );
+        painter.image(
+            logo.id(),
+            logo_rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        painter.galley(
+            Pos2::new(screen.center().x - caption.size().x * 0.5, logo_rect.bottom() + gap),
+            caption,
+            Color32::from_gray(180),
+        );
+    }
+
     fn ui_fullscreen_game(&mut self, ui: &mut egui::Ui) {
         let Some(frame) = self.last_frame_snapshot.as_ref() else {
+            self.paint_game_loading(ui, ui.available_rect_before_wrap());
             return;
         };
         let guest_size = Vec2::new(frame.width as f32, frame.height as f32);
@@ -3774,11 +3819,7 @@ impl PocketLauncher {
                 self.handle_pointer_clipped(ui.ctx(), &rect, guest, room);
             });
         } else {
-            ui.allocate_ui_at_rect(room, |ui| {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Starting Pocket PC…");
-                });
-            });
+            self.paint_game_loading(ui, room);
         }
         ui.allocate_rect(bounds, Sense::hover());
     }
@@ -3902,13 +3943,7 @@ impl PocketLauncher {
             self.paint_guest_frame(ui, screen);
             self.handle_pointer(ui.ctx(), &screen, guest);
         } else {
-            ui.painter().text(
-                screen.center(),
-                egui::Align2::CENTER_CENTER,
-                "Starting…",
-                egui::FontId::proportional(16.),
-                Color32::from_gray(180),
-            );
+            self.paint_game_loading(ui, screen);
         }
         for (i, (caption, button)) in [
             ("HOME", GuestButton::GizPiano1),

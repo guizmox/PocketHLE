@@ -46,7 +46,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private lateinit var surface: GLSurfaceView
-    private lateinit var progress: ProgressBar
+    private lateinit var loadingOverlay: View
     private lateinit var status: TextView
     private lateinit var fpsOverlay: TextView
     private val fpsMeter = FrameRateMeter()
@@ -304,8 +304,13 @@ class GameActivity : AppCompatActivity() {
         title = name
 
         surface = findViewById(R.id.surface)
+        loadingOverlay = findViewById(R.id.game_loading)
         presentationHandle = NativeBridge.nativeCreatePresentation()
-        glRenderer = AndroidFrameRenderer(this, config.upscaleFilter, showFps, !gizmondoGame, config.graphicsDiagnostics, presentationHandle) {
+        glRenderer = AndroidFrameRenderer(
+            this, config.upscaleFilter, showFps, !gizmondoGame, config.graphicsDiagnostics,
+            presentationHandle,
+            firstFrameDrawn = { mainHandler.post { loadingOverlay.visibility = View.GONE } },
+        ) {
             mainHandler.post {
                 presentationReady = true
                 presentationStart?.let { (root,id) -> presentationStart=null; startSession(root,id) }
@@ -321,7 +326,6 @@ class GameActivity : AppCompatActivity() {
         surface.preserveEGLContextOnPause = shareOpenGlContext
         surface.setRenderer(glRenderer)
         surface.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
-        progress = findViewById(R.id.progress)
         status = findViewById(R.id.status)
         fpsOverlay = findViewById(R.id.fps_overlay)
         ipsOverlay = findViewById(R.id.ips_overlay)
@@ -407,7 +411,7 @@ class GameActivity : AppCompatActivity() {
         val handle = NativeBridge.nativeStartGame(rootDir, id, presentationHandle)
         if (handle == 0L) {
             accelerometer.stop()
-            progress.visibility = View.GONE
+            loadingOverlay.visibility = View.GONE
             android.widget.Toast.makeText(this, "Could not start the game: see logcat", android.widget.Toast.LENGTH_LONG).show()
             finish()
             return
@@ -416,7 +420,6 @@ class GameActivity : AppCompatActivity() {
         if (!gizmondoGame) NativeBridge.nativeSendInput(handle, NativeBridge.INPUT_KEYBOARD_ROTATION, rotationDegrees/90, 0)
         startAudio(handle)
         status.text = "Backend: Unicorn (ARM)\nRunning…"
-        // The spinner gets hidden the moment the first frame arrives.
         mainHandler.postDelayed(pollTick, POLL_INTERVAL_MS)
     }
 
@@ -567,7 +570,7 @@ class GameActivity : AppCompatActivity() {
         session = 0
         stopAudio()
         val audioToJoin = audioThreads.toList()
-        progress.visibility = View.GONE
+        loadingOverlay.visibility = View.GONE
         // `nativeFinishGame` blocks on the worker thread join, so
         // do it off the UI thread to keep the UI responsive — the
         // join is usually fast (the Stop signal already fired) but
@@ -798,7 +801,6 @@ class GameActivity : AppCompatActivity() {
 
     private fun paintFrame(frame: FrameSnapshot) {
         updatePocketPcDisplayGeometry(frame)
-        progress.visibility = View.GONE
         glRenderer.submit(frame)
         surface.requestRender()
 

@@ -12,7 +12,7 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /** Desktop shaders, including reference three-pass SMAA; filtering never alters guest geometry. */
-internal class AndroidFrameRenderer(context: Context, private var filter: String, private val countFps: Boolean = false, private val pocketPc: Boolean = false, private val diagnostics: Boolean = false, private val presentation: Long = 0, private val ready: () -> Unit = {}) : GLSurfaceView.Renderer {
+internal class AndroidFrameRenderer(context: Context, private var filter: String, private val countFps: Boolean = false, private val pocketPc: Boolean = false, private val diagnostics: Boolean = false, private val presentation: Long = 0, private val firstFrameDrawn: () -> Unit = {}, private val ready: () -> Unit = {}) : GLSurfaceView.Renderer {
     private val timing = GraphicsTiming(diagnostics) { Log.i("PocketHLE", it) }
     private var gpuTimer: AndroidGpuTimer? = null
     private var previousDraw = 0L
@@ -42,6 +42,7 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
     private var smaa: Smaa? = null
     private var filtered = 0
     private var failed = false
+    private var drewFirstFrame = false
     fun submit(frame: GameActivity.FrameSnapshot) { pending = frame }
     fun setRotationDegrees(degrees: Int) { turn = ((degrees % 360)+360)%360 }
     /** Called on the GL thread; invalidate uploads when changing xBRZ or SMAA. */
@@ -169,6 +170,10 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
             glDrawArrays(GL_TRIANGLES,0,3)
             timing.end(GraphicsTiming.Stage.DRAW, draw)
             if (countFps) frameCounter.presented(frame)
+            if (!drewFirstFrame) {
+                drewFirstFrame = true
+                firstFrameDrawn()
+            }
             gpuTimer?.end()
         } catch (e: Exception) {
             if (sharedTexture != 0) { uploaded=null; throw e }
