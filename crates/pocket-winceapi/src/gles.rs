@@ -2828,56 +2828,12 @@ fn egl_query_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))
 }
 
-/// `eglSwapBuffers` — the only place GL output becomes visible.
-/// Converts the RGBA8888 render target down to the kernel
-/// framebuffer's RGB565 and marks it dirty so the frontend picks it up.
-pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _diagnostic = graphics_diagnostic::Span::new(graphics_diagnostic::Stage::Swap);
-    if !egl_config_display(ctx)? {
-        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
-    }
-    let surface = ctx.arg_u32(1)?;
-    let valid = SURFACES.with(|s| {
-        let s = s.borrow();
-        s.bound && s.images.contains_key(&surface) && (s.draw == surface || s.read == surface)
-    });
-    if !valid {
-        set_egl_error(pocket_gles::EGL_BAD_SURFACE);
-        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
-    }
-    let draw = surface;
-    if !SURFACES.with(|s| s.borrow().images[&draw].window.is_some()) {
-        flush_pixmap(ctx, draw)?;
-        with_ctx(|c| c.sync_gpu());
-        return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
-    }
-    // Frontend snapshot throttling does not pace guest execution. Battlestations
-    // runs its simulation too quickly once GPU rendering removes the incidental
-    // software rasterization cost. Use the same modeled 60 Hz LCD as DirectDraw,
-    // including cooperative retries and one-shot credit for explicit blank waits.
-    // Offscreen swaps above are synchronization, not display presentations.
-    if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
-        return Ok(outcome);
-    }
-    let active = SURFACES.with(|s| {
-        let mut s = s.borrow_mut();
-        let active = s.active;
-        with_ctx(|c| s.select(c, surface));
-        active
-    });
-    let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
-    SURFACES.with(|s| {
-        if let Some(image) = s.borrow_mut().images.get_mut(&surface) {
-            image.width = w;
-            image.height = h;
-        }
-    });
-    with_ctx(|c| {
-        if (c.target.width, c.target.height) != (w, h) {
-            c.target.resize(w, h);
-        }
-    });
-    let color_capture = color_capture::begin();
+/// Publish through the same immutable window-frame handoff for both guest APIs.
+pub(crate) fn publish_shared_window(
+    ctx: &mut CallCtx<'_>,
+    snapshot: impl FnOnce(&SharedContextSource) -> Option<SharedFrame>,
+) -> Result<bool, KernelError> {
+    let (w, h) = ctx.kernel.framebuffer.logical_size();
     let enabled = SHARED_EXPORT.with(|s| {
         s.borrow()
             .as_ref()
@@ -2892,7 +2848,7 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     let measure_ips = ctx.kernel.framebuffer.ips_enabled();
     let shared = if enabled && !measure_ips && (!ctx.kernel.fb_mapped || mapped_defer) {
         pocket_gles::gpu::configured_shared_context_source().and_then(|source| {
-            let frame = with_ctx(|c| c.snapshot_shared_frame())?;
+            let frame = snapshot(&source)?;
             let provider =
                 deferred_frame::GlesCpuPixelSource::new(frame.clone(), source, (w, h)).ok()?;
             let provider: std::sync::Arc<dyn pocket_kernel::framebuffer::deferred::CpuPixelSource> =
@@ -2944,7 +2900,72 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
             Some("swap_snapshot_unavailable_or_publication_rejected")
         });
     });
-    if shared.is_none() {
+    let published = shared.is_some();
+    SHARED_WINDOW.with(|s| {
+        s.replace(shared.map(|(frame, identity)| {
+            (
+                ctx.kernel.framebuffer.frame_counter,
+                ctx.kernel.framebuffer.authority_epoch(),
+                frame,
+                identity,
+            )
+        }));
+    });
+    Ok(published)
+}
+
+/// `eglSwapBuffers` — the only place GL output becomes visible.
+/// Converts the RGBA8888 render target down to the kernel
+/// framebuffer's RGB565 and marks it dirty so the frontend picks it up.
+pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let _diagnostic = graphics_diagnostic::Span::new(graphics_diagnostic::Stage::Swap);
+    if !egl_config_display(ctx)? {
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let surface = ctx.arg_u32(1)?;
+    let valid = SURFACES.with(|s| {
+        let s = s.borrow();
+        s.bound && s.images.contains_key(&surface) && (s.draw == surface || s.read == surface)
+    });
+    if !valid {
+        set_egl_error(pocket_gles::EGL_BAD_SURFACE);
+        return Ok(DispatchOutcome::ReturnedR0(EGL_FALSE));
+    }
+    let draw = surface;
+    if !SURFACES.with(|s| s.borrow().images[&draw].window.is_some()) {
+        flush_pixmap(ctx, draw)?;
+        with_ctx(|c| c.sync_gpu());
+        return Ok(DispatchOutcome::ReturnedR0(EGL_TRUE));
+    }
+    // Frontend snapshot throttling does not pace guest execution. Battlestations
+    // runs its simulation too quickly once GPU rendering removes the incidental
+    // software rasterization cost. Use the same modeled 60 Hz LCD as DirectDraw,
+    // including cooperative retries and one-shot credit for explicit blank waits.
+    // Offscreen swaps above are synchronization, not display presentations.
+    if let Some(outcome) = crate::ddraw::wait_display(ctx, None)? {
+        return Ok(outcome);
+    }
+    let active = SURFACES.with(|s| {
+        let mut s = s.borrow_mut();
+        let active = s.active;
+        with_ctx(|c| s.select(c, surface));
+        active
+    });
+    let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
+    SURFACES.with(|s| {
+        if let Some(image) = s.borrow_mut().images.get_mut(&surface) {
+            image.width = w;
+            image.height = h;
+        }
+    });
+    with_ctx(|c| {
+        if (c.target.width, c.target.height) != (w, h) {
+            c.target.resize(w, h);
+        }
+    });
+    let color_capture = color_capture::begin();
+    let shared = publish_shared_window(ctx, |_| with_ctx(|c| c.snapshot_shared_frame()))?;
+    if !shared {
         pocket_kernel::framebuffer::gapi_memory::discard(ctx.cpu)?;
         // Full replacement: never materialize a previous retained image only
         // to overwrite it with this new swap (disabled policy/backpressure).
@@ -2956,16 +2977,6 @@ pub(crate) fn egl_swap_buffers(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
         });
         ctx.kernel.framebuffer.observe_ips();
     }
-    SHARED_WINDOW.with(|s| {
-        s.replace(shared.map(|(frame, identity)| {
-            (
-                ctx.kernel.framebuffer.frame_counter,
-                ctx.kernel.framebuffer.authority_epoch(),
-                frame,
-                identity,
-            )
-        }));
-    });
     // The conversion above replaces the framebuffer, including any video
     // composed by the message pump. Invalidate that presentation before
     // DirectShow checks its cached frame, even if no new video frame is due.

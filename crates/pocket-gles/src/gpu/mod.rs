@@ -11,7 +11,7 @@ mod transfer;
 pub use platform::PersistentSharedContext;
 pub use platform::SharedConsumer;
 pub use readback::SharedReadback;
-pub use shared::{SharedFrame, RGB565_DISPLAY_FRAGMENT, SHARED_DISPLAY_FRAGMENT};
+pub use shared::{ProgrammableFrameExport, SharedFrame, RGB565_DISPLAY_FRAGMENT, SHARED_DISPLAY_FRAGMENT};
 #[cfg(all(test, unix))]
 mod shared_display_tests;
 #[cfg(all(test, unix))]

@@ -2,7 +2,10 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 
-use pocket_gles::gpu::ProgrammableHost;
+use pocket_gles::gpu::{
+    configured_shared_context_source, ProgrammableFrameExport, ProgrammableHost,
+    SharedContextSource, SharedFrame,
+};
 
 use super::{error, CallCtx, Result};
 
@@ -31,7 +34,20 @@ struct ClientAttribute {
     normalized: u8,
     stride: i32,
     bytes_per_vertex: usize,
-    staging: u32,
+}
+
+#[derive(Default)]
+struct StagedBuffer {
+    name: u32,
+    uploaded: Vec<u8>,
+}
+
+/// One contiguous upload minimizes both bytes and GL calls for a reused buffer.
+fn changed_range(previous: &[u8], current: &[u8]) -> Option<std::ops::Range<usize>> {
+    let previous = &previous[..current.len()];
+    let start = previous.iter().zip(current).position(|(a, b)| a != b)?;
+    let end = previous.iter().zip(current).rposition(|(a, b)| a != b)? + 1;
+    Some(start..end)
 }
 
 pub(super) struct Renderer {
@@ -43,7 +59,8 @@ pub(super) struct Renderer {
     framebuffer: u32,
     array: u32,
     elements: u32,
-    client_indices: u32,
+    client_indices: StagedBuffer,
+    client_vertices: HashMap<u32, StagedBuffer>,
     guest_buffers: HashSet<u32>,
     index_data: HashMap<u32, Vec<u8>>,
     client_attributes: HashMap<u32, ClientAttribute>,
@@ -51,6 +68,9 @@ pub(super) struct Renderer {
     configured_attributes: HashSet<u32>,
     unpack: usize,
     guest_error: u32,
+    native_compressed_formats: Vec<i32>,
+    export: Option<ProgrammableFrameExport>,
+    export_failed: bool,
     readback: Vec<u8>,
 }
 
@@ -73,8 +93,18 @@ impl Renderer {
         if width == 0 || height == 0 || bytes > MAX_TRANSFER {
             return Err(error("Invalid GLES2 framebuffer size"));
         }
+        let host = configured_shared_context_source()
+            .and_then(|source| match ProgrammableHost::shared(&source) {
+                Ok(host) => Some(host),
+                Err(error) => {
+                    log::warn!("Adreno 200 shared context unavailable: {error}");
+                    None
+                }
+            })
+            .map_or_else(ProgrammableHost::new_programmable, Ok)
+            .map_err(error)?;
         let mut renderer = Self {
-            host: ProgrammableHost::new_programmable().map_err(error)?,
+            host,
             symbols: HashMap::new(),
             width,
             height,
@@ -82,7 +112,8 @@ impl Renderer {
             framebuffer: 0,
             array: 0,
             elements: 0,
-            client_indices: 0,
+            client_indices: StagedBuffer::default(),
+            client_vertices: HashMap::new(),
             guest_buffers: HashSet::new(),
             index_data: HashMap::new(),
             client_attributes: HashMap::new(),
@@ -90,7 +121,10 @@ impl Renderer {
             configured_attributes: HashSet::new(),
             unpack: 4,
             guest_error: 0,
-            readback: vec![0; bytes],
+            native_compressed_formats: Vec::new(),
+            export: None,
+            export_failed: false,
+            readback: Vec::new(),
         };
         let mut fbo = 0;
         let mut color = 0;
@@ -123,12 +157,82 @@ impl Renderer {
         invoke!(r, "glBindRenderbuffer", (RENDERBUFFER => u32, 0 => u32), ());
         invoke!(r, "glViewport", (0 => i32, 0 => i32, width as i32 => i32, height as i32 => i32), ());
         r.default_fbo = fbo;
+        let mut count = 0i32;
+        invoke!(r, "glGetIntegerv", (0x86a2 => u32, &mut count => *mut i32), ());
+        if (1..=4096).contains(&count) {
+            let mut formats = vec![0; count as usize];
+            invoke!(r, "glGetIntegerv", (0x86a3 => u32, formats.as_mut_ptr() => *mut i32), ());
+            r.native_compressed_formats = formats;
+        }
         Ok(renderer)
+    }
+
+    fn snapshot(&mut self, source: &SharedContextSource) -> Option<SharedFrame> {
+        if self.export_failed {
+            return None;
+        }
+        let snapshot = (|| -> Result<Option<SharedFrame>> {
+            // The transport checks native errors after copying. Preserve a
+            // pending guest error before it can be mistaken for a copy failure.
+            for _ in 0..8 {
+                let pending = invoke!(self, "glGetError", (), u32);
+                if pending == 0 {
+                    break;
+                }
+                self.reject(pending);
+            }
+            let export = match self.export.as_mut() {
+                Some(export) => export,
+                None => self
+                    .export
+                    .insert(ProgrammableFrameExport::new(&self.host, source).map_err(error)?),
+            };
+            let fbo = self.default_fbo;
+            let restore = if self.framebuffer == 0 {
+                fbo
+            } else {
+                self.framebuffer
+            };
+            export
+                .snapshot(&self.host, fbo, restore, (self.width, self.height))
+                .map_err(error)
+        })();
+        match snapshot {
+            Ok(frame) => frame,
+            Err(error) => {
+                log::warn!("Adreno 200 shared frame export unavailable: {error}");
+                self.export_failed = true;
+                None
+            }
+        }
     }
 
     pub(super) fn present(&mut self, ctx: &mut CallCtx<'_>) -> Result<()> {
         self.host.bind_client_api().map_err(error)?;
         self.host.make_current().map_err(error)?;
+        ctx.kernel.framebuffer.resize(self.width, self.height);
+        let shared = crate::gles::publish_shared_window(ctx, |source| self.snapshot(source))?;
+        if !shared {
+            self.readback_window(ctx)?;
+        }
+        crate::directshow::service(ctx)?;
+        if ctx.kernel.fb_mapped
+            && !ctx
+                .cpu
+                .deferred_memory_pending(pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE)
+        {
+            ctx.cpu.write_mem(
+                pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
+                &ctx.kernel.framebuffer.cpu().map_err(error)?.pixels,
+            )?;
+        }
+        ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
+        ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
+        ctx.kernel.framebuffer.presentation_stats.record_present();
+        Ok(())
+    }
+
+    fn readback_window(&mut self, ctx: &mut CallCtx<'_>) -> Result<()> {
         let default_fbo = self.default_fbo;
         let previous = if self.framebuffer == 0 {
             default_fbo
@@ -137,12 +241,13 @@ impl Renderer {
         };
         let (width, height) = (self.width, self.height);
         invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, default_fbo => u32), ());
+        self.readback
+            .resize(width as usize * height as usize * 4, 0);
         let pixels = self.readback.as_mut_ptr().cast();
         invoke!(self, "glReadPixels", (0 => i32, 0 => i32, width as i32 => i32,
             height as i32 => i32, RGBA => u32, UNSIGNED_BYTE => u32, pixels => *mut c_void), ());
         invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, previous => u32), ());
         pocket_kernel::framebuffer::gapi_memory::discard(ctx.cpu)?;
-        ctx.kernel.framebuffer.resize(width, height);
         ctx.kernel.framebuffer.overwrite_rgb565(|rgb, native| {
             native.resize(self.readback.len(), 0);
             let stride = width as usize * 4;
@@ -162,15 +267,33 @@ impl Renderer {
             Some((width, height))
         });
         ctx.kernel.framebuffer.observe_ips();
-        if ctx.kernel.fb_mapped {
-            ctx.cpu.write_mem(
-                pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE,
-                &ctx.kernel.framebuffer.cpu().map_err(error)?.pixels,
-            )?;
+        Ok(())
+    }
+
+    /// Bind reusable storage and upload only the bytes that changed.
+    fn upload_client_buffer(
+        &mut self,
+        target: u32,
+        staging: &mut StagedBuffer,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        if staging.name == 0 {
+            invoke!(self, "glGenBuffers", (1 => i32, &mut staging.name => *mut u32), ());
+            if staging.name == 0 {
+                return Err(error("Host GL could not allocate a client staging buffer"));
+            }
         }
-        ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
-        ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
-        ctx.kernel.framebuffer.presentation_stats.record_present();
+        invoke!(self, "glBindBuffer", (target => u32, staging.name => u32), ());
+        if data.len() > staging.uploaded.len() {
+            invoke!(self, "glBufferData", (target => u32, data.len() as isize => isize,
+                data.as_ptr().cast() => *const c_void, 0x88e0 => u32), ());
+            staging.uploaded = data;
+        } else if let Some(range) = changed_range(&staging.uploaded, &data) {
+            let bytes = &data[range.clone()];
+            invoke!(self, "glBufferSubData", (target => u32, range.start as isize => isize,
+                bytes.len() as isize => isize, bytes.as_ptr().cast() => *const c_void), ());
+            staging.uploaded[range].copy_from_slice(bytes);
+        }
         Ok(())
     }
 
@@ -199,28 +322,50 @@ impl Renderer {
                     .and_then(|offset| offset.checked_add(attribute.bytes_per_vertex))
                     .filter(|&n| n <= MAX_TRANSFER)
                     .ok_or_else(|| error("GLES2 client attribute exceeds the supported size"))?;
-                let data = ctx.cpu.read_mem(attribute.address, size as u32)?;
+                let mut data = ctx.cpu.read_mem(attribute.address, size as u32)?;
+                // Upload only the bytes belonging to this attribute. Guest
+                // interleaved layouts otherwise resend the same stride gaps
+                // for every enabled attribute.
+                if stride > attribute.bytes_per_vertex {
+                    for vertex in 1..=last_vertex {
+                        let source = vertex * stride;
+                        let destination = vertex * attribute.bytes_per_vertex;
+                        data.copy_within(source..source + attribute.bytes_per_vertex, destination);
+                    }
+                    data.truncate((last_vertex + 1) * attribute.bytes_per_vertex);
+                } else if stride < attribute.bytes_per_vertex {
+                    let packed = (last_vertex + 1)
+                        .checked_mul(attribute.bytes_per_vertex)
+                        .filter(|&bytes| bytes <= MAX_TRANSFER)
+                        .ok_or_else(|| {
+                            error("GLES2 packed vertex data exceeds the supported size")
+                        })?;
+                    let mut expanded = Vec::with_capacity(packed);
+                    for vertex in 0..=last_vertex {
+                        let source = vertex * stride;
+                        expanded
+                            .extend_from_slice(&data[source..source + attribute.bytes_per_vertex]);
+                    }
+                    data = expanded;
+                }
                 Ok((index, attribute, data))
             })
             .collect::<Result<Vec<_>>>()?;
-        for (index, mut attribute, data) in arrays {
-            if attribute.staging == 0 {
-                invoke!(self, "glGenBuffers", (1 => i32, &mut attribute.staging => *mut u32), ());
-                if attribute.staging == 0 {
-                    return Err(error("Host GL could not allocate a vertex staging buffer"));
-                }
-                self.client_attributes.get_mut(&index).unwrap().staging = attribute.staging;
+        let upload = (|| {
+            for (index, attribute, data) in arrays {
+                let mut staging = self.client_vertices.remove(&index).unwrap_or_default();
+                let result = self.upload_client_buffer(ARRAY_BUFFER, &mut staging, data);
+                self.client_vertices.insert(index, staging);
+                result?;
+                invoke!(self, "glVertexAttribPointer", (index => u32, attribute.size => i32,
+                    attribute.kind => u32, attribute.normalized => u8, 0 => i32,
+                    std::ptr::null() => *const c_void), ());
             }
-            invoke!(self, "glBindBuffer", (ARRAY_BUFFER => u32, attribute.staging => u32), ());
-            invoke!(self, "glBufferData", (ARRAY_BUFFER => u32, data.len() as isize => isize,
-                data.as_ptr().cast() => *const c_void, 0x88e0 => u32), ());
-            invoke!(self, "glVertexAttribPointer", (index => u32, attribute.size => i32,
-                attribute.kind => u32, attribute.normalized => u8, attribute.stride => i32,
-                std::ptr::null() => *const c_void), ());
-        }
+            Ok(())
+        })();
         let bound = self.array;
         invoke!(self, "glBindBuffer", (ARRAY_BUFFER => u32, bound => u32), ());
-        Ok(())
+        upload
     }
 
     pub(super) fn gl(&mut self, name: &str, ctx: &mut CallCtx<'_>) -> Result<u32> {
@@ -431,10 +576,6 @@ impl Renderer {
                 }
                 self.configured_attributes.insert(index);
                 if self.array == 0 {
-                    let staging = self
-                        .client_attributes
-                        .get(&index)
-                        .map_or(0, |old| old.staging);
                     self.client_attributes.insert(
                         index,
                         ClientAttribute {
@@ -443,20 +584,15 @@ impl Renderer {
                             kind,
                             normalized,
                             stride,
-                            staging,
                             bytes_per_vertex: size as usize * component,
                         },
                     );
                 } else {
                     gl!(index => u32, size => i32, kind => u32, normalized => u8, stride => i32,
                         address as usize as *const c_void => *const c_void);
-                    if let Some(old) = self
-                        .client_attributes
-                        .remove(&index)
-                        .filter(|a| a.staging != 0)
-                    {
-                        invoke!(self, "glDeleteBuffers", (1 => i32, &old.staging => *const u32), ());
-                    }
+                    self.client_attributes.remove(&index);
+                    // Keep its staging buffer available if this slot switches
+                    // back from a guest VBO to client memory.
                 }
             }
             "glDrawArrays" => {
@@ -528,22 +664,15 @@ impl Renderer {
                     self.stage_attributes(ctx, last)?;
                 }
                 if let Some(data) = client {
-                    if self.client_indices == 0 {
-                        let mut temporary = 0;
-                        invoke!(self, "glGenBuffers", (1 => i32, &mut temporary => *mut u32), ());
-                        if temporary == 0 {
-                            return Err(error(
-                                "Host GL could not allocate an index staging buffer",
-                            ));
-                        }
-                        self.client_indices = temporary;
-                    }
-                    let temporary = self.client_indices;
-                    invoke!(self, "glBindBuffer", (ELEMENT_BUFFER => u32, temporary => u32), ());
-                    invoke!(self, "glBufferData", (ELEMENT_BUFFER => u32, bytes as isize => isize,
-                        data.as_ptr().cast() => *const c_void, 0x88e0 => u32), ());
-                    gl!(mode => u32, count => i32, kind => u32, std::ptr::null() => *const c_void);
+                    let mut staging = std::mem::take(&mut self.client_indices);
+                    let upload = self.upload_client_buffer(ELEMENT_BUFFER, &mut staging, data);
+                    self.client_indices = staging;
+                    let draw = upload.and_then(|()| {
+                        gl!(mode => u32, count => i32, kind => u32, std::ptr::null() => *const c_void);
+                        Ok(())
+                    });
                     invoke!(self, "glBindBuffer", (ELEMENT_BUFFER => u32, 0 => u32), ());
+                    draw?;
                 } else {
                     gl!(mode => u32, count => i32, kind => u32, address as usize as *const c_void => *const c_void);
                 }
@@ -570,7 +699,8 @@ impl Renderer {
                     GL_ATC_RGB_AMD
                         | GL_ATC_RGBA_EXPLICIT_ALPHA_AMD
                         | GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD
-                ) {
+                ) && !self.native_compressed_formats.contains(&(format as i32))
+                {
                     let Some(bytes) = texture_size(width, height, RGBA, UNSIGNED_BYTE, 1) else {
                         return Ok(self.reject(0x0501));
                     };
@@ -852,4 +982,63 @@ fn desktop_shader(source: &[u8]) -> Vec<u8> {
         }
     }
     output
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use pocket_gles::gpu::{with_shared_context_source, Renderer as NativeRenderer};
+    use pocket_kernel::Thunk;
+    use pocket_pe::ImportBinding;
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    #[test]
+    fn reused_client_buffers_skip_equal_bytes_and_limit_partial_uploads() {
+        let previous = [1, 2, 3, 4, 5, 6];
+        assert_eq!(changed_range(&previous, &previous), None);
+        assert_eq!(changed_range(&previous, &[1, 2, 3]), None);
+        assert_eq!(changed_range(&previous, &[1, 2, 8, 4, 5]), Some(2..3));
+        assert_eq!(changed_range(&previous, &[1, 2, 8, 4, 9]), Some(2..5));
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL with shared-context fences"]
+    fn programmable_swap_publishes_gpu_pixels_and_defers_readback() -> Result<()> {
+        let ui = NativeRenderer::new(8, 8).map_err(error)?;
+        let source = ui.shared_context_source();
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "libegl.dll".into(),
+            binding: ImportBinding::Name("eglSwapBuffers".into()),
+            friendly_name: None,
+        };
+        let mut call = CallCtx {
+            cpu: &mut cpu,
+            thunk: &thunk,
+            kernel: &mut kernel,
+        };
+        with_shared_context_source(Some(source.clone()), || {
+            crate::gles::with_shared_frame_export(Arc::new(AtomicBool::new(true)), || {
+                let mut renderer = Renderer::new(8, 8)?;
+                invoke!(&mut renderer, "glClearColor", (1.0 => f32, 0.0 => f32, 0.0 => f32, 0.0 => f32), ());
+                invoke!(&mut renderer, "glClear", (0x4000 => u32), ());
+                renderer.present(&mut call)?;
+                assert!(renderer.readback.is_empty());
+                assert!(!call.kernel.framebuffer.cpu_resident());
+                let frame = crate::gles::take_shared_window_frame(&call.kernel.framebuffer)
+                    .expect("programmable swap must publish a shared frame");
+                assert_eq!(frame.size(), (8, 8));
+                assert!(frame.belongs_to_source(&source));
+
+                // Changing the renderer's window must leave the snapshot intact.
+                invoke!(&mut renderer, "glClearColor", (0.0 => f32, 1.0 => f32, 0.0 => f32, 1.0 => f32), ());
+                invoke!(&mut renderer, "glClear", (0x4000 => u32), ());
+                let pixels = &call.kernel.framebuffer.cpu().map_err(error)?.pixels;
+                assert!(pixels.chunks_exact(2).all(|pixel| pixel == [0, 248]));
+                Ok(())
+            })
+        })
+    }
 }

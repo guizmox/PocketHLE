@@ -320,15 +320,22 @@ impl FramePool {
             pressure_events: 0,
         })
     }
-    unsafe fn capture(&mut self, r: &mut Renderer) -> Result<Option<SharedFrame>, String> {
-        let group = r.host.shared_source().1;
-        group.collect(|n| r.host.load(n))?;
+    unsafe fn capture(
+        &mut self,
+        host: &Host,
+        gl: &Gl,
+        fbo: u32,
+        (width, height): (u32, u32),
+        rgb565: bool,
+    ) -> Result<Option<SharedFrame>, String> {
+        let group = host.shared_source().1;
+        group.collect(|n| host.load(n))?;
         let index = self.slots.iter().position(|s| Arc::strong_count(s) == 1);
         let index = match index {
             Some(i) => i,
             None if self.slots.len() < SNAPSHOT_CAPACITY => {
                 let mut texture = 0;
-                (r.gl.GenTextures)(1, &mut texture);
+                (gl.GenTextures)(1, &mut texture);
                 if texture == 0 {
                     return Err("shared snapshot allocation failed".into());
                 }
@@ -357,8 +364,8 @@ impl FramePool {
             }
         };
         let slot = Arc::get_mut(&mut self.slots[index]).unwrap();
-        let format_changed = slot.rgb565 != r.rgb565;
-        slot.rgb565 = r.rgb565;
+        let format_changed = slot.rgb565 != rgb565;
+        slot.rgb565 = rgb565;
         let s = slot.sync.get_mut().unwrap_or_else(|e| e.into_inner());
         if s.poisoned {
             return Err("shared snapshot slot is poisoned".into());
@@ -368,35 +375,37 @@ impl FramePool {
         self.sync.delete(s.ready);
         s.done = 0;
         s.ready = 0;
-        (r.gl.BindFramebuffer)(0x8d40, r.fbo);
-        (r.gl.ActiveTexture)(GL_TEXTURE0);
-        (r.gl.BindTexture)(GL_TEXTURE_2D, slot.texture);
-        if format_changed || (slot.width, slot.height) != (r.width, r.height) {
-            (r.gl.TexImage2D)(
+        (gl.BindFramebuffer)(0x8d40, fbo);
+        (gl.ActiveTexture)(GL_TEXTURE0);
+        (gl.BindTexture)(GL_TEXTURE_2D, slot.texture);
+        if format_changed || (slot.width, slot.height) != (width, height) {
+            (gl.TexImage2D)(
                 GL_TEXTURE_2D,
                 0,
                 // GLES copies require compatible source/destination formats.
                 // In particular ANGLE rejects RGB565 -> RGBA8 snapshots.
-                if r.rgb565 { 0x8d62 } else { GL_RGBA as i32 },
-                r.width as i32,
-                r.height as i32,
+                if rgb565 { 0x8d62 } else { GL_RGBA as i32 },
+                width as i32,
+                height as i32,
                 0,
-                if r.rgb565 { GL_RGB } else { GL_RGBA },
-                if r.rgb565 {
+                if rgb565 { GL_RGB } else { GL_RGBA },
+                if rgb565 {
                     GL_UNSIGNED_SHORT_5_6_5
                 } else {
                     GL_UNSIGNED_BYTE
                 },
                 std::ptr::null(),
             );
-            r.params(
-                Filter::Nearest,
-                Filter::Nearest,
-                Wrap::ClampToEdge,
-                Wrap::ClampToEdge,
-            );
-            slot.width = r.width;
-            slot.height = r.height;
+            for (parameter, value) in [
+                (GL_TEXTURE_MIN_FILTER, GL_NEAREST),
+                (GL_TEXTURE_MAG_FILTER, GL_NEAREST),
+                (GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE),
+                (GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE),
+            ] {
+                (gl.TexParameteri)(GL_TEXTURE_2D, parameter, value as i32);
+            }
+            slot.width = width;
+            slot.height = height;
         }
         (self.copy)(
             GL_TEXTURE_2D,
@@ -405,11 +414,11 @@ impl FramePool {
             0,
             0,
             0,
-            r.width as i32,
-            r.height as i32,
+            width as i32,
+            height as i32,
         );
-        s.ready = self.sync.publish(r.gl.Flush);
-        let result = r.check();
+        s.ready = self.sync.publish(gl.Flush);
+        let result = check_native_error(gl);
         s.poisoned = result.is_err() || s.ready == 0;
         result?;
         if s.poisoned {
@@ -418,6 +427,57 @@ impl FramePool {
         Ok(Some(SharedFrame(self.slots[index].clone())))
     }
 }
+/// A bounded export pool for a programmable renderer in the UI share group.
+pub struct ProgrammableFrameExport {
+    gl: Gl,
+    pool: FramePool,
+    group: Arc<ShareGroup>,
+}
+
+impl ProgrammableFrameExport {
+    pub fn new(host: &Host, source: &SharedContextSource) -> Result<Self, String> {
+        let group = host.shared_source().1;
+        if !Arc::ptr_eq(&source.1, &group) {
+            return Err("programmable renderer is outside the UI share group".into());
+        }
+        host.make_current()?;
+        unsafe {
+            Ok(Self {
+                gl: Gl::load(host)?,
+                pool: FramePool::new(host)?,
+                group,
+            })
+        }
+    }
+
+    /// Copy an RGBA window FBO into a leased texture, preserving guest bindings.
+    /// The supplied FBOs must belong to the supplied current renderer.
+    pub fn snapshot(
+        &mut self,
+        host: &Host,
+        fbo: u32,
+        restore_fbo: u32,
+        size: (u32, u32),
+    ) -> Result<Option<SharedFrame>, String> {
+        if !Arc::ptr_eq(&self.group, &host.shared_source().1) {
+            return Err("programmable frame export used with another share group".into());
+        }
+        host.make_current()?;
+        unsafe {
+            let mut active = 0;
+            let mut texture = 0;
+            (self.gl.GetIntegerv)(0x84e0, &mut active);
+            (self.gl.ActiveTexture)(GL_TEXTURE0);
+            (self.gl.GetIntegerv)(0x8069, &mut texture);
+            let result = self.pool.capture(host, &self.gl, fbo, size, false);
+            (self.gl.BindTexture)(GL_TEXTURE_2D, texture as u32);
+            (self.gl.ActiveTexture)(active as u32);
+            (self.gl.BindFramebuffer)(0x8d40, restore_fbo);
+            result
+        }
+    }
+}
+
 impl Renderer {
     pub(crate) fn copy_guest_rgb_texture(
         &mut self,
@@ -641,7 +701,15 @@ impl Renderer {
             Some(p) => p,
             None => unsafe { FramePool::new(&self.host)? },
         };
-        let result = unsafe { pool.capture(self) };
+        let result = unsafe {
+            pool.capture(
+                &self.host,
+                &self.gl,
+                self.fbo,
+                (self.width, self.height),
+                self.rgb565,
+            )
+        };
         self.shared_frames = Some(pool);
         self.pipeline = None;
         result
