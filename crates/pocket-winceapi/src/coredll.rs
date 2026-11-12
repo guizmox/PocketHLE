@@ -16120,8 +16120,10 @@ fn block_on_wait(
     if let Some(outcome) = resume_worker_reenter(ctx)? {
         return Ok(outcome);
     }
-    // Keep the main call open. The normal run-loop hook still services host
-    // stop/input while the event is unsignalled or its deadline is pending.
+    // No guest thread can run until a signal or a timeout. Retry the same
+    // call after yielding outside the shared execution gate so other
+    // processes can run and signal it.
+    ctx.kernel.wait_retry_delay = Some(std::time::Duration::from_millis(1));
     Ok(DispatchOutcome::JumpTo(ctx.thunk.thunk_va))
 }
 
@@ -32915,6 +32917,7 @@ mod tests {
             worker_round_seen: Vec::new(),
             worker_preempt_after_ms: 0,
             wait_deadlines: std::collections::HashMap::new(),
+            wait_retry_delay: None,
             guest_fpscr: std::collections::HashMap::new(),
             timer_period_requests: std::collections::BTreeMap::new(),
             critical_sections: std::collections::HashMap::new(),
@@ -33303,6 +33306,43 @@ mod tests {
                 DispatchOutcome::ReturnedR0R1(0, expected)
             );
         }
+    }
+
+    #[test]
+    fn blocking_wait_yields_outside_the_gate_when_no_worker_can_run() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000100);
+        let handle = 0xdead8080;
+        kernel.events.insert(
+            handle,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: false,
+            },
+        );
+        cpu.write_reg(ArmReg::R0, handle).unwrap();
+        cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
+        assert_eq!(
+            ctx.kernel.wait_retry_delay.take(),
+            Some(std::time::Duration::from_millis(1))
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), handle);
+        ctx.kernel.events.get_mut(&handle).unwrap().signalled = true;
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert!(ctx.kernel.wait_retry_delay.is_none());
     }
 
     #[test]

@@ -1573,6 +1573,8 @@ pub struct KernelState {
     /// Finite wait deadlines keyed by guest thread, API thunk and caller SP.
     /// Re-entering a blocked call must not restart its timeout.
     pub wait_deadlines: HashMap<(usize, u32, u32), u64>,
+    /// Yield the host thread after dropping the shared execution gate.
+    pub wait_retry_delay: Option<std::time::Duration>,
     pub guest_fpscr: HashMap<usize, u32>,
     pub timer_period_requests: std::collections::BTreeMap<u32, u32>,
     /// Critical section address -> (owning guest thread index, recursion depth).
@@ -4334,22 +4336,36 @@ impl Process {
             cpu.map_region(dynamic_base, dynamic_size, Prot::READ | Prot::EXEC)?;
             for (index, (dll, name)) in dynamic_exports_to_add.into_iter().enumerate() {
                 let thunk_va = dynamic_base + index as u32 * THUNK_STRIDE;
-                // GetProcAddress must expose the same small-copy fast path
-                // as a static import; unrelated dynamic exports keep their
-                // existing dispatch behaviour.
-                let hybrid = if cpu.arch() == Arch::Mips {
+                // GetProcAddress can resolve CRT helpers by name or ordinal.
+                // Keep hot single-precision operations on the same ARM/VFP
+                // path as static imports (Ferrari GT uses the ordinal form).
+                let arm_ordinal_name =
+                    if cpu.arch() == Arch::Arm && dll.eq_ignore_ascii_case("coredll.dll") {
+                        name.strip_prefix('#')
+                            .or_else(|| name.strip_prefix("ord:"))
+                            .and_then(|ordinal| ordinal.parse().ok())
+                            .and_then(|ordinal| ordinal_resolver(&dll, ordinal))
+                    } else {
+                        None
+                    };
+                let arm_native_name = arm_ordinal_name.as_deref().unwrap_or(&name);
+                let native = if cpu.arch() == Arch::Mips {
                     native_thunks::mips_thunk_for(&dll, &name).map(|words| (None, words))
                 } else if cpu.arch() == Arch::Arm
                     && (native_thunks::hybrid_fallback_offset(&dll, &name).is_some()
                         || (dll.eq_ignore_ascii_case("coredll.dll")
-                            && matches!(name.as_str(), "__i64tod" | "__u64tod")))
+                            && (matches!(name.as_str(), "__i64tod" | "__u64tod")
+                                || matches!(
+                                    arm_native_name,
+                                    "__adds" | "__subs" | "__muls" | "__itos" | "__stoi"
+                                ))))
                 {
-                    native_thunks::native_thunk_at(&dll, &name, thunk_va)
+                    native_thunks::native_thunk_at(&dll, arm_native_name, thunk_va)
                         .map(|words| (native_thunks::hybrid_fallback_offset(&dll, &name), words))
                 } else {
                     None
                 };
-                if let Some((offset, words)) = hybrid {
+                if let Some((offset, words)) = native {
                     cpu.write_mem(thunk_va, &native_thunks::thunk_bytes(&words))?;
                     if let Some(offset) = offset {
                         let fallback = thunk_va + offset;
@@ -4690,6 +4706,7 @@ impl Process {
                 worker_round_seen: Vec::new(),
                 worker_preempt_after_ms: 0,
                 wait_deadlines: HashMap::new(),
+                wait_retry_delay: None,
                 guest_fpscr: std::collections::HashMap::new(),
                 timer_period_requests: std::collections::BTreeMap::new(),
                 critical_sections: HashMap::new(),
@@ -5542,7 +5559,9 @@ pub fn run_main_loop_with_hook(
         } // Drop the shared API gate before frontend hooks or child startup.
           // An idle/suspended process must not sleep while owning the domain's
           // API gate: its parent needs that gate to issue ResumeThread/Terminate.
-        if pc == THREAD_SCHEDULER_IDLE_VA {
+        if let Some(delay) = process.state.wait_retry_delay.take() {
+            std::thread::sleep(delay);
+        } else if pc == THREAD_SCHEDULER_IDLE_VA {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         if let Some(hook) = frame_hook.as_deref_mut() {
@@ -6808,6 +6827,55 @@ mod tests {
         // The alias window is present and readable.
         cpu.read_mem(SLOT_ALIAS_BASE + 0x1000, 4)
             .expect("slot alias window must be mapped for a high-based image");
+    }
+
+    #[test]
+    fn dynamic_arm_float_exports_use_the_static_thunk_by_name_and_ordinal() {
+        struct MathExports;
+
+        impl Dispatcher for MathExports {
+            fn dispatch(
+                &mut self,
+                _cpu: &mut dyn Cpu,
+                _thunk: &Thunk,
+                _kernel: &mut KernelState,
+            ) -> Result<DispatchOutcome, KernelError> {
+                panic!("this test only maps exports");
+            }
+
+            fn dynamic_names(&self, dll: &str) -> Vec<String> {
+                if dll == "coredll.dll" {
+                    ["__muls", "#2026", "ord:2026", "#2027"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+
+        let mut cpu = StubCpu::new();
+        let process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|dll, ordinal| match (dll, ordinal) {
+                ("coredll.dll", 2026) => Some("__muls".into()),
+                ("coredll.dll", 2027) => Some("__muld".into()),
+                _ => None,
+            },
+            &MathExports,
+        )
+        .unwrap();
+        let exports = &process.state.dynamic_exports[&0x1000_0000];
+        let expected = native_thunks::thunk_bytes(
+            &native_thunks::native_thunk_for("coredll.dll", "__muls").unwrap(),
+        );
+        for name in ["__muls", "#2026", "ord:2026"] {
+            assert_eq!(cpu.read_mem(exports[name], THUNK_STRIDE).unwrap(), expected);
+        }
+        let stub = return_stub_bytes(Arch::Arm);
+        assert_eq!(cpu.read_mem(exports["#2027"], 8).unwrap(), stub);
     }
 
     #[test]

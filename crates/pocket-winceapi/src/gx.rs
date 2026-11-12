@@ -678,6 +678,7 @@ pub(crate) mod tests {
             worker_round_seen: Vec::new(),
             worker_preempt_after_ms: 0,
             wait_deadlines: std::collections::HashMap::new(),
+            wait_retry_delay: None,
             guest_fpscr: std::collections::HashMap::new(),
             timer_period_requests: std::collections::BTreeMap::new(),
             critical_sections: std::collections::HashMap::new(),
