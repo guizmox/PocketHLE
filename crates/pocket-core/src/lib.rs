@@ -447,6 +447,9 @@ impl Emulator {
     pub fn set_module_path(&mut self, path: impl Into<String>) {
         let path = path.into();
         if let Some(p) = self.process.as_mut() {
+            p.state
+                .object_handles
+                .set_process_image(&path, p.state.image_base);
             p.state.module_path = path;
         } else {
             log::warn!("set_module_path called before load_pe; ignored");

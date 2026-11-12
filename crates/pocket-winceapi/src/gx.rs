@@ -708,6 +708,7 @@ pub(crate) mod tests {
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),
             next_msg_queue_handle: 0xDEAD_E500,
+            registry_notifications: Default::default(),
             power_notifications: Default::default(),
             device_notification_queues: Default::default(),
             next_device_notification: 0xda80_0000,

@@ -516,8 +516,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "calloc", calloc);
     d.register_handler(dll, "free", free);
     d.register_handler(dll, "realloc", realloc);
-    d.register_handler(dll, "_new", malloc);
-    d.register_handler(dll, "_delete", free);
+    d.register_handler(dll, "_new", operator_new);
+    d.register_handler(dll, "_delete", operator_delete);
     // MSVC-mangled C++ scalar new/delete:
     //   ??2@YAPAXI@Z  = void* operator new(unsigned int)
     //   ??3@YAXPAX@Z  = void  operator delete(void*)
@@ -527,11 +527,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     // MFC for CE3 exports the same global allocation ABI by ordinal315.
     d.register_handler("mfcce300.dll", "??2@YAPAXI@Z", operator_new);
     d.register_handler("mfcce300.dll", "ord:315", operator_new);
-    d.register_handler("mfcce300.dll", "??3@YAXPAX@Z", free);
-    d.register_handler("mfcce300.dll", "ord:317", free);
-    d.register_handler(dll, "??3@YAXPAX@Z", free);
+    d.register_handler("mfcce300.dll", "??3@YAXPAX@Z", operator_delete);
+    d.register_handler("mfcce300.dll", "ord:317", operator_delete);
+    d.register_handler(dll, "??3@YAXPAX@Z", operator_delete);
     d.register_handler(dll, "??_U@YAPAXI@Z", operator_new);
-    d.register_handler(dll, "??_V@YAXPAX@Z", free);
+    d.register_handler(dll, "??_V@YAXPAX@Z", operator_delete);
 
     // ---- Resources ----
     d.register_handler(dll, "FindResourceW", find_resource_w);
@@ -4654,6 +4654,8 @@ fn get_module_handle_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
         0x1000_0002
     } else if name == "ddraw.dll" || name == "ddraw" {
         pocket_kernel::DDRAW_MODULE_HANDLE
+    } else if name == "toolhelp.dll" || name == "toolhelp" {
+        pocket_kernel::TOOLHELP_MODULE_HANDLE
     } else if name == "note_prj.dll" || name == "note_prj" {
         pocket_kernel::NOTE_PRJ_MODULE_HANDLE
     } else if name == "wininet.dll" || name == "wininet" {
@@ -4777,6 +4779,11 @@ fn load_library(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if name.ends_with("coredll.dll") || name == "coredll" {
         log::debug!("LoadLibraryW({name:?}) -> 0x{FAKE_MODULE_HANDLE:08x}");
         return Ok(DispatchOutcome::ReturnedR0(FAKE_MODULE_HANDLE));
+    }
+    if name == "toolhelp.dll" || name == "toolhelp" {
+        return Ok(DispatchOutcome::ReturnedR0(
+            pocket_kernel::TOOLHELP_MODULE_HANDLE,
+        ));
     }
     if name.ends_with("aygshell.dll") || name == "aygshell" {
         let handle = if ctx
@@ -10926,7 +10933,13 @@ fn malloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn operator_new(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let size = ctx.arg_u32(0)?;
-    do_alloc(ctx, size)
+    allocate_zeroed(ctx, size, pocket_kernel::Heap::alloc_cpp)
+}
+
+fn operator_delete(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    do_free(ctx, pointer);
+    Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 fn calloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -10937,9 +10950,9 @@ fn calloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
-    if p != 0 {
-        do_free(ctx, p);
-    }
+    // A stale CRT free can otherwise reclaim an unrelated C++ object when
+    // the common heap reuses a block (Shift's audio plug-in does this).
+    ctx.kernel.heap.free_crt(p);
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
@@ -10954,7 +10967,15 @@ fn realloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// `LocalSize` / `_msize` / `do_free` / `do_realloc` can recover it
 /// later without trusting guest memory.
 pub(crate) fn do_alloc(ctx: &mut CallCtx<'_>, size: u32) -> Result<DispatchOutcome, KernelError> {
-    let user_ptr = match ctx.kernel.heap.alloc(size) {
+    allocate_zeroed(ctx, size, pocket_kernel::Heap::alloc)
+}
+
+fn allocate_zeroed(
+    ctx: &mut CallCtx<'_>,
+    size: u32,
+    allocate: fn(&mut pocket_kernel::Heap, u32) -> Option<u32>,
+) -> Result<DispatchOutcome, KernelError> {
+    let user_ptr = match allocate(&mut ctx.kernel.heap, size) {
         Some(p) => p,
         None => {
             log::warn!("heap exhausted; alloc({size}) failed");
@@ -12039,11 +12060,17 @@ fn create_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     let name = ctx.arg_u32(0)?;
     let options = ctx.arg_u32(1)?;
     let (max_messages, max_message_size, read_access) = read_msg_queue_options(ctx, options)?;
+    let queue_name = if name == 0 {
+        None
+    } else {
+        Some(String::from_utf16_lossy(&read_wstr(ctx, name, 260)?))
+    };
     let handle = ctx.kernel.next_msg_queue_handle;
     ctx.kernel.next_msg_queue_handle = ctx.kernel.next_msg_queue_handle.wrapping_add(1);
     ctx.kernel.msg_queues.insert(
         handle,
         pocket_kernel::MsgQueue {
+            name: queue_name,
             max_messages: max_messages.max(1),
             max_message_size: max_message_size.max(1),
             read_access,
@@ -12356,6 +12383,7 @@ fn open_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     ctx.kernel.next_msg_queue_handle = ctx.kernel.next_msg_queue_handle.wrapping_add(1);
     let (_, _, read_access) = read_msg_queue_options(ctx, options)?;
     let queue = pocket_kernel::MsgQueue {
+        name: None,
         max_messages: source.0,
         max_message_size: source.1,
         read_access,
@@ -32283,6 +32311,7 @@ mod tests {
         kernel.msg_queues.insert(
             1,
             pocket_kernel::MsgQueue {
+                name: None,
                 max_messages: 4,
                 max_message_size: 36,
                 read_access: true,
@@ -32833,6 +32862,7 @@ mod tests {
             posted_messages: Default::default(),
             msg_queues: std::collections::HashMap::new(),
             next_msg_queue_handle: 0xDEAD_E500,
+            registry_notifications: Default::default(),
             power_notifications: Default::default(),
             device_notification_queues: Default::default(),
             next_device_notification: 0xda80_0000,
@@ -34332,6 +34362,37 @@ mod tests {
         c.cpu.write_reg(ArmReg::R0, p).unwrap();
         let _ = free(&mut c).unwrap();
         assert_eq!(c.kernel.heap.free_bytes(), initial_free);
+    }
+
+    #[test]
+    fn stale_c_free_cannot_reclaim_a_reused_cpp_allocation() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.map_region(0x5000_0000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut api = |name, arg| {
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                name,
+                &[arg],
+            )
+        };
+        let DispatchOutcome::ReturnedR0(pointer) = api("malloc", 512) else {
+            panic!("expected allocation");
+        };
+        assert_ne!(pointer, 0);
+        assert_eq!(api("free", pointer), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(
+            api("??2@YAPAXI@Z", 20),
+            DispatchOutcome::ReturnedR0(pointer)
+        );
+        assert_eq!(api("free", pointer), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(api("_msize", pointer), DispatchOutcome::ReturnedR0(20));
+        assert_eq!(api("??3@YAXPAX@Z", pointer), DispatchOutcome::ReturnedR0(0));
+        assert_eq!(api("malloc", 512), DispatchOutcome::ReturnedR0(pointer));
     }
 
     #[test]

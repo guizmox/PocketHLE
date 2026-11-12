@@ -329,6 +329,7 @@ mod notification_tests {
         HashMap::from([(
             1,
             crate::MsgQueue {
+                name: None,
                 max_messages: capacity,
                 max_message_size: 36,
                 read_access: true,

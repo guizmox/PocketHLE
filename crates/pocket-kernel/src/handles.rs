@@ -31,6 +31,21 @@ struct ThreadControl {
     ce_priority: u8,
     suspend_count: u32,
 }
+pub struct ProcessSnapshotEntry {
+    pub pid: u32,
+    pub path: String,
+    pub image_base: u32,
+    pub threads: Vec<u32>,
+}
+
+#[derive(Default)]
+pub struct ToolhelpSnapshot {
+    pub processes: Vec<Vec<u8>>,
+    pub threads: Vec<Vec<u8>>,
+    pub process_cursor: Option<usize>,
+    pub thread_cursor: Option<usize>,
+}
+
 #[derive(Default)]
 struct Domain {
     api_gate: Arc<Mutex<()>>,
@@ -44,6 +59,8 @@ struct Domain {
     next: u32,
     next_pid: u32,
     active: HashSet<u32>,
+    process_images: HashMap<u32, (String, u32)>,
+    toolhelp_snapshots: HashMap<(u32, u32), ToolhelpSnapshot>,
     exits: HashMap<(u32, Option<usize>), u32>,
     deferred_process_exits: HashSet<u32>,
     child_ids: HashMap<u32, u32>,
@@ -85,6 +102,82 @@ impl HandleTable {
     pub fn process_id(&self) -> u32 {
         self.pid
     }
+    pub fn set_process_image(&self, path: &str, image_base: u32) {
+        self.domain
+            .lock()
+            .unwrap()
+            .process_images
+            .insert(self.pid, (path.to_owned(), image_base));
+    }
+
+    pub fn snapshot_processes(&self) -> Vec<ProcessSnapshotEntry> {
+        let domain = self.domain.lock().unwrap();
+        let mut processes = Vec::new();
+        for (&pid, (path, image_base)) in &domain.process_images {
+            if !domain.active.contains(&pid) || domain.held_start.contains(&pid) {
+                continue;
+            }
+            let mut threads: Vec<_> = domain
+                .threads
+                .iter()
+                .filter(|&(&(owner, index), _)| {
+                    owner == pid && !domain.exits.contains_key(&(pid, Some(index)))
+                })
+                .map(|(_, thread)| thread.tid)
+                .collect();
+            threads.sort_unstable();
+            processes.push(ProcessSnapshotEntry {
+                pid,
+                path: path.clone(),
+                image_base: *image_base,
+                threads,
+            });
+        }
+        processes.sort_unstable_by_key(|process| process.pid);
+        processes
+    }
+
+    pub fn add_toolhelp_snapshot(&self, snapshot: ToolhelpSnapshot) -> Option<u32> {
+        let mut domain = self.domain.lock().unwrap();
+        if domain
+            .toolhelp_snapshots
+            .keys()
+            .filter(|&&(pid, _)| pid == self.pid)
+            .count()
+            >= 256
+        {
+            return None;
+        }
+        let handle = domain.next;
+        domain.next = handle.checked_add(1)?;
+        domain
+            .toolhelp_snapshots
+            .insert((self.pid, handle), snapshot);
+        Some(handle)
+    }
+
+    pub fn with_toolhelp_snapshot<T>(
+        &self,
+        handle: u32,
+        f: impl FnOnce(&mut ToolhelpSnapshot) -> T,
+    ) -> Option<T> {
+        self.domain
+            .lock()
+            .unwrap()
+            .toolhelp_snapshots
+            .get_mut(&(self.pid, handle))
+            .map(f)
+    }
+
+    pub fn close_toolhelp_snapshot(&self, handle: u32) -> bool {
+        self.domain
+            .lock()
+            .unwrap()
+            .toolhelp_snapshots
+            .remove(&(self.pid, handle))
+            .is_some()
+    }
+
     pub fn execution_gate(&self) -> Arc<Mutex<()>> {
         self.domain.lock().unwrap().api_gate.clone()
     }
@@ -445,6 +538,8 @@ impl HandleTable {
     pub fn mark_inactive(&self) {
         let mut d = self.domain.lock().unwrap();
         d.active.remove(&self.pid);
+        d.process_images.remove(&self.pid);
+        d.toolhelp_snapshots.retain(|&(pid, _), _| pid != self.pid);
         d.held_start.remove(&self.pid);
         d.process_kills.remove(&self.pid);
         d.updates.retain(|(pid, _), _| *pid != self.pid);

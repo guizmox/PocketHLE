@@ -17,6 +17,9 @@
     "83": "SHHandleWMSettingChange",
     "84": "SHHandleWMActivate",
     "97": "SHSendBackToFocusWindow",
-    "188": "SHFindMenuBar"
+    "188": "SHFindMenuBar",
+    "333": "RegistryGetDWORD",
+    "340": "RegistryNotifyMsgQueue",
+    "341": "RegistryCloseNotification"
   }
 }

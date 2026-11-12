@@ -1463,3 +1463,67 @@ mod tests {
         assert_eq!(next.value(key, "Owner"), Some(baseline));
     }
 }
+
+/// Windows Mobile registry subscriptions with a named message queue destination.
+#[derive(Default)]
+pub struct QueueNotifications {
+    next: u32,
+    entries: HashMap<u32, QueueSubscription>,
+}
+
+pub struct QueueSubscription {
+    pub path: String,
+    pub value: String,
+    pub queue: String,
+    pub user_data: u32,
+    pub previous: Option<RegistryValue>,
+}
+
+impl QueueNotifications {
+    pub fn register(&mut self, subscription: QueueSubscription) -> Option<u32> {
+        if self.entries.len() >= 1024 || self.next >= 0x000f_ffff {
+            return None;
+        }
+        self.next += 1;
+        let handle = 0xda80_0000 + self.next;
+        self.entries.insert(handle, subscription);
+        Some(handle)
+    }
+
+    pub fn close(&mut self, handle: u32) -> bool {
+        self.entries.remove(&handle).is_some()
+    }
+
+    pub fn deliver(&mut self, registry: &Registry, queues: &mut HashMap<u32, crate::MsgQueue>) {
+        for (&handle, subscription) in &mut self.entries {
+            let value = registry.value(&subscription.path, &subscription.value);
+            if value == subscription.previous {
+                continue;
+            }
+            let Some(queue) = queues.values_mut().find(|queue| {
+                queue.read_access
+                    && queue
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name == subscription.queue)
+            }) else {
+                continue;
+            };
+            let bytes = value
+                .as_ref()
+                .map_or_else(Vec::new, RegistryValue::to_bytes);
+            if queue.messages.len() >= queue.max_messages as usize
+                || 12 + bytes.len() > queue.max_message_size as usize
+            {
+                continue;
+            }
+            let mut message = Vec::with_capacity(12 + bytes.len());
+            message.extend_from_slice(&handle.to_le_bytes());
+            message.extend_from_slice(&subscription.user_data.to_le_bytes());
+            message.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            message.extend_from_slice(&bytes);
+            queue.messages.push_back(message);
+            subscription.previous = value;
+        }
+    }
+}

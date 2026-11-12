@@ -1636,6 +1636,7 @@ pub struct KernelState {
     pub posted_messages: VecDeque<(u32, u32, u32, u32)>,
     pub msg_queues: HashMap<u32, MsgQueue>,
     pub next_msg_queue_handle: u32,
+    pub registry_notifications: registry::QueueNotifications,
     pub power_notifications: power::Notifications,
     /// Device-interface registrations, keyed by notification handle.
     pub device_notification_queues: HashMap<u32, u32>,
@@ -1754,6 +1755,8 @@ impl KernelState {
 
     /// Colors writes the shared device registry from its own brightness slider.
     pub fn sync_power_notifications(&mut self) {
+        self.registry_notifications
+            .deliver(&self.registry, &mut self.msg_queues);
         if !self.power_notifications.is_empty() || !self.battery_alerts.is_empty() {
             let current = power::status(false);
             self.power_notifications
@@ -3012,7 +3015,7 @@ pub struct Heap {
     /// not accidentally corrupt the bookkeeping by writing past its
     /// own buffer (Pocket PC games do this all the time). It also lets
     /// `Heap::msize(p)` answer in O(1).
-    live: HashMap<u32, u32>,
+    live: HashMap<u32, LiveAllocation>,
     ram: Option<memory_division::MemoryDivision>,
     image_memory: std::sync::Arc<image_memory::ImageMemory>,
     page_refs: HashMap<u32, u32>,
@@ -3046,6 +3049,12 @@ const HEAP_ALIGN: u32 = 8;
 // This is address space, not additional emulated physical RAM.
 const HOST_VIRTUAL_BASE: u32 = 0x5400_0000;
 const HOST_VIRTUAL_END: u32 = 0x5f00_0000;
+
+#[derive(Debug)]
+struct LiveAllocation {
+    size: u32,
+    cpp: bool,
+}
 
 impl Heap {
     pub fn new(base: u32, size: u32) -> Self {
@@ -3149,6 +3158,14 @@ impl Heap {
     /// Return the user pointer (after the 8-byte header), or `None`
     /// if the heap has no large-enough free block.
     pub fn alloc(&mut self, requested: u32) -> Option<u32> {
+        self.alloc_with_origin(requested, false)
+    }
+
+    pub fn alloc_cpp(&mut self, requested: u32) -> Option<u32> {
+        self.alloc_with_origin(requested, true)
+    }
+
+    fn alloc_with_origin(&mut self, requested: u32, cpp: bool) -> Option<u32> {
         let need = requested.max(1).checked_add(HEAP_ALIGN - 1)? & !(HEAP_ALIGN - 1);
         let need = need.checked_add(HEAP_HEADER_BYTES)?;
         for i in 0..self.free.len() {
@@ -3163,7 +3180,13 @@ impl Heap {
                     self.free[i] = (start + need, sz - need);
                 }
                 let user_ptr = start + HEAP_HEADER_BYTES;
-                self.live.insert(user_ptr, requested);
+                self.live.insert(
+                    user_ptr,
+                    LiveAllocation {
+                        size: requested,
+                        cpp,
+                    },
+                );
                 return Some(user_ptr);
             }
         }
@@ -3173,26 +3196,40 @@ impl Heap {
     /// Look up the user-requested size of `user_ptr`, or `None` if the
     /// pointer is not the result of a still-live `Heap::alloc`.
     pub fn msize(&self, user_ptr: u32) -> Option<u32> {
-        self.live.get(&user_ptr).copied()
+        self.live.get(&user_ptr).map(|allocation| allocation.size)
     }
 
     /// Free a previously allocated chunk. The size is recovered from
     /// our live-block table; if the caller passes a bogus pointer we
     /// log and ignore.
     pub fn free(&mut self, user_ptr: u32) {
+        self.free_with_origin(user_ptr, true);
+    }
+
+    /// C free must not reclaim an object owned by C++ operator delete.
+    pub fn free_crt(&mut self, user_ptr: u32) {
+        self.free_with_origin(user_ptr, false);
+    }
+
+    fn free_with_origin(&mut self, user_ptr: u32, allow_cpp: bool) {
         if user_ptr == 0 {
             return;
         }
-        let Some(user_size) = self.live.remove(&user_ptr) else {
+        let std::collections::hash_map::Entry::Occupied(entry) = self.live.entry(user_ptr) else {
             log::warn!("heap.free: unknown pointer 0x{user_ptr:08x} (double free?)");
             return;
         };
+        if !allow_cpp && entry.get().cpp {
+            log::debug!("free ignored for C++ allocation 0x{user_ptr:08x}");
+            return;
+        }
+        let allocation = entry.remove();
         if user_ptr < self.base + HEAP_HEADER_BYTES {
             log::warn!("heap.free: ignoring out-of-range pointer 0x{user_ptr:08x}");
             return;
         }
         let block_start = user_ptr - HEAP_HEADER_BYTES;
-        let block_size = Self::align_up(user_size.max(1)) + HEAP_HEADER_BYTES;
+        let block_size = Self::align_up(allocation.size.max(1)) + HEAP_HEADER_BYTES;
         if !self.regions.iter().any(|&(base, size)| {
             block_start >= base
                 && block_start
@@ -3822,6 +3859,7 @@ pub const DDRAW_MODULE_HANDLE: u32 = 0x1000_0003;
 pub const HSS_MODULE_HANDLE: u32 = 0x1000_0006;
 /// Fake HMODULE for the resident `aygshell.dll` compatibility module.
 pub const AYGSHELL_MODULE_HANDLE: u32 = 0x1000_0008;
+pub const TOOLHELP_MODULE_HANDLE: u32 = 0x1000_000f;
 
 /// The whole emulated process state owned by the kernel.
 fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>> {
@@ -3866,6 +3904,11 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
             if let ImportBinding::Ordinal(ord) = &thunk.binding {
                 aygshell.insert(format!("#{ord}"), thunk.thunk_va);
             }
+        } else if thunk.dll.eq_ignore_ascii_case("toolhelp.dll") {
+            exports
+                .entry(TOOLHELP_MODULE_HANDLE)
+                .or_insert_with(HashMap::new)
+                .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("htcsensorsdk.dll") {
             exports
                 .entry(HTCSENSOR_MODULE_HANDLE)
@@ -4212,6 +4255,7 @@ impl Process {
             "ws2.dll",
             "wininet.dll",
             "note_prj.dll",
+            "toolhelp.dll",
         ] {
             dynamic_exports_to_add.extend(
                 dispatcher
@@ -4616,6 +4660,7 @@ impl Process {
                 posted_messages: Default::default(),
                 msg_queues: HashMap::new(),
                 next_msg_queue_handle: 0xDEAD_E500,
+                registry_notifications: Default::default(),
                 power_notifications: Default::default(),
                 device_notification_queues: Default::default(),
                 next_device_notification: 0xda80_0000,
@@ -5020,14 +5065,15 @@ pub fn run_main_loop_with_hook(
                             "{label} memory: addr=0x{address:08x}, virtual reservation=0x{base:08x}+0x{size:x}, page_committed={}, committed_pages={}",
                             committed.contains(&(address / 4096)), committed.len()
                         );
-                    } else if let Some((&base, &size)) =
-                        process.state.heap.live.iter().find(|&(base, size)| {
+                    } else if let Some((&base, allocation)) =
+                        process.state.heap.live.iter().find(|&(base, allocation)| {
                             address >= *base
                                 && address
                                     .checked_sub(*base)
-                                    .is_some_and(|offset| offset < *size)
+                                    .is_some_and(|offset| offset < allocation.size)
                         })
                     {
+                        let size = allocation.size;
                         log::error!("{label} memory: addr=0x{address:08x}, live heap allocation=0x{base:08x}+0x{size:x}");
                     } else {
                         log::error!("{label} memory: addr=0x{address:08x}, no matching tracked heap allocation or virtual reservation");
@@ -6771,6 +6817,7 @@ mod tests {
 
 #[derive(Debug, Default)]
 pub struct MsgQueue {
+    pub name: Option<String>,
     pub max_messages: u32,
     pub max_message_size: u32,
     pub read_access: bool,

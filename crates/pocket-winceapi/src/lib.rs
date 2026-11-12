@@ -22,6 +22,7 @@
 mod accelerators;
 mod acm;
 pub mod aygshell;
+mod toolhelp;
 #[cfg(test)]
 mod backlight_tests;
 mod bluetooth;
@@ -311,6 +312,7 @@ impl WinCeDispatcher {
         legacy_services::register(&mut d);
         ddraw::register(&mut d);
         aygshell::register(&mut d);
+        toolhelp::register(&mut d);
         commctrl::register(&mut d);
         copilot::register(&mut d);
         scroll::register(&mut d);
