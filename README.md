@@ -75,16 +75,17 @@ PocketHLE can currently:
 * intercept imported Windows CE DLL calls through HLE thunks;
 * provide ordinal-to-name resolution for `coredll.dll` and `aygshell.dll`;
 * emulate core windowing, GDI, GAPI, registry, filesystem, timing, input and audio paths;
-* present GDI and GAPI software framebuffers and use the host GPU by default for OpenGL ES, with a software fallback when the GPU backend is unavailable;
+* present GDI and GAPI software framebuffers, use host OpenGL by default for GLES 1.x with a PocketHLE software fallback, and use host OpenGL for GLES 2.0;
 * keep supported OpenGL ES frames on the GPU from rendering through desktop presentation, avoiding CPU pixel readback and re-upload;
 * run a shared game library with per-game settings on desktop and Android;
 * build Linux, Windows and Android artifacts through GitHub Actions.
 
 The desktop frontend offers fullscreen (F12), screenshots (F10), video
-recording (F11), and separate VSync and game FPS settings. Supported 320×240
-GLES titles can use higher internal resolutions, independently of display
-scaling. The Android frontend offers per-game settings, orientation controls
-and on-screen controls. See the [frontend guide](docs/FRONTENDS.md) and
+recording (F11), and separate VSync and game FPS settings. Desktop and Android
+offer global GLES 1.x rendering options. The host OpenGL path supports Native,
+2×, 3× and 4× internal resolution, with a checkbox to include surfaces other
+than 320×240 and 240×320. The Android frontend offers per-game settings,
+orientation controls and on-screen controls. See the [frontend guide](docs/FRONTENDS.md) and
 [GPU guide](docs/GPU.md) for platform-specific behavior.
 
 Gizmondo profiles can use host Bluetooth Classic for supported RFCOMM workflows.

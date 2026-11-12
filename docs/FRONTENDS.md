@@ -19,9 +19,16 @@ fields. Device/platform settings, renderer choice and frame limits apply at the
 next launch unless an individual live control explicitly says otherwise.
 
 Host optimizations are permanently active; no user optimization switches remain.
-See [always-on execution optimizations](AGENTS.md#always-on-execution-optimizations). GPU/software renderer selection is a
-separate supported choice. Frame-limit inheritance and filters are defined in
-[GPU.md](GPU.md), not duplicated here.
+See [always-on execution optimizations](AGENTS.md#always-on-execution-optimizations).
+In the global graphics settings, **GPU rendering** selects host OpenGL or the
+PocketHLE software rasterizer for GLES 1.x. With host OpenGL enabled,
+**OpenGL ES internal resolution (GPU only)** offers **Native**, **2×**, **3×**
+and **4×**. Enable **Apply to all resolutions, including sizes other than
+320×240** to extend the chosen multiplier beyond 320×240 and 240×320 surfaces.
+The per-game **GPU compatibility profile** controls the guest API, and
+**Generic OpenGL ES (2.0, Common)** uses host OpenGL. A fresh Pocket PC import
+selects it when the executable imports `libGLESv2.dll`. See [GPU.md](GPU.md)
+for frame-limit inheritance and filters.
 
 PocketPC options holds the global PocketPC processor/device identity fields;
 Gizmondo options holds its hardware activations. Stylus speed remains in the
@@ -47,10 +54,11 @@ flags remember completion independently, including after games are removed.
 
 Desktop and Android offer Gizmondo supersampling and camera, Bluetooth, GPS and
 Internet/data bridges, initialized from the saved configuration. Supersampling
-uses the existing global OpenGL ES setting: enabling it starts at 2x unless a
-higher scale is already selected, and enables GPU rendering. It can also affect
-PocketPC GPU games; individual game renderer overrides remain effective. Hardware
-choices do not bypass host permissions.
+uses the global OpenGL ES setting. Enabling it from **Native** selects **2×**
+for 320×240 and 240×320 surfaces and enables **GPU rendering**. An existing
+multiplier and resolution scope are preserved. The same global options apply
+to Pocket PC games using the GLES 1.x host OpenGL path. Hardware choices
+remain subject to host permissions.
 
 Android additionally offers Gizmondo Normal/Big directional controls and control
 overlap. **Big controls can reduce the game image size.** Allowing overlap keeps

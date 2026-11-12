@@ -26,9 +26,9 @@ not silently hidden by continuing with stale software depth or color state.
 
 ## Renderer identity
 
-Guest `glGetString(GL_RENDERER)` returns the active host OpenGL renderer name
-when a native renderer exists, or `PocketHLE Software Rasterizer` in PocketHLE's
-software mode. The host name is captured once during renderer initialization
+For GLES 1.x, guest `glGetString(GL_RENDERER)` returns the active host OpenGL
+renderer name when a native renderer exists, or `PocketHLE Software Rasterizer`
+in PocketHLE's software mode. The host name is captured once during renderer initialization
 and follows the current EGL surface's renderer; querying it does not bind a
 context or synchronize GPU work. Guest strings retain the existing process-owned
 allocation cache, so earlier returned pointers survive a backend change.
@@ -38,6 +38,11 @@ software renderer such as llvmpipe when present; it is not a host GPU inventory.
 Guest `GL_VENDOR`, `GL_VERSION` and extensions still describe PocketHLE's emulated
 API. The shared implementation applies to desktop and Android. Games which
 branch on renderer-name substrings can consequently select different paths.
+
+The GLES 2.0 guest renderer string is `Adreno 200 (PocketHLE)`. The
+**Generic OpenGL ES (2.0, Common)** settings label identifies the profile.
+The guest renderer string identifies the compatibility target, independently
+of whether host OpenGL runs on a GPU or through a software driver.
 
 ## Authority and lifetimes
 
@@ -63,7 +68,8 @@ branch on renderer-name substrings can consequently select different paths.
 
 PocketPC games select **GPU compatibility profile** in their own **Graphics**
 settings on desktop and Android. The global **GPU rendering** option selects the
-GLES 1.x backend for all games.
+GLES 1.x backend for all games. Older per-game `gpu_renderer` values are ignored
+on load and removed when the game settings are saved.
 
 | Profile | Compatibility behavior |
 | --- | --- |
@@ -357,7 +363,9 @@ three different quantities. In **Emulator Options**, the GLES 1.x host OpenGL
 backend offers **Native**, **2×**, **3×** and **4×**. By default, a multiplier
 applies only to 320×240 and 240×320 surfaces. Check **Apply to all resolutions,
 including sizes other than 320×240** to apply the same multiplier to all
-supported surface sizes. Changes apply the next time a game launches.
+supported surface sizes. The checkbox is disabled at **Native**. A surface
+stays at its native size if enlargement would exceed the renderer's
+dimension limit. Changes apply the next time a game launches.
 
 | Serialized value | Multiplier | Surface sizes |
 | --- | --- | --- |

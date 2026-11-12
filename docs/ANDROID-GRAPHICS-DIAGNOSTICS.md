@@ -25,11 +25,13 @@ next game launch. It is independent of rendering mode, FPS/IPS and frame limits.
 Turn it off after collecting the report. Verbosity 2/3 is unnecessary and its
 existing per-call debug logs can distort measurements.
 
-Only two runs are needed. Use the same game, scene, native internal resolution
-and filter for both; disable optional IPS measurement and recording to avoid
-those changing the presentation path. Run approximately 20 seconds of intro and
-20 seconds of gameplay in software, then repeat with GPU rendering. Keep the
-phone's power mode unchanged. Collect both runs in one log:
+To compare renderers, use a GLES 1.x game and set **OpenGL ES internal
+resolution (GPU only)** to **Native** in the global graphics settings. Use the
+same game, scene and filter for both runs. Run approximately 20 seconds of
+intro and 20 seconds of gameplay with global **GPU rendering** off, then
+enable it and relaunch the game for the second run. Keep the phone's power
+mode unchanged. The **Generic OpenGL ES (2.0, Common)** profile uses host
+OpenGL, so collect a host OpenGL run for GLES 2.0 diagnostics.
 
 ```bat
 adb logcat -c
