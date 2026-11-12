@@ -225,7 +225,7 @@ load path. In order:
    the slot-0 alias window.
 3. Map the thunk pool, one `THUNK_STRIDE`-byte slot per import.
 4. Map the User KData page and prime the tick fields.
-5. For each import, pick **one** of the three strategies below and write
+5. For each import, pick **one** of the four strategies below and write
    the resulting address into `iat_va`.
 6. Register dynamic exports so `GetProcAddress` can resolve names that
    were never in the import directory.
@@ -234,14 +234,14 @@ The strategies, in the order they are tried:
 
 | Order | Strategy | Condition | Cost |
 | --- | --- | --- | --- |
-| 1 | **Native ARM/VFP code** written into the thunk slot | `native_thunks::native_thunk_for` returns code. Gated on `dll.eq_ignore_ascii_case("coredll.dll")` (`native_thunks.rs:225`) and **never** used for MIPS. | Zero host round-trips. `memcpy`, `strlen`, float helpers. |
+| 1 | **Native guest code** written into the thunk slot | The architecture-specific thunk generator supports the import. ARM COREDLL helpers can use ARM/VFP instructions; MIPS has its own native thunk table. | The native path runs without a host round trip. Hybrid memory helpers trap only on the fallback path. |
 | 2 | **Constant return**: `mov r0, #imm; bx lr` | Native declined *and* `cpu.arch() == Arm` *and* `Dispatcher::constant_for` answers. | Zero host round-trips. Derby's imports hit this ~33% of the time. |
-| 3 | **CPU-local exact 64-bit arithmetic** | ARM COREDLL `__rt_{s,u}{div,rem}64by64` on supported backends; static, ordinal and dynamic imports share installation. | Unicorn stops internally, calculates while stopped, resumes through padded `bx lr`, skipping kernel dispatch. Preserve the original slice deadline and clear hooks on unmap. |
+| 3 | **CPU-local register arithmetic** | ARM COREDLL wide division, remainder and conversion helpers, plus double-precision `sqrt`, `sin` and `cos`, on supported backends. | A Unicorn code callback computes the result and continues through a padded `bx lr` within the same backend run. The original slice deadline and guest floating-point state are preserved. Hooks are removed with their mappings. |
 | 4 | **`bx lr` + code hook** → Rust `Handler` | Everything else. `ARM_BX_LR` = `[0x1e, 0xff, 0x2f, 0xe1]`; MIPS gets `MIPS_JR_RA`. | One host call per guest call. |
 
 Strategy 2 is why invariant 2 exists: `constant_for` is consulted once,
-at load time, and its answer is frozen into guest memory. A handler whose
-return value depends on mutable state must be strategy 4.
+at load time, and its answer is frozen into guest memory. Reserve this strategy
+for answers that are independent of mutable state.
 
 The dynamic-export DLL list in step 6 is hard-coded at
 `crates/pocket-kernel/src/lib.rs:1620`: `coredll.dll`, `commctrl.dll`,
@@ -1093,6 +1093,11 @@ Respect the most specific mount and canonical path boundary, including read-only
 overlays and symlinks. Find records carry the same attributes as attribute queries.
 Extra attributes are shared session state, not persistent filesystem metadata.
 
+VFS resolves exact paths across the eligible mounts before trying the recursive
+fallback. A read-only mount lazily keeps a list of candidate files for repeated
+fallback lookups. The ranking and ambiguity checks still run on the candidates.
+Exact lookups and writable mounts continue to observe the live filesystem.
+
 Flash Disk has a 32 MiB logical file-data quota, independent of physical RAM and
 the object store. Serialize size-growth validation with writes/truncation; count
 sparse logical lengths and refund through current file sizes after truncate/delete.
@@ -1321,6 +1326,19 @@ These are architecture-guarded fast paths, not user switches:
 - Keep Win64 link/unlink pointer atomics 64-bit. Preserve guest-code store,
   permissions, unmap/remap and explicit host-code invalidation requirements.
 
+- Keep bounded ARM memory helpers in guest code. `memcpy` and `memmove`
+  handle up to 16 bytes and use a word-copy path for aligned 32-, 48- and
+  64-byte blocks. The larger fast path handles overlap in either direction.
+  Alignment failures, page-boundary cases, framebuffer destinations and
+  other sizes use the hooked host tail with the original arguments. Small
+  `memset` operations also use a bounded guest path.
+- On x86-64 hosts translating ARM32, emit the common stop check in translated
+  code. Test both the CPU-local exit flag and Unicorn's persistent stop
+  request. Actual exits still call the helper with a return address in the
+  translated block so Unicorn can restore the guest PC. The helper keeps
+  its own common return path separate from exit handling. Other host
+  backends keep the ordinary helper call.
+
 The private 0x5049 identity-mapping control is a retained optimization contract;
 the temporary 0x5048 profiling control, timing fields, sampling module and
 Cpu::take_backend_diagnostics are not production dependencies. Rejected division
@@ -1329,6 +1347,18 @@ lowering and cache/hash experiments are not retained optimizations.
 Historical synthetic gains and original validation counts are recorded in
 [implementation notes](history/IMPLEMENTATION-NOTES.md#history-cpu). They are not a
 promise of the same speedup on games, Windows, Android or MIPS.
+
+### WinCE heap free-list coalescing
+
+The free list remains sorted by guest address and allocations keep first-fit
+order. Freeing a block merges only its immediate neighbours in the usual
+coalesced list. Adding a separately mapped arena can leave adjacent entries,
+so the next free retains the full coalescing pass in place. Page accounting,
+allocation addresses and guest-visible zero filling keep their established
+behavior.
+
+[Local Electopia and GLBenchmark measurements](history/VALIDATION.md#electopia-and-glbenchmark-optimization-validation)
+record the workload, renderer and experimental variants used during development.
 
 ### Code-hook lookup cache
 

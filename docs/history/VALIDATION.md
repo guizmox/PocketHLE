@@ -220,6 +220,40 @@ repeats the 580 frames in 25.8 s, 22.5 fps. Formatting and diff checks pass.
 * Responsive thread scheduling: `7c9d309de695be46becb99d76250e1476dd663d5`.
 * Extended jump cache: `c98e0cfeb71a469dc92b3b3bd677945dd9d5a8e7`.
 
+## Electopia and GLBenchmark optimization validation
+
+Local instrumented CLI runs on Linux x86-64 with Mesa llvmpipe. Timing rows
+compare the stated workload and presentation mode. They describe software
+OpenGL runs and leave physical GPU performance unverified.
+
+| Change | Workload and observed result |
+| --- | --- |
+| Adreno 200 context and state dispatch (`2ffdf8f`) | Electopia, 800×480, 10–20 s of attract mode. Context checks took about one-third as long per call in both comparisons. The first pass went from 19.2 to 21.1 FPS, with host load varying across passes. |
+| ARM copies of 32 and 48 bytes and CPU-local `sqrt` (`5dfce5f`) | Same Electopia sequence with the GLES2 dispatch change. Unicorn entries per image fell from about 9,000–9,200 to 5,597 with the copies and 4,755 with both changes. |
+| CPU-local `sin` and `cos` (`b53e2b1`) | Electopia, 10–19.5 s. About 1,650 fewer Unicorn entries per image. Paired FPS went from 24.6 to 28.1 and from 20.5 to 24.4 in reverse order. |
+| Unicorn exit helper split (`34cc8b7`) | Isolated ARM loops gained about 20% throughput on reads and 4.5% on writes. The two Electopia comparisons moved in opposite directions. |
+| Adreno 200 EGL/GLES2 startup coverage (`0126755`) | GLBenchmark 2.0.3 reached the menu, performed draws and guest pixel reads, and displayed Egypt. Electopia still started. The API and native tests covered EGL configuration enumeration, pack-aligned readback and shared publication. |
+| WinCE heap free-list coalescing (`7c430fd`) | Before the first Egypt image, roughly 1.13 million `delete` dispatches took 4.6–4.7 s in the references and about 0.8 s with local coalescing. The instrumented first-image time went from 45–47 s to 41.1 s. A final build without API timing displayed Egypt after about 45 s. |
+| ARM copies of 64 bytes and generated stop checks (`ca1eeee`) | Heavy Egypt no-FSAA images with shared publication. References averaged 13.8–14.7 ms in Unicorn. Copies alone avoided about 650 Unicorn entries per image. The generated stop check alone reduced Unicorn time to 11.2 ms. CPU and kernel tests covered faults, ARM/Thumb copy return, overlap and preemption. |
+
+The subsequent Egypt comparison held the copy and JIT changes active in the same
+instrumented binary, using 104–111 indexed draws per image. The cache column
+also enabled the experimental GLES2 capability and face-state cache.
+
+| Run order | Copies and JIT | Copies, JIT and experimental state cache |
+| --- | ---: | ---: |
+| Copies and JIT first | 48.8 FPS | 47.4 FPS |
+| Experimental cache first | 49.5 FPS | 45.1 FPS |
+
+The earlier 42.0 FPS run enabled all three prototypes. The final implementation
+retains the copies and JIT changes. The wider GLES2 state cache, the allocation-free
+breakpoint read experiment and the CPU-local `exp` / native `fabs` experiments
+were measured separately and remain historical. GPU texture decoding on the
+software fallback path and direct rendering into the publication pool are
+investigation topics. Current behavior is described in the
+[architecture](../AGENTS.md#always-on-execution-optimizations) and
+[graphics](../GPU.md#adreno-200-programmable-rendering) guides.
+
 ## Colors investigation records
 
 <a id="colors-colors-save-compatibility-turf-wars-and-performance"></a>

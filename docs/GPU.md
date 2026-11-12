@@ -95,15 +95,26 @@ advertisement and entry points and permits existing program detection.
 The profile provides an initial GLES 2.0 implementation with its own EGL
 context, programmable state and object namespaces. The window configuration
 advertises RGB565 color, 16 depth bits and 8 stencil bits. The native window
-framebuffer uses an RGBA color texture and a packed depth/stencil attachment.
-Host GLES compiles the guest GLSL ES source. The desktop GL path adapts
-supported shader sources for GLSL 1.20.
+framebuffer uses an RGBA color texture and a packed `DEPTH24_STENCIL8`
+attachment. `eglGetConfigAttrib(EGL_DEPTH_SIZE)` reports the virtual EGL
+configuration's 16-bit depth. `glGetIntegerv(GL_DEPTH_BITS)` queries the currently
+bound native framebuffer, so it can report 24 for the default attachment or
+a different depth for an application-created framebuffer. Host GLES compiles
+the guest GLSL ES source. The desktop GL path adapts supported shader sources
+for GLSL 1.20.
 
+- **Dispatch.** An owned offscreen context can use a single native context
+  identity check when it is already current. A context change uses the full
+  EGL/WGL binding path. The renderer skips redundant buffer bindings, active
+  texture selections and vertex-attribute enable changes after validating
+  their arguments.
 - **Presentation.** Window swaps publish an immutable texture from the same
   bounded pool and fence protocol as the GLES 1.x renderer. The GUI can consume
   the texture within the shared context group without reading pixels to RAM.
-  A CPU readback remains available when shared export is unavailable or when
-  the guest or a diagnostic needs CPU pixels.
+  The current export copies the window framebuffer into a leased GPU texture.
+  A CPU readback remains available when shared export is unavailable. An
+  explicit guest `glReadPixels` reads the currently bound framebuffer into
+  guest memory and respects pack alignment, including padding between rows.
 - **Textures.** The renderer submits compressed ATC blocks directly when the
   host driver reports support for the requested format. The CPU decoder
   provides RGBA uploads for unsupported ATC formats.
@@ -111,7 +122,9 @@ supported shader sources for GLSL 1.20.
   index arrays are read from guest RAM into reusable native buffers. The
   renderer skips identical uploads and updates the contiguous span covering
   changed bytes. It uses a CPU copy of element data when it needs to bound a
-  client vertex array.
+  client vertex array. Guest textures and buffer contents stay in native
+  storage until updated or deleted. The application can reuse them across
+  draws and swaps.
 
 For Electopia, select Adreno 200 and **800×480 (WVGA landscape)**. The CLI
 equivalent is:
@@ -120,11 +133,17 @@ equivalent is:
 pockethle run ElectopiaSetup.cab --adreno200 --screen 800x480
 ```
 
-The original CAB reached the main menu under Linux Mesa llvmpipe with both
-shared presentation and CPU readback. Shared presentation tests verify deferred
-CPU access and retained texture contents. Physical GPU testing on Windows and
-Android remains pending. The profile covers the API subset needed for the
-tested startup and menu.
+Electopia reached its menu and attract mode under Linux Mesa llvmpipe.
+GLBenchmark 2.0.3 reached the test menu and rendered Egypt. It enumerates and
+queries EGL configurations and the window surface before running GLES2 tests.
+After **More → Run the test**, the default selection can leave a black image
+visible while the benchmark loads resources and draws without swapping. The
+**Swapbuffers** test provides a short presentation check.
+
+Shared presentation tests verify deferred CPU access and retained texture
+contents. [Local timing and validation records](history/VALIDATION.md#electopia-and-glbenchmark-optimization-validation)
+describe the measured sequences. Physical GPU timing on Windows, Steam Deck
+and Android remains pending for these comparisons.
 
 ### Intel 2700G depth-bias model
 
