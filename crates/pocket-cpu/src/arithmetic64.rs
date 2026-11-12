@@ -2,6 +2,7 @@
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arithmetic64 {
+    DoubleSquareRoot,
     SignedToDouble,
     UnsignedToDouble,
     DoubleToSigned,
@@ -16,7 +17,8 @@ impl Arithmetic64 {
     pub fn unary(self) -> bool {
         matches!(
             self,
-            Self::SignedToDouble
+            Self::DoubleSquareRoot
+                | Self::SignedToDouble
                 | Self::UnsignedToDouble
                 | Self::DoubleToSigned
                 | Self::DoubleToUnsigned
@@ -25,6 +27,7 @@ impl Arithmetic64 {
     /// Match the runtime handlers, including divide-by-zero and MIN / -1.
     pub fn evaluate(self, dividend: u64, divisor: u64) -> u64 {
         match self {
+            Self::DoubleSquareRoot => return f64::from_bits(dividend).sqrt().to_bits(),
             Self::SignedToDouble => return ((dividend as i64) as f64).to_bits(),
             Self::UnsignedToDouble => return (dividend as f64).to_bits(),
             Self::DoubleToSigned => return (f64::from_bits(dividend) as i64) as u64,

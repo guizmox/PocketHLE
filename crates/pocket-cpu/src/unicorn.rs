@@ -1890,7 +1890,7 @@ mod tests {
         assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 20);
     }
     #[test]
-    fn inline_conversion_callbacks_preserve_guest_rounding_and_exception_state() {
+    fn inline_numeric_callbacks_preserve_guest_rounding_and_exception_state() {
         use crate::arithmetic64::Arithmetic64;
         let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
         cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
@@ -1908,8 +1908,13 @@ mod tests {
             f64::NEG_INFINITY.to_bits(),
             (-1.5f64).to_bits(),
             1.5f64.to_bits(),
+            (-0.0f64).to_bits(),
+            f64::MIN_POSITIVE.to_bits(),
+            4.0f64.to_bits(),
+            0x7ff0_0000_0000_0001, // signalling NaN
         ];
         for operation in [
+            Arithmetic64::DoubleSquareRoot,
             Arithmetic64::SignedToDouble,
             Arithmetic64::UnsignedToDouble,
             Arithmetic64::DoubleToSigned,
@@ -1931,7 +1936,16 @@ mod tests {
                     );
                     let actual = u64::from(cpu.read_reg(ArmReg::R0).unwrap())
                         | (u64::from(cpu.read_reg(ArmReg::R1).unwrap()) << 32);
-                    assert_eq!(actual, operation.evaluate(value, 0));
+                    if operation == Arithmetic64::DoubleSquareRoot {
+                        let expected = f64::from_bits(value).sqrt();
+                        if expected.is_nan() {
+                            assert!(f64::from_bits(actual).is_nan());
+                        } else {
+                            assert_eq!(actual, expected.to_bits());
+                        }
+                    } else {
+                        assert_eq!(actual, operation.evaluate(value, 0));
+                    }
                     assert_eq!(cpu.read_fpscr().unwrap(), fpscr);
                     assert_eq!(cpu.read_reg(ArmReg::R2).unwrap(), 0x12345678);
                     assert_eq!(cpu.read_reg(ArmReg::R3).unwrap(), 0xabcdef01);

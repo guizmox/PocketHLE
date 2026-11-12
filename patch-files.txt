@@ -1,2 +1,4 @@
-crates/pocket-gles/src/gpu/platform.rs
-crates/pocket-winceapi/src/gles2/renderer.rs
+crates/pocket-cpu/src/arithmetic64.rs
+crates/pocket-cpu/src/unicorn.rs
+crates/pocket-kernel/src/native_thunks.rs
+crates/pocket-kernel/tests/small_copy.rs

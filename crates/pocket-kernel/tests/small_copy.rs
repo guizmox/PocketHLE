@@ -45,18 +45,29 @@ fn copies_preserve_bytes_overlap_guards_and_arm_thumb_return() {
     for slot in [SLOT, 0x7100_0000, 0x30000000] {
         for name in ["memcpy", "memmove"] {
             let mut cpu = setup(slot, name);
-            for len in 0..=16 {
-                for src in [0x2200, 0x2201, 0x2202, 0x2203, 0x2fff, 0x3ffb, 0x3ffc] {
+            for len in (0..=16).chain([32, 48]) {
+                for src in [
+                    0x2200, 0x2201, 0x2202, 0x2203, 0x2fe0, 0x2fff, 0x3ffb, 0x3ffc,
+                ] {
                     if src + len > 0x4000 {
                         continue;
                     }
-                    for delta in [-15i32, -7, -3, -2, -1, 0, 1, 2, 3, 7, 15, 32] {
+                    for delta in [
+                        -32i32, -15, -8, -7, -4, -3, -2, -1, 0, 1, 2, 3, 4, 7, 8, 15, 32,
+                    ] {
                         for thumb in [false, true] {
                             let dst = if src >= 0x3ff0 {
                                 0x2301
                             } else {
                                 (src as i32 + delta) as u32
                             };
+                            if len > 16
+                                && ((src | dst) & 3 != 0
+                                    || (src & 0xfff) + len >= 0x1000
+                                    || (dst & 0xfff) + len >= 0x1000)
+                            {
+                                continue;
+                            }
                             let original: Vec<u8> =
                                 (0..0x2000).map(|i| (i * 31 + 7) as u8).collect();
                             cpu.write_mem(0x2000, &original).unwrap();
@@ -90,19 +101,26 @@ fn copies_preserve_bytes_overlap_guards_and_arm_thumb_return() {
 #[test]
 fn other_sizes_reach_host_with_original_arguments_and_without_writes() {
     let mut cpu = setup(SLOT, "memcpy");
-    for len in [17, 32, 80, 4096] {
+    for (dst, src, len) in [
+        (0x2300, 0x2200, 17),
+        (0x2300, 0x2200, 80),
+        (0x2300, 0x2200, 4096),
+        (0x2300, 0x2201, 32),
+        (0x2301, 0x2200, 48),
+        (0x2300, 0x2ff0, 48),
+        (0x2ff0, 0x2200, 32),
+        (pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE - 16, 0x2200, 32),
+        (pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE, 0x2200, 48),
+        (0xfffffff0, 0x2200, 48),
+    ] {
         let before = vec![0xa5; 0x2000];
         cpu.write_mem(0x2000, &before).unwrap();
-        args(&mut cpu, 0x2300, 0x2200, len, false);
+        args(&mut cpu, dst, src, len, false);
         assert_eq!(
             cpu.run_until_hook(SLOT, 100).unwrap(),
             StopReason::Hook(SLOT + 28)
         );
-        for (reg, value) in [
-            (ArmReg::R0, 0x2300),
-            (ArmReg::R1, 0x2200),
-            (ArmReg::R2, len),
-        ] {
+        for (reg, value) in [(ArmReg::R0, dst), (ArmReg::R1, src), (ArmReg::R2, len)] {
             assert_eq!(cpu.read_reg(reg).unwrap(), value);
         }
         assert_eq!(cpu.read_mem(0x2000, 0x2000).unwrap(), before);
@@ -120,10 +138,14 @@ fn native_copy_honours_unmapped_and_read_only_memory() {
         args(&mut cpu, dst, src, 4, false);
         assert!(cpu.run_until_hook(SLOT, 100).is_err());
     }
-    let mut cpu = setup(SLOT, "memcpy");
-    cpu.protect_region(0x3000, 0x1000, Prot::READ).unwrap();
-    args(&mut cpu, 0x3000, 0x2000, 4, false);
-    assert!(cpu.run_until_hook(SLOT, 100).is_err());
+    for len in [4, 32, 48] {
+        let mut cpu = setup(SLOT, "memcpy");
+        cpu.protect_region(0x3000, 0x1000, Prot::READ).unwrap();
+        args(&mut cpu, 0x3000, 0x2000, len, false);
+        assert!(cpu.run_until_hook(SLOT, 100).is_err());
+        args(&mut cpu, 0x2300, 0x4000, len, false);
+        assert!(cpu.run_until_hook(SLOT, 100).is_err());
+    }
 }
 
 #[test]
