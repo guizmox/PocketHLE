@@ -1,1 +1,2 @@
-crates/pocket-winceapi/src/ce_services.rs
+crates/pocket-kernel/src/audio.rs
+crates/pocket-winceapi/src/coredll.rs

@@ -683,6 +683,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "waveOutGetDevCaps", wave_out_get_dev_caps);
     d.register_handler(dll, "waveOutGetDevCapsW", wave_out_get_dev_caps);
     d.register_handler(dll, "waveOutGetPosition", wave_out_get_position);
+    d.register_handler(dll, "waveOutGetPlaybackRate", wave_out_get_playback_rate);
+    d.register_handler(dll, "waveOutSetPlaybackRate", wave_out_set_playback_rate);
     d.register_handler(dll, "waveOutGetID", wave_out_get_id);
     d.register_constant(dll, "waveOutMessage", 0, zero_returning);
     d.register_handler(dll, "setjmp", setjmp);
@@ -1289,6 +1291,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     crate::crt_integer::register(d);
     d.register_handler(dll, "abs", m_abs_i32);
     d.register_handler(dll, "fabs", m_fabs);
+    d.register_handler(dll, "_copysign", m_copysign);
     d.register_handler(dll, "atan2", m_atan2);
     d.register_handler(dll, "pow", m_pow);
     d.register_handler(dll, "fmod", m_fmod);
@@ -23034,6 +23037,10 @@ fn m_fabs(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     libm_unary_d(c, f64::abs)
 }
 
+fn m_copysign(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    libm_binary_d(c, f64::copysign)
+}
+
 fn m_atan2(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     libm_binary_d(c, f64::atan2)
 }
@@ -25221,9 +25228,35 @@ fn wave_out_get_dev_caps(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
             buf[76..78].copy_from_slice(&2u16.to_le_bytes());
         }
         if buf.len() >= 84 {
-            buf[80..84].copy_from_slice(&12u32.to_le_bytes()); // WAVECAPS_VOLUME | WAVECAPS_LRVOLUME
+            // WAVECAPS_PLAYBACKRATE | WAVECAPS_VOLUME | WAVECAPS_LRVOLUME
+            buf[80..84].copy_from_slice(&14u32.to_le_bytes());
         }
         ctx.cpu.write_mem(caps, &buf)?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
+}
+
+fn wave_out_get_playback_rate(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let output = ctx.arg_u32(1)?;
+    let Some(rate) = ctx.kernel.audio.wave_playback_rate(handle) else {
+        return Ok(DispatchOutcome::ReturnedR0(5)); // MMSYSERR_INVALHANDLE
+    };
+    if output == 0 || ctx.cpu.check_guest_access(output, 4, Prot::WRITE).is_err() {
+        return Ok(DispatchOutcome::ReturnedR0(11)); // MMSYSERR_INVALPARAM
+    }
+    ctx.cpu.write_mem(output, &rate.to_le_bytes())?;
+    Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
+}
+
+fn wave_out_set_playback_rate(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let rate = ctx.arg_u32(1)?;
+    if (rate as i32) <= 0 {
+        return Ok(DispatchOutcome::ReturnedR0(11)); // MMSYSERR_INVALPARAM
+    }
+    if !ctx.kernel.audio.set_wave_playback_rate(handle, rate) {
+        return Ok(DispatchOutcome::ReturnedR0(5)); // MMSYSERR_INVALHANDLE
     }
     Ok(DispatchOutcome::ReturnedR0(MMSYSERR_NOERROR))
 }
@@ -28711,7 +28744,7 @@ mod tests {
             ),
             DispatchOutcome::ReturnedR0(0)
         );
-        assert_eq!(cpu.read_mem(0x2150, 4).unwrap(), 12u32.to_le_bytes());
+        assert_eq!(cpu.read_mem(0x2150, 4).unwrap(), 14u32.to_le_bytes());
         // WAVE_FORMAT_2S16 must be advertised for applications that check
         // stereo 22.05 kHz support before starting their renderer.
         assert_eq!(cpu.read_mem(0x2148, 4).unwrap(), 0x0fffu32.to_le_bytes());
@@ -33240,6 +33273,27 @@ mod tests {
         }
         assert!(ctx.kernel.pending_input.is_empty());
         assert!(ctx.kernel.posted_messages.is_empty());
+    }
+
+    #[test]
+    fn ce_copysign_ordinal_returns_both_soft_float_words() {
+        let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
+        for (args, expected) in [
+            ([0, 0x3ff8_0000, 0, 0x8000_0000], 0xbff8_0000),
+            ([0, 0, 0, 0x8000_0000], 0x8000_0000),
+        ] {
+            assert_eq!(
+                crate::bluetooth::tests::call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "#1003",
+                    &args,
+                ),
+                DispatchOutcome::ReturnedR0R1(0, expected)
+            );
+        }
     }
 
     #[test]

@@ -188,6 +188,7 @@ struct WaveStream {
     samples: std::collections::VecDeque<i16>,
     format: GuestFormat,
     phase: u64,
+    playback_rate_q16: u32,
     written: u64,
     consumed: u64,
     paused: bool,
@@ -203,6 +204,7 @@ impl WaveStream {
             samples: Default::default(),
             format,
             phase: 0,
+            playback_rate_q16: 1 << 16,
             written: 0,
             consumed: 0,
             paused: false,
@@ -215,10 +217,12 @@ impl WaveStream {
     fn advance_virtual(&mut self, active: bool) {
         let now = Instant::now();
         if !active && !self.paused && self.consumed < self.written {
-            let rate = self.format.sample_rate.max(1) as u128;
+            const Q16_NANOSECONDS_PER_SECOND: u128 = 1_000_000_000 << 16;
+            let rate =
+                u128::from(self.format.sample_rate.max(1)) * u128::from(self.playback_rate_q16);
             let elapsed = now.duration_since(self.tick).as_nanos() * rate + self.fraction;
-            let frames = elapsed / 1_000_000_000;
-            self.fraction = elapsed % 1_000_000_000;
+            let frames = elapsed / Q16_NANOSECONDS_PER_SECOND;
+            self.fraction = elapsed % Q16_NANOSECONDS_PER_SECOND;
             self.consume(
                 (frames * self.format.channels.max(1) as u128).min(usize::MAX as u128) as usize,
             );
@@ -297,7 +301,8 @@ impl WaveStream {
             let right = if channels > 1 { self.samples[1] } else { left };
             (left, right)
         };
-        self.phase += ((self.format.sample_rate.max(1) as u64) << 16) / rate.max(1) as u64;
+        self.phase += u64::from(self.format.sample_rate.max(1)) * u64::from(self.playback_rate_q16)
+            / u64::from(rate.max(1));
         let frames = self.phase >> 16;
         self.phase &= 0xffff;
         self.consume((frames as usize).saturating_mul(channels));
@@ -838,6 +843,24 @@ impl AudioEngine {
         }
     }
 
+    pub fn set_wave_playback_rate(&self, handle: u32, rate_q16: u32) -> bool {
+        let Ok(mut shared) = self.shared.lock() else {
+            return false;
+        };
+        let active = shared.device_active;
+        let Some(stream) = shared.wave_streams.get_mut(&handle) else {
+            return false;
+        };
+        stream.advance_virtual(active);
+        stream.playback_rate_q16 = rate_q16;
+        true
+    }
+
+    pub fn wave_playback_rate(&self, handle: u32) -> Option<u32> {
+        let shared = self.shared.lock().ok()?;
+        Some(shared.wave_streams.get(&handle)?.playback_rate_q16)
+    }
+
     /// Device ID 0 updates existing instances and the default for future opens.
     /// An open HWAVEOUT updates only that stream, including queued/live-loop PCM.
     pub fn set_wave_volume(&self, handle: u32, volume: u32) -> bool {
@@ -980,8 +1003,10 @@ impl AudioEngine {
         if let Ok(mut s) = self.shared.lock() {
             if let Some(v) = s.wave_streams.get_mut(&handle) {
                 let volume = v.volume;
+                let playback_rate = v.playback_rate_q16;
                 *v = WaveStream::new(v.format);
                 v.volume = volume;
+                v.playback_rate_q16 = playback_rate;
             }
         }
     }
@@ -1953,6 +1978,23 @@ mod tests {
         assert_eq!(out, [3000]);
         e.stop_mas_stream(2);
         assert_eq!(e.buffered_samples(), 0);
+    }
+
+    #[test]
+    fn wave_playback_rate_changes_stream_cursor_without_changing_source_format() {
+        let mut wave = WaveStream::new(mono(8000));
+        wave.samples.extend([100, 200, 300, 400]);
+        wave.written = 4;
+        wave.playback_rate_q16 = 0x8000;
+        wave.frame(8000);
+        assert_eq!(wave.consumed, 0);
+        wave.frame(8000);
+        assert_eq!(wave.consumed, 1);
+        assert_eq!(wave.format.sample_rate, 8000);
+
+        wave.playback_rate_q16 = 0x20000;
+        wave.frame(8000);
+        assert_eq!(wave.consumed, 3);
     }
 
     fn mono(rate: u32) -> GuestFormat {
