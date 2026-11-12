@@ -1,2 +1,1 @@
-crates/pocket-kernel/src/lib.rs
-crates/pocket-winceapi/src/coredll.rs
+crates/pocket-winceapi/src/ce_services.rs
