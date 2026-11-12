@@ -2,6 +2,7 @@ package com.pockethle.app
 
 import android.os.Bundle
 import androidx.appcompat.widget.Toolbar
+import androidx.preference.CheckBoxPreference
 import androidx.preference.ListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
@@ -233,15 +234,47 @@ class SettingsActivity : HostKeyActivity() {
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(SwitchPreferenceCompat(requireContext()).apply {
                 key="gpu_renderer"; title="GPU rendering"; isPersistent=false; isChecked=current.gpuRenderer
-                summary="Host OpenGL; takes effect on the next launch. Can be overridden per game."
-                setOnPreferenceChangeListener { _,v -> current=current.copy(gpuRenderer=v as Boolean);findPreference<ListPreference>("gles_internal_resolution")?.isEnabled=current.gpuRenderer;writeConfig();true }
+                summary="Host OpenGL for OpenGL ES 1.x. Takes effect the next time a game launches."
+                setOnPreferenceChangeListener { _, v ->
+                    current = current.copy(gpuRenderer = v as Boolean)
+                    findPreference<ListPreference>("gles_internal_resolution")?.isEnabled = current.gpuRenderer
+                    findPreference<CheckBoxPreference>("gles_resolution_all_sizes")?.isEnabled =
+                        current.gpuRenderer && current.glesResolutionScale > 1
+                    writeConfig()
+                    true
+                }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
-                key="gles_internal_resolution"; title="OpenGLES internal resolution (GPU only)"; isPersistent=false
-                entries=arrayOf("Native (1×)", "2x - only for 320x240 games", "3x - only for 320x240 games", "4x - only for 320x240 games", "2x - also for 640x480 games"); entryValues=arrayOf("1", "3", "4", "5", "2")
-                value=current.glesInternalResolution.toString(); isEnabled=current.gpuRenderer
-                summary="Includes portrait equivalents (240x320 and 480x640). QVGA-only 2x/3x/4x modes leave larger surfaces native; the other 2x mode doubles them. Display size is automatic; PocketPC fits whole logical-screen multiples regardless of internal resolution. Touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch."
-                setOnPreferenceChangeListener { _, v -> current=current.copy(glesInternalResolution=v.toString().toInt());writeConfig();true }
+                key = "gles_internal_resolution"
+                title = "OpenGL ES internal resolution (GPU only)"
+                isPersistent = false
+                entries = arrayOf("Native", "2×", "3×", "4×")
+                entryValues = arrayOf("1", "2", "3", "4")
+                value = current.glesResolutionScale.toString()
+                isEnabled = current.gpuRenderer
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                setOnPreferenceChangeListener { _, v ->
+                    current = current.withGlesResolution(v.toString().toInt(), current.glesResolutionAllSizes)
+                    findPreference<CheckBoxPreference>("gles_resolution_all_sizes")?.apply {
+                        isChecked = current.glesResolutionAllSizes
+                        isEnabled = current.gpuRenderer && current.glesResolutionScale > 1
+                    }
+                    writeConfig()
+                    true
+                }
+            })
+            findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(CheckBoxPreference(requireContext()).apply {
+                key = "gles_resolution_all_sizes"
+                title = "Apply to all resolutions, including sizes other than 320×240"
+                summary = "When unchecked, only 320×240 and 240×320 are scaled. Applies the next time a game launches."
+                isPersistent = false
+                isChecked = current.glesResolutionAllSizes
+                isEnabled = current.gpuRenderer && current.glesResolutionScale > 1
+                setOnPreferenceChangeListener { _, v ->
+                    current = current.withGlesResolution(current.glesResolutionScale, v as Boolean)
+                    writeConfig()
+                    true
+                }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
                 key="frame_rate_limit"; title="Frame rate limit"; isPersistent=false

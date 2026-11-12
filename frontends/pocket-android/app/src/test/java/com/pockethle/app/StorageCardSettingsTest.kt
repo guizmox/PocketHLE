@@ -9,7 +9,7 @@ class StorageCardSettingsTest {
         val incoming = JSONObject("""{"storage_card_dir":"cards/sd-card","max_slices":0,"host_extension":{"keep":true}}""")
         val settings = GameSettings.fromJson(incoming)
         assertEquals("cards/sd-card", settings.storageCardDir)
-        val saved = settings.copy(rotation = "none", gpuRenderer = false).toJson()
+        val saved = settings.copy(rotation = "none").toJson()
         assertEquals("cards/sd-card", saved.getString("storage_card_dir"))
         assertEquals(0L, saved.getLong("max_slices"))
         assertTrue(saved.getJSONObject("host_extension").getBoolean("keep"))

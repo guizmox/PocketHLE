@@ -12,7 +12,7 @@ class InternalResolutionSettingsTest {
                 .put("gpu_renderer", false).put("future_setting", "kept")
             val saved = GameSettings.fromJson(original).copy(screen = "landscape").toJson()
             assertEquals(profile, GameSettings.fromJson(saved).gpuCompatibilityProfile)
-            assertEquals(false, GameSettings.fromJson(saved).gpuRenderer)
+            assertFalse(saved.has("gpu_renderer"))
             assertEquals("kept", saved.getString("future_setting"))
         }
         val legacy = JSONObject().put("pocketpc_intel2700g_depth_bias", true)
@@ -32,7 +32,7 @@ class InternalResolutionSettingsTest {
             val restored=GameSettings.fromJson(saved)
             assertEquals(enabled,restored.pocketpcEglRgba8888Only)
             assertTrue(restored.pocketpcGapiColumns)
-            assertEquals(false,restored.gpuRenderer)
+            assertFalse(saved.has("gpu_renderer"))
             assertEquals("kept",saved.getString("future_setting"))
         }
     }
@@ -57,10 +57,17 @@ class InternalResolutionSettingsTest {
     }
 
     @Test fun allResolutionPoliciesRoundtripWithoutChangingOtherSettings() {
-        for (policy in listOf(1,2,3,4,5)) {
-            val original=LauncherConfig.default().copy(glesInternalResolution=policy)
+        val policies = listOf(
+            Triple(1, 1, false), Triple(2, 2, true), Triple(3, 2, false),
+            Triple(4, 3, false), Triple(5, 4, false), Triple(6, 3, true),
+            Triple(7, 4, true),
+        )
+        for ((policy, scale, allSizes) in policies) {
+            val original = LauncherConfig.default().withGlesResolution(scale, allSizes)
             val decoded=LauncherConfig.fromJson(original.toJson())
-            assertEquals(policy,decoded.glesInternalResolution)
+            assertEquals(policy, decoded.glesInternalResolution)
+            assertEquals(scale, decoded.glesResolutionScale)
+            assertEquals(allSizes, decoded.glesResolutionAllSizes)
             assertEquals(original.gpuRenderer,decoded.gpuRenderer)
         }
     }

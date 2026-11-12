@@ -579,11 +579,10 @@ impl Context {
         }
     }
 
-    /// Host-only GPU resolution policy: 1=native, 2=all 2x, 3=QVGA-only 2x, 4=QVGA-only 3x, 5=QVGA-only 4x.
-    /// Guest surfaces, queries and reads stay logical.
+    /// Host-only GPU resolution policy. Guest coordinates remain logical.
     pub fn set_internal_resolution(&mut self, scale: u8) {
         self.internal_resolution = match scale {
-            2 | 3 | 4 | 5 => scale,
+            2..=7 => scale,
             _ => 1,
         };
         if let Some(gpu) = self.gpu.as_mut() {

@@ -665,9 +665,6 @@ pub struct GameSettings {
     pub gpu_compatibility_profile: gpu_profile::GpuCompatibilityProfile,
     #[serde(default)]
     pub import_executable_selected: bool,
-    /// Experimental OpenGL host rasterization; None inherits the global choice.
-    #[serde(default)]
-    pub gpu_renderer: Option<bool>,
     /// Which CPU backend the user prefers for this game.
     #[serde(default)]
     pub cpu_backend: CpuBackendPref,
@@ -849,7 +846,6 @@ impl Default for GameSettings {
             pocketpc_egl_rgba8888_only: false,
             gpu_compatibility_profile: Default::default(),
             import_executable_selected: false,
-            gpu_renderer: None,
             cpu_backend: CpuBackendPref::default(),
             max_slices: default_max_slices(),
             instructions_per_slice: default_instructions_per_slice(),
@@ -1119,10 +1115,10 @@ pub struct LauncherConfig {
     pub gizmondo_platform_id: String,
     #[serde(default)]
     pub gizmondo_identity_revision: u8,
-    /// Host GPU rendering is enabled by default; games may override it.
+    /// Host GPU rendering for GLES 1.x is enabled by default.
     #[serde(default = "default_gpu_renderer")]
     pub gpu_renderer: bool,
-    /// Host-only GLES resolution: 1=native, 2=double all, 3=double QVGA only, 4=triple QVGA only, 5=quadruple QVGA only.
+    /// Host-only GLES resolution policy. Values 1–7 are stable across releases.
     #[serde(default = "default_gles_internal_resolution")]
     pub gles_internal_resolution: u8,
     /// One-time first-import setup completion, independent for each platform.
@@ -1386,6 +1382,31 @@ fn default_fullscreen_mode() -> String {
 }
 
 impl LauncherConfig {
+    /// Decode the stable resolution policy into a multiplier and surface scope.
+    pub fn gles_resolution_selection(&self) -> (u8, bool) {
+        match self.gles_internal_resolution {
+            2 => (2, true),
+            3 => (2, false),
+            4 => (3, false),
+            5 => (4, false),
+            6 => (3, true),
+            7 => (4, true),
+            _ => (1, false),
+        }
+    }
+
+    pub fn set_gles_resolution_selection(&mut self, scale: u8, all: bool) {
+        self.gles_internal_resolution = match (scale, all) {
+            (2, true) => 2,
+            (2, false) => 3,
+            (3, false) => 4,
+            (4, false) => 5,
+            (3, true) => 6,
+            (4, true) => 7,
+            _ => 1,
+        };
+    }
+
     /// Effective PocketPC stylus keyboard inputs are unavailable to per-game grids.
     /// Explicit guest overrides free an old direction key for another purpose.
     pub fn stylus_keyboard_reserved(&self, key: &str) -> bool {
@@ -4570,11 +4591,21 @@ mod tests {
     }
 
     #[test]
-    fn qvga_resolution_policies_preserve_saved_values() {
-        for policy in [1, 2, 3, 4, 5] {
+    fn resolution_selection_preserves_saved_policies() {
+        for (policy, scale, all) in [
+            (1, 1, false),
+            (2, 2, true),
+            (3, 2, false),
+            (4, 3, false),
+            (5, 4, false),
+            (6, 3, true),
+            (7, 4, true),
+        ] {
             let mut value = serde_json::to_value(super::LauncherConfig::default()).unwrap();
             value["gles_internal_resolution"] = serde_json::json!(policy);
-            let config: super::LauncherConfig = serde_json::from_value(value).unwrap();
+            let mut config: super::LauncherConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.gles_resolution_selection(), (scale, all));
+            config.set_gles_resolution_selection(scale, all);
             assert_eq!(config.gles_internal_resolution, policy);
             assert_eq!(
                 serde_json::to_value(config).unwrap()["gles_internal_resolution"],
@@ -4641,14 +4672,6 @@ mod tests {
         );
         let settings: GameSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.dpad_deadzone, DpadDeadzone::Large);
-        assert_eq!(settings.gpu_renderer, None);
-        let gpu = GameSettings {
-            gpu_renderer: Some(true),
-            ..GameSettings::default()
-        };
-        let decoded: GameSettings =
-            serde_json::from_str(&serde_json::to_string(&gpu).unwrap()).unwrap();
-        assert_eq!(decoded.gpu_renderer, Some(true));
         for zone in DpadDeadzone::ALL {
             let settings = GameSettings {
                 dpad_deadzone: zone,
@@ -5281,7 +5304,10 @@ mod tests {
                         .unwrap()
                         .get("anisotropic_filtering")
                         .is_none());
-                    assert_eq!(reopened.get(&id).unwrap().settings.gpu_renderer, game);
+                    assert!(serde_json::to_value(&reopened.get(&id).unwrap().settings)
+                        .unwrap()
+                        .get("gpu_renderer")
+                        .is_none());
                 }
             }
         }
@@ -7537,7 +7563,6 @@ fn egl_format_profile_defaults_off_and_round_trips_independently() {
         let settings = GameSettings {
             pocketpc_egl_rgba8888_only: enabled,
             pocketpc_gapi_columns: true,
-            gpu_renderer: Some(false),
             ..Default::default()
         };
         let restored: GameSettings =

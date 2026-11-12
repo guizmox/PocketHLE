@@ -233,20 +233,6 @@ class GameSettingsActivity : HostKeyActivity() {
                     true
                 }
             }
-            findPreference<ListPreference>("gpu_renderer_mode")?.apply {
-                // JSON is authoritative; do not maintain a second SharedPreferences value.
-                isPersistent = false
-                entries = arrayOf("Emulator default", "Software", "GPU")
-                entryValues = arrayOf("inherit", "software", "gpu")
-                value = when (current.gpuRenderer) { null -> "inherit"; false -> "software"; true -> "gpu" }
-                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                setOnPreferenceChangeListener { _, newValue ->
-                    current = current.copy(gpuRenderer = when (newValue.toString()) { "gpu" -> true; "software" -> false; else -> null })
-                    writeGameSettings()
-                    true
-                }
-            }
-
         }
 
         private fun readGameSettings(): GameSettings? {
@@ -263,14 +249,12 @@ class GameSettingsActivity : HostKeyActivity() {
             if (gameId.isEmpty()) return
             val result = runCatching { org.json.JSONObject(NativeBridge.writeGameSettings(rootDir, gameId, current.toJson().toString())) }.getOrNull()
             val saved = runCatching { org.json.JSONObject(NativeBridge.readGameSettings(rootDir, gameId)) }.getOrNull()
-            val gpuSaved = saved != null && saved.has("gpu_renderer") &&
-                (if (saved.isNull("gpu_renderer")) null else saved.optBoolean("gpu_renderer")) == current.gpuRenderer
             val frameLimitSaved = saved != null && saved.has("frame_rate_limit") && (if (saved.isNull("frame_rate_limit")) null else saved.optString("frame_rate_limit")) == current.frameRateLimit
             val heapSaved = saved != null &&
                 (if (saved.isNull("executable_heap")) null else saved.optBoolean("executable_heap")) == current.executableHeap
             val eglFormatSaved = saved != null && saved.has("pocketpc_egl_rgba8888_only") &&
                 saved.optBoolean("pocketpc_egl_rgba8888_only") == current.pocketpcEglRgba8888Only
-            if (result?.optBoolean("ok", false) != true || !gpuSaved || !frameLimitSaved || !heapSaved || !eglFormatSaved) {
+            if (result?.optBoolean("ok", false) != true || !frameLimitSaved || !heapSaved || !eglFormatSaved) {
                 android.widget.Toast.makeText(context, "Could not save settings. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             }
         }

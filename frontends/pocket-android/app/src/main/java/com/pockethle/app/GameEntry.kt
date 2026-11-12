@@ -80,7 +80,6 @@ data class GameSettings(
      */
     val rotation: String,
     val frameRateLimit: String? = null,
-    val gpuRenderer: Boolean? = null,
     val gpuCompatibilityProfile: String = "generic",
     val executableHeap: Boolean? = null,
     val dpadDeadzone: String = "large",
@@ -106,7 +105,7 @@ data class GameSettings(
         remove("anisotropic_filtering")
         optJSONObject("stylus_stick")?.apply { remove("enabled");remove("controller") }
         put("frame_rate_limit", frameRateLimit ?: JSONObject.NULL)
-        put("gpu_renderer", gpuRenderer ?: JSONObject.NULL)
+        remove("gpu_renderer")
         put("gpu_compatibility_profile", gpuCompatibilityProfile)
         put("executable_heap", executableHeap ?: JSONObject.NULL)
         put("dpad_deadzone", dpadDeadzone)
@@ -157,7 +156,6 @@ data class GameSettings(
             rotation = obj.optString("rotation", "none").ifEmpty { "none" },
             dpadDeadzone = obj.optString("dpad_deadzone", "large"),
             frameRateLimit = if (obj.isNull("frame_rate_limit")) null else obj.optString("frame_rate_limit", "unlimited").takeUnless { it == "inherit" },
-            gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             executableHeap = if (obj.isNull("executable_heap")) null else obj.optBoolean("executable_heap"),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
             pocketpcTiltInput = TiltInput.fromId(obj.optString("pocketpc_tilt_input")),
@@ -236,6 +234,27 @@ data class LauncherConfig(
      */
     val keybindingsJson: String?,
 ) {
+    val glesResolutionScale: Int
+        get() = when (glesInternalResolution) {
+            2, 3 -> 2
+            4, 6 -> 3
+            5, 7 -> 4
+            else -> 1
+        }
+
+    val glesResolutionAllSizes: Boolean
+        get() = glesInternalResolution == 2 || glesInternalResolution in 6..7
+
+    fun withGlesResolution(scale: Int, allSizes: Boolean): LauncherConfig {
+        val policy = when (scale) {
+            2 -> if (allSizes) 2 else 3
+            3 -> if (allSizes) 6 else 4
+            4 -> if (allSizes) 7 else 5
+            else -> 1
+        }
+        return copy(glesInternalResolution = policy)
+    }
+
     fun toJson(): JSONObject = JSONObject(originalJson).apply {
         remove("pocketpc_intel2700g_depth_bias")
         remove("pocketpc_nv_combiners")
@@ -306,7 +325,7 @@ data class LauncherConfig(
             gpuRenderer = obj.optBoolean("gpu_renderer", true),
             executableHeap = obj.optBoolean("executable_heap", true),
             frameRateLimit = obj.optString("frame_rate_limit", "60").takeIf { it in listOf("10","15","20","30","45","60","120","unlimited") } ?: "60",
-            glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it == 2 || it == 3 || it == 4 || it == 5 } ?: 1,
+            glesInternalResolution = obj.optInt("gles_internal_resolution", 1).takeIf { it in 1..7 } ?: 1,
             lastImportDir = obj.optString("last_import_dir").takeIf { !obj.isNull("last_import_dir") && it.isNotEmpty() },
             showFps = obj.optBoolean("show_fps", true),
             showIps = obj.optBoolean("show_ips", false),

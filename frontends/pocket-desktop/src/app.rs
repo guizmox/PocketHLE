@@ -2670,7 +2670,7 @@ impl PocketLauncher {
         ui.heading("Graphics");
         egui::Grid::new("emulator_graphics").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
                 ui.label("GPU rendering");
-                crate::controller_ui::checkbox(ui, &mut draft.gpu_renderer, "").on_hover_text("Host OpenGL; takes effect on the next launch. Can be overridden per game.");
+                crate::controller_ui::checkbox(ui, &mut draft.gpu_renderer, "").on_hover_text("Host OpenGL for OpenGL ES 1.x. Takes effect the next time a game launches.");
                 ui.end_row();
                 #[cfg(windows)]
                 if !crate::gamepad_host::is_wine() {
@@ -2684,22 +2684,26 @@ impl PocketLauncher {
                     });
                     ui.end_row();
                 }
-                ui.label("OpenGLES internal resolution (GPU only)");
+                let (mut scale, mut all_resolutions) = draft.gles_resolution_selection();
+                ui.label("OpenGL ES internal resolution (GPU only)");
                 ui.add_enabled_ui(draft.gpu_renderer, |ui| {
+                    let scales = [(1, "Native"), (2, "2×"), (3, "3×"), (4, "4×")];
+                    let selected = scales[usize::from(scale) - 1].1;
                     crate::controller_ui::ComboBox::from_id_source("gles_internal_resolution")
-                        .selected_text(match draft.gles_internal_resolution { 5 => "4x - only for 320x240 games", 4 => "3x - only for 320x240 games", 3 => "2x - only for 320x240 games", 2 => "2x - also for 640x480 games", _ => "Native (1×)" })
+                        .selected_text(selected)
                         .show_ui(ui, |ui| {
-                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 1, "Native (1×)");
-                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 3, "2x - only for 320x240 games");
-                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 4, "3x - only for 320x240 games");
-                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 5, "4x - only for 320x240 games");
-                            crate::controller_ui::selectable_value(ui, &mut draft.gles_internal_resolution, 2, "2x - also for 640x480 games");
+                            for (value, label) in scales {
+                                crate::controller_ui::selectable_value(ui, &mut scale, value, label);
+                            }
                         });
-                }).response.on_hover_text("Includes portrait equivalents (240x320 and 480x640). QVGA-only 2x/3x/4x modes leave larger surfaces native; the other 2x mode doubles them. Display zoom uses the rendered image; touch coordinates stay logical. More GPU/readback work; no extra detail for 2D assets. Applies next launch.");
+                });
                 ui.end_row();
                 ui.label("");
-                ui.add(egui::Label::new("2x/3x/4x increases the rendered resolution; display zoom then scales that image. Applies next launch.").wrap(true));
+                ui.add_enabled_ui(draft.gpu_renderer && scale > 1, |ui| {
+                    crate::controller_ui::checkbox(ui, &mut all_resolutions, "Apply to all resolutions, including sizes other than 320×240");
+                }).response.on_hover_text("When unchecked, only 320×240 and 240×320 are scaled. Applies the next time a game launches.");
                 ui.end_row();
+                draft.set_gles_resolution_selection(scale, all_resolutions);
                 ui.label("VSync (PC / Steam Deck)");
                 crate::controller_ui::checkbox(ui, &mut draft.desktop_vsync, "Synchronize with the display");
                 ui.end_row();
@@ -3173,16 +3177,6 @@ impl PocketLauncher {
                         }).response.on_hover_text("Choose the GPU targeted by this game. Generic OpenGL ES 2.0 uses the host GPU for OpenGL ES 2.0.");
                     ui.end_row();
                 }
-                ui.label("GPU rendering");
-                crate::controller_ui::ComboBox::from_id_source("game_gpu_renderer").selected_text(match draft.gpu_renderer { None => "Emulator default", Some(false) => "Software", Some(true) => "GPU" }).show_ui(ui, |ui| {
-                    crate::controller_ui::selectable_value(ui, &mut draft.gpu_renderer, None, "Emulator default");
-                    crate::controller_ui::selectable_value(ui, &mut draft.gpu_renderer, Some(false), "Software");
-                    crate::controller_ui::selectable_value(ui, &mut draft.gpu_renderer, Some(true), "GPU");
-                });
-                ui.end_row();
-
-
-
                 if !is_gizmondo {
                     ui.label("OpenGL ES surface format");
                     crate::controller_ui::ComboBox::from_id_source("pocketpc_egl_surface_format")

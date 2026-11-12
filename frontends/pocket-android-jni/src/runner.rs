@@ -586,13 +586,7 @@ fn run_process_inner(
     }
     let profile = entry.settings.gpu_compatibility_profile;
     let programmable = !is_gizmondo && profile.programmable_gles();
-    emu.set_gpu_renderer(
-        !programmable
-            && entry
-                .settings
-                .gpu_renderer
-                .unwrap_or(launcher_config.gpu_renderer),
-    );
+    emu.set_gpu_renderer(!programmable && launcher_config.gpu_renderer);
     emu.set_gizmondo_goforce_driver(is_gizmondo);
     emu.set_programmable_gles(programmable);
     emu.set_goforce_5500_profile(!is_gizmondo && profile.nvidia_combiners());
@@ -617,10 +611,7 @@ fn run_process_inner(
         log::info!(
             "GPU_DIAG session_start game={} requested_gpu={} internal_policy={} filter={} measure_ips={}",
             entry.id,
-            entry
-                .settings
-                .gpu_renderer
-                .unwrap_or(launcher_config.gpu_renderer),
+            programmable || launcher_config.gpu_renderer,
             launcher_config.gles_internal_resolution,
             launcher_config.upscale_filter,
             launcher_config.show_ips

@@ -369,13 +369,7 @@ impl Runner {
         }
         let profile = game.settings.gpu_compatibility_profile;
         let programmable = !is_gizmondo && profile.programmable_gles();
-        emu.set_gpu_renderer(
-            !programmable
-                && game
-                    .settings
-                    .gpu_renderer
-                    .unwrap_or(launcher_config.gpu_renderer),
-        );
+        emu.set_gpu_renderer(!programmable && launcher_config.gpu_renderer);
         emu.set_gizmondo_goforce_driver(is_gizmondo);
         emu.set_programmable_gles(programmable);
         emu.set_goforce_5500_profile(!is_gizmondo && profile.nvidia_combiners());

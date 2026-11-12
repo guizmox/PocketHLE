@@ -1468,13 +1468,22 @@ pub struct Renderer {
     pub max_viewport: [i32; 2],
     pub subpixel_bits: i32,
 }
+const MAX_RENDER_DIMENSION: u32 = 8192;
+
 fn render_scale_for(policy: u8, width: u32, height: u32) -> u32 {
-    match policy {
+    let scale = match policy {
         2 => 2,
+        6 => 3,
+        7 => 4,
         3 if matches!((width, height), (320, 240) | (240, 320)) => 2,
         4 if matches!((width, height), (320, 240) | (240, 320)) => 3,
         5 if matches!((width, height), (320, 240) | (240, 320)) => 4,
         _ => 1,
+    };
+    if width.max(height) > MAX_RENDER_DIMENSION / scale {
+        1
+    } else {
+        scale
     }
 }
 
@@ -2273,7 +2282,7 @@ impl Renderer {
         ]
     }
 
-    /// Policy 1=native, 2=double all, 3=double QVGA only, 4=triple QVGA only, 5=quadruple QVGA only. Guest sizes stay logical.
+    /// Apply the host resolution policy while keeping guest dimensions logical.
     pub fn set_render_scale(&mut self, policy: u8) -> Result<(), String> {
         self.render_policy = policy;
         let (w, h) = (
@@ -2303,7 +2312,7 @@ impl Renderer {
         let scale = render_scale_for(self.render_policy, logical_w, logical_h);
         let w = logical_w.checked_mul(scale).ok_or("GPU width overflow")?;
         let h = logical_h.checked_mul(scale).ok_or("GPU height overflow")?;
-        if w == 0 || h == 0 || w > 8192 || h > 8192 {
+        if w == 0 || h == 0 || w > MAX_RENDER_DIMENSION || h > MAX_RENDER_DIMENSION {
             return Err("unsupported GPU target size".into());
         }
         self.host.make_current()?;
@@ -8008,6 +8017,8 @@ mod resolution_policy_tests {
         ] {
             assert_eq!(render_scale_for(1, size.0, size.1), 1);
             assert_eq!(render_scale_for(2, size.0, size.1), 2);
+            assert_eq!(render_scale_for(6, size.0, size.1), 3);
+            assert_eq!(render_scale_for(7, size.0, size.1), 4);
             assert_eq!(
                 render_scale_for(3, size.0, size.1),
                 if matches!(size, (320, 240) | (240, 320)) {
@@ -8034,6 +8045,8 @@ mod resolution_policy_tests {
             );
             assert_eq!(render_scale_for(99, size.0, size.1), 1);
         }
+        assert_eq!(render_scale_for(7, 2048, 1080), 4);
+        assert_eq!(render_scale_for(7, 2560, 1440), 1);
     }
     #[cfg(unix)]
     #[test]
@@ -8060,6 +8073,10 @@ mod resolution_policy_tests {
             assert_eq!((gpu.width, gpu.height), (480, 640));
             gpu.set_render_scale(2).unwrap();
             assert_eq!((gpu.width, gpu.height), (960, 1280));
+            gpu.set_render_scale(6).unwrap();
+            assert_eq!((gpu.width, gpu.height), (1440, 1920));
+            gpu.set_render_scale(7).unwrap();
+            assert_eq!((gpu.width, gpu.height), (1920, 2560));
             gpu.set_render_scale(1).unwrap();
             assert_eq!((gpu.width, gpu.height), (480, 640));
         }

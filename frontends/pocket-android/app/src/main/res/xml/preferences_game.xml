@@ -9,7 +9,6 @@
         <ListPreference android:key="frame_rate_limit" android:title="Frame rate limit" android:persistent="false" />
         <ListPreference android:key="executable_heap" android:title="Executable heap" android:persistent="false" />
         <ListPreference android:key="gpu_compatibility_profile" android:title="GPU compatibility profile" android:persistent="false" />
-        <ListPreference android:key="gpu_renderer_mode" android:title="GPU rendering" android:summary="Host OpenGL; restart the game to apply. Falls back to software if unavailable." android:defaultValue="inherit" />
     </PreferenceCategory>
     <PreferenceCategory android:key="sound_category" android:title="Sound">
         <Preference android:title="No per-game sound options yet." android:selectable="false" android:persistent="false" />

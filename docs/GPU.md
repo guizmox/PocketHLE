@@ -62,7 +62,8 @@ branch on renderer-name substrings can consequently select different paths.
 ## PocketPC graphics compatibility options
 
 PocketPC games select **GPU compatibility profile** in their own **Graphics**
-settings, immediately above **GPU rendering**, on desktop and Android:
+settings on desktop and Android. The global **GPU rendering** option selects the
+GLES 1.x backend for all games.
 
 | Profile | Compatibility behavior |
 | --- | --- |
@@ -352,19 +353,23 @@ per-draw program decode, screenshot comparison or GPU readback is introduced.
 ## Internal resolution
 
 Internal rasterization resolution, guest logical resolution and display zoom are
-three different quantities. The global GPU-only setting applies next launch.
-Portrait equivalents are included in the QVGA/VGA policies.
+three different quantities. In **Emulator Options**, the GLES 1.x host OpenGL
+backend offers **Native**, **2×**, **3×** and **4×**. By default, a multiplier
+applies only to 320×240 and 240×320 surfaces. Check **Apply to all resolutions,
+including sizes other than 320×240** to apply the same multiplier to all
+supported surface sizes. Changes apply the next time a game launches.
 
-| Serialized value | Menu choice | Effective GPU rendering |
+| Serialized value | Multiplier | Surface sizes |
 | --- | --- | --- |
-| 1 | Native (1x) | Native logical surface size |
-| 3 | 2x, only for 320x240 games | Double QVGA; larger surfaces stay native |
-| 4 | 3x, only for 320x240 games | Triple QVGA; larger surfaces stay native |
-| 5 | 4x, only for 320x240 games | Quadruple QVGA; larger surfaces stay native |
-| 2 | 2x, also for 640x480 games | Double supported native surfaces, including VGA |
+| 1 | Native | All |
+| 2 | 2× | All |
+| 3 | 2× | 320×240 and 240×320 |
+| 4 | 3× | 320×240 and 240×320 |
+| 5 | 4× | 320×240 and 240×320 |
+| 6 | 3× | All |
+| 7 | 4× | All |
 
-The nonsequential values preserve compatibility: value 2 retains its original
-all-sizes meaning. Do not renumber them to match menu order.
+The serialized values preserve existing settings.
 Evaluate the policy on surface creation/resize, including parked/restored
 surfaces. Viewport/scissor and point/line density follow the effective scale.
 Queries, input coordinates and guest read/copy buffers stay logical-sized.

@@ -645,6 +645,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "StopDeviceNotifications", stop_device_notifications);
     d.register_handler(dll, "StopPowerNotifications", stop_power_notifications);
     d.register_handler(dll, "GetSystemPowerState", get_system_power_state);
+    d.register_handler(dll, "SetSystemPowerState", set_system_power_state);
     d.register_handler(
         dll,
         "MsgWaitForMultipleObjectsEx",
@@ -12256,6 +12257,35 @@ fn get_system_power_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
         ctx.cpu.write_mem(flags_out, &0u32.to_le_bytes())?;
     }
     Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+/// WinCE keeps the emulated system in the active state. An explicit request
+/// to stay on succeeds. Other transitions require an emulated power manager.
+fn set_system_power_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const POWER_STATE_ON: u32 = 0x0001_0000;
+    const POWER_FORCE: u32 = 0x0000_1000;
+    let name = ctx.arg_u32(0)?;
+    let flags = ctx.arg_u32(1)?;
+    let options = ctx.arg_u32(2)?;
+    if options & !POWER_FORCE != 0 {
+        return Ok(DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER));
+    }
+    let on = if name == 0 {
+        if flags == 0 {
+            return Ok(DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER));
+        }
+        flags == POWER_STATE_ON
+    } else {
+        let Some(name) = power_requirement_name(ctx, name) else {
+            return Ok(DispatchOutcome::ReturnedR0(ERROR_INVALID_PARAMETER));
+        };
+        name.eq_ignore_ascii_case("on")
+    };
+    Ok(DispatchOutcome::ReturnedR0(if on {
+        0
+    } else {
+        ERROR_NOT_SUPPORTED
+    }))
 }
 
 fn get_msg_queue_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -43932,6 +43962,31 @@ mod power_requirement_api_tests {
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
     use pocket_kernel::DispatchOutcome;
+    #[test]
+    fn system_power_requests_use_the_ce_state_name_or_flags() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.write_mem(0x2000, &[b'O', 0, b'n', 0, 0, 0]).unwrap();
+        for (args, expected) in [
+            ([0, 0x0001_0000, 0], 0),
+            ([0x2000, 0x0020_0000, 0x1000], 0),
+            ([0, 0x0020_0000, 0], 50),
+            ([0, 0, 0], 87),
+            ([0x8000, 0x0001_0000, 0], 87),
+        ] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "SetSystemPowerState",
+                    &args
+                ),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+        }
+    }
+
     #[test]
     fn requirements_use_the_ce_abi_and_release_returns_a_status() {
         let (mut cpu, mut kernel, mut dispatcher) = setup();

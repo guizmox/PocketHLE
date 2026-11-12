@@ -311,12 +311,14 @@ class GameActivity : AppCompatActivity() {
                 presentationStart?.let { (root,id) -> presentationStart=null; startSession(root,id) }
             }
         }
-        sharedEglFactory = SharedEglContextFactory(presentationHandle, glRenderer, launchSettings.gpuRenderer ?: config.gpuRenderer)
+        val shareOpenGlContext = config.gpuRenderer ||
+            (!gizmondoGame && launchSettings.gpuCompatibilityProfile == "adreno200")
+        sharedEglFactory = SharedEglContextFactory(presentationHandle, glRenderer, shareOpenGlContext)
         glRenderer.sharedContextAvailable = { sharedEglFactory.isShared() }
         findViewById<View>(R.id.btn_fullscreen).setOnClickListener { setControllerFullscreen(true) }
         surface.setEGLContextClientVersion(3)
         surface.setEGLContextFactory(sharedEglFactory)
-        surface.preserveEGLContextOnPause = launchSettings.gpuRenderer ?: config.gpuRenderer
+        surface.preserveEGLContextOnPause = shareOpenGlContext
         surface.setRenderer(glRenderer)
         surface.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         progress = findViewById(R.id.progress)
