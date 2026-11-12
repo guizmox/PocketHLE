@@ -13,10 +13,73 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
     d.register_handler(DLL, "HTCSensorClose", close);
 }
 
-fn open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.arg_u32(0)? != 1
-        || (ctx.kernel.virtual_tilt_axes.is_none() && !accelerometer::available())
+fn available(kernel: &pocket_kernel::KernelState) -> bool {
+    kernel.virtual_tilt_axes.is_some() || accelerometer::available()
+}
+
+fn sample_counts(kernel: &mut pocket_kernel::KernelState) -> Option<[i16; 3]> {
+    let axes = if let Some(axes) = kernel.virtual_tilt_axes {
+        accelerometer::simulated_sample(kernel, axes)
+    } else {
+        accelerometer::sample()?
+    };
+    Some(axes.map(|value| (value / 0.0098).round() as i16))
+}
+
+pub(crate) fn open_stream(ctx: &mut CallCtx<'_>, disposition: u32) -> DispatchOutcome {
+    let error = if disposition != 3 {
+        87 // ERROR_INVALID_PARAMETER
+    } else if !available(ctx.kernel) {
+        1167 // ERROR_DEVICE_NOT_CONNECTED
+    } else if let Some(handle) = ctx.kernel.vfs.open_htc_sensor() {
+        return DispatchOutcome::ReturnedR0(handle);
+    } else {
+        8 // ERROR_NOT_ENOUGH_MEMORY
+    };
+    set_thread_error(ctx, error);
+    DispatchOutcome::ReturnedR0(u32::MAX)
+}
+
+pub(crate) fn stream_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const READ_ACCELERATION: u32 = 0x0100_0001;
+    const AXES_BYTES: u32 = 6;
+    let fail = |ctx: &mut CallCtx<'_>, error| {
+        set_thread_error(ctx, error);
+        Ok(DispatchOutcome::ReturnedR0(0))
+    };
+    if ctx.arg_u32(1)? != READ_ACCELERATION {
+        return fail(ctx, 50); // ERROR_NOT_SUPPORTED
+    }
+    let output = ctx.arg_u32(4)?;
+    let capacity = ctx.arg_u32(5)?;
+    let written = ctx.arg_u32(6)?;
+    // The HTC stream ABI also accepts a zero length for its fixed-size packet.
+    if output == 0
+        || (capacity != 0 && capacity < AXES_BYTES)
+        || ctx
+            .cpu
+            .check_guest_access(output, AXES_BYTES, Prot::WRITE)
+            .is_err()
+        || (written != 0 && ctx.cpu.check_guest_access(written, 4, Prot::WRITE).is_err())
     {
+        return fail(ctx, 87);
+    }
+    let Some(axes) = sample_counts(ctx.kernel) else {
+        return fail(ctx, if available(ctx.kernel) { 21 } else { 1167 });
+    };
+    let mut data = [0; AXES_BYTES as usize];
+    for (value, field) in axes.into_iter().zip(data.chunks_exact_mut(2)) {
+        field.copy_from_slice(&value.to_le_bytes());
+    }
+    ctx.cpu.write_mem(output, &data)?;
+    if written != 0 {
+        ctx.cpu.write_mem(written, &AXES_BYTES.to_le_bytes())?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if ctx.arg_u32(0)? != 1 || !available(ctx.kernel) {
         set_thread_error(ctx, 1167); // ERROR_DEVICE_NOT_CONNECTED
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -36,18 +99,14 @@ fn read(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if output == 0 || ctx.cpu.check_guest_access(output, 20, Prot::WRITE).is_err() {
         return Ok(DispatchOutcome::ReturnedR0(87));
     }
-    let axes = if let Some(axes) = ctx.kernel.virtual_tilt_axes {
-        accelerometer::simulated_sample(ctx.kernel, axes)
-    } else if let Some(axes) = accelerometer::sample() {
-        axes
-    } else {
+    let Some(axes) = sample_counts(ctx.kernel) else {
         return Ok(DispatchOutcome::ReturnedR0(21)); // ERROR_NOT_READY
     };
     // TiltX/Y/Z are signed 16-bit counts, approximately 1000 per g.
     // Leave the SDK's unknown and auxiliary angle fields at zero.
     let mut data = [0u8; 20];
     for (value, field) in axes.into_iter().zip(data.chunks_exact_mut(2)) {
-        field.copy_from_slice(&((value / 0.0098).round() as i16).to_le_bytes());
+        field.copy_from_slice(&value.to_le_bytes());
     }
     ctx.cpu.write_mem(output, &data)?;
     Ok(DispatchOutcome::ReturnedR0(0))
@@ -66,6 +125,60 @@ mod tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
+
+    #[test]
+    fn sen0_stream_uses_arrow_tilt_with_the_legacy_zero_length_request() {
+        use pocket_kernel::{gapi, InputEvent};
+
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel.gapi_action_key = gapi::VK_RETURN;
+        kernel.virtual_tilt_axes = Some(accelerometer::TiltAxes::Horizontal);
+        let name: Vec<_> = "SEN0:"
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        cpu.write_mem(0x1000, &name).unwrap();
+        let DispatchOutcome::ReturnedR0(handle) = call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "CreateFileW",
+            &[0x1000, 0, 0, 0, 3, 0x80, 0],
+        ) else {
+            panic!("expected a SEN0 stream handle");
+        };
+        assert!(kernel.vfs.is_htc_sensor(handle));
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: gapi::VK_RIGHT });
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[handle, 0x0100_0001, 0, 0, 0x1100, 0, 0x1200, 0],
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_mem(0x1100, 2).unwrap(), 500i16.to_le_bytes());
+        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 6);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "CloseHandle",
+                &[handle]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(!kernel.vfs.is_htc_sensor(handle));
+    }
 
     #[test]
     fn virtual_tilt_tracks_display_direction_and_centers_on_release() {

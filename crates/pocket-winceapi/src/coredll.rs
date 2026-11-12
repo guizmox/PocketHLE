@@ -4272,6 +4272,9 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let out_len = ctx.arg_u32(5)?;
     let returned_p = ctx.arg_u32(6)?;
 
+    if ctx.kernel.vfs.is_htc_sensor(handle) {
+        return crate::htcsensor::stream_control(ctx);
+    }
     if ctx.kernel.vfs.bluetooth_driver_open(handle).is_some() {
         return crate::bluetooth::driver_control(ctx);
     }
@@ -9355,6 +9358,12 @@ fn create_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         .is_ok_and(|n| n.trim_matches(['\\', '/']).eq_ignore_ascii_case("COM8:"))
     {
         return crate::serial::open(ctx);
+    }
+    if name
+        .as_ref()
+        .is_ok_and(|n| n.trim_matches(['\\', '/']).eq_ignore_ascii_case("SEN0:"))
+    {
+        return Ok(crate::htcsensor::open_stream(ctx, disposition));
     }
     let result = name.and_then(|name| {
         ctx.kernel.vfs.open_file(

@@ -393,6 +393,7 @@ enum VfsObjectInner {
     Ram(Arc<Mutex<OpenRamFile>>),
     Volume(OpenVolume),
     Registration,
+    HtcSensor,
     Decoder(Arc<Mutex<Mp3DecoderState>>),
 }
 impl VfsObject {
@@ -457,6 +458,7 @@ pub struct Vfs {
     next_handle: u32,
     /// Handles opened on the Gizmondo registration service device.
     registration: std::collections::HashSet<u32>,
+    htc_sensor_handles: std::collections::HashSet<u32>,
     /// Directory relative guest paths are resolved against.
     ///
     /// Windows CE has no per-process working directory, but Pocket PC
@@ -497,6 +499,7 @@ impl Vfs {
             decoders: HashMap::new(),
             next_handle: HANDLE_BASE,
             registration: std::collections::HashSet::new(),
+            htc_sensor_handles: std::collections::HashSet::new(),
             default_dir: "\\".to_string(),
             colors_language_extensions: &[],
         };
@@ -1944,6 +1947,9 @@ impl Vfs {
 
     /// An opaque shared open description, retaining seek/access/device state.
     pub fn export_handle(&self, handle: u32) -> Option<VfsObject> {
+        if self.is_htc_sensor(handle) {
+            return Some(VfsObject(VfsObjectInner::HtcSensor, None));
+        }
         if let Some(driver) = self.bluetooth_driver_handles.get(&handle) {
             return Some(VfsObject(
                 VfsObjectInner::BluetoothDriver(driver.clone()),
@@ -2010,6 +2016,9 @@ impl Vfs {
             VfsObjectInner::Decoder(decoder) => {
                 self.decoders.insert(handle, decoder);
             }
+            VfsObjectInner::HtcSensor => {
+                self.htc_sensor_handles.insert(handle);
+            }
             VfsObjectInner::Registration => {
                 self.registration.insert(handle);
             }
@@ -2026,6 +2035,7 @@ impl Vfs {
             || self.volumes.contains_key(&handle)
             || self.decoders.contains_key(&handle)
             || self.registration.contains(&handle)
+            || self.is_htc_sensor(handle)
     }
     pub fn vibration_open(&self, handle: u32) -> Option<Arc<VibrationOpen>> {
         self.vibration_handles.get(&handle).cloned()
@@ -2058,6 +2068,7 @@ impl Vfs {
             .chain(self.volumes.keys())
             .chain(self.decoders.keys())
             .chain(self.registration.iter())
+            .chain(self.htc_sensor_handles.iter())
             .copied()
             .collect()
     }
@@ -2079,6 +2090,7 @@ impl Vfs {
             || self.volumes.remove(&handle).is_some()
             || self.decoders.remove(&handle).is_some()
             || self.registration.remove(&handle)
+            || self.htc_sensor_handles.remove(&handle)
     }
 
     /// Flush and close every open handle, returning how many were closed.
@@ -2100,6 +2112,7 @@ impl Vfs {
         self.volumes.clear();
         self.decoders.clear();
         self.registration.clear();
+        self.htc_sensor_handles.clear();
         self.bluetooth_handles.clear();
         self.bluetooth_driver_handles.clear();
         self.camera_handles.clear();
@@ -2155,6 +2168,17 @@ impl Vfs {
 
     pub fn is_open(&self, handle: u32) -> bool {
         self.ram_handles.contains_key(&handle) || self.handles.contains_key(&handle)
+    }
+
+    pub fn open_htc_sensor(&mut self) -> Option<u32> {
+        let handle = self.next_handle;
+        self.next_handle = handle.checked_add(1)?;
+        self.htc_sensor_handles.insert(handle);
+        Some(handle)
+    }
+
+    pub fn is_htc_sensor(&self, handle: u32) -> bool {
+        self.htc_sensor_handles.contains(&handle)
     }
 
     /// Whether `handle` came from opening the Gizmondo registration service.
