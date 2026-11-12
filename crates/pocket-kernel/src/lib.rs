@@ -4342,8 +4342,8 @@ impl Process {
             for (index, (dll, name)) in dynamic_exports_to_add.into_iter().enumerate() {
                 let thunk_va = dynamic_base + index as u32 * THUNK_STRIDE;
                 // GetProcAddress can resolve CRT helpers by name or ordinal.
-                // Keep hot single-precision operations on the same ARM/VFP
-                // path as static imports (Ferrari GT uses the ordinal form).
+                // Match the ARM fast paths used by static imports for hot
+                // helpers (Ferrari GT uses the ordinal form).
                 let arm_ordinal_name =
                     if cpu.arch() == Arch::Arm && dll.eq_ignore_ascii_case("coredll.dll") {
                         name.strip_prefix('#')
@@ -4354,6 +4354,11 @@ impl Process {
                         None
                     };
                 let arm_native_name = arm_ordinal_name.as_deref().unwrap_or(&name);
+                let inline_name = if arm_ordinal_name.as_deref() == Some("sqrtf") {
+                    "sqrtf"
+                } else {
+                    &name
+                };
                 let native = if cpu.arch() == Arch::Mips {
                     native_thunks::mips_thunk_for(&dll, &name).map(|words| (None, words))
                 } else if cpu.arch() == Arch::Arm
@@ -4362,7 +4367,12 @@ impl Process {
                             && (matches!(name.as_str(), "__i64tod" | "__u64tod")
                                 || matches!(
                                     arm_native_name,
-                                    "__adds" | "__subs" | "__muls" | "__itos" | "__stoi"
+                                    "__adds"
+                                        | "__subs"
+                                        | "__muls"
+                                        | "__itos"
+                                        | "__stoi"
+                                        | "__ll_mul"
                                 ))))
                 {
                     native_thunks::native_thunk_at(&dll, arm_native_name, thunk_va)
@@ -4377,7 +4387,12 @@ impl Process {
                         cpu.add_code_hook(fallback)?;
                         thunk_by_va.insert(fallback, thunks.len());
                     }
-                } else if native_thunks::install_inline_arithmetic64(cpu, thunk_va, &dll, &name)? {
+                } else if native_thunks::install_inline_arithmetic64(
+                    cpu,
+                    thunk_va,
+                    &dll,
+                    inline_name,
+                )? {
                     // Register-only conversion/arithmetic, no kernel dispatch.
                 } else {
                     let mut buf = [0u8; THUNK_STRIDE as usize];

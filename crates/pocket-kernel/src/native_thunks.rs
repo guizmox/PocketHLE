@@ -70,6 +70,7 @@ pub fn install_inline_arithmetic64(
         return Ok(false);
     }
     let operation = match name {
+        "sqrtf" => Arithmetic64::SingleSquareRoot,
         "sqrt" => Arithmetic64::DoubleSquareRoot,
         "sin" => Arithmetic64::DoubleSine,
         "cos" => Arithmetic64::DoubleCosine,
@@ -548,6 +549,17 @@ pub fn native_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
         "__rt_sdiv" => pad(&[0xE71C_F011, 0xE061_109C, 0xE1A0_000C, BX_LR]),
         "__rt_udiv" => pad(&[0xE73C_F011, 0xE061_109C, 0xE1A0_000C, BX_LR]),
 
+        // The low 64 bits are the full low-word product plus the two
+        // cross-products shifted by 32. Signedness does not affect these bits.
+        "__ll_mul" => pad(&[
+            0xE00C_0291, // mul ip,r1,r2
+            0xE02C_C390, // mla ip,r0,r3,ip
+            0xE081_3290, // umull r3,r1,r0,r2
+            0xE081_100C, // add r1,r1,ip
+            0xE1A0_0003, // mov r0,r3
+            BX_LR,
+        ]),
+
         // ---- f32 binary arithmetic --------------------------------------
         // vmov s0,r0 / vmov s1,r1 / vOP.f32 s0,s0,s1 / vmov r0,s0 / bx lr
         "__adds" => pad(&[0xEE00_0A10, 0xEE00_1A90, 0xEE30_0A20, 0xEE10_0A10, BX_LR]),
@@ -665,6 +677,37 @@ pub fn thunk_bytes(words: &[u32; 8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "unicorn-tests")]
+    #[test]
+    fn arm_long_multiply_returns_the_wrapping_product() {
+        use pocket_cpu::{regs::ArmReg, Cpu, Prot, StopReason};
+        let mut cpu = pocket_cpu::unicorn::UnicornCpu::new().unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        let words = native_thunk_for("coredll.dll", "__ll_mul").unwrap();
+        cpu.write_mem(0x1200, &thunk_bytes(&words)).unwrap();
+        cpu.add_code_hook(0x1100).unwrap();
+        for (a, b) in [
+            (0, u64::MAX),
+            (0xffff_ffff, 0xffff_ffff),
+            (0x1_0000_0001, 0x1_0000_0001),
+            (0x1234_5678_9abc_def0, 0xfedc_ba98_7654_3210),
+            (u64::MAX, 2),
+        ] {
+            cpu.write_reg(ArmReg::R0, a as u32).unwrap();
+            cpu.write_reg(ArmReg::R1, (a >> 32) as u32).unwrap();
+            cpu.write_reg(ArmReg::R2, b as u32).unwrap();
+            cpu.write_reg(ArmReg::R3, (b >> 32) as u32).unwrap();
+            cpu.write_reg(ArmReg::Lr, 0x1100).unwrap();
+            assert_eq!(
+                cpu.run_until_hook(0x1200, 0).unwrap(),
+                StopReason::Hook(0x1100)
+            );
+            let result = u64::from(cpu.read_reg(ArmReg::R0).unwrap())
+                | (u64::from(cpu.read_reg(ArmReg::R1).unwrap()) << 32);
+            assert_eq!(result, a.wrapping_mul(b));
+        }
+    }
 
     #[test]
     fn floating_comparisons_fit_native_slots_and_are_coredll_only() {
