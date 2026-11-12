@@ -71,6 +71,8 @@ pub fn install_inline_arithmetic64(
     }
     let operation = match name {
         "sqrt" => Arithmetic64::DoubleSquareRoot,
+        "sin" => Arithmetic64::DoubleSine,
+        "cos" => Arithmetic64::DoubleCosine,
         "__i64tod" => Arithmetic64::SignedToDouble,
         "__u64tod" => Arithmetic64::UnsignedToDouble,
         "__dtoi64" => Arithmetic64::DoubleToSigned,

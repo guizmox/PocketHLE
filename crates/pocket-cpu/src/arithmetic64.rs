@@ -1,8 +1,10 @@
-//! Register-only wide arithmetic and exact runtime-compatible conversions.
+//! Register-only arithmetic matching the WinCE runtime handlers.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arithmetic64 {
     DoubleSquareRoot,
+    DoubleSine,
+    DoubleCosine,
     SignedToDouble,
     UnsignedToDouble,
     DoubleToSigned,
@@ -18,6 +20,8 @@ impl Arithmetic64 {
         matches!(
             self,
             Self::DoubleSquareRoot
+                | Self::DoubleSine
+                | Self::DoubleCosine
                 | Self::SignedToDouble
                 | Self::UnsignedToDouble
                 | Self::DoubleToSigned
@@ -28,6 +32,8 @@ impl Arithmetic64 {
     pub fn evaluate(self, dividend: u64, divisor: u64) -> u64 {
         match self {
             Self::DoubleSquareRoot => return f64::from_bits(dividend).sqrt().to_bits(),
+            Self::DoubleSine => return f64::from_bits(dividend).sin().to_bits(),
+            Self::DoubleCosine => return f64::from_bits(dividend).cos().to_bits(),
             Self::SignedToDouble => return ((dividend as i64) as f64).to_bits(),
             Self::UnsignedToDouble => return (dividend as f64).to_bits(),
             Self::DoubleToSigned => return (f64::from_bits(dividend) as i64) as u64,
