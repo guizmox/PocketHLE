@@ -2,7 +2,9 @@
 use crate::coredll::set_thread_error;
 use crate::{CallCtx, WinCeDispatcher};
 use pocket_cpu::Prot;
-use pocket_kernel::{accelerometer, handles::HandleObject, DispatchOutcome, KernelError};
+use pocket_kernel::{
+    accelerometer, handles::HandleObject, vfs::AccelerometerStream, DispatchOutcome, KernelError,
+};
 
 const DLL: &str = "htcsensorsdk.dll";
 const SENSOR: HandleObject = HandleObject::Device(pocket_kernel::HTCSENSOR_MODULE_HANDLE);
@@ -42,12 +44,16 @@ fn sample_counts(kernel: &mut pocket_kernel::KernelState) -> Option<[i16; 3]> {
     Some(axes.map(|value| (value / 0.0098).round() as i16))
 }
 
-pub(crate) fn open_stream(ctx: &mut CallCtx<'_>, disposition: u32) -> DispatchOutcome {
+pub(crate) fn open_stream(
+    ctx: &mut CallCtx<'_>,
+    disposition: u32,
+    stream: AccelerometerStream,
+) -> DispatchOutcome {
     let error = if disposition != 3 {
         87 // ERROR_INVALID_PARAMETER
     } else if !available(ctx.kernel) {
         1167 // ERROR_DEVICE_NOT_CONNECTED
-    } else if let Some(handle) = ctx.kernel.vfs.open_htc_sensor() {
+    } else if let Some(handle) = ctx.kernel.vfs.open_htc_sensor(stream) {
         return DispatchOutcome::ReturnedR0(handle);
     } else {
         8 // ERROR_NOT_ENOUGH_MEMORY
@@ -57,13 +63,19 @@ pub(crate) fn open_stream(ctx: &mut CallCtx<'_>, disposition: u32) -> DispatchOu
 }
 
 pub(crate) fn stream_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    const READ_ACCELERATION: u32 = 0x0100_0001;
+    let handle = ctx.arg_u32(0)?;
+    let stream = ctx.kernel.vfs.htc_sensor_stream(handle);
+    let code = ctx.arg_u32(1)?;
     const AXES_BYTES: u32 = 6;
     let fail = |ctx: &mut CallCtx<'_>, error| {
         set_thread_error(ctx, error);
         Ok(DispatchOutcome::ReturnedR0(0))
     };
-    if ctx.arg_u32(1)? != READ_ACCELERATION {
+    if !matches!(
+        (stream, code),
+        (Some(AccelerometerStream::Sen0), 0x0100_0001)
+            | (Some(AccelerometerStream::Acc1), 0x8012_2ef0)
+    ) {
         return fail(ctx, 50); // ERROR_NOT_SUPPORTED
     }
     let output = ctx.arg_u32(4)?;
@@ -82,6 +94,14 @@ pub(crate) fn stream_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     }
     let Some(axes) = sample_counts(ctx.kernel) else {
         return fail(ctx, if available(ctx.kernel) { 21 } else { 1167 });
+    };
+    let axes = if stream == Some(AccelerometerStream::Acc1) {
+        // The SDK decodes ACC1 as (raw X - 0x800, raw Y - 0x800, 0x800 - raw Z).
+        // Invert that wire encoding after normalizing the device axes.
+        let [x, y, z] = axes.map(i32::from);
+        [x, y, -z].map(|value| (value + 0x800).clamp(0, 0xfff) as i16)
+    } else {
+        axes
     };
     let mut data = [0; AXES_BYTES as usize];
     for (value, field) in axes.into_iter().zip(data.chunks_exact_mut(2)) {
@@ -141,6 +161,68 @@ mod tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
+
+    #[test]
+    fn acc1_stream_returns_biased_samples_for_the_native_sdk() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel.virtual_tilt_axes = Some(accelerometer::TiltAxes::Both);
+        let name: Vec<_> = "ACC1:"
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        cpu.write_mem(0x1000, &name).unwrap();
+        let DispatchOutcome::ReturnedR0(handle) = call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "CreateFileW",
+            &[0x1000, 0, 0, 0, 3, 0, 0],
+        ) else {
+            panic!("expected an ACC1 stream handle");
+        };
+        assert_eq!(
+            kernel.vfs.htc_sensor_stream(handle),
+            Some(AccelerometerStream::Acc1)
+        );
+        for (code, expected) in [(0x0100_0001, 0), (0x8012_2ef0, 1)] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "DeviceIoControl",
+                    &[handle, code, 0, 0, 0x1100, 6, 0x1200, 0]
+                ),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+        }
+        assert_eq!(cpu.read_mem(0x1100, 6).unwrap(), [0, 8, 0, 8, 0xe8, 0x0b]);
+        kernel.pending_input.extend([
+            pocket_kernel::InputEvent::KeyboardRotation { turns: 1 },
+            pocket_kernel::InputEvent::KeyDown {
+                vk: pocket_kernel::gapi::VK_UP,
+            },
+        ]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[handle, 0x8012_2ef0, 0, 0, 0x1100, 6, 0x1200, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            cpu.read_mem(0x1100, 6).unwrap(),
+            [0, 8, 0x0c, 6, 0x62, 0x0b]
+        );
+        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 6);
+    }
 
     #[test]
     fn sen0_stream_uses_arrow_tilt_with_the_legacy_zero_length_request() {

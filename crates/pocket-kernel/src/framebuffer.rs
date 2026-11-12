@@ -23,6 +23,14 @@ pub const FB_BPP: u32 = 16;
 /// Total framebuffer size in bytes.
 pub const FB_BYTES: u32 = FB_WIDTH * FB_HEIGHT * (FB_BPP / 8);
 
+/// A single opaque DirectDraw overlay composited over the primary surface.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectDrawOverlay {
+    pub surface: u32,
+    pub source: (i64, i64, i64, i64),
+    pub destination: (i64, i64, i64, i64),
+}
+
 /// Modeled LCD clock shared by DirectDraw waits and primary presentations.
 #[derive(Debug, Clone)]
 pub struct DirectDrawTiming {
@@ -35,6 +43,8 @@ pub struct DirectDrawTiming {
     pub recent_blank: std::collections::HashMap<usize, std::time::Instant>,
     pub paced_primary_locks: std::collections::HashSet<u32>,
     pub primary_locks: std::collections::HashSet<u32>,
+    pub overlay: Option<DirectDrawOverlay>,
+    pub surface_dcs: std::collections::HashMap<u32, (u32, u32)>,
 }
 impl Default for DirectDrawTiming {
     fn default() -> Self {
@@ -46,6 +56,8 @@ impl Default for DirectDrawTiming {
             recent_blank: Default::default(),
             paced_primary_locks: Default::default(),
             primary_locks: Default::default(),
+            overlay: None,
+            surface_dcs: Default::default(),
         }
     }
 }

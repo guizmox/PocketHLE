@@ -270,8 +270,8 @@ pub fn register(d: &mut WinCeDispatcher) {
             "ddraw_create_palette" => ddraw_create_palette,
             "ddraw_create_clipper" => ddraw_create_clipper,
             "ddraw_set_cooperative_level" => ddraw_set_cooperative_level,
-            "ddraw_get_caps"
-            | "ddraw_get_fourcc_codes"
+            "ddraw_get_caps" => ddraw_get_caps,
+            "ddraw_get_fourcc_codes"
             | "ddraw_get_monitor_frequency"
             | "ddraw_restore_display_mode"
             | "ddraw_restore_all_surfaces"
@@ -298,7 +298,10 @@ pub fn register(d: &mut WinCeDispatcher) {
             _ if name.starts_with("clipper_") => clipper_ok,
             "surface_qi" => surface_qi,
             "surface_add_ref" => add_ref,
-            "surface_release" => release,
+            "surface_release" => surface_release,
+            "surface_update_overlay" => surface_update_overlay,
+            "surface_get_overlay_position" => surface_get_overlay_position,
+            "surface_set_overlay_position" => surface_set_overlay_position,
             "surface_blt" | "surface_alpha_blt" => surface_blt,
             "surface_blt_fast" => surface_blt_fast,
             "surface_ce_flip_or_legacy_blt_fast" => surface_ce_flip_or_legacy_blt_fast,
@@ -307,6 +310,7 @@ pub fn register(d: &mut WinCeDispatcher) {
             "surface_get_color_key" => surface_get_color_key,
             "surface_get_surface_desc" => surface_desc,
             "surface_get_dc" => surface_get_dc,
+            "surface_release_dc" => surface_release_dc,
             "surface_is_lost" => surface_is_lost,
             "surface_lock" => surface_lock,
             "surface_ce_palette_or_legacy_lock" => surface_ce_palette_or_legacy_lock,
@@ -848,6 +852,136 @@ fn ddraw_get_available_vid_mem(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+/// The compact CE DDCAPS has independent surface, blit and overlay masks.
+fn ddraw_get_caps(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const CE_CAPS_SIZE: u32 = 112;
+    let driver = ctx.arg_u32(1)?;
+    let emulation = ctx.arg_u32(2)?;
+    let video_memory = ctx.kernel.framebuffer.byte_size().saturating_mul(4);
+    for out in [driver, emulation] {
+        if out == 0 || ctx.cpu.read_u32_le(out).ok() != Some(CE_CAPS_SIZE) {
+            continue;
+        }
+        let mut caps = [0u32; (CE_CAPS_SIZE / 4) as usize];
+        caps[0] = CE_CAPS_SIZE;
+        caps[1] = video_memory;
+        caps[2] = video_memory;
+        // BACKBUFFER | FLIP | OVERLAY | PRIMARYSURFACE | SYSTEMMEMORY | VIDEOMEMORY
+        caps[4] = 0x01d6;
+        caps[7] = 3; // DDBLTCAPS_READSYSMEM | DDBLTCAPS_WRITESYSMEM
+        caps[18] = 0x8000_0001; // DDOVERLAYCAPS_OVERLAYSUPPORT | DDOVERLAYCAPS_FLIP
+        caps[19] = 1;
+        caps[20] = u32::from(ctx.kernel.framebuffer.directdraw.overlay.is_some());
+        ctx.cpu
+            .write_mem(out, &caps.map(u32::to_le_bytes).concat())?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn surface_update_overlay(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    use pocket_kernel::framebuffer::DirectDrawOverlay;
+    const HIDE: u32 = 0x20;
+    const SHOW: u32 = 0x400;
+    const WAITS: u32 = 0xc000;
+    let object = ctx.arg_u32(0)?;
+    let flags = ctx.arg_u32(4)?;
+    let clock = &mut ctx.kernel.framebuffer.directdraw;
+    if flags & HIDE != 0 {
+        if clock
+            .overlay
+            .is_some_and(|overlay| overlay.surface == object)
+        {
+            clock.overlay = None;
+            publish_framebuffer(ctx)?;
+        }
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if flags & !(SHOW | WAITS) != 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0x8000_4001)); // E_NOTIMPL
+    }
+    let source_rect = ctx.arg_u32(1)?;
+    let dest_object = ctx.arg_u32(2)?;
+    let dest_rect = ctx.arg_u32(3)?;
+    let Some(source) = surface_record(ctx, object).filter(|surface| !surface.primary) else {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    };
+    let Some(dest) = surface_record(ctx, dest_object).filter(|surface| surface.primary) else {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    };
+    if ctx
+        .kernel
+        .framebuffer
+        .directdraw
+        .overlay
+        .is_some_and(|overlay| overlay.surface != object)
+    {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_000e));
+    }
+    let source = read_blt_rect(ctx, source_rect, source);
+    let destination = read_blt_rect(ctx, dest_rect, dest);
+    ctx.kernel.framebuffer.directdraw.overlay = Some(DirectDrawOverlay {
+        surface: object,
+        source,
+        destination,
+    });
+    publish_framebuffer(ctx)?;
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn surface_get_overlay_position(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let object = ctx.arg_u32(0)?;
+    let Some(overlay) = ctx
+        .kernel
+        .framebuffer
+        .directdraw
+        .overlay
+        .filter(|overlay| overlay.surface == object)
+    else {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    };
+    for (arg, value) in [(1, overlay.destination.0), (2, overlay.destination.1)] {
+        let out = ctx.arg_u32(arg)?;
+        ctx.cpu.write_mem(out, &(value as i32).to_le_bytes())?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn surface_set_overlay_position(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let object = ctx.arg_u32(0)?;
+    let x = i64::from(ctx.arg_u32(1)? as i32);
+    let y = i64::from(ctx.arg_u32(2)? as i32);
+    let Some(overlay) = ctx
+        .kernel
+        .framebuffer
+        .directdraw
+        .overlay
+        .as_mut()
+        .filter(|overlay| overlay.surface == object)
+    else {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    };
+    let (left, top, right, bottom) = overlay.destination;
+    overlay.destination = (x, y, x + right - left, y + bottom - top);
+    publish_framebuffer(ctx)?;
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn surface_release(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let object = ctx.arg_u32(0)?;
+    close_surface_dc(ctx, object)?;
+    if ctx
+        .kernel
+        .framebuffer
+        .directdraw
+        .overlay
+        .is_some_and(|overlay| overlay.surface == object)
+    {
+        ctx.kernel.framebuffer.directdraw.overlay = None;
+        publish_framebuffer(ctx)?;
+    }
+    release(ctx)
+}
+
 fn ddraw_ok(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -1044,9 +1178,91 @@ fn surface_desc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn surface_get_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let object = ctx.arg_u32(0)?;
     let out = ctx.arg_u32(1)?;
-    if out != 0 {
-        ctx.cpu.write_mem(out, &0xDEAD_1001u32.to_le_bytes())?;
+    if out == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    }
+    let Some(surface) = surface_record(ctx, object) else {
+        ctx.cpu
+            .write_mem(out, &pocket_kernel::gdi::GDI_SCREEN_DC.to_le_bytes())?;
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if ctx
+        .kernel
+        .framebuffer
+        .directdraw
+        .surface_dcs
+        .contains_key(&object)
+    {
+        return Ok(DispatchOutcome::ReturnedR0(0x8876_026c)); // DDERR_DCALREADYCREATED
+    }
+    ctx.cpu
+        .check_guest_access(out, 4, pocket_cpu::Prot::WRITE)?;
+    let bitmap = ctx
+        .kernel
+        .gdi
+        .register_dib(pocket_kernel::gdi::Bitmap::new_dib(
+            surface.width,
+            surface.height,
+            16,
+            surface.pixels,
+            surface.pitch,
+            false,
+            Vec::new(),
+            false,
+        ));
+    let dc = ctx.kernel.gdi.create_memory_dc();
+    ctx.kernel.gdi.select_into(dc, bitmap);
+    crate::coredll::sync_dib_from_guest(ctx, dc)?;
+    ctx.cpu.write_mem(out, &dc.to_le_bytes())?;
+    ctx.kernel
+        .framebuffer
+        .directdraw
+        .surface_dcs
+        .insert(object, (dc, bitmap));
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn close_surface_dc(ctx: &mut CallCtx<'_>, object: u32) -> Result<(), KernelError> {
+    if let Some((dc, bitmap)) = ctx
+        .kernel
+        .framebuffer
+        .directdraw
+        .surface_dcs
+        .get(&object)
+        .copied()
+    {
+        crate::coredll::sync_bitmap_to_guest(ctx, bitmap)?;
+        ctx.kernel
+            .framebuffer
+            .directdraw
+            .surface_dcs
+            .remove(&object);
+        ctx.kernel.gdi.delete(dc);
+        ctx.kernel.gdi.delete(bitmap);
+        if surface_record(ctx, object).is_some_and(|surface| surface.primary)
+            || ctx
+                .kernel
+                .framebuffer
+                .directdraw
+                .overlay
+                .is_some_and(|overlay| overlay.surface == object)
+        {
+            publish_framebuffer(ctx)?;
+        }
+    }
+    Ok(())
+}
+
+fn surface_release_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let object = ctx.arg_u32(0)?;
+    let dc = ctx.arg_u32(1)?;
+    if let Some(&(expected, _)) = ctx.kernel.framebuffer.directdraw.surface_dcs.get(&object) {
+        if dc != expected {
+            return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+        }
+        close_surface_dc(ctx, object)?;
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -1166,6 +1382,18 @@ fn publish_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     let mut pixels = vec![0u8; ctx.kernel.framebuffer.byte_size() as usize];
     ctx.cpu
         .read_mem_into(SYNTHETIC_FRAMEBUFFER_BASE, &mut pixels)?;
+    if let Some(overlay) = ctx.kernel.framebuffer.directdraw.overlay {
+        if let Some(surface) = surface_record(ctx, overlay.surface) {
+            stretch_rect_into(
+                ctx,
+                surface,
+                overlay.source,
+                panel_record(ctx),
+                overlay.destination,
+                Some(&mut pixels),
+            )?;
+        }
+    }
     if pixels
         != ctx
             .kernel
@@ -1188,6 +1416,17 @@ fn publish_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
 }
 
 fn surface_unlock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let object = ctx.arg_u32(0)?;
+    if ctx
+        .kernel
+        .framebuffer
+        .directdraw
+        .overlay
+        .is_some_and(|overlay| overlay.surface == object)
+    {
+        publish_framebuffer(ctx)?;
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     if this_surface(ctx)?.is_none_or(|record| record.primary) {
         let paced = ctx
             .kernel
@@ -1249,7 +1488,15 @@ fn surface_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             stretch_rect(ctx, src, source, dest, target)?;
         }
     }
-    if dest.primary {
+    let object = ctx.arg_u32(0)?;
+    if dest.primary
+        || ctx
+            .kernel
+            .framebuffer
+            .directdraw
+            .overlay
+            .is_some_and(|overlay| overlay.surface == object)
+    {
         publish_framebuffer(ctx)?;
     }
     Ok(DispatchOutcome::ReturnedR0(0))
@@ -1336,9 +1583,20 @@ fn copy_rect(
 fn stretch_rect(
     ctx: &mut CallCtx<'_>,
     src: SurfaceRecord,
+    source: BltRect,
+    dest: SurfaceRecord,
+    target: BltRect,
+) -> Result<(), KernelError> {
+    stretch_rect_into(ctx, src, source, dest, target, None)
+}
+
+fn stretch_rect_into(
+    ctx: &mut CallCtx<'_>,
+    src: SurfaceRecord,
     (sl, st, sr, sb): BltRect,
     dest: SurfaceRecord,
     (dl, dt, dr, db): BltRect,
+    mut composed: Option<&mut [u8]>,
 ) -> Result<(), KernelError> {
     if sr <= sl || sb <= st || dr <= dl || db <= dt {
         return Ok(());
@@ -1370,7 +1628,7 @@ fn stretch_rect(
     let source_bytes = ((last_x - first_x + 1) * 2) as usize;
     let mut input = vec![0; source_bytes];
     // A stretch in place can overwrite source rows before they are sampled.
-    let snapshot = if src.pixels == dest.pixels {
+    let snapshot = if composed.is_none() && src.pixels == dest.pixels {
         let mut pixels = vec![0; source_bytes * (last_y - first_y + 1) as usize];
         for (row, y) in pixels.chunks_exact_mut(source_bytes).zip(first_y..=last_y) {
             ctx.cpu
@@ -1398,8 +1656,13 @@ fn stretch_rect(
             }
             previous = Some(sy);
         }
-        ctx.cpu
-            .write_mem(dest.pixels + y * dest.pitch + left * 2, &output)?;
+        let offset = y * dest.pitch + left * 2;
+        if let Some(pixels) = composed.as_deref_mut() {
+            let offset = offset as usize;
+            pixels[offset..offset + output.len()].copy_from_slice(&output);
+        } else {
+            ctx.cpu.write_mem(dest.pixels + offset, &output)?;
+        }
     }
     Ok(())
 }
@@ -1481,6 +1744,108 @@ mod tests {
         pixel_format_bytes, surface_desc_bytes, CLIPPER_METHODS, DDRAW_METHODS, PALETTE_METHODS,
         SURFACE_METHODS,
     };
+
+    #[test]
+    fn compact_caps_and_overlay_preserve_the_primary_surface() {
+        use super::*;
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_cpu::Cpu;
+
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.write_mem(0x1100, &112u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1170, &[0x7f; 4]).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "ddraw_get_caps",
+                &[0, 0x1100, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_u32_le(0x1148).unwrap(), 0x8000_0001);
+        assert_eq!(cpu.read_mem(0x1170, 4).unwrap(), [0x7f; 4]);
+
+        let primary = SurfaceRecord {
+            pixels: SYNTHETIC_FRAMEBUFFER_BASE,
+            width: kernel.framebuffer.width,
+            height: kernel.framebuffer.height,
+            pitch: kernel.framebuffer.stride_bytes(),
+            primary: true,
+        };
+        let overlay = SurfaceRecord {
+            pixels: 0x1400,
+            width: 1,
+            height: 1,
+            pitch: 2,
+            primary: false,
+        };
+        for (addr, surface) in [(0x1200, primary), (0x1300, overlay)] {
+            cpu.write_mem(
+                addr + 4,
+                &surface.private_words().map(u32::to_le_bytes).concat(),
+            )
+            .unwrap();
+        }
+        let invoke =
+            |cpu: &mut pocket_cpu::stub::StubCpu,
+             kernel: &mut pocket_kernel::KernelState,
+             dispatcher: &mut WinCeDispatcher,
+             name,
+             args: &[u32]| { call(cpu, kernel, dispatcher, "coredll.dll", name, args) };
+        assert_eq!(
+            invoke(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "surface_get_dc",
+                &[0x1300, 0x1600]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let dc = cpu.read_u32_le(0x1600).unwrap();
+        assert_eq!(
+            invoke(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "SetPixel",
+                &[dc, 0, 0, 0xff00]
+            ),
+            DispatchOutcome::ReturnedR0(0xff00)
+        );
+        assert_eq!(
+            invoke(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "surface_release_dc",
+                &[0x1300, dc]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_mem(0x1400, 2).unwrap(), [0xe0, 0x07]);
+        assert!(kernel.gdi.dc(dc).is_none());
+        cpu.write_mem(0x1500, &[0u32, 0, 1, 1].map(u32::to_le_bytes).concat())
+            .unwrap();
+        for (flags, expected) in [(0x400, [0xe0, 0x07]), (0x20, [0, 0])] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "surface_update_overlay",
+                    &[0x1300, 0, 0x1200, 0x1500, flags, 0]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(kernel.framebuffer.cpu().unwrap().pixels[..2], expected);
+            assert_eq!(cpu.read_mem(SYNTHETIC_FRAMEBUFFER_BASE, 2).unwrap(), [0, 0]);
+        }
+    }
 
     #[test]
     fn rgb565_stretch_preserves_sampling_when_destination_is_clipped() {

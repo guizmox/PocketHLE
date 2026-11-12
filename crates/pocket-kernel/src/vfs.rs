@@ -382,6 +382,12 @@ static NEXT_MAS_STREAM: std::sync::atomic::AtomicU32 =
 /// Cloneable open description for transfer between process namespaces.
 #[derive(Clone)]
 pub struct VfsObject(VfsObjectInner, Option<(u32, crate::audio::MasPlayback)>);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccelerometerStream {
+    Sen0,
+    Acc1,
+}
+
 #[derive(Clone)]
 enum VfsObjectInner {
     Bluetooth(Arc<BluetoothOpen>),
@@ -393,7 +399,7 @@ enum VfsObjectInner {
     Ram(Arc<Mutex<OpenRamFile>>),
     Volume(OpenVolume),
     Registration,
-    HtcSensor,
+    HtcSensor(AccelerometerStream),
     Decoder(Arc<Mutex<Mp3DecoderState>>),
 }
 impl VfsObject {
@@ -458,7 +464,7 @@ pub struct Vfs {
     next_handle: u32,
     /// Handles opened on the Gizmondo registration service device.
     registration: std::collections::HashSet<u32>,
-    htc_sensor_handles: std::collections::HashSet<u32>,
+    htc_sensor_handles: HashMap<u32, AccelerometerStream>,
     /// Directory relative guest paths are resolved against.
     ///
     /// Windows CE has no per-process working directory, but Pocket PC
@@ -499,7 +505,7 @@ impl Vfs {
             decoders: HashMap::new(),
             next_handle: HANDLE_BASE,
             registration: std::collections::HashSet::new(),
-            htc_sensor_handles: std::collections::HashSet::new(),
+            htc_sensor_handles: HashMap::new(),
             default_dir: "\\".to_string(),
             colors_language_extensions: &[],
         };
@@ -1947,8 +1953,8 @@ impl Vfs {
 
     /// An opaque shared open description, retaining seek/access/device state.
     pub fn export_handle(&self, handle: u32) -> Option<VfsObject> {
-        if self.is_htc_sensor(handle) {
-            return Some(VfsObject(VfsObjectInner::HtcSensor, None));
+        if let Some(stream) = self.htc_sensor_stream(handle) {
+            return Some(VfsObject(VfsObjectInner::HtcSensor(stream), None));
         }
         if let Some(driver) = self.bluetooth_driver_handles.get(&handle) {
             return Some(VfsObject(
@@ -2016,8 +2022,8 @@ impl Vfs {
             VfsObjectInner::Decoder(decoder) => {
                 self.decoders.insert(handle, decoder);
             }
-            VfsObjectInner::HtcSensor => {
-                self.htc_sensor_handles.insert(handle);
+            VfsObjectInner::HtcSensor(stream) => {
+                self.htc_sensor_handles.insert(handle, stream);
             }
             VfsObjectInner::Registration => {
                 self.registration.insert(handle);
@@ -2068,7 +2074,7 @@ impl Vfs {
             .chain(self.volumes.keys())
             .chain(self.decoders.keys())
             .chain(self.registration.iter())
-            .chain(self.htc_sensor_handles.iter())
+            .chain(self.htc_sensor_handles.keys())
             .copied()
             .collect()
     }
@@ -2090,7 +2096,7 @@ impl Vfs {
             || self.volumes.remove(&handle).is_some()
             || self.decoders.remove(&handle).is_some()
             || self.registration.remove(&handle)
-            || self.htc_sensor_handles.remove(&handle)
+            || self.htc_sensor_handles.remove(&handle).is_some()
     }
 
     /// Flush and close every open handle, returning how many were closed.
@@ -2170,15 +2176,19 @@ impl Vfs {
         self.ram_handles.contains_key(&handle) || self.handles.contains_key(&handle)
     }
 
-    pub fn open_htc_sensor(&mut self) -> Option<u32> {
+    pub fn open_htc_sensor(&mut self, stream: AccelerometerStream) -> Option<u32> {
         let handle = self.next_handle;
         self.next_handle = handle.checked_add(1)?;
-        self.htc_sensor_handles.insert(handle);
+        self.htc_sensor_handles.insert(handle, stream);
         Some(handle)
     }
 
     pub fn is_htc_sensor(&self, handle: u32) -> bool {
-        self.htc_sensor_handles.contains(&handle)
+        self.htc_sensor_handles.contains_key(&handle)
+    }
+
+    pub fn htc_sensor_stream(&self, handle: u32) -> Option<AccelerometerStream> {
+        self.htc_sensor_handles.get(&handle).copied()
     }
 
     /// Whether `handle` came from opening the Gizmondo registration service.

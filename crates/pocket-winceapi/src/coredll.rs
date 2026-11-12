@@ -342,6 +342,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "_snprintf", snprintf);
     d.register_handler(dll, "sscanf", sscanf);
     d.register_handler(dll, "fscanf", fscanf);
+    d.register_handler(dll, "fwscanf", fwscanf);
     d.register_handler(dll, "swscanf", swscanf);
     d.register_handler(dll, "_snwprintf", snwprintf);
     d.register_handler(dll, "vswprintf", vswprintf);
@@ -354,6 +355,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     // nothing into the buffer and both fields came out blank.
     d.register_handler(dll, "StringCbPrintfW", string_cb_printf_w);
     d.register_handler(dll, "StringCchPrintfW", string_cch_printf_w);
+    d.register_handler(dll, "StringCchCopyW", string_cch_copy_w);
     d.register_handler(dll, "StringCbCopyW", string_cb_copy_w);
     d.register_handler(dll, "StringCbLengthW", string_cb_length_w);
     d.register_handler(dll, "StringCbCatW", string_cb_cat_w);
@@ -794,6 +796,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "DrawEdge", 1, one_returning);
     d.register_constant(dll, "DrawFocusRect", 1, one_returning);
     d.register_handler(dll, "SetBkMode", set_bk_mode);
+    d.register_handler(dll, "GetBkMode", get_bk_mode);
     d.register_handler(dll, "SetBkColor", set_bk_color);
     d.register_handler(dll, "GetBkColor", get_bk_color);
     d.register_handler(dll, "SetTextColor", set_text_color);
@@ -1292,6 +1295,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "abs", m_abs_i32);
     d.register_handler(dll, "fabs", m_fabs);
     d.register_handler(dll, "_copysign", m_copysign);
+    d.register_handler(dll, "_finite", m_finite);
     d.register_handler(dll, "atan2", m_atan2);
     d.register_handler(dll, "pow", m_pow);
     d.register_handler(dll, "fmod", m_fmod);
@@ -4758,7 +4762,7 @@ fn load_library(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             return Ok(DispatchOutcome::ReturnedR0(0));
         }
     };
-    let name = String::from_utf16_lossy(&path).to_ascii_lowercase();
+    let mut name = String::from_utf16_lossy(&path).to_ascii_lowercase();
     if module_file_name(&name) == "note_prj.dll" || name == "note_prj" {
         let handle = pocket_kernel::NOTE_PRJ_MODULE_HANDLE;
         if ctx.kernel.dynamic_exports.contains_key(&handle) {
@@ -4845,9 +4849,14 @@ fn load_library(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         name.rsplit(['\\', '/']).next(),
         Some("htcsensorsdk" | "htcsensorsdk.dll")
     ) {
-        return Ok(DispatchOutcome::ReturnedR0(
-            pocket_kernel::HTCSENSOR_MODULE_HANDLE,
-        ));
+        if ctx.kernel.find_module_file("htcsensorsdk.dll").is_none() {
+            return Ok(DispatchOutcome::ReturnedR0(
+                pocket_kernel::HTCSENSOR_MODULE_HANDLE,
+            ));
+        }
+        if !name.ends_with(".dll") {
+            name.push_str(".dll");
+        }
     }
     if name.ends_with("hss.dll") || name == "hss" {
         let handle = if ctx.kernel.dynamic_exports.contains_key(&HSS_MODULE_HANDLE) {
@@ -4939,7 +4948,9 @@ fn load_library(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 // Navigator's map/routing libraries are supplied as native ARM DLLs. Keep
 // registered HLE handlers first, and use native exports only for missing APIs.
 pub(crate) fn native_import_available(kernel: &KernelState, thunk: &pocket_kernel::Thunk) -> bool {
-    (!runtime_hle_dll(&thunk.dll) || thunk.dll.eq_ignore_ascii_case("zlib.dll"))
+    (!runtime_hle_dll(&thunk.dll)
+        || thunk.dll.eq_ignore_ascii_case("zlib.dll")
+        || thunk.dll.eq_ignore_ascii_case("htcsensorsdk.dll"))
         && kernel.find_module_file(&thunk.dll).is_some()
 }
 
@@ -4947,8 +4958,11 @@ pub(crate) fn native_import_available(kernel: &KernelState, thunk: &pocket_kerne
 // Prefer the user's actual runtime from its first call, avoiding split HLE /
 // native CString, allocator and module state. A supplied zlib likewise owns its
 // stream state; never pass an HLE stream handle into a native inflater.
+// A supplied HTC SDK likewise owns its sensor handles and return-code ABI.
 pub(crate) fn native_import_preferred(kernel: &KernelState, thunk: &pocket_kernel::Thunk) -> bool {
-    (thunk.dll.eq_ignore_ascii_case("mfcce300.dll") || thunk.dll.eq_ignore_ascii_case("zlib.dll"))
+    (thunk.dll.eq_ignore_ascii_case("mfcce300.dll")
+        || thunk.dll.eq_ignore_ascii_case("zlib.dll")
+        || thunk.dll.eq_ignore_ascii_case("htcsensorsdk.dll"))
         && native_import_available(kernel, thunk)
 }
 
@@ -5642,7 +5656,8 @@ fn map_resource_module_inner(
         .iter()
         .map(|import| {
             runtime_hle_dll(&import.dll)
-                && !(import.dll.eq_ignore_ascii_case("zlib.dll")
+                && !((import.dll.eq_ignore_ascii_case("zlib.dll")
+                    || import.dll.eq_ignore_ascii_case("htcsensorsdk.dll"))
                     && (ctx.kernel.module_by_name(&import.dll).is_some()
                         || native_dependency_file(ctx.kernel, host_path, &import.dll).is_some()))
         })
@@ -8593,13 +8608,25 @@ fn run_sscanf(
 /// records. Translate CRLF only for a text-mode FILE and map logical offsets
 /// back to physical bytes before seeking to the final position.
 fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    scan_stream(ctx, false)
+}
+
+fn fwscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    scan_stream(ctx, true)
+}
+
+fn scan_stream(ctx: &mut CallCtx<'_>, wide: bool) -> Result<DispatchOutcome, KernelError> {
     use pocket_kernel::vfs::SeekKind;
     let handle = ctx.arg_u32(0)?;
     let format = ctx.arg_u32(1)?;
     if format == 0 || !ctx.kernel.vfs.is_open(handle) {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
-    let fmt = String::from_utf8_lossy(&read_crt_cstr(ctx, format)?).into_owned();
+    let fmt = if wide {
+        String::from_utf16_lossy(&read_wstr(ctx, format, 0x4000)?)
+    } else {
+        String::from_utf8_lossy(&read_crt_cstr(ctx, format)?).into_owned()
+    };
     let Some(start) = ctx.kernel.vfs.seek(handle, 0, SeekKind::Current) else {
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     };
@@ -8619,23 +8646,31 @@ fn fscanf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let mut input = Vec::new();
     let pushed = ctx.kernel.crt_pushback.remove(&handle);
     let mut offsets = vec![0usize];
+    let mut append = |byte: u8, position: usize| {
+        if wide && !byte.is_ascii() {
+            let text = crate::crt_ansi::decode(&[byte]);
+            input.extend_from_slice(text.as_bytes());
+            offsets.resize(input.len() + 1, position);
+        } else {
+            input.push(byte);
+            offsets.push(position);
+        }
+    };
     if let Some(byte) = pushed {
-        input.push(byte);
-        offsets.push(0);
+        append(byte, 0);
     }
     let mut i = 0;
     while i < raw.len() {
         if text_mode && raw[i] == b'\r' && raw.get(i + 1) == Some(&b'\n') {
-            input.push(b'\n');
             i += 2;
+            append(b'\n', i);
         } else {
-            input.push(raw[i]);
             i += 1;
+            append(raw[i - 1], i);
         }
-        offsets.push(i);
     }
     let mut arg = 2u8;
-    let result = run_scan_bytes(ctx, &input, &fmt, false, |ctx| {
+    let result = run_scan_bytes(ctx, &input, &fmt, wide, |ctx| {
         let pointer = ctx.arg_u32(arg)?;
         arg = arg.saturating_add(1);
         Ok(pointer)
@@ -8908,6 +8943,28 @@ fn string_cb_length_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         STRSAFE_E_INSUFFICIENT_BUFFER
     }))
 }
+fn string_cch_copy_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const E_INVALIDARG: u32 = 0x8007_0057;
+    let dst = ctx.arg_u32(0)?;
+    let capacity = ctx.arg_u32(1)?;
+    let src = ctx.arg_u32(2)?;
+    if dst == 0 || src == 0 || capacity == 0 || capacity > 0x7fff_ffff {
+        return Ok(DispatchOutcome::ReturnedR0(E_INVALIDARG));
+    }
+    let mut units = read_wstr(ctx, src, capacity)?;
+    let truncated = units.len() == capacity as usize;
+    if truncated {
+        units.pop();
+    }
+    units.push(0);
+    ctx.cpu.write_mem(dst, &wide_to_bytes(&units))?;
+    Ok(DispatchOutcome::ReturnedR0(if truncated {
+        STRSAFE_E_INSUFFICIENT_BUFFER
+    } else {
+        S_OK
+    }))
+}
+
 /// `HRESULT StringCchPrintfW(LPWSTR dst, size_t cchDest, LPCWSTR fmt, ...)`
 /// — capacity counted in *characters*.
 fn string_cch_printf_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -9359,11 +9416,19 @@ fn create_file_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     {
         return crate::serial::open(ctx);
     }
-    if name
-        .as_ref()
-        .is_ok_and(|n| n.trim_matches(['\\', '/']).eq_ignore_ascii_case("SEN0:"))
-    {
-        return Ok(crate::htcsensor::open_stream(ctx, disposition));
+    if let Ok(name) = &name {
+        use pocket_kernel::vfs::AccelerometerStream;
+        let name = name.trim_matches(['\\', '/']);
+        let stream = if name.eq_ignore_ascii_case("SEN0:") {
+            Some(AccelerometerStream::Sen0)
+        } else if name.eq_ignore_ascii_case("ACC1:") {
+            Some(AccelerometerStream::Acc1)
+        } else {
+            None
+        };
+        if let Some(stream) = stream {
+            return Ok(crate::htcsensor::open_stream(ctx, disposition, stream));
+        }
     }
     let result = name.and_then(|name| {
         ctx.kernel.vfs.open_file(
@@ -17389,6 +17454,17 @@ fn get_current_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 
 fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
+    // A DirectDraw DC borrows its bitmap and surface pixels until ReleaseDC.
+    if ctx
+        .kernel
+        .framebuffer
+        .directdraw
+        .surface_dcs
+        .values()
+        .any(|&(_, bitmap)| bitmap == h)
+    {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     let dib_bits = ctx.kernel.gdi.bitmap(h).and_then(|b| b.dib_bits_va);
     let deleted = ctx.kernel.gdi.delete(h);
     if deleted && ctx.kernel.gdi.bitmap(h).is_none() {
@@ -17403,6 +17479,16 @@ fn delete_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     let deleted = ctx.kernel.gdi.delete(h);
     Ok(DispatchOutcome::ReturnedR0(u32::from(deleted)))
+}
+
+fn get_bk_mode(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let dc = ctx.arg_u32(0)?;
+    let mode = ctx
+        .kernel
+        .gdi
+        .dc(dc)
+        .map_or(0, |dc| if dc.bk_transparent { 1 } else { 2 });
+    Ok(DispatchOutcome::ReturnedR0(mode))
 }
 
 fn set_bk_mode(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -18495,7 +18581,7 @@ pub(crate) fn sync_bitmap_to_guest(ctx: &mut CallCtx<'_>, bm_h: u32) -> Result<(
 /// `bm.dib_row_stride * bm.height` and for actually writing the
 /// result back to guest memory.
 // Chopper Fight overlays labels on DIB pixels written directly by the guest.
-fn sync_dib_from_guest(ctx: &mut CallCtx<'_>, hdc: u32) -> Result<(), KernelError> {
+pub(crate) fn sync_dib_from_guest(ctx: &mut CallCtx<'_>, hdc: u32) -> Result<(), KernelError> {
     let bitmap_handle = match ctx.kernel.gdi.dc(hdc).and_then(|dc| dc.selected_bitmap) {
         Some(handle) => handle,
         None => return Ok(()),
@@ -23046,6 +23132,12 @@ fn m_abs_i32(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn m_fabs(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     libm_unary_d(c, f64::abs)
+}
+
+fn m_finite(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(u32::from(
+        read_f64(ctx, 0)?.is_finite(),
+    )))
 }
 
 fn m_copysign(c: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -38349,6 +38441,61 @@ mod tests {
         assert_eq!(
             msg_wait_for_multiple_objects_legacy(&mut ctx).unwrap(),
             DispatchOutcome::ReturnedR0(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn fwscanf_decodes_ansi_and_keeps_the_byte_position() {
+        use pocket_kernel::vfs::SeekKind;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("records.txt"), b"\xe9lan\r\nnext").unwrap();
+        let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
+        kernel.vfs.mount("\\", dir.path());
+        let handle = kernel
+            .vfs
+            .open("\\records.txt", Access::Read, false)
+            .unwrap();
+        kernel.vfs.mark_text_mode(handle);
+        cpu.write_mem(0x1100, &wide_to_bytes(&[37, 115, 10, 0]))
+            .unwrap();
+        assert_eq!(
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "fwscanf",
+                &[handle, 0x1100, 0x1200]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            cpu.read_mem(0x1200, 10).unwrap(),
+            wide_to_bytes(&[0xe9, 108, 97, 110, 0])
+        );
+        assert_eq!(kernel.vfs.seek(handle, 0, SeekKind::Current), Some(6));
+    }
+
+    #[test]
+    fn string_cch_copy_w_truncates_by_utf16_unit_and_terminates() {
+        let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
+        cpu.write_mem(0x1100, &wide_to_bytes(&[0xd83d, 0xde00, 0]))
+            .unwrap();
+        cpu.write_mem(0x1200, &[0x7f; 8]).unwrap();
+        assert_eq!(
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "StringCchCopyW",
+                &[0x1200, 2, 0x1100]
+            ),
+            DispatchOutcome::ReturnedR0(STRSAFE_E_INSUFFICIENT_BUFFER)
+        );
+        assert_eq!(
+            cpu.read_mem(0x1200, 8).unwrap(),
+            [0x3d, 0xd8, 0, 0, 0x7f, 0x7f, 0x7f, 0x7f]
         );
     }
 

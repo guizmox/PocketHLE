@@ -8,6 +8,7 @@ to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
 - [Library data](#adding-data-to-an-installed-game), [removal](#removing-library-games) and [captures](#desktop-capture-gallery)
 - [Image fitting](#image-geometry-and-input) and [Android touch controls](#android-controls)
 - [Factory bindings](#factory-input-profiles) and [assignment editor](#visual-input-editor--desktop-and-android)
+- [PocketPC accelerometer](#pocketpc-accelerometer)
 - [Stylus modes](#pocketpc-right-stick-stylus-modes) and [Center tap](#center-tap)
 - [Focus and dialogs](#desktop-focus-and-import-launch-settings-prompt)
 
@@ -673,6 +674,72 @@ if restoration changes an offset, that intermediate draw is cancelled. No timed
 post-delay or renderer-specific workaround is used. R3's controller row explicitly
 shows its fixed mode gesture even though it is a reserved input without a normal
 host tap/hold action. This is frontend view-state handling, not a GLES game fix.
+
+## PocketPC accelerometer
+
+On desktop and Android, **Tilt input (accelerometer)** is available in the
+global PocketPC options and in each PocketPC game's controls settings.
+**Emulator Default** in a game's settings inherits the global choice.
+Source changes apply on the next launch.
+
+| Mode | Source and behavior |
+| --- | --- |
+| **Use physical accelerometer** | Default. Android uses the device's accelerometer. Desktop uses an SDL host accelerometer when available, then tries the selected controller's accelerometer. |
+| **Simulate left/right tilt** | The configured directional buttons or the left stick simulate horizontal tilt relative to the displayed game. Vertical tilt stays neutral. |
+| **Simulate tilt in four directions** | The directional buttons or the left stick simulate horizontal and vertical tilt relative to the displayed game. |
+
+In simulated modes, a held direction overrides the stick on its axis.
+Opposite buttons on one axis cancel each other. The stick uses a 12% dead zone
+and supplies proportional tilt beyond it. Full input supplies up to 0.5 g on
+each enabled axis. With no input, the virtual device rests flat, screen up.
+The guest receives tilt readings. The game decides what to do with them.
+For example, Ferrari GT uses tilt to steer and its on-screen pedals to
+accelerate and brake.
+
+### Guest interfaces
+
+The guest interfaces share the physical or simulated sample. PocketHLE converts
+it to device coordinates before encoding it for the requested interface.
+
+| Interface | Guest access |
+| --- | --- |
+| PocketHLE implementation of `HTCSensorSDK.dll` | Open with `HTCSensorOpen(1)`, read with `HTCSensorGetDataOutput`, and release with `HTCSensorClose`. A successful read returns zero. The 20-byte result starts with signed X, Y and Z values. PocketHLE fills the remaining fields with zeros. |
+| `SEN0:` stream device | Open with `CreateFileW` and `OPEN_EXISTING`. Read via `DeviceIoControl` with control code `0x01000001`. The reply is three little-endian signed 16-bit values in X, Y, Z order. The legacy zero output-length form is supported and still requires a writable six-byte buffer. Release with `CloseHandle`. |
+| `ACC1:` stream device | Open with `CreateFileW` and `OPEN_EXISTING`. Read with `DeviceIoControl` code `0x80122ef0`. The reply is three little-endian 16-bit words with unsigned values in the range 0–4095. Release with `CloseHandle`. |
+
+One g is approximately 1,000 counts. In device coordinates, positive X
+points right, positive Y points down, and positive Z points out through the
+screen. The readings follow the direction of gravity, so a device resting
+flat with the screen up reports approximately `(0, 0, -1000)`. PocketHLE
+converts host acceleration into that convention and undoes the presentation
+rotation before encoding the sample. A newly launched guest process inherits
+its parent's display rotation.
+
+When an application supplies its own `HTCSensorSDK.dll`, PocketHLE loads that
+DLL so it can retain its own handles and return codes. The SDK bundled with
+HTC Teeter reads `ACC1:` and returns 1 on a successful SDK read.
+
+The device-coordinate conversion happens once. For the same sample, the SDK
+bundled with HTC Teeter decodes the three `ACC1:` words as
+`(raw_x - 2048, raw_y - 2048, 2048 - raw_z)`. PocketHLE therefore encodes
+signed device counts `(x, y, z)` as `(2048 + x, 2048 + y, 2048 - z)`, clamping
+each word to the driver's range. The resulting SDK readings match `SEN0:`
+whenever none of the values saturate.
+
+| Simulated input | Signed `SEN0:` or decoded SDK counts | Raw `ACC1:` words |
+| --- | --- | --- |
+| Flat, screen up | `(0, 0, -1000)` | `(2048, 2048, 3048)` |
+| Right at full tilt, display rotated 90° clockwise | `(0, -500, -866)` | `(2048, 1548, 2914)` |
+
+The sensor tests cover neutral, rotated input, and the six-byte stream formats.
+The HTC Teeter launch test uses simulated tilt and an intact CAB. It does not
+measure axis calibration on physical HTC or Samsung hardware.
+
+Physical mode requires an available sensor and a fresh sample. If the sensor
+is unavailable, the guest open call fails. If an available sensor has yet to
+produce a sample or its last sample is at least one second old, reads report
+that the data is unavailable. Select a simulated mode to use the directional
+buttons or left stick on a host without a sensor.
 
 ## PocketPC right-stick stylus modes
 
