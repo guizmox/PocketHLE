@@ -70,6 +70,9 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
                 Some(ctx.kernel.posted_messages[i])
             };
         }
+        if let Some(input) = find_host_input(ctx, window, low, high, remove) {
+            return Some(input);
+        }
     } else {
         if let Some((hwnd, lp)) = ctx.kernel.pending_create {
             let m = (hwnd, WM_CREATE, 0, lp);
@@ -101,36 +104,8 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
             };
             return Some((FAKE_HWND, msg, wp, lp));
         }
-        // A render probe observes raw input. It must neither activate an HLE
-        // control nor discard a queued key while looking only for mouse input.
-        let target = input_window(ctx.kernel);
-        let input = ctx
-            .kernel
-            .pending_input
-            .iter()
-            .enumerate()
-            .find_map(|(i, &event)| {
-                let event = remap_input(
-                    event,
-                    ctx.kernel.gapi_keys_queried,
-                    ctx.kernel.gapi_action_key,
-                );
-                let (msg, wp, lp) = input_to_message(event)?;
-                accepts(ctx.kernel, (target, msg, wp, lp)).then_some((
-                    i,
-                    event,
-                    (target, msg, wp, lp),
-                ))
-            });
-        if let Some((i, event, m)) = input {
-            if remove {
-                ctx.kernel.remove_pending_input(i);
-                if matches!(event, InputEvent::KeyDown { .. }) {
-                    restore_active_dialog_focus(ctx.kernel);
-                }
-                update_key_state(ctx, event);
-            }
-            return Some(m);
+        if let Some(input) = find_host_input(ctx, window, low, high, remove) {
+            return Some(input);
         }
         let mixer = ctx.kernel.threads.iter().any(|t| t.started && !t.finished);
         if let Some(i) = ctx.kernel.posted_messages.iter().position(|&m| {
@@ -144,7 +119,8 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
                 Some(ctx.kernel.posted_messages[i])
             };
         }
-        if ctx.kernel.controls.is_empty()
+        if input_window_thread(ctx.kernel) == ctx.kernel.current_thread
+            && ctx.kernel.controls.is_empty()
             && !ctx.kernel.held_keys.is_empty()
             && ctx
                 .kernel
@@ -153,7 +129,7 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
         {
             let cursor = ctx.kernel.key_repeat_cursor % ctx.kernel.held_keys.len();
             let m = (
-                target,
+                input_window(ctx.kernel),
                 WM_KEYDOWN,
                 u32::from(ctx.kernel.held_keys[cursor]),
                 0x40000001,
@@ -198,6 +174,47 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
             );
         }
         return Some(paint);
+    }
+    None
+}
+
+fn find_host_input(
+    ctx: &mut CallCtx<'_>,
+    window: u32,
+    low: u32,
+    high: u32,
+    remove: bool,
+) -> Option<Message> {
+    if input_window_thread(ctx.kernel) != ctx.kernel.current_thread {
+        return None;
+    }
+    let accepts = |kernel: &KernelState, message| matches(kernel, message, window, low, high);
+    // A render probe observes raw input. It must neither activate an HLE
+    // control nor discard a queued key while looking only for mouse input.
+    let target = input_window(ctx.kernel);
+    let input = ctx
+        .kernel
+        .pending_input
+        .iter()
+        .enumerate()
+        .find_map(|(i, &event)| {
+            let event = remap_input(
+                event,
+                ctx.kernel.gapi_keys_queried,
+                ctx.kernel.gapi_action_key,
+            );
+            let (msg, wp, lp) = input_to_message(event)?;
+            accepts(ctx.kernel, (target, msg, wp, lp)).then_some((i, event, (target, msg, wp, lp)))
+        });
+    if let Some((i, event, m)) = input {
+        if remove {
+            ctx.kernel.remove_pending_input(i);
+            if matches!(event, InputEvent::KeyDown { .. }) {
+                restore_active_dialog_focus(ctx.kernel);
+            }
+            update_key_state(ctx, event);
+        }
+        return Some(m);
     }
     None
 }

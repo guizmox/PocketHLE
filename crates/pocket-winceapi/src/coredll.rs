@@ -2399,6 +2399,7 @@ fn worker_is_ready(
     }
     if thread.parked_wait_handles.is_empty() {
         return !thread.messages.is_empty()
+            || (!kernel.pending_input.is_empty() && input_window_thread(kernel) == index + 1)
             || kernel
                 .posted_messages
                 .iter()
@@ -15502,7 +15503,18 @@ fn take_posted_message(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
     take_posted_message_at(ctx.kernel, i)
 }
 
-fn next_queued_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+fn input_window_thread(kernel: &KernelState) -> usize {
+    kernel
+        .window_threads
+        .get(&input_window(kernel))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn next_host_input_message(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+    if input_window_thread(ctx.kernel) != ctx.kernel.current_thread {
+        return None;
+    }
     while let Some(ev) = take_pending_input(ctx) {
         update_key_state(ctx, ev);
         if let Some(handled) = controls_take_input(ctx, ev) {
@@ -15514,6 +15526,13 @@ fn next_queued_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u
         if let Some(addressed) = addressed_input(ctx.kernel, ev) {
             return Some(addressed);
         }
+    }
+    None
+}
+
+fn next_queued_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
+    if let Some(input) = next_host_input_message(ctx) {
+        return Some(input);
     }
     // Driver notifications (`MM_WOM_DONE`) outrank the synthetic
     // paint/timer pump: a game streaming music refills its buffer from
@@ -15669,6 +15688,10 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             write_retrieved_message(ctx, lp_msg, 0, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(u32::from(msg != WM_QUIT)));
         }
+        if let Some((hwnd, msg, wp, lp)) = next_host_input_message(ctx) {
+            write_retrieved_message(ctx, lp_msg, hwnd, msg, wp, lp)?;
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
         // GetMessageW blocks with lpMsg still live. Re-entering the thunk
         // must preserve r0-r3; otherwise r0 becomes NULL and the queued
         // message is consumed into address 0 when the worker wakes.
@@ -15806,6 +15829,13 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         });
         if let Some((msg, wp, lp)) = queued {
             write_retrieved_message(ctx, lp_msg, 0, msg, wp, lp)?;
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
+        if let Some(message @ (hwnd, msg, wp, lp)) = next_host_input_message(ctx) {
+            if remove_mode & 1 == 0 {
+                ctx.kernel.posted_messages.push_front(message);
+            }
+            write_retrieved_message(ctx, lp_msg, hwnd, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
         if let Some((hwnd, msg, wp, lp)) = timer_message_if_due(ctx, remove_mode & 1 != 0) {
@@ -33174,6 +33204,37 @@ mod tests {
             DispatchOutcome::ReturnedR0(0)
         );
         assert_eq!(ctx.cpu.read_u32_le(0x2004).unwrap(), WM_QUIT);
+    }
+
+    #[test]
+    fn worker_window_receives_stylus_input_in_its_own_message_pump() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        kernel.active_window = FAKE_HWND;
+        kernel.window_threads.insert(FAKE_HWND, 1);
+        kernel
+            .pending_input
+            .push_back(InputEvent::PointerDown { x: 42, y: 31 });
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(next_host_input_message(&mut ctx), None);
+        ctx.kernel.current_thread = 1;
+        for mode in [0u32, 1] {
+            ctx.cpu.write_reg(ArmReg::R0, 0x2000).unwrap();
+            ctx.cpu.write_mem(0x9000, &mode.to_le_bytes()).unwrap();
+            assert_eq!(
+                peek_message_w(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(), FAKE_HWND);
+            assert_eq!(ctx.cpu.read_u32_le(0x2004).unwrap(), WM_LBUTTONDOWN);
+        }
+        assert!(ctx.kernel.pending_input.is_empty());
+        assert!(ctx.kernel.posted_messages.is_empty());
     }
 
     #[test]
