@@ -15,7 +15,29 @@ const CONTEXT: u32 = 4;
 const EGL_NONE: u32 = 0x3038;
 const EGL_SUCCESS: u32 = 0x3000;
 const EGL_BAD_ATTRIBUTE: u32 = 0x3004;
+const EGL_BAD_CONFIG: u32 = 0x3005;
 const EGL_BAD_MATCH: u32 = 0x3009;
+const EGL_BAD_PARAMETER: u32 = 0x300c;
+const EGL_BAD_SURFACE: u32 = 0x300d;
+const EGL_OPENGL_ES_API: u32 = 0x30a0;
+
+fn config_attribute(key: u32) -> Option<i32> {
+    Some(match key {
+        0x3020 | 0x3025 => 16,              // buffer and depth sizes
+        0x3022 | 0x3024 => 5,               // blue and red sizes
+        0x3023 => 6,                        // green size
+        0x3026 => 8,                        // stencil size
+        0x3027 | 0x3034 => EGL_NONE as i32, // caveat, transparent type
+        0x3028 => CONFIG as i32,            // config ID
+        0x3033 => 4,                        // window surface bit
+        0x3040 | 0x3042 => 4,               // renderable and conformant ES2 bits
+        0x303b => 0,                        // minimum swap interval
+        0x303c => 1,                        // maximum swap interval
+        0x303f => 0x308e,                   // RGB color buffer
+        0x3021 | 0x3029..=0x302f | 0x3031 | 0x3032 | 0x3035..=0x3037 | 0x3039 | 0x303a => 0,
+        _ => return None,
+    })
+}
 type Result<T> = std::result::Result<T, KernelError>;
 
 fn error(message: impl Into<String>) -> KernelError {
@@ -93,6 +115,9 @@ impl Session {
         let value = match name {
             "eglGetDisplay" => DISPLAY,
             "eglGetError" => std::mem::replace(&mut self.error, EGL_SUCCESS),
+            "eglBindAPI" if ctx.arg_u32(0)? == EGL_OPENGL_ES_API => 1,
+            "eglBindAPI" => self.fail(EGL_BAD_PARAMETER),
+            "eglQueryAPI" => EGL_OPENGL_ES_API,
             _ if ctx.arg_u32(0)? != DISPLAY => self.fail(0x3008),
             "eglInitialize" => {
                 for (index, value) in [(1, 1u32), (2, 4u32)] {
@@ -117,31 +142,18 @@ impl Session {
                         if value == -1 {
                             continue;
                         }
-                        let supported = match key {
-                            0x3020 => 16,
-                            0x3021 => 0,
-                            0x3022 | 0x3024 => 5,
-                            0x3023 => 6,
-                            0x3025 => 16,
-                            0x3026 => 8,
-                            0x3031 | 0x3032 => 0,
-                            0x3033 => 4,
-                            0x3040 => 4,
-                            _ => {
-                                return Ok(DispatchOutcome::ReturnedR0(
-                                    self.fail(EGL_BAD_ATTRIBUTE),
-                                ))
-                            }
+                        let Some(supported) = config_attribute(key) else {
+                            return Ok(DispatchOutcome::ReturnedR0(self.fail(EGL_BAD_ATTRIBUTE)));
                         };
-                        matches &= if matches!(key, 0x3033 | 0x3040) {
-                            supported & value == value
-                        } else {
-                            supported >= value
+                        matches &= match key {
+                            0x3033 | 0x3040 | 0x3042 => supported & value == value,
+                            0x3020..=0x3026 | 0x3031 | 0x3032 => supported >= value,
+                            _ => supported == value,
                         };
                     }
                 }
-                if count == 0 || capacity < 0 {
-                    self.fail(0x300c)
+                if count == 0 || config != 0 && capacity < 0 {
+                    self.fail(EGL_BAD_PARAMETER)
                 } else {
                     let n = u32::from(matches && (config == 0 || capacity > 0));
                     ctx.cpu.write_mem(count, &n.to_le_bytes())?;
@@ -150,6 +162,37 @@ impl Session {
                     }
                     1
                 }
+            }
+            "eglGetConfigAttrib" => {
+                if ctx.arg_u32(1)? != CONFIG {
+                    return Ok(DispatchOutcome::ReturnedR0(self.fail(EGL_BAD_CONFIG)));
+                }
+                let key = ctx.arg_u32(2)?;
+                self.write_attribute(ctx, config_attribute(key))?
+            }
+            "eglQueryString" => {
+                let text = match ctx.arg_u32(1)? {
+                    0x3053 => "PocketHLE",
+                    0x3054 => "1.4 PocketHLE",
+                    0x3055 => "",
+                    0x308d => "OpenGL_ES",
+                    _ => return Ok(DispatchOutcome::ReturnedR0(self.fail(EGL_BAD_PARAMETER))),
+                };
+                crate::gles::intern_string(ctx, text)?
+            }
+            "eglQuerySurface" => {
+                if !self.window || ctx.arg_u32(1)? != WINDOW {
+                    return Ok(DispatchOutcome::ReturnedR0(self.fail(EGL_BAD_SURFACE)));
+                }
+                let value = match ctx.arg_u32(2)? {
+                    0x3028 => Some(CONFIG as i32),
+                    0x3056 => Some(ctx.kernel.framebuffer.height as i32),
+                    0x3057 => Some(ctx.kernel.framebuffer.width as i32),
+                    0x3086 => Some(0x3084), // EGL_BACK_BUFFER
+                    0x3093 => Some(0x3095), // EGL_BUFFER_DESTROYED
+                    _ => None,
+                };
+                self.write_attribute(ctx, value)?
             }
             "eglCreateWindowSurface" if ctx.arg_u32(1)? == CONFIG && ctx.arg_u32(2)? != 0 => {
                 if self.window {
@@ -237,6 +280,18 @@ impl Session {
         Ok(DispatchOutcome::ReturnedR0(value))
     }
 
+    fn write_attribute(&mut self, ctx: &mut CallCtx<'_>, value: Option<i32>) -> Result<u32> {
+        let Some(value) = value else {
+            return Ok(self.fail(EGL_BAD_ATTRIBUTE));
+        };
+        let out = ctx.arg_u32(3)?;
+        if out == 0 {
+            return Ok(self.fail(EGL_BAD_PARAMETER));
+        }
+        ctx.cpu.write_mem(out, &value.to_le_bytes())?;
+        Ok(1)
+    }
+
     fn fail(&mut self, error: u32) -> u32 {
         self.error = error;
         0
@@ -265,4 +320,89 @@ fn attributes(ctx: &mut CallCtx<'_>, index: u8) -> Result<Vec<(u32, i32)>> {
             .ok_or_else(|| error("EGL attribute address overflow"))?;
     }
     Err(error("Unterminated EGL attribute list"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
+    use pocket_kernel::Thunk;
+    use pocket_pe::ImportBinding;
+
+    fn egl(session: &mut Session, ctx: &mut CallCtx<'_>, name: &str, args: [u32; 4]) -> u32 {
+        for (register, value) in [R0, R1, R2, R3].into_iter().zip(args) {
+            ctx.cpu.write_reg(register, value).unwrap();
+        }
+        match session.egl(name, ctx).unwrap() {
+            DispatchOutcome::ReturnedR0(value) => value,
+            _ => panic!("unexpected EGL dispatch result"),
+        }
+    }
+
+    #[test]
+    fn enumerated_window_config_can_be_queried_before_context_creation() {
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "libegl.dll".into(),
+            binding: ImportBinding::Name("eglGetConfigs".into()),
+            friendly_name: None,
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &thunk,
+            kernel: &mut kernel,
+        };
+        let mut session = Session::default();
+        assert_eq!(
+            egl(
+                &mut session,
+                &mut ctx,
+                "eglBindAPI",
+                [EGL_OPENGL_ES_API, 0, 0, 0]
+            ),
+            1
+        );
+        assert_eq!(
+            egl(&mut session, &mut ctx, "eglInitialize", [DISPLAY, 0, 0, 0]),
+            1
+        );
+        assert_eq!(
+            egl(
+                &mut session,
+                &mut ctx,
+                "eglGetConfigs",
+                [DISPLAY, 0x2000, 1, 0x2004]
+            ),
+            1
+        );
+        assert_eq!(ctx.cpu.read_u32_le(0x2000).unwrap(), CONFIG);
+        assert_eq!(ctx.cpu.read_u32_le(0x2004).unwrap(), 1);
+        for (key, expected) in [(0x3033, 4), (0x3040, 4), (0x3024, 5), (0x302f, 0)] {
+            assert_eq!(
+                egl(
+                    &mut session,
+                    &mut ctx,
+                    "eglGetConfigAttrib",
+                    [DISPLAY, CONFIG, key, 0x2008]
+                ),
+                1
+            );
+            assert_eq!(ctx.cpu.read_u32_le(0x2008).unwrap(), expected);
+        }
+        assert_eq!(
+            egl(
+                &mut session,
+                &mut ctx,
+                "eglGetConfigAttrib",
+                [DISPLAY, 0, 0x3033, 0x2008]
+            ),
+            0
+        );
+        assert_eq!(
+            egl(&mut session, &mut ctx, "eglGetError", [0; 4]),
+            EGL_BAD_CONFIG
+        );
+    }
 }

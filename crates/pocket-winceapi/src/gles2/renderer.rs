@@ -72,6 +72,7 @@ pub(super) struct Renderer {
     texture_units: u32,
     configured_attributes: HashSet<u32>,
     unpack: usize,
+    pack: usize,
     guest_error: u32,
     native_compressed_formats: Vec<i32>,
     export: Option<ProgrammableFrameExport>,
@@ -128,6 +129,7 @@ impl Renderer {
             texture_units: 0,
             configured_attributes: HashSet::new(),
             unpack: 4,
+            pack: 4,
             guest_error: 0,
             native_compressed_formats: Vec::new(),
             export: None,
@@ -258,8 +260,15 @@ impl Renderer {
         self.readback
             .resize(width as usize * height as usize * 4, 0);
         let pixels = self.readback.as_mut_ptr().cast();
+        let pack = self.pack as i32;
+        if pack > 4 {
+            invoke!(self, "glPixelStorei", (0x0d05 => u32, 4 => i32), ());
+        }
         invoke!(self, "glReadPixels", (0 => i32, 0 => i32, width as i32 => i32,
             height as i32 => i32, RGBA => u32, UNSIGNED_BYTE => u32, pixels => *mut c_void), ());
+        if pack > 4 {
+            invoke!(self, "glPixelStorei", (0x0d05 => u32, pack => i32), ());
+        }
         invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, previous => u32), ());
         pocket_kernel::framebuffer::gapi_memory::discard(ctx.cpu)?;
         ctx.kernel.framebuffer.overwrite_rgb565(|rgb, native| {
@@ -406,8 +415,23 @@ impl Renderer {
         }
         match name {
             "glCreateProgram" => return Ok(invoke!(self, name, (), u32)),
+            "glIsProgram" => return Ok(u32::from(invoke!(self, name, (u!(0) => u32), u8))),
             "glCreateShader" | "glCheckFramebufferStatus" => {
                 return Ok(invoke!(self, name, (u!(0) => u32), u32));
+            }
+            "glGetString" => {
+                let value = match u!(0) {
+                    0x1f00 => "PocketHLE",
+                    0x1f01 => "Adreno 200 (PocketHLE)",
+                    0x1f02 => "OpenGL ES 2.0 PocketHLE",
+                    0x1f03 => "",
+                    0x8b8c => "OpenGL ES GLSL ES 1.00",
+                    _ => {
+                        self.reject(0x0500);
+                        return Ok(0);
+                    }
+                };
+                return crate::gles::intern_string(ctx, value);
             }
             "glGetError" => {
                 let pending = std::mem::take(&mut self.guest_error);
@@ -418,8 +442,9 @@ impl Renderer {
                 });
             }
             "glFinish" | "glFlush" => gl!(),
-            "glClear" | "glCompileShader" | "glCullFace" | "glDeleteProgram" | "glDeleteShader"
-            | "glDepthFunc" | "glDisable" | "glEnable" | "glLinkProgram" | "glUseProgram" => {
+            "glClear" | "glGenerateMipmap" | "glCompileShader" | "glCullFace"
+            | "glDeleteProgram" | "glDeleteShader" | "glDepthFunc" | "glDisable" | "glEnable"
+            | "glLinkProgram" | "glUseProgram" | "glValidateProgram" | "glFrontFace" => {
                 gl!(u!(0) => u32)
             }
             "glActiveTexture" => {
@@ -483,6 +508,9 @@ impl Renderer {
                 gl!(target => u32, if framebuffer == 0 { default_fbo } else { framebuffer } => u32);
             }
             "glDepthMask" => gl!(u!(0) as u8 => u8),
+            "glColorMask" => {
+                gl!(u!(0) as u8 => u8, u!(1) as u8 => u8, u!(2) as u8 => u8, u!(3) as u8 => u8)
+            }
             "glClearDepthf" if !self.host.es => {
                 invoke!(self, "glClearDepth", (f!(0) as f64 => f64), ());
             }
@@ -496,12 +524,17 @@ impl Renderer {
                 gl!(i!(0) => i32, i!(1) => i32, i!(2) => i32, i!(3) => i32)
             }
             "glTexParameteri" => gl!(u!(0) => u32, u!(1) => u32, i!(2) => i32),
+            "glTexParameterf" => gl!(u!(0) => u32, u!(1) => u32, f!(2) => f32),
             "glPixelStorei" => {
                 let (parameter, alignment) = (u!(0), i!(1));
-                if parameter != 0x0cf5 || !matches!(alignment, 1 | 2 | 4 | 8) {
+                if !matches!(alignment, 1 | 2 | 4 | 8) {
                     return Ok(self.reject(0x0501));
                 }
-                self.unpack = alignment as usize;
+                match parameter {
+                    0x0d05 => self.pack = alignment as usize,
+                    0x0cf5 => self.unpack = alignment as usize,
+                    _ => return Ok(self.reject(0x0500)),
+                }
                 gl!(parameter => u32, alignment => i32);
             }
             "glRenderbufferStorage" => gl!(u!(0) => u32, u!(1) => u32, i!(2) => i32, i!(3) => i32),
@@ -827,25 +860,84 @@ impl Renderer {
                     );
                 }
             }
-            "glGetIntegerv" => {
+            "glGetAttachedShaders" => {
+                let (program, capacity, count_out, shaders_out) = (u!(0), i!(1), u!(2), u!(3));
+                if capacity < 0 {
+                    return Ok(self.reject(0x0501));
+                }
+                let mut shaders = vec![0u32; transfer_size(capacity, 4)? / 4];
+                let mut count = 0i32;
+                gl!(program => u32, capacity => i32, &mut count => *mut i32, shaders.as_mut_ptr() => *mut u32);
+                if count_out != 0 {
+                    ctx.cpu.write_mem(count_out, &count.to_le_bytes())?;
+                }
+                let count = count.clamp(0, capacity) as usize;
+                if count != 0 {
+                    write_words(ctx, shaders_out, &shaders[..count])?;
+                }
+            }
+            "glReadPixels" => {
+                let (x, y, width, height) = (i!(0), i!(1), i!(2), i!(3));
+                let (format, kind, address) = (u!(4), u!(5), u!(6));
+                if width < 0 || height < 0 {
+                    return Ok(self.reject(0x0501));
+                }
+                let Some(bytes) = texture_size(width, height, format, kind, self.pack) else {
+                    return Ok(self.reject(0x0500));
+                };
+                if bytes == 0 {
+                    return Ok(0);
+                }
+                address
+                    .checked_add(bytes as u32 - 1)
+                    .ok_or_else(|| error("GLES2 readback address overflow"))?;
+                let row = texture_size(width, 1, format, kind, 1).unwrap();
+                let stride = (row + self.pack - 1) & !(self.pack - 1);
+                let mut pixels = vec![0u8; bytes];
+                // Preserve an earlier GL error while detecting a failed read.
+                let previous = invoke!(self, "glGetError", (), u32);
+                if previous != 0 {
+                    self.reject(previous);
+                }
+                gl!(x => i32, y => i32, width => i32, height => i32, format => u32, kind => u32,
+                    pixels.as_mut_ptr().cast() => *mut c_void);
+                let read_error = invoke!(self, "glGetError", (), u32);
+                if read_error != 0 {
+                    return Ok(self.reject(read_error));
+                }
+                if stride == row {
+                    ctx.cpu.write_mem(address, &pixels)?;
+                } else {
+                    for (index, data) in pixels.chunks(stride).enumerate() {
+                        let start = address + (index * stride) as u32;
+                        ctx.cpu.write_mem(start, &data[..row])?;
+                    }
+                }
+            }
+            "glGetIntegerv" | "glGetBooleanv" => {
                 let (parameter, address) = (u!(0), u!(1));
+                let boolean = name == "glGetBooleanv";
                 let count = match parameter {
                     0x0ba2 | 0x0c10 | 0x0c23 => 4,
                     0x0d3a | 0x846d | 0x846e => 2,
                     0x8df8 => return Ok(0), // Shader binary formats: none.
-                    0x8df9 => {
-                        ctx.cpu.write_mem(address, &0u32.to_le_bytes())?;
+                    0x8ca6 | 0x8df9 | 0x8dfa => {
+                        let value = match parameter {
+                            0x8ca6 => self.framebuffer,
+                            0x8dfa => 1, // Source shaders are compiled on either host API.
+                            _ => 0,      // Shader binaries are not exposed.
+                        };
+                        if boolean {
+                            ctx.cpu.write_mem(address, &[u8::from(value != 0)])?;
+                        } else {
+                            ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                        }
                         return Ok(0);
                     }
                     0x86a3 => {
                         let mut count = 0i32;
                         gl!(0x86a2 => u32, &mut count => *mut i32);
                         transfer_size(count, 4)? / 4
-                    }
-                    0x8ca6 => {
-                        ctx.cpu
-                            .write_mem(address, &self.framebuffer.to_le_bytes())?;
-                        return Ok(0);
                     }
                     // Scalar ES2 queries.
                     0x0b21
@@ -886,7 +978,11 @@ impl Renderer {
                     | 0x8dfa..=0x8dfd => 1,
                     _ => return Ok(self.reject(0x0500)),
                 };
-                if count != 0 {
+                if count != 0 && boolean {
+                    let mut values = vec![0u8; count];
+                    gl!(parameter => u32, values.as_mut_ptr() => *mut u8);
+                    ctx.cpu.write_mem(address, &values)?;
+                } else if count != 0 {
                     let mut values = vec![0u32; count];
                     gl!(parameter => u32, values.as_mut_ptr().cast() => *mut i32);
                     write_words(ctx, address, &values)?;
@@ -898,6 +994,21 @@ impl Renderer {
             "glUniform3f" => gl!(i!(0) => i32, f!(1) => f32, f!(2) => f32, f!(3) => f32),
             "glUniform4f" => {
                 gl!(i!(0) => i32, f!(1) => f32, f!(2) => f32, f!(3) => f32, f!(4) => f32)
+            }
+            "glUniform1fv" | "glUniform2fv" | "glUniform3fv" | "glUniform4fv" | "glUniform1iv" => {
+                let (location, count, address) = (i!(0), i!(1), u!(2));
+                let components = match name {
+                    "glUniform2fv" => 2,
+                    "glUniform3fv" => 3,
+                    "glUniform4fv" => 4,
+                    _ => 1,
+                };
+                let values = read_words(ctx, address, transfer_size(count, components * 4)? / 4)?;
+                if name == "glUniform1iv" {
+                    gl!(location => i32, count => i32, values.as_ptr().cast() => *const i32);
+                } else {
+                    gl!(location => i32, count => i32, values.as_ptr().cast() => *const f32);
+                }
             }
             "glUniformMatrix3fv" | "glUniformMatrix4fv" => {
                 let (location, count, transpose, address) = (i!(0), i!(1), u!(2), u!(3));
@@ -1066,6 +1177,19 @@ mod tests {
                 drop(foreign);
                 call.cpu.write_reg(R0, 0x4000)?;
                 renderer.gl("glClear", &mut call)?;
+                call.cpu.write_reg(R0, 0x0d05)?; // GL_PACK_ALIGNMENT
+                call.cpu.write_reg(R1, 8)?;
+                renderer.gl("glPixelStorei", &mut call)?;
+                call.cpu.write_mem(0x2000, &[0x55; 12])?;
+                for (reg, value) in [(R0, 0), (R1, 0), (R2, 1), (R3, 2)] {
+                    call.cpu.write_reg(reg, value)?;
+                }
+                write_words(&mut call, 0x4000, &[RGBA, UNSIGNED_BYTE, 0x2000])?;
+                renderer.gl("glReadPixels", &mut call)?;
+                assert_eq!(
+                    call.cpu.read_mem(0x2000, 12)?,
+                    [255, 0, 0, 0, 0x55, 0x55, 0x55, 0x55, 255, 0, 0, 0],
+                );
                 renderer.present(&mut call)?;
                 assert!(renderer.readback.is_empty());
                 assert!(!call.kernel.framebuffer.cpu_resident());

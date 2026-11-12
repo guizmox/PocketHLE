@@ -1772,7 +1772,7 @@ fn gl_get_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
 
 /// Copy `text` into guest memory as NUL-terminated ASCII, reusing the
 /// same allocation for repeated queries of the same string.
-fn intern_string(ctx: &mut CallCtx<'_>, text: &str) -> Result<u32, KernelError> {
+pub(super) fn intern_string(ctx: &mut CallCtx<'_>, text: &str) -> Result<u32, KernelError> {
     if let Some(va) = ctx.kernel.gles_strings.get(text).copied() {
         return Ok(va);
     }
