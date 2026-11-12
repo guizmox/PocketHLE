@@ -3005,6 +3005,8 @@ pub struct Heap {
     regions: Vec<(u32, u32)>,
     /// Sorted by start VA. Each entry is `(start, size)` of free space.
     free: Vec<(u32, u32)>,
+    // Adding an arena can leave adjacent free entries until the next free.
+    free_may_touch: bool,
     /// Out-of-band tracker of `(user_ptr -> requested_size)` for every
     /// outstanding allocation. We keep it host-side so the guest can
     /// not accidentally corrupt the bookkeeping by writing past its
@@ -3052,6 +3054,7 @@ impl Heap {
             size,
             regions: vec![(base, size)],
             free: vec![(base, size)],
+            free_may_touch: false,
             live: HashMap::new(),
             ram: None,
             image_memory: std::sync::Arc::new(image_memory::ImageMemory::default()),
@@ -3071,6 +3074,7 @@ impl Heap {
         self.regions.push((base, size));
         let at = self.free.partition_point(|&(start, _)| start < base);
         self.free.insert(at, (base, size));
+        self.free_may_touch = true;
     }
 
     /// Reserve page-aligned stack storage from the top of the private slot.
@@ -3199,21 +3203,36 @@ impl Heap {
             return;
         }
         self.release_pages(block_start, block_size);
-        // insert and coalesce
-        let pos = self.free.partition_point(|(s, _)| *s < block_start);
-        self.free.insert(pos, (block_start, block_size));
-        // coalesce with neighbours
-        let mut merged = Vec::with_capacity(self.free.len());
-        for (s, sz) in self.free.drain(..) {
-            if let Some((ps, psz)) = merged.last_mut() {
-                if *ps + *psz == s {
-                    *psz += sz;
-                    continue;
+        let mut pos = self.free.partition_point(|(s, _)| *s < block_start);
+        if self.free_may_touch {
+            // Preserve the original full coalescing after a new arena is added.
+            self.free.insert(pos, (block_start, block_size));
+            self.free.dedup_by(|next, previous| {
+                if previous.0 + previous.1 == next.0 {
+                    previous.1 += next.1;
+                    true
+                } else {
+                    false
                 }
-            }
-            merged.push((s, sz));
+            });
+            self.free_may_touch = false;
+            return;
         }
-        self.free = merged;
+
+        // With a sorted, coalesced free list, only the inserted block's
+        // immediate neighbours can become contiguous.
+        if pos > 0 && self.free[pos - 1].0 + self.free[pos - 1].1 == block_start {
+            pos -= 1;
+            self.free[pos].1 += block_size;
+        } else {
+            self.free.insert(pos, (block_start, block_size));
+        }
+        if let Some(&(next, size)) = self.free.get(pos + 1) {
+            if self.free[pos].0 + self.free[pos].1 == next {
+                self.free[pos].1 += size;
+                self.free.remove(pos + 1);
+            }
+        }
     }
 
     /// Bind all allocations (including allocations made during loading) to
@@ -6275,6 +6294,31 @@ mod tests {
         h.free(b);
         // After freeing both, the heap should be fully coalesced.
         assert_eq!(h.free_bytes(), initial_free);
+    }
+
+    #[test]
+    fn heap_free_coalesces_both_neighbours_in_address_order() {
+        let mut heap = Heap::new(0x1000, 0x1000);
+        let first = heap.alloc(24).unwrap();
+        let middle = heap.alloc(24).unwrap();
+        let last = heap.alloc(24).unwrap();
+        heap.free(first);
+        heap.free(last);
+        assert_eq!(heap.free, [(0x1000, 32), (0x1040, 0xfc0)]);
+        heap.free(middle);
+        assert_eq!(heap.free, [(0x1000, 0x1000)]);
+        assert_eq!(heap.alloc(24), Some(first));
+    }
+
+    #[test]
+    fn heap_free_retains_full_coalescing_after_adding_an_arena() {
+        let mut heap = Heap::new(0x1000, 0x1000);
+        let first = heap.alloc(24).unwrap();
+        heap.add_region(0x2000, 0x1000);
+        heap.add_region(0x4000, 0x1000);
+        heap.free(first);
+        assert_eq!(heap.free, [(0x1000, 0x2000), (0x4000, 0x1000)]);
+        assert_eq!(heap.alloc(24), Some(first));
     }
 
     #[test]
