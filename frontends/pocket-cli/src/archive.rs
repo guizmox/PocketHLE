@@ -333,10 +333,10 @@ fn prepare_cab(path: &Path) -> Result<Launcher> {
     // (`_G2D32~1.003`, `ZUMAPP~1.002`, …). Games then `CreateFileW`
     // their assets by their *long* name (`_game_common.pak`,
     // `ZumaPPC_VS2008.exe`). Parse `_setup.xml` (or the binary `.000`
-    // install header) and materialise the long-name copies under the
-    // same temp dir so a single mount answers both shapes.
+    // install header) and materialise the installed names before choosing
+    // an executable and removing consumed XML cabinet member names.
     let setup = parse_setup_script(&files);
-    materialise_long_names(tmp.path(), &files, &setup);
+    let long_names = materialise_long_names(tmp.path(), &files, &setup);
     // A `.000` header that parsed as a real MSCE file names every
     // payload exactly, so the reconstruct-by-guesswork paths below only
     // add wrong names. They stay for headers we could not parse.
@@ -353,17 +353,31 @@ fn prepare_cab(path: &Path) -> Result<Launcher> {
         }
     }
 
-    // Chopper Fight's `.000` gives GUI and scene ZIPs their install paths;
-    // expand them after preserving that tree so startup enumeration finds
-    // the expected images and level files.
-    extract_payload_archives(tmp.path())
-        .with_context(|| format!("extracting nested game archives from {}", path.display()))?;
-
     let exe_path = match find_main_exe(&files, &setup, header.as_ref()) {
         Some(p) => p,
         None => pick_entrypoint_pe(files.iter().map(|f| f.extracted_path.as_path()))
             .with_context(|| format!("looking for a launchable PE inside {}", path.display()))?,
     };
+
+    let exe_path = long_names
+        .iter()
+        .find(|(source, destination)| *source == exe_path && is_entrypoint_candidate(destination))
+        .map(|(_, destination)| destination.clone())
+        .unwrap_or(exe_path);
+    if let Some(setup) = setup.as_ref().filter(|_| !structured) {
+        pocket_core::cab::remove_materialised_setup_sources(
+            tmp.path(),
+            setup,
+            &long_names,
+            &exe_path,
+        )?;
+    }
+
+    // Chopper Fight's `.000` gives GUI and scene ZIPs their install paths;
+    // expand them after preserving that tree so startup enumeration finds
+    // the expected images and level files.
+    extract_payload_archives(tmp.path())
+        .with_context(|| format!("extracting nested game archives from {}", path.display()))?;
 
     // The shortcut names the file the *installer* would have left there,
     // which for a cabinet shipping one build per 3D chip is whichever
@@ -535,11 +549,11 @@ fn materialise_long_names(
     root: &Path,
     files: &[pocket_core::cab::CabFile],
     setup: &Option<pocket_core::cab::WinCeSetupScript>,
-) {
-    let Some(setup) = setup else { return };
-    if setup.renames.is_empty() {
-        return;
-    }
+) -> Vec<(PathBuf, PathBuf)> {
+    let Some(setup) = setup else {
+        return Vec::new();
+    };
+    let mut copies = Vec::new();
     let install_root = setup.install_root();
     for (short, long) in &setup.renames {
         let source_suffix = short.rsplit('.').next().unwrap_or(short);
@@ -581,8 +595,10 @@ fn materialise_long_names(
             );
         } else {
             log::debug!("materialised {} as {}", short, dest.display());
+            copies.push((src.to_path_buf(), dest));
         }
     }
+    copies
 }
 
 fn extract_payload_archives(root: &Path) -> Result<()> {

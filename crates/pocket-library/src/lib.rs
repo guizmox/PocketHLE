@@ -2226,6 +2226,19 @@ impl Library {
         if let Some(header) = header.as_ref().filter(|h| h.structured) {
             register_cab_install_dir(&mut registry, header);
         }
+        let screen = guess_screen(
+            &exe_abs,
+            &files,
+            header.as_ref().and_then(|h| h.app_name.as_deref()),
+        );
+        if let Some(setup) = setup.as_ref().filter(|_| structured_header.is_none()) {
+            pocket_cab::remove_materialised_setup_sources(
+                &extracted_dir,
+                setup,
+                &long_names,
+                &exe_abs,
+            )?;
+        }
         let entry = GameEntry {
             platform: None,
             id: id.clone(),
@@ -2249,11 +2262,7 @@ impl Library {
             imported_at: now_unix_seconds(),
             settings: GameSettings {
                 cpu_backend: self.config.default_cpu_backend,
-                screen: guess_screen(
-                    &exe_abs,
-                    &files,
-                    header.as_ref().and_then(|h| h.app_name.as_deref()),
-                ),
+                screen,
                 ..GameSettings::default()
             },
             icon: extract_icon_png(&game_dir, &exe_abs),

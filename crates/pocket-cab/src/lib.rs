@@ -15,7 +15,7 @@
 
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1409,6 +1409,72 @@ pub fn materialise_setup_names(root: &Path, files: &[CabFile]) -> Vec<(PathBuf, 
     created
 }
 
+/// Remove raw cabinet member names once every declared destination for the
+/// member has been installed. Call after entry-point and metadata discovery.
+pub fn remove_materialised_setup_sources(
+    root: &Path,
+    setup: &WinCeSetupScript,
+    copies: &[(PathBuf, PathBuf)],
+    executable: &Path,
+) -> io::Result<()> {
+    let install_root = setup.install_root();
+    let path_key = |path: &Path| path.to_string_lossy().to_ascii_lowercase();
+    let mut by_source = HashMap::<_, Vec<_>>::new();
+    let mut destinations = HashSet::new();
+    for (source, destination) in &setup.renames {
+        let destination = setup
+            .relative_destination(destination, install_root.as_deref())
+            .map(|relative| join_guest_relative(root, relative));
+        if let Some(path) = &destination {
+            destinations.insert(path_key(path));
+        }
+        by_source
+            .entry(source.to_ascii_lowercase())
+            .or_default()
+            .push(destination);
+    }
+    let mut copied_from = HashMap::new();
+    for (source, destination) in copies {
+        copied_from
+            .entry(path_key(destination))
+            .and_modify(|previous| {
+                if *previous != Some(source) {
+                    *previous = None;
+                }
+            })
+            .or_insert(Some(source));
+    }
+    for (source, _) in copies {
+        let Some(name) = source.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let name = name.to_ascii_lowercase();
+        if source.parent() != Some(root)
+            || path_key(source) == path_key(executable)
+            || name == "_setup.xml"
+            || name.ends_with(".000")
+            || name.ends_with(".999")
+            || destinations.contains(&path_key(source))
+        {
+            continue;
+        }
+        let Some(expected) = by_source.remove(&name) else {
+            continue;
+        };
+        if expected.iter().all(|destination| {
+            destination.as_ref().is_some_and(|destination| {
+                copies
+                    .iter()
+                    .any(|(from, to)| from == source && to == destination)
+                    && destination.is_file()
+            })
+        }) {
+            fs::remove_file(source)?;
+        }
+    }
+    Ok(())
+}
+
 impl WinCeInstallHeader {
     /// Resolve an install destination from this header onto the host
     /// path [`materialise_install_header_names`] wrote it to under
@@ -1562,6 +1628,38 @@ mod tests {
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].1.file_name().unwrap(), "lÉvel.dat");
         assert_eq!(fs::read(&paths[0].1).unwrap(), b"original");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installed_setup_payloads_hide_raw_names_only_after_all_copies_succeed() {
+        let root = std::env::temp_dir().join(format!("pocket-cab-aliases-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("payload.dat.001");
+        let first = root.join("payload.dat");
+        let second = root.join("backup.dat");
+        let unmapped = root.join("other.dat.002");
+        for path in [&source, &first, &unmapped] {
+            fs::write(path, b"payload").unwrap();
+        }
+        let setup = WinCeSetupScript {
+            renames: vec![
+                ("payload.dat.001".into(), "payload.dat".into()),
+                ("payload.dat.001".into(), "backup.dat".into()),
+            ],
+            ..Default::default()
+        };
+        let mut copies = vec![(source.clone(), first.clone())];
+        remove_materialised_setup_sources(&root, &setup, &copies, &root.join("app.exe")).unwrap();
+        assert!(source.is_file());
+
+        fs::copy(&source, &second).unwrap();
+        copies.push((source.clone(), second.clone()));
+        remove_materialised_setup_sources(&root, &setup, &copies, &root.join("app.exe")).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(first).unwrap(), b"payload");
+        assert_eq!(fs::read(second).unwrap(), b"payload");
+        assert!(unmapped.is_file());
         fs::remove_dir_all(root).unwrap();
     }
 
