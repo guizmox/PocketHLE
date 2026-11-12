@@ -237,8 +237,7 @@ fn install_copy_selector(
         0xe52c3004, // str r3,[ip,#-4]!
         0xe2522004, // subs r2,r2,#4
         0x1afffffb, // bne backward loop
-        BX_LR,
-        0xe1a0c000, // mov ip,r0
+        BX_LR, 0xe1a0c000, // mov ip,r0
         0xe4913004, // ldr r3,[r1],#4
         0xe48c3004, // str r3,[ip],#4
         0xe2522004, // subs r2,r2,#4

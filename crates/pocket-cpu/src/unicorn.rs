@@ -1932,7 +1932,8 @@ mod tests {
                         cpu.write_reg(ArmReg::R1, (value >> 32) as u32).unwrap();
                         cpu.write_reg(ArmReg::R2, 0x12345678).unwrap();
                         cpu.write_reg(ArmReg::R3, 0xabcdef01).unwrap();
-                        cpu.write_reg(ArmReg::Lr, 0x1100 | u32::from(thumb)).unwrap();
+                        cpu.write_reg(ArmReg::Lr, 0x1100 | u32::from(thumb))
+                            .unwrap();
                         let fpscr = 0x0200001f | rounding;
                         cpu.write_fpscr(fpscr).unwrap();
                         assert_eq!(
