@@ -608,6 +608,23 @@ impl Renderer {
                         .insert(index, data.unwrap_or_else(|| vec![0; bytes]));
                 }
             }
+            "glGetBufferParameteriv" => {
+                let (target, pname, out) = (u!(0), u!(1), u!(2));
+                let bound = match target {
+                    ARRAY_BUFFER => self.array,
+                    ELEMENT_BUFFER => self.elements,
+                    _ => return Ok(self.reject(0x0500)),
+                };
+                if !matches!(pname, 0x8764 | 0x8765) {
+                    return Ok(self.reject(0x0500));
+                }
+                if bound == 0 {
+                    return Ok(self.reject(0x0502));
+                }
+                let mut value = 0i32;
+                gl!(target => u32, pname => u32, &mut value => *mut i32);
+                ctx.cpu.write_mem(out, &value.to_le_bytes())?;
+            }
             "glBufferSubData" => {
                 let (target, offset, size, address) = (u!(0), i!(1), i!(2), u!(3));
                 let bytes = transfer_size(size, 1)?;
