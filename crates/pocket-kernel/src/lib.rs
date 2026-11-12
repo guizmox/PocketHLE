@@ -851,6 +851,59 @@ pub struct GuestCallFrame {
     pub sp: u32,
 }
 
+/// Registers saved by the DispatchMessage guest callback boundary.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchMessageFrame {
+    pub args: [u32; 4],
+    pub lr: u32,
+    pub sp: u32,
+    nonvolatile: [u32; 8],
+}
+
+impl DispatchMessageFrame {
+    const NONVOLATILE: [ArmReg; 8] = [
+        ArmReg::R4,
+        ArmReg::R5,
+        ArmReg::R6,
+        ArmReg::R7,
+        ArmReg::R8,
+        ArmReg::R9,
+        ArmReg::R10,
+        ArmReg::R11,
+    ];
+
+    pub fn capture(cpu: &mut dyn Cpu) -> Result<Self, KernelError> {
+        let mut nonvolatile = [0; 8];
+        for (value, reg) in nonvolatile.iter_mut().zip(Self::NONVOLATILE) {
+            *value = cpu.read_reg(reg)?;
+        }
+        Ok(Self {
+            args: [
+                cpu.read_reg(ArmReg::R0)?,
+                cpu.read_reg(ArmReg::R1)?,
+                cpu.read_reg(ArmReg::R2)?,
+                cpu.read_reg(ArmReg::R3)?,
+            ],
+            lr: cpu.read_reg(ArmReg::Lr)?,
+            sp: cpu.read_reg(ArmReg::Sp)?,
+            nonvolatile,
+        })
+    }
+
+    pub fn restore(self, cpu: &mut dyn Cpu) -> Result<(), KernelError> {
+        for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+            .into_iter()
+            .zip(self.args)
+            .chain(Self::NONVOLATILE.into_iter().zip(self.nonvolatile))
+        {
+            cpu.write_reg(reg, value)?;
+        }
+        cpu.write_reg(ArmReg::Sp, self.sp)?;
+        cpu.write_reg(ArmReg::Lr, self.lr)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NotifyMessageFrame {
     pub thread: usize,
@@ -1421,7 +1474,7 @@ pub struct KernelState {
     /// Per-thread DispatchMessageW continuations. A worker may run while
     /// another thread is inside WndProc; its callback return must restore
     /// only its own arguments/stack, never another thread's continuation.
-    pub message_frames: HashMap<usize, Vec<GuestCallFrame>>,
+    pub message_frames: HashMap<usize, Vec<DispatchMessageFrame>>,
     pub notify_message_frames: Vec<NotifyMessageFrame>,
     /// Bottom status bar created via commctrl's `CreateStatusWindowW`.
     ///
@@ -1741,7 +1794,7 @@ impl KernelState {
 
     /// A modal loop may dispatch again inside its caller's WndProc. Only
     /// the matching stack level is a return; a deeper call is a new frame.
-    pub fn take_message_return(&mut self, owner: usize, sp: u32) -> Option<GuestCallFrame> {
+    pub fn take_message_return(&mut self, owner: usize, sp: u32) -> Option<DispatchMessageFrame> {
         let frames = self.message_frames.get_mut(&owner)?;
         if frames.last()?.sp != sp {
             return None;
@@ -5198,20 +5251,7 @@ pub fn run_main_loop_with_hook(
                             .state
                             .take_message_return(owner, cpu.read_reg(ArmReg::Sp)?)
                         {
-                            for (index, value) in frame.args.iter().enumerate() {
-                                cpu.write_reg(
-                                    match index {
-                                        0 => ArmReg::R0,
-                                        1 => ArmReg::R1,
-                                        2 => ArmReg::R2,
-                                        3 => ArmReg::R3,
-                                        _ => unreachable!(),
-                                    },
-                                    *value,
-                                )?;
-                            }
-                            cpu.write_reg(ArmReg::Sp, frame.sp)?;
-                            cpu.write_reg(ArmReg::Lr, frame.lr)?;
+                            frame.restore(cpu)?;
                             pc = frame.lr;
                             continue;
                         }
@@ -5442,19 +5482,7 @@ pub fn run_main_loop_with_hook(
                                         .state
                                         .take_message_return(owner, cpu.read_reg(ArmReg::Sp)?)
                                     {
-                                        for (index, value) in frame.args.iter().enumerate() {
-                                            cpu.write_reg(
-                                                match index {
-                                                    0 => ArmReg::R0,
-                                                    1 => ArmReg::R1,
-                                                    2 => ArmReg::R2,
-                                                    _ => ArmReg::R3,
-                                                },
-                                                *value,
-                                            )?;
-                                        }
-                                        cpu.write_reg(ArmReg::Lr, frame.lr)?;
-                                        cpu.write_reg(ArmReg::Sp, frame.sp)?;
+                                        frame.restore(cpu)?;
                                         pc = frame.lr;
                                         continue;
                                     }
@@ -6513,10 +6541,11 @@ mod tests {
         .unwrap();
         process.state.message_frames.insert(
             0,
-            vec![GuestCallFrame {
+            vec![DispatchMessageFrame {
                 args: [0x1234, 2, 0, 0],
                 sp: 0x2222,
                 lr: 0x3333,
+                nonvolatile: [0; 8],
             }],
         );
         let worker = GuestThread::new(
@@ -6549,10 +6578,11 @@ mod tests {
         .unwrap();
         process.state.message_frames.insert(
             0,
-            vec![GuestCallFrame {
+            vec![DispatchMessageFrame {
                 args: [0x1234, 2, 0, 0],
                 sp: 0x2222,
                 lr: 0x3333,
+                nonvolatile: [0; 8],
             }],
         );
         cpu.write_reg(ArmReg::R0, 0xdeadbeef).unwrap();

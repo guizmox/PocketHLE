@@ -13549,20 +13549,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         .kernel
         .take_message_return(owner, ctx.cpu.read_reg(ArmReg::Sp)?)
     {
-        use pocket_cpu::regs::ArmReg;
-        for (index, value) in frame.args.iter().enumerate() {
-            ctx.cpu.write_reg(
-                match index {
-                    0 => ArmReg::R0,
-                    1 => ArmReg::R1,
-                    2 => ArmReg::R2,
-                    _ => ArmReg::R3,
-                },
-                *value,
-            )?;
-        }
-        ctx.cpu.write_reg(ArmReg::Sp, frame.sp)?;
-        ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
+        frame.restore(ctx.cpu)?;
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     // DispatchMessageW(const MSG *lpMsg) — pass the message into the
@@ -13631,16 +13618,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         hwnd, message, wparam, lparam, wnd_proc
     );
     use pocket_cpu::regs::ArmReg;
-    let frame = pocket_kernel::GuestCallFrame {
-        args: [
-            ctx.cpu.read_reg(ArmReg::R0)?,
-            ctx.cpu.read_reg(ArmReg::R1)?,
-            ctx.cpu.read_reg(ArmReg::R2)?,
-            ctx.cpu.read_reg(ArmReg::R3)?,
-        ],
-        lr: ctx.cpu.read_reg(ArmReg::Lr)?,
-        sp: ctx.cpu.read_reg(ArmReg::Sp)?,
-    };
+    let frame = pocket_kernel::DispatchMessageFrame::capture(ctx.cpu)?;
     ctx.kernel
         .message_frames
         .entry(owner)
@@ -29012,6 +28990,33 @@ mod tests {
         assert_eq!(ctx.cpu.read_reg(ArmReg::R0).unwrap(), 0x1100);
         assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x10400);
         assert!(ctx.kernel.message_frames.is_empty());
+    }
+
+    #[test]
+    fn dispatch_message_restores_nonvolatile_registers_after_a_window_callback() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = thunk_at(0x70000100);
+        kernel.wnd_proc = 0x10200;
+        write_synthetic_msg(&mut cpu, 0x1100, WM_LBUTTONDOWN, 1, 0x00200010).unwrap();
+        cpu.write_reg(ArmReg::R0, 0x1100).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x10400).unwrap();
+        cpu.write_reg(ArmReg::R4, 0x12345678).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(0x10200)
+        );
+        ctx.cpu.write_reg(ArmReg::R4, 0x00200010).unwrap();
+        assert_eq!(
+            dispatch_message_w(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R4).unwrap(), 0x12345678);
     }
 
     #[test]
