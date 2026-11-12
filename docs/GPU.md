@@ -69,27 +69,62 @@ settings, immediately above **GPU rendering**, on desktop and Android:
 | Generic OpenGL ES (1.1, Common) | Standard behavior; no Intel bias or NVIDIA combiners. This is the default. |
 | NVIDIA GoForce 5500 (OpenGL ES 1.1, Common) | Allows detected clients to use AR10/AR11 combiners, exposes legacy OES VBO entry points and an RGBA8 pbuffer configuration without depth; standard depth bias. |
 | Intel 2700G (OpenGL ES 1.0, Common-Lite) | Enables the Intel depth-bias model and opaque coplanar tolerance; NVIDIA combiners disabled. |
+| Adreno 200 (OpenGL ES 2.0) | Selects the programmable guest EGL and GLES path for `libEGL.dll` and `libGLESv2.dll`. |
 
 The persisted per-game `gpu_compatibility_profile` enum replaces both global
 compatibility booleans. Old global values are ignored, not inherited; existing
-entries without the new field use Generic. Selection applies on the next launch
-in software and GPU modes and is ignored for Gizmondo. Gizmondo's existing driver
-and combiner policy and standalone CLI defaults are unchanged. The version/profile
-labels identify compatibility targets; they do not remove supported API entry
-points or change the host renderer identity.
+entries without the field use Generic. The GLES 1.x profiles apply in software
+and GPU modes. Adreno 200 uses the native host graphics driver. Profile changes
+take effect on the next launch. Gizmondo uses its own driver and combiner policy.
+The profile labels identify guest compatibility targets. The host driver still
+determines the actual rendering device.
 
 An imported PocketPC game receives one combined launch-settings prompt for
 screen/orientation, optional FPS advice and, when the existing executable analysis
-identifies OpenGL ES, the GPU compatibility profile. The FPS detector and message
-are shared across desktop and Android. For a new PocketPC import, a direct
-`libGLES_CL.dll` import in the executable selects Intel 2700G as the initial
-profile. When an installation contains multiple supported executables, the
-PocketPC import asks which one to launch before offering launch settings.
-The GPU profile is initialized from that selection. The user can change it in
-Graphics settings. Updating an installed
-game preserves its saved profile. NVIDIA selection gates extension advertisement
-and entry points;
-it permits existing program detection rather than forcing combiner rendering.
+identifies OpenGL ES, the GPU compatibility profile. The FPS detector and
+message are shared across desktop and Android. On a new PocketPC import, a direct
+`libGLESv2.dll` import selects Adreno 200, and `libGLES_CL.dll` selects Intel
+2700G when the executable has no GLES 2.0 import. If the installation contains
+multiple supported executables, the selected executable determines the profile.
+Users can override the profile in Graphics settings. Updating or reimporting an
+installed game preserves its saved profile. NVIDIA selection gates extension
+advertisement and entry points and permits existing program detection.
+
+### Adreno 200 programmable rendering
+
+The profile provides an initial GLES 2.0 implementation with its own EGL
+context, programmable state and object namespaces. The window configuration
+advertises RGB565 color, 16 depth bits and 8 stencil bits. The native window
+framebuffer uses an RGBA color texture and a packed depth/stencil attachment.
+Host GLES compiles the guest GLSL ES source. The desktop GL path adapts
+supported shader sources for GLSL 1.20.
+
+- **Presentation.** Window swaps publish an immutable texture from the same
+  bounded pool and fence protocol as the GLES 1.x renderer. The GUI can consume
+  the texture within the shared context group without reading pixels to RAM.
+  A CPU readback remains available when shared export is unavailable or when
+  the guest or a diagnostic needs CPU pixels.
+- **Textures.** The renderer submits compressed ATC blocks directly when the
+  host driver reports support for the requested format. The CPU decoder
+  provides RGBA uploads for unsupported ATC formats.
+- **Geometry.** Guest buffer objects use native GPU storage. Client vertex and
+  index arrays are read from guest RAM into reusable native buffers. The
+  renderer skips identical uploads and updates the contiguous span covering
+  changed bytes. It uses a CPU copy of element data when it needs to bound a
+  client vertex array.
+
+For Electopia, select Adreno 200 and **800×480 (WVGA landscape)**. The CLI
+equivalent is:
+
+```sh
+pockethle run ElectopiaSetup.cab --adreno200 --screen 800x480
+```
+
+The original CAB reached the main menu under Linux Mesa llvmpipe with both
+shared presentation and CPU readback. Shared presentation tests verify deferred
+CPU access and retained texture contents. Physical GPU testing on Windows and
+Android remains pending. The profile covers the API subset needed for the
+tested startup and menu.
 
 ### Intel 2700G depth-bias model
 
