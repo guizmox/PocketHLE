@@ -289,8 +289,75 @@ pub fn layout_dx(font: Option<&Font>, text: &[u16], dx: Option<&[i32]>) -> Layou
     result
 }
 
+/// GDI LOGFONT escapement in counterclockwise tenths of a degree.
+#[derive(Clone, Copy)]
+pub struct TextQuarterTurn {
+    anchor: (i32, i32),
+    turns: i32,
+}
+
+impl TextQuarterTurn {
+    pub fn new(x: i32, y: i32, escapement: i32) -> Option<Self> {
+        let angle = escapement.rem_euclid(3600);
+        (matches!(angle, 900 | 1800 | 2700)).then_some(Self {
+            anchor: (x, y),
+            turns: angle / 900,
+        })
+    }
+
+    fn point(self, x: i32, y: i32) -> (i32, i32) {
+        let dx = x.saturating_sub(self.anchor.0);
+        let dy = y.saturating_sub(self.anchor.1);
+        let (dx, dy) = match self.turns {
+            1 => (dy, dx.saturating_neg()),
+            2 => (dx.saturating_neg(), dy.saturating_neg()),
+            _ => (dy.saturating_neg(), dx),
+        };
+        (
+            self.anchor.0.saturating_add(dx),
+            self.anchor.1.saturating_add(dy),
+        )
+    }
+
+    pub fn bounds(self, [left, top, right, bottom]: [i32; 4]) -> [i32; 4] {
+        let (ax, ay) = self.point(left, top);
+        let (bx, by) = self.point(right.saturating_sub(1), bottom.saturating_sub(1));
+        [
+            ax.min(bx),
+            ay.min(by),
+            ax.max(bx).saturating_add(1),
+            ay.max(by).saturating_add(1),
+        ]
+    }
+}
+
 impl Layout {
     pub fn draw(&self, surface: &mut Surface<'_>, x: i32, y: i32, color: u16, clip: [i32; 4]) {
+        self.draw_mapped(surface, x, y, color, clip, None);
+    }
+
+    pub fn draw_quarter_turn(
+        &self,
+        surface: &mut Surface<'_>,
+        x: i32,
+        y: i32,
+        color: u16,
+        clip: [i32; 4],
+        turn: TextQuarterTurn,
+    ) {
+        self.draw_mapped(surface, x, y, color, clip, Some(turn));
+    }
+
+    fn draw_mapped(
+        &self,
+        surface: &mut Surface<'_>,
+        x: i32,
+        y: i32,
+        color: u16,
+        clip: [i32; 4],
+        turn: Option<TextQuarterTurn>,
+    ) {
+        let map = |x, y| turn.map_or((x, y), |turn| turn.point(x, y));
         if let Some(face) = &self.face {
             for glyph in &self.glyphs {
                 if let Some(outline) = face.font.outline_glyph(glyph.clone()) {
@@ -310,6 +377,7 @@ impl Layout {
                         if self.monochrome {
                             coverage = if coverage >= 0.5 { 1.0 } else { 0.0 };
                         }
+                        let (px, py) = map(px, py);
                         blend(surface, px, py, color, coverage, clip);
                     });
                 }
@@ -335,11 +403,15 @@ impl Layout {
         .into_iter()
         .flatten()
         {
-            let (sw, _) = surface.dimensions();
-            for px in
+            let (sw, sh) = surface.dimensions();
+            let range = if turn.is_some() {
+                x..x.saturating_add(self.width.min(sw.max(sh) as i32))
+            } else {
                 x.max(clip[0]).max(0)..x.saturating_add(self.width).min(clip[2]).min(sw as i32)
-            {
-                blend(surface, px, y.saturating_add(line), color, 1.0, clip);
+            };
+            for px in range {
+                let (px, py) = map(px, y.saturating_add(line));
+                blend(surface, px, py, color, 1.0, clip);
             }
         }
     }
@@ -401,6 +473,41 @@ mod tests {
         }
         assert!(painted);
     }
+    #[test]
+    fn clockwise_escapement_rotates_the_glyphs_around_the_text_origin() {
+        let font = Font::new(-16);
+        let text: Vec<_> = "Resume".encode_utf16().collect();
+        let layout = layout(Some(&font), &text);
+        let mut regular = crate::gdi::Bitmap::new(128, 128);
+        let mut rotated = crate::gdi::Bitmap::new(128, 128);
+        let turn = TextQuarterTurn::new(64, 16, 2700).unwrap();
+        layout.draw(
+            &mut Surface::Bitmap(&mut regular),
+            64,
+            16,
+            0xffff,
+            [0, 0, 128, 128],
+        );
+        layout.draw_quarter_turn(
+            &mut Surface::Bitmap(&mut rotated),
+            64,
+            16,
+            0xffff,
+            [0, 0, 128, 128],
+            turn,
+        );
+        let mut painted = false;
+        for (index, pixel) in regular.pixels.chunks_exact(2).enumerate() {
+            if pixel != [0, 0] {
+                let (x, y) = ((index % 128) as i32, (index / 128) as i32);
+                let offset = ((16 + x - 64) * 128 + (64 - y + 16)) as usize * 2;
+                assert_eq!(&rotated.pixels[offset..offset + 2], pixel);
+                painted = true;
+            }
+        }
+        assert!(painted);
+    }
+
     #[test]
     fn font_explicit_spacing_and_surrogates() {
         let f = Font::new(14);

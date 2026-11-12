@@ -959,6 +959,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     );
     d.register_handler(dll, "DeleteCriticalSection", delete_critical_section);
     d.register_handler(dll, "EnterCriticalSection", enter_critical_section);
+    d.register_handler(dll, "TryEnterCriticalSection", try_enter_critical_section);
     d.register_handler(dll, "LeaveCriticalSection", leave_critical_section);
     d.register_handler(dll, "GetCurrentThreadId", get_current_thread_id);
     d.register_handler(dll, "GetExitCodeThread", get_exit_code_thread);
@@ -2758,17 +2759,31 @@ fn delete_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ker
     ctx.kernel.critical_sections.remove(&key);
     Ok(DispatchOutcome::ReturnedR0(0))
 }
-fn enter_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let key = ctx.arg_u32(0)?;
-    let current = ctx.kernel.current_thread;
-    let lock = ctx
-        .kernel
+fn acquire_critical_section(kernel: &mut KernelState, key: u32) -> bool {
+    let current = kernel.current_thread;
+    let lock = kernel
         .critical_sections
         .entry(key)
         .or_insert((usize::MAX, 0));
-    if lock.1 == 0 || lock.0 == current {
-        lock.0 = current;
-        lock.1 = lock.1.saturating_add(1);
+    if lock.1 != 0 && lock.0 != current {
+        return false;
+    }
+    lock.0 = current;
+    lock.1 = lock.1.saturating_add(1);
+    true
+}
+
+fn try_enter_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let key = ctx.arg_u32(0)?;
+    Ok(DispatchOutcome::ReturnedR0(u32::from(
+        acquire_critical_section(ctx.kernel, key),
+    )))
+}
+
+fn enter_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let key = ctx.arg_u32(0)?;
+    let current = ctx.kernel.current_thread;
+    if acquire_critical_section(ctx.kernel, key) {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     if let Some(index) = current.checked_sub(1) {
@@ -5093,6 +5108,11 @@ pub(crate) fn attach_static_imports(
             KernelError::Loader("Static DLL attach returned without its saved context".into())
         })?
     } else {
+        // Main executables can have MUI satellites just like DLLs.
+        // Map them before the entry point so early resource lookups can see them.
+        if let Some(path) = ctx.kernel.find_module_file(&ctx.kernel.module_path) {
+            load_mui_satellites(&mut ctx, &path, 0);
+        }
         let mut modules = std::collections::BTreeMap::new();
         for import in &ctx.kernel.image_imports {
             if !runtime_hle_dll(&import.dll) {
@@ -5442,7 +5462,8 @@ fn load_mui_satellites(ctx: &mut CallCtx<'_>, host_path: &std::path::Path, owner
         .filter_map(|e| e.file_name().to_str().map(str::to_owned))
         .filter(|n| {
             n.len() == file_name.len() + 9
-                && n.starts_with(file_name)
+                && n.get(..file_name.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(file_name))
                 && n[file_name.len()..].starts_with('.')
                 && n[file_name.len() + 5..].eq_ignore_ascii_case(".mui")
                 && n[file_name.len() + 1..file_name.len() + 5]
@@ -22050,6 +22071,9 @@ fn blit_text_at(
     let color = colorref_to_rgb565(dc_meta.text_color);
     let bk_color = colorref_to_rgb565(dc_meta.bk_color);
     let selected_font = selected_text_font(ctx.kernel, hdc);
+    let turn = selected_font
+        .as_ref()
+        .and_then(|font| pocket_kernel::text::TextQuarterTurn::new(x, y, font.field(8)));
     let layout = pocket_kernel::text::layout_dx(selected_font.as_ref(), &chars, dx);
     let (x, mut y) = aligned_text_origin(&dc_meta, x, y, layout.width, layout.height);
     // TA_BASELINE uses ascent, TA_BOTTOM uses the complete cell.
@@ -22082,15 +22106,28 @@ fn blit_text_at(
                 );
             }
         } else if !dc_meta.bk_transparent {
-            let left = x.max(clip[0]);
-            let top = y.max(clip[1]);
-            let right = x.saturating_add(layout.width).min(clip[2]);
-            let bottom = y.saturating_add(layout.height).min(clip[3]);
+            let cell = [
+                x,
+                y,
+                x.saturating_add(layout.width),
+                y.saturating_add(layout.height),
+            ];
+            let [left, top, right, bottom] = turn
+                .filter(|_| layout.width > 0 && layout.height > 0)
+                .map_or(cell, |turn| turn.bounds(cell));
+            let left = left.max(clip[0]);
+            let top = top.max(clip[1]);
+            let right = right.min(clip[2]);
+            let bottom = bottom.min(clip[3]);
             if right > left && bottom > top {
                 surf.fill_rect(left, top, right - left, bottom - top, bk_color);
             }
         }
-        layout.draw(&mut surf, x, y, color, clip);
+        if let Some(turn) = turn {
+            layout.draw_quarter_turn(&mut surf, x, y, color, clip, turn);
+        } else {
+            layout.draw(&mut surf, x, y, color, clip);
+        }
         surf.mark_dirty();
     }
     sync_dst_dib_to_guest(ctx, hdc)?;
@@ -39630,14 +39667,28 @@ mod tests {
             thunk: &thunk,
         };
         initialize_critical_section(&mut ctx).unwrap();
-        enter_critical_section(&mut ctx).unwrap();
-        enter_critical_section(&mut ctx).unwrap();
+        assert_eq!(
+            try_enter_critical_section(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            try_enter_critical_section(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
         ctx.kernel.worker_preempt_after_ms = 0;
         assert_eq!(
             wake_due_worker(&mut ctx).unwrap(),
             Some(DispatchOutcome::JumpTo(0x10200))
         );
         assert_eq!(ctx.kernel.critical_sections[&key], (0, 2));
+        ctx.cpu.write_reg(ArmReg::R0, key).unwrap();
+        assert_eq!(
+            try_enter_critical_section(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.kernel.current_thread, 1);
+        assert_eq!(ctx.kernel.critical_sections[&key], (0, 2));
+        assert!(ctx.kernel.threads[0].parked_wait_handles.is_empty());
         // The independent worker may own a different critical section.
         ctx.cpu.write_reg(ArmReg::R0, other).unwrap();
         assert_eq!(
