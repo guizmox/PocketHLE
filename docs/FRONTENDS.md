@@ -198,14 +198,18 @@ In the viewer, East still leaves fullscreen or closes playback; it never deletes
 
 Desktop and Android tiles show resolution followed by a compact graphics API hint
 (OpenGL ES, Direct3D Mobile, DirectDraw, GAPI, GapiDraw, SDL or GDI). The shared detector
-inspects the selected executable, resolves COREDLL ordinals through the same
-bundled ARM/MIPS maps as runtime, and recognizes explicit graphics symbol strings
-when GetProcAddress is used. GDI menu drawing does not override stronger 3D or
-framebuffer evidence. SDL and GapiDraw are identified as middleware without guessing their video backend.
-This remains a static hint rather than proof of the active rendering path; no
-DLL traversal, game-name rules, options or metadata migration are introduced.
-Missing evidence leaves only resolution. Existing games benefit after restarting
-the updated launcher, without reimport or a new Refresh button.
+inspects the selected executable, resolves COREDLL ordinals through the bundled
+ARM/MIPS maps, and recognizes explicit graphics symbols used with
+`GetProcAddress`. If the executable has no rendering evidence beyond GDI,
+the detector also checks local DLLs referenced by imports or explicit names
+in programs that call `LoadLibrary`. A cabinet DLL with a unique matching
+filename alias can supply the hint. Unrelated files in the same directory are
+excluded. SDL and GapiDraw are shown as middleware when detected.
+
+The label describes static API evidence. A DLL that supports several rendering
+paths can contribute a label before the game chooses its active path. Missing
+evidence leaves only resolution. Existing games benefit after restarting the
+updated launcher, with their library entries and settings intact.
 
 A second line, “Custom settings”, appears for saved per-game overrides or runtime
 settings different from standard defaults. Explicit per-game overrides count

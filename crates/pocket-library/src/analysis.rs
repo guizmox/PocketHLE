@@ -17,10 +17,19 @@ pub struct GameAnalysis {
     pub dependencies: Vec<(String, String)>,
 }
 
-/// Best-effort graphics label from PE imports and dynamic symbol references.
-/// This is an API hint, not proof of the active renderer. Unknown stays absent.
-/// Prefer framebuffer/3D APIs over GDI, which often only supplies menu text.
+/// Best-effort graphics label from the selected executable and its referenced
+/// local DLLs. This describes API evidence, not a live renderer.
 pub fn detect_graphics_api(path: &std::path::Path) -> Option<&'static str> {
+    detect_from_modules(path, read_graphics_module)
+}
+
+#[derive(Clone)]
+struct ModuleGraphics {
+    label: Option<&'static str>,
+    dependencies: std::collections::BTreeSet<String>,
+}
+
+fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
     let bytes = std::fs::read(path).ok()?;
     let image = pocket_pe::load_bytes(&bytes).ok()?;
     let mut imports = image.imports;
@@ -60,24 +69,104 @@ pub fn detect_graphics_api(path: &std::path::Path) -> Option<&'static str> {
         }
     }
     let strings = binary_strings(&bytes);
-    graphics_api_from_evidence(&imports, &strings)
+    let label = graphics_api_from_evidence(&imports, &strings);
+    let mut dependencies: std::collections::BTreeSet<_> = imports
+        .iter()
+        .filter_map(|import| dll_basename(&import.dll))
+        .collect();
+    if imports.iter().any(|import| {
+        matches!(
+            &import.binding, pocket_pe::ImportBinding::Name(name)
+                if matches!(name.to_ascii_lowercase().as_str(),
+                    "loadlibraryw" | "loadlibrarya" | "loadlibraryexw" | "loadlibraryexa")
+        )
+    }) {
+        dependencies.extend(strings.iter().filter_map(|name| dll_basename(name)));
+    }
+    Some(ModuleGraphics {
+        label,
+        dependencies,
+    })
+}
+
+fn dll_basename(name: &str) -> Option<String> {
+    let name = name.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    let stem = name.strip_suffix(".dll")?;
+    if stem.is_empty()
+        || stem.len() > 128
+        || !stem
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b' ' | b'$'))
+    {
+        return None;
+    }
+    Some(name)
+}
+
+fn detect_from_modules(
+    path: &std::path::Path,
+    mut inspect: impl FnMut(&std::path::Path) -> Option<ModuleGraphics>,
+) -> Option<&'static str> {
+    let main = inspect(path)?;
+    if main.label.is_some_and(|label| label != "GDI") || main.dependencies.is_empty() {
+        return main.label;
+    }
+    let Some(files) = path.parent().and_then(|dir| std::fs::read_dir(dir).ok()) else {
+        return main.label;
+    };
+    // Cabinets may add $-separated suffixes to installed DLL filenames.
+    // Prefer the exact filename and skip ambiguous aliases.
+    let files: Vec<_> = files
+        .flatten()
+        .filter_map(|entry| {
+            let name = dll_basename(entry.file_name().to_str()?)?;
+            entry
+                .file_type()
+                .ok()?
+                .is_file()
+                .then(|| (name, entry.path()))
+        })
+        .collect();
+    let mut labels = std::collections::HashSet::new();
+    labels.extend(main.label);
+    for dependency in main.dependencies {
+        let mut exact = files.iter().filter(|(name, _)| *name == dependency);
+        let candidate = if let Some(candidate) = exact.next() {
+            exact.next().is_none().then_some(candidate)
+        } else {
+            let stem = dependency.trim_end_matches(".dll");
+            let mut aliases = files.iter().filter(|(name, _)| {
+                name.split_once('$')
+                    .is_some_and(|(prefix, _)| prefix == stem)
+            });
+            let first = aliases.next();
+            first.filter(|_| aliases.next().is_none())
+        };
+        if let Some((_, candidate)) = candidate {
+            labels.extend(inspect(candidate).and_then(|module| module.label));
+        }
+    }
+    [
+        "OpenGL ES",
+        "Direct3D Mobile",
+        "DirectDraw",
+        "GAPI",
+        "GapiDraw",
+        "SDL",
+        "GDI",
+    ]
+    .into_iter()
+    .find(|label| labels.contains(label))
 }
 
 /// Process-local cache for catalogue refreshes. File metadata, not game names,
 /// invalidates both known and unknown API results after executable replacement.
 #[derive(Default)]
-struct GraphicsApiCache {
-    entries: std::collections::HashMap<
-        std::path::PathBuf,
-        (u64, std::time::SystemTime, Option<&'static str>),
-    >,
+struct GraphicsApiCache<T> {
+    entries: std::collections::HashMap<std::path::PathBuf, (u64, std::time::SystemTime, T)>,
 }
-impl GraphicsApiCache {
-    fn get(
-        &mut self,
-        path: &std::path::Path,
-        detect: impl FnOnce(&std::path::Path) -> Option<&'static str>,
-    ) -> Option<&'static str> {
+impl<T: Clone> GraphicsApiCache<T> {
+    fn get(&mut self, path: &std::path::Path, detect: impl FnOnce(&std::path::Path) -> T) -> T {
         let stamp = std::fs::metadata(path)
             .ok()
             .and_then(|m| m.modified().ok().map(|t| (m.len(), t)));
@@ -87,23 +176,23 @@ impl GraphicsApiCache {
         };
         if let Some((old_len, old_time, label)) = self.entries.get(path) {
             if *old_len == len && *old_time == modified {
-                return *label;
+                return label.clone();
             }
         }
         let label = detect(path);
         self.entries
-            .insert(path.to_path_buf(), (len, modified, label));
+            .insert(path.to_path_buf(), (len, modified, label.clone()));
         label
     }
 }
 pub fn detect_graphics_api_cached(path: &std::path::Path) -> Option<&'static str> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<GraphicsApiCache>> =
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<GraphicsApiCache<Option<ModuleGraphics>>>> =
         std::sync::OnceLock::new();
-    CACHE
+    let mut cache = CACHE
         .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(path, detect_graphics_api)
+        .unwrap_or_else(|e| e.into_inner());
+    detect_from_modules(path, |module| cache.get(module, read_graphics_module))
 }
 
 fn graphics_api_from_evidence(
@@ -543,6 +632,11 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             }
         }
     }
+    if !a.graphics.iter().any(|(key, _)| key == "Renderer") {
+        if let Some(api) = detect_graphics_api_cached(&path) {
+            a.graphics.push(("Renderer".into(), api.into()));
+        }
+    }
     // Device names and transport APIs are evidence; scene-camera names are not.
     // Imports referenced by ordinal have no readable name, so absence is not proof.
     for (label, needles) in [
@@ -959,6 +1053,39 @@ mod graphics_api_tests {
 #[cfg(test)]
 mod catalogue_cache_tests {
     use super::*;
+    #[test]
+    fn catalogue_follows_only_the_referenced_local_dll() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("game.exe");
+        let aliased = temp.path().join("graphics$a$b.dll");
+        let unrelated = temp.path().join("other.dll");
+        let exact = temp.path().join("graphics.dll");
+        for path in [&aliased, &unrelated] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let inspect = |path: &std::path::Path| {
+            let label = if path == main {
+                None
+            } else if path == aliased {
+                Some("DirectDraw")
+            } else if path == exact {
+                Some("GAPI")
+            } else {
+                panic!("unreferenced DLL was scanned")
+            };
+            Some(ModuleGraphics {
+                label,
+                dependencies: (path == main)
+                    .then(|| "graphics.dll".into())
+                    .into_iter()
+                    .collect(),
+            })
+        };
+        assert_eq!(detect_from_modules(&main, inspect), Some("DirectDraw"));
+        std::fs::write(&exact, b"fixture").unwrap();
+        assert_eq!(detect_from_modules(&main, inspect), Some("GAPI"));
+    }
+
     #[test]
     fn executable_metadata_invalidates_cached_known_and_unknown_results() {
         let temp = tempfile::tempdir().unwrap();

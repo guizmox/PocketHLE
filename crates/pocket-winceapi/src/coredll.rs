@@ -2824,9 +2824,8 @@ fn leave_critical_section(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 ///
 /// A guest calling `Sleep` has voluntarily given up the CPU, which is
 /// exactly when a driver thread would have run, so serve the queue here
-/// too. `WaitFor*Object*` deliberately does not do this: those handlers
-/// re-run their call on re-entry, and stacking the callback detour on
-/// top of that has no game asking for it.
+/// too. Blocking single-object waits also deliver callbacks so a worker
+/// can receive its final buffer notification while the caller joins it.
 pub(crate) fn sleep(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // Must come first: when `waveOutProc` returns, the thunk re-fires
     // this handler with R0..R3 holding the callback's result rather than
@@ -21035,6 +21034,12 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     service_mas_audio(ctx.kernel);
     ctx.kernel.sync_power_notifications();
     crate::shell::service(ctx);
+    let thunk_va = ctx.thunk.thunk_va;
+    // A wave callback returns through this same thunk. Restore its interrupted
+    // call before inspecting the handle or touching the wait deadline.
+    if ctx.kernel.wave_out.function_frame.is_some() {
+        wave_out_enter_callback(ctx, thunk_va)?;
+    }
     let handle = ctx.arg_u32(0)?;
     let timeout = ctx.arg_u32(1)?;
 
@@ -21043,19 +21048,12 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
         return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
     }
 
-    // The real wave driver keeps running while a guest thread is blocked in
-    // WaitForSingleObject.  In this HLE, buffer retirement normally happens
-    // only when the guest crosses one of our API boundaries; without servicing
-    // waveOut here, a CALLBACK_NULL mixer can submit its first buffer, wait,
-    // and never observe WHDR_DONE even though the host has already consumed it.
-    //
-    // CALLBACK_FUNCTION is the one exception: delivering a waveOutProc requires
-    // a guest-call detour and this handler may be re-entered while a wait is
-    // being reevaluated.  Sleep/the message pump already own that detour path.
-    // The other notification modes only mutate guest-visible state or enqueue/
-    // signal an object, which is exactly what an asynchronous driver would do
-    // while the thread waits.
-    if ctx.kernel.wave_out.callback_kind != WaveCallbackKind::Function {
+    // Driver completion can signal an event or queue a guest function.
+    // Retire function-mode buffers even when the main thread has stopped
+    // pumping messages. Keep the existing full service for other modes.
+    if ctx.kernel.wave_out.callback_kind == WaveCallbackKind::Function {
+        retire_completed_wave_buffers(ctx)?;
+    } else {
         service_wave_out(ctx)?;
     }
 
@@ -21074,6 +21072,27 @@ fn wait_for_single_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     if waitable_is_signalled(ctx.kernel, handle) {
         let result = acquire_wait_signal(ctx.kernel, handle);
         return finish_wait(ctx, result);
+    }
+    if timeout != 0 && !ctx.kernel.wave_out.function_done.is_empty() {
+        if timeout != u32::MAX {
+            let key = (
+                ctx.kernel.current_thread,
+                thunk_va,
+                ctx.cpu.read_reg(ArmReg::Sp)?,
+            );
+            let now = monotonic_ms();
+            let deadline = *ctx
+                .kernel
+                .wait_deadlines
+                .entry(key)
+                .or_insert_with(|| now.saturating_add(u64::from(timeout)));
+            if now >= deadline {
+                return finish_wait(ctx, 0x102); // WAIT_TIMEOUT
+            }
+        }
+        if let Some(outcome) = wave_out_enter_callback(ctx, thunk_va)? {
+            return Ok(outcome);
+        }
     }
     block_on_wait(ctx, &[handle], false, timeout)
 }
@@ -41423,6 +41442,62 @@ mod tests {
         kernel.current_thread = 0;
         assert_eq!(call(&mut cpu, &mut kernel, 0), 0);
         assert_eq!(call(&mut cpu, &mut kernel, 0), -1);
+    }
+
+    #[test]
+    fn blocking_wait_delivers_wave_completion_and_restores_the_wait() {
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let t = dummy_thunk();
+        let event = 0xdeade010;
+        let proc = 0x3000;
+        kernel.events.insert(
+            event,
+            pocket_kernel::EventObject {
+                manual_reset: false,
+                signalled: false,
+            },
+        );
+        kernel.wave_out.callback_kind = WaveCallbackKind::Function;
+        kernel.wave_out.devices.insert(
+            FAKE_HWAVEOUT,
+            pocket_kernel::WaveOutDevice {
+                callback_kind: WaveCallbackKind::Function,
+                callback_target: proc,
+                instance: 0,
+                owner_thread: 0,
+                format: pocket_kernel::audio::GuestFormat::default(),
+                paused: false,
+            },
+        );
+        kernel
+            .wave_out
+            .pending
+            .push_back(pocket_kernel::PendingWaveBuffer {
+                handle: FAKE_HWAVEOUT,
+                hdr: 0x1000,
+                end_cursor: 0,
+            });
+        cpu.write_reg(ArmReg::R0, event).unwrap();
+        cpu.write_reg(ArmReg::R1, u32::MAX).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x1200).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &t,
+            kernel: &mut kernel,
+        };
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(proc)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), MM_WOM_DONE);
+        ctx.kernel.events.get_mut(&event).unwrap().signalled = true;
+        assert_eq!(
+            wait_for_single_object(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Sp).unwrap(), 0x4000);
+        assert_eq!(ctx.cpu.read_reg(ArmReg::Lr).unwrap(), 0x1200);
+        assert!(!ctx.kernel.events.get(&event).unwrap().signalled);
     }
 
     #[test]
