@@ -38,6 +38,21 @@ impl Backend for Bridge {
             }
         }
     }
+    fn display_is_on(&self) -> Option<bool> {
+        let mut env = self.vm.attach_current_thread().ok()?;
+        match env
+            .call_static_method(&self.class, "displayPowerState", "()I", &[])
+            .and_then(|v| v.i())
+        {
+            Ok(0) => Some(false),
+            Ok(1) => Some(true),
+            Ok(_) => None,
+            Err(_) => {
+                let _ = env.exception_clear();
+                None
+            }
+        }
+    }
 }
 
 impl pocket_core::kernel::device_status::Backend for Bridge {

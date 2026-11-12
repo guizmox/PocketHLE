@@ -1937,10 +1937,18 @@ fn gl_compressed_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
     }) else {
         return Ok(VOID);
     };
-    if size as usize != needed {
+    // Some legacy ATC uploaders pass the RGB565 allocation size even
+    // though the ATC image at its start occupies only half that space.
+    let padded_atc = matches!(
+        format,
+        pocket_gles::GL_ATC_RGBA_EXPLICIT_ALPHA_AMD
+            | pocket_gles::GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD
+    ) && needed.checked_mul(2) == Some(size as usize);
+    if size as usize != needed && !padded_atc {
         with_ctx(|c| c.set_error(pocket_gles::GL_INVALID_VALUE));
         return Ok(VOID);
     }
+    let size = needed as u32;
     let bytes = if data == 0 || size == 0 {
         Vec::new()
     } else {
@@ -1951,6 +1959,17 @@ fn gl_compressed_tex_image_2d(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
         bytes
     };
     with_ctx(|c| c.compressed_tex_image_2d(target, level, width, height, format, &bytes));
+    Ok(VOID)
+}
+
+fn gl_current_palette_matrix(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let index = ctx.arg_u32(0)?;
+    with_ctx(|c| c.set_palette_index(index));
+    Ok(VOID)
+}
+
+fn gl_load_palette_from_modelview(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    with_ctx(|c| c.load_palette_from_modelview());
     Ok(VOID)
 }
 
@@ -3180,6 +3199,20 @@ fn goforce_5500_enabled() -> bool {
 
 /// Resolve only known callable GLES thunks, without modifying ordinal tables.
 fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    egl_get_proc_address_for(
+        ctx,
+        &[
+            pocket_kernel::GLES_CM_MODULE_HANDLE,
+            pocket_kernel::GLES_CL_MODULE_HANDLE,
+            pocket_kernel::EGL_MODULE_HANDLE,
+        ],
+    )
+}
+
+pub(crate) fn egl_get_proc_address_for(
+    ctx: &mut CallCtx<'_>,
+    modules: &[u32],
+) -> Result<DispatchOutcome, KernelError> {
     let pointer = ctx.arg_u32(0)?;
     if pointer == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -3199,20 +3232,16 @@ fn egl_get_proc_address(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
     if GOFORCE_5500_VBO_EXPORTS.contains(&name.as_ref()) && !goforce_5500_enabled() {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
-    let address = [
-        pocket_kernel::GLES_CM_MODULE_HANDLE,
-        pocket_kernel::GLES_CL_MODULE_HANDLE,
-        pocket_kernel::EGL_MODULE_HANDLE,
-    ]
-    .into_iter()
-    .find_map(|module| {
-        ctx.kernel
-            .dynamic_exports
-            .get(&module)
-            .and_then(|exports| exports.get(name.as_ref()))
-            .copied()
-    })
-    .unwrap_or(0);
+    let address = modules
+        .iter()
+        .find_map(|module| {
+            ctx.kernel
+                .dynamic_exports
+                .get(module)
+                .and_then(|exports| exports.get(name.as_ref()))
+                .copied()
+        })
+        .unwrap_or(0);
     Ok(DispatchOutcome::ReturnedR0(address))
 }
 
@@ -3239,13 +3268,7 @@ fn query_matrix_parts(values: &[f32]) -> ([i32; 16], [i32; 16], u32) {
 fn gl_query_matrix_x_oes(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let output = ctx.arg_u32(0)?;
     let powers = ctx.arg_u32(1)?;
-    let values = with_ctx(|c| match c.matrix_mode {
-        pocket_gles::matrix::MatrixMode::Modelview => c.modelview.current().to_vec(),
-        pocket_gles::matrix::MatrixMode::Projection => c.projection.current().to_vec(),
-        pocket_gles::matrix::MatrixMode::Texture => c.texture_matrix[c.active_texture as usize]
-            .current()
-            .to_vec(),
-    });
+    let values = with_ctx(|c| *c.current_matrix());
     let (mantissa, exponent, status) = query_matrix_parts(&values);
     for index in 0..16 {
         ctx.cpu
@@ -3428,10 +3451,9 @@ fn handler_for(name: &str) -> Option<crate::Handler> {
         // Matrix-palette skinning (OES_matrix_palette). The rasterizer
         // transforms by the modelview alone, so a skinned mesh renders
         // in its bind pose rather than not at all.
-        "glMatrixIndexPointerOES"
-        | "glWeightPointerOES"
-        | "glCurrentPaletteMatrixOES"
-        | "glLoadPaletteFromModelViewMatrixOES" => gl_ignored,
+        "glMatrixIndexPointerOES" | "glWeightPointerOES" => gl_ignored,
+        "glCurrentPaletteMatrixOES" => gl_current_palette_matrix,
+        "glLoadPaletteFromModelViewMatrixOES" => gl_load_palette_from_modelview,
         "glPointSizePointerOES" => gl_point_size_pointer,
 
         "glLightf" => gl_lightf,
@@ -4421,6 +4443,35 @@ mod tests {
         assert_eq!(
             call(&mut cpu, &mut kernel, gl_get_error, &[]),
             GL_INVALID_OPERATION
+        );
+    }
+
+    #[test]
+    fn legacy_atc_upload_uses_the_encoded_length_of_a_padded_buffer() {
+        use pocket_gles::*;
+        let _guard = guard();
+        reset_for_test(16, 16);
+        let mut cpu = fresh_cpu();
+        let mut kernel = fresh_kernel();
+        cpu.write_mem(SCRATCH, &[0; 16]).unwrap();
+        let mut args = [
+            GL_TEXTURE_2D,
+            0,
+            GL_ATC_RGBA_EXPLICIT_ALPHA_AMD,
+            4,
+            4,
+            0,
+            32,
+            SCRATCH,
+        ];
+        call(&mut cpu, &mut kernel, gl_compressed_tex_image_2d, &args);
+        assert_eq!(call(&mut cpu, &mut kernel, gl_get_error, &[]), GL_NO_ERROR);
+        assert_eq!(with_ctx(|c| c.textures[&0].compressed[&0].bytes.len()), 16);
+        args[6] = 33;
+        call(&mut cpu, &mut kernel, gl_compressed_tex_image_2d, &args);
+        assert_eq!(
+            call(&mut cpu, &mut kernel, gl_get_error, &[]),
+            GL_INVALID_VALUE
         );
     }
 

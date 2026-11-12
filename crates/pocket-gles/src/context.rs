@@ -358,6 +358,8 @@ pub struct Context {
     // ---- transform state ----
     pub matrix_mode: MatrixMode,
     pub modelview: MatrixStack,
+    palette_matrices: [MatrixStack; 32],
+    palette_index: usize,
     pub projection: MatrixStack,
     /// GL ES keeps one texture matrix stack per server texture unit.
     pub texture_matrix: [MatrixStack; MAX_TEXTURE_UNITS],
@@ -468,6 +470,8 @@ impl Context {
             gpu_failed: false,
             matrix_mode: MatrixMode::Modelview,
             modelview: MatrixStack::new(16),
+            palette_matrices: std::array::from_fn(|_| MatrixStack::new(1)),
+            palette_index: 0,
             projection: MatrixStack::new(16),
             texture_matrix: std::array::from_fn(|_| MatrixStack::new(16)),
             current_color: [1.0, 1.0, 1.0, 1.0],
@@ -825,6 +829,7 @@ impl Context {
             MatrixMode::Modelview => &mut self.modelview,
             MatrixMode::Projection => &mut self.projection,
             MatrixMode::Texture => &mut self.texture_matrix[self.active_texture as usize],
+            MatrixMode::Palette => &mut self.palette_matrices[self.palette_index],
         }
     }
 
@@ -833,6 +838,22 @@ impl Context {
             Some(m) => self.matrix_mode = m,
             None => self.set_error(GL_INVALID_ENUM),
         }
+    }
+
+    pub fn set_palette_index(&mut self, index: u32) {
+        if (index as usize) < self.palette_matrices.len() {
+            self.palette_index = index as usize;
+        } else {
+            self.set_error(GL_INVALID_VALUE);
+        }
+    }
+
+    pub fn load_palette_from_modelview(&mut self) {
+        self.palette_matrices[self.palette_index].load(*self.modelview.current());
+    }
+
+    pub fn current_matrix(&mut self) -> &Matrix4 {
+        self.stack_mut().current()
     }
 
     pub fn load_identity(&mut self) {
@@ -927,7 +948,9 @@ impl Context {
             GL_COLOR_MATERIAL => self.lighting.color_material = on,
             crate::lighting::RESCALE_NORMAL => self.lighting.rescale = on,
             GL_POLYGON_OFFSET_FILL => self.state.polygon_offset = on,
-            0x0b10 | 0x0b20 | 0x809d | 0x809e | 0x809f | 0x80a0 => {
+            // Palette array entry points are already accepted by the bridge.
+            // Retain this enable so glGetError does not contaminate later calls.
+            0x0b10 | 0x0b20 | 0x809d | 0x809e | 0x809f | 0x80a0 | GL_MATRIX_PALETTE_OES => {
                 if on {
                     self.es11.extra_enables.insert(cap);
                 } else {
@@ -955,6 +978,13 @@ impl Context {
                 self.texture_units[unit].texcoord_array.enabled = on;
             }
             GL_NORMAL_ARRAY => self.normal_array.enabled = on,
+            GL_MATRIX_INDEX_ARRAY_OES | GL_WEIGHT_ARRAY_OES => {
+                if on {
+                    self.es11.extra_enables.insert(array);
+                } else {
+                    self.es11.extra_enables.remove(&array);
+                }
+            }
             GL_POINT_SIZE_ARRAY_OES => {
                 self.point_size_array.enabled = on;
                 self.state.point_size_array = on;

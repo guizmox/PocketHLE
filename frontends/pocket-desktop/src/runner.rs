@@ -1,12 +1,12 @@
 //! Background runner that drives [`pocket_core::Emulator`] for the
 //! desktop GUI.
 
+use pocket_core::winceapi::{self, SystemMediaCommand, SystemMediaInput, SystemMediaStatus};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::sync::Mutex;
-use pocket_core::winceapi::{self, SystemMediaCommand, SystemMediaInput, SystemMediaStatus};
 use std::time::{Duration, Instant};
 
 use pocket_core::kernel::{FrameAction, FrameHook, InputEvent, KernelState};
@@ -47,7 +47,7 @@ fn presentation_phase(
 
 #[derive(Debug, Clone)]
 pub struct Runner {
-    library_profile:pocket_library::LauncherProfile,
+    library_profile: pocket_library::LauncherProfile,
     inner: Arc<Mutex<()>>,
     missing_api_logging: Arc<AtomicBool>,
     shared_context_source: Arc<Mutex<Option<pocket_core::winceapi::gles::SharedContextSource>>>,
@@ -57,7 +57,7 @@ pub struct Runner {
 impl Default for Runner {
     fn default() -> Self {
         Self {
-            library_profile:Default::default(),
+            library_profile: Default::default(),
             inner: Default::default(),
             missing_api_logging: Arc::new(AtomicBool::new(true)),
             shared_context_source: Default::default(),
@@ -66,8 +66,11 @@ impl Default for Runner {
     }
 }
 impl Runner {
-    pub fn new(library_profile:pocket_library::LauncherProfile) -> Self {
-        Self {library_profile,..Self::default()}
+    pub fn new(library_profile: pocket_library::LauncherProfile) -> Self {
+        Self {
+            library_profile,
+            ..Self::default()
+        }
     }
 
     pub fn set_shared_context_source(
@@ -224,9 +227,10 @@ impl Runner {
         // [`pocket_library::Library::migrate_legacy_entries`], which
         // covers users who downgrade or who have a stale
         // `library.json` from before that migration existed.
-        let launcher_config = pocket_library::Library::open_with_profile(library_root,self.library_profile)
-            .map(|l| l.config().clone())
-            .unwrap_or_default();
+        let launcher_config =
+            pocket_library::Library::open_with_profile(library_root, self.library_profile)
+                .map(|l| l.config().clone())
+                .unwrap_or_default();
         let requested_backend = game.settings.cpu_backend;
         let mut effective_backend = requested_backend;
         let mut emu = match requested_backend {
@@ -300,11 +304,12 @@ impl Runner {
             if !is_gizmondo {
                 use pocket_core::kernel::accelerometer::TiltAxes;
                 use pocket_library::TiltInput;
-                process.state.virtual_tilt_axes = match game.settings.effective_tilt_input(&launcher_config) {
-                    TiltInput::Accelerometer => None,
-                    TiltInput::LeftRight => Some(TiltAxes::Horizontal),
-                    TiltInput::FourDirections => Some(TiltAxes::Both),
-                };
+                process.state.virtual_tilt_axes =
+                    match game.settings.effective_tilt_input(&launcher_config) {
+                        TiltInput::Accelerometer => None,
+                        TiltInput::LeftRight => Some(TiltAxes::Horizontal),
+                        TiltInput::FourDirections => Some(TiltAxes::Both),
+                    };
             }
             process.state.touch_steering.enabled = !is_gizmondo
                 && (game.settings.controls_mode()
@@ -368,7 +373,11 @@ impl Runner {
             }
         }
         let profile = game.settings.gpu_compatibility_profile;
-        let programmable = !is_gizmondo && profile.programmable_gles();
+        let programmable = !is_gizmondo
+            && (profile.programmable_gles()
+                || metadata
+                    .as_ref()
+                    .is_some_and(pocket_library::uses_programmable_gles));
         emu.set_gpu_renderer(!programmable && launcher_config.gpu_renderer);
         emu.set_gizmondo_goforce_driver(is_gizmondo);
         emu.set_programmable_gles(programmable);
@@ -536,7 +545,9 @@ impl Runner {
         emu.set_egl_rgba8888_only(!is_gizmondo && game.settings.pocketpc_egl_rgba8888_only);
         emu.set_pocketpc_gapi_columns(if is_gizmondo {
             (screen_w, screen_h) == (320, 240)
-                && metadata.as_ref().is_some_and(pocket_library::analysis::uses_rotated_gizmondo_lcd)
+                && metadata
+                    .as_ref()
+                    .is_some_and(pocket_library::analysis::uses_rotated_gizmondo_lcd)
         } else {
             game.settings.pocketpc_gapi_columns
         });
@@ -1263,7 +1274,10 @@ impl RunHook {
                 loop {
                     match rx.try_recv() {
                         Ok(InputCommand::Input(ev)) => {
-                            if self.media_input.capture(ev, media_active, &mut self.media_commands) {
+                            if self
+                                .media_input
+                                .capture(ev, media_active, &mut self.media_commands)
+                            {
                                 continue;
                             }
                             match ev {
@@ -1491,7 +1505,8 @@ impl FrameHook for RunHook {
                                     return FrameAction::Stop;
                                 }
                             };
-                            if black && self.saw_non_black && !state.framebuffer.has_system_video() {
+                            if black && self.saw_non_black && !state.framebuffer.has_system_video()
+                            {
                                 return if stop_requested {
                                     state.should_stop = true;
                                     FrameAction::Stop
@@ -1780,8 +1795,8 @@ mod launcher_return_tests {
         });
         let table = context.as_ref().map(|context| context.table.clone());
         let mut hook = RunHook::new(None, None);
-        let (outcome, code) =
-            Runner::new(Default::default()).run_process(&root, &game, &card, None, None, context, None, &mut hook);
+        let (outcome, code) = Runner::new(Default::default())
+            .run_process(&root, &game, &card, None, None, context, None, &mut hook);
         assert_eq!(code, 77, "{}", outcome.summary);
         if let Some(table) = table {
             assert_eq!(table.exit_code(table.process_id(), None), Some(77));
@@ -1876,8 +1891,8 @@ mod launcher_return_tests {
             }
         });
         let mut hook = RunHook::new(None, Some(rx));
-        let (outcome, code) =
-            Runner::new(Default::default()).run_process(&root, &game, &card, None, None, None, None, &mut hook);
+        let (outcome, code) = Runner::new(Default::default())
+            .run_process(&root, &game, &card, None, None, None, None, &mut hook);
         completed.store(true, Ordering::Release);
         input.join().unwrap();
         assert_eq!(code, 0, "{}", outcome.summary);

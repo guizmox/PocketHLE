@@ -3860,6 +3860,7 @@ pub const HSS_MODULE_HANDLE: u32 = 0x1000_0006;
 /// Fake HMODULE for the resident `aygshell.dll` compatibility module.
 pub const AYGSHELL_MODULE_HANDLE: u32 = 0x1000_0008;
 pub const TOOLHELP_MODULE_HANDLE: u32 = 0x1000_000f;
+pub const GLES2_MODULE_HANDLE: u32 = 0x1000_0010;
 
 /// The whole emulated process state owned by the kernel.
 fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>> {
@@ -3904,6 +3905,11 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
             if let ImportBinding::Ordinal(ord) = &thunk.binding {
                 aygshell.insert(format!("#{ord}"), thunk.thunk_va);
             }
+        } else if thunk.dll.eq_ignore_ascii_case("libglesv2.dll") {
+            exports
+                .entry(GLES2_MODULE_HANDLE)
+                .or_insert_with(HashMap::new)
+                .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("toolhelp.dll") {
             exports
                 .entry(TOOLHELP_MODULE_HANDLE)
@@ -4248,6 +4254,7 @@ impl Process {
             "libgles_cm.dll",
             "libgles_cl.dll",
             "libegl.dll",
+            "libglesv2.dll",
             "hss.dll",
             "htcsensorsdk.dll",
             "ole32.dll",

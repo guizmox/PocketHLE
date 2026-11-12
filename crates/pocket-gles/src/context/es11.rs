@@ -211,9 +211,15 @@ impl Context {
             GL_STENCIL_TEST => self.es11.stencil,
             0x3000..=0x3005 => self.es11.clip_enabled[(cap - 0x3000) as usize],
             0x4000..=0x4007 => self.lighting.lights[(cap - 0x4000) as usize].enabled,
-            0x0b10 | 0x0b20 | 0x809d | 0x809e | 0x809f | 0x80a0 => {
-                self.es11.extra_enables.contains(&cap)
-            }
+            0x0b10
+            | 0x0b20
+            | 0x809d
+            | 0x809e
+            | 0x809f
+            | 0x80a0
+            | GL_MATRIX_PALETTE_OES
+            | GL_MATRIX_INDEX_ARRAY_OES
+            | GL_WEIGHT_ARRAY_OES => self.es11.extra_enables.contains(&cap),
             GL_VERTEX_ARRAY => self.vertex_array.enabled,
             GL_NORMAL_ARRAY => self.normal_array.enabled,
             GL_COLOR_ARRAY => self.color_array.enabled,
@@ -540,6 +546,7 @@ impl Context {
                 MatrixMode::Modelview => GL_MODELVIEW,
                 MatrixMode::Projection => GL_PROJECTION,
                 MatrixMode::Texture => GL_TEXTURE,
+                MatrixMode::Palette => GL_MATRIX_PALETTE_OES,
             }),
             0x8069 => StateValue::Number(vec![f64::from(self.texture_object_name(
                 self.texture_units[self.active_texture as usize].bound_texture,

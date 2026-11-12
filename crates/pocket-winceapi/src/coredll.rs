@@ -4687,6 +4687,7 @@ pub(crate) fn gles_module_handle(name: &str) -> Option<u32> {
         "libgles_cm" => Some(pocket_kernel::GLES_CM_MODULE_HANDLE),
         "libgles_cl" => Some(pocket_kernel::GLES_CL_MODULE_HANDLE),
         "libegl" => Some(pocket_kernel::EGL_MODULE_HANDLE),
+        "libglesv2" => Some(pocket_kernel::GLES2_MODULE_HANDLE),
         _ => None,
     }
 }
@@ -12266,22 +12267,28 @@ fn stop_power_notifications(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
     Ok(DispatchOutcome::ReturnedR0(u32::from(stopped)))
 }
 
-/// `DWORD GetSystemPowerState(LPVOID pSystemPowerState, DWORD dwLen,
-///                             LPDWORD pdwFlags, DWORD dwFlags)`.
-///
-/// Diamond Twister polls this before every iteration of its window loop.
-/// The desktop HLE has no suspend/resume power manager, so report the
-/// active state and clear the optional flag output instead of returning
-/// zero without touching the caller's buffers.
+const POWER_STATE_ON: u32 = 0x0001_0000;
+const POWER_STATE_BACKLIGHTON: u32 = 0x0200_0000;
+
+/// Project host display power onto the guest backlight flag. With no
+/// physical display reading the emulated LCD retains its normal on state.
 fn get_system_power_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const STATE_NAME: [u8; 6] = [b'o', 0, b'n', 0, 0, 0];
     let state = ctx.arg_u32(0)?;
     let state_len = ctx.arg_u32(1)?;
     let flags_out = ctx.arg_u32(2)?;
-    if state != 0 && state_len >= 4 {
-        ctx.cpu.write_mem(state, &0u32.to_le_bytes())?;
+    if state != 0 {
+        if state_len < 3 {
+            return Ok(DispatchOutcome::ReturnedR0(122)); // ERROR_INSUFFICIENT_BUFFER
+        }
+        ctx.cpu.write_mem(state, &STATE_NAME)?;
     }
     if flags_out != 0 {
-        ctx.cpu.write_mem(flags_out, &0u32.to_le_bytes())?;
+        let mut flags = POWER_STATE_ON;
+        if pocket_kernel::power::host_display_is_on().unwrap_or(true) {
+            flags |= POWER_STATE_BACKLIGHTON;
+        }
+        ctx.cpu.write_mem(flags_out, &flags.to_le_bytes())?;
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -12289,7 +12296,6 @@ fn get_system_power_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
 /// WinCE keeps the emulated system in the active state. An explicit request
 /// to stay on succeeds. Other transitions require an emulated power manager.
 fn set_system_power_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    const POWER_STATE_ON: u32 = 0x0001_0000;
     const POWER_FORCE: u32 = 0x0000_1000;
     let name = ctx.arg_u32(0)?;
     let flags = ctx.arg_u32(1)?;
@@ -44118,6 +44124,27 @@ mod power_requirement_api_tests {
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
     use pocket_kernel::DispatchOutcome;
+    #[test]
+    fn system_power_query_reports_active_backlight_and_checks_buffer_capacity() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        for (capacity, expected) in [(2, 122), (3, 0)] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "GetSystemPowerState",
+                    &[0x2000, capacity, 0x2010],
+                ),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+        }
+        assert_eq!(cpu.read_mem(0x2000, 6).unwrap(), [b'o', 0, b'n', 0, 0, 0]);
+        let display_flag = u8::from(pocket_kernel::power::host_display_is_on().unwrap_or(true)) * 2;
+        assert_eq!(cpu.read_mem(0x2010, 4).unwrap(), [0, 0, 1, display_flag]);
+    }
+
     #[test]
     fn system_power_requests_use_the_ce_state_name_or_flags() {
         let (mut cpu, mut kernel, mut dispatcher) = setup();

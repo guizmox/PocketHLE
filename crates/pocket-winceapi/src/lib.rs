@@ -22,7 +22,6 @@
 mod accelerators;
 mod acm;
 pub mod aygshell;
-mod toolhelp;
 #[cfg(test)]
 mod backlight_tests;
 mod bluetooth;
@@ -46,6 +45,7 @@ mod dc_state;
 pub mod ddraw;
 mod dialog_keys;
 mod directshow;
+mod toolhelp;
 pub use directshow::{
     system_media_command, system_media_status, SystemMediaCommand, SystemMediaInput,
     SystemMediaStatus,
@@ -323,7 +323,7 @@ impl WinCeDispatcher {
         htcsensor::register(&mut d);
         ole32::register(&mut d);
         msxml::register(&mut d);
-        for dll in ["coredll.dll", "ws2.dll"] {
+        for dll in ["coredll.dll", "ws2.dll", "aygshell.dll"] {
             for ordinal in 0..=4095u16 {
                 if let Some(name) = ordinals::lookup(dll, ordinal) {
                     let source = (dll.to_string(), name);
@@ -514,6 +514,12 @@ impl Dispatcher for WinCeDispatcher {
 
     fn dynamic_names(&self, dll: &str) -> Vec<String> {
         let dll_key = dll.to_ascii_lowercase();
+        if dll_key == "libglesv2.dll" {
+            return gles2::EXPORTS
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect();
+        }
         let mut names: Vec<String> = self
             .by_name
             .keys()
@@ -521,6 +527,7 @@ impl Dispatcher for WinCeDispatcher {
             .map(|(_, name)| name.clone())
             .collect();
         if dll_key == "coredll.dll"
+            || dll_key == "aygshell.dll"
             || dll_key == "ws2.dll"
             || pocket_gles::ordinals::is_gles_dll(&dll_key)
         {

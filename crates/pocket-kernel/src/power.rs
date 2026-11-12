@@ -53,11 +53,17 @@ impl Status {
 }
 pub trait Backend: Send + Sync {
     fn read(&self) -> Option<Status>;
+
+    fn display_is_on(&self) -> Option<bool> {
+        None
+    }
 }
 struct Cache {
     backend: Option<Arc<dyn Backend>>,
     sample: Status,
     at: Option<Instant>,
+    display_sample: Option<bool>,
+    display_at: Option<Instant>,
 }
 fn cache() -> &'static Mutex<Cache> {
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
@@ -66,6 +72,8 @@ fn cache() -> &'static Mutex<Cache> {
             backend: None,
             sample: Status::UNKNOWN,
             at: None,
+            display_sample: None,
+            display_at: None,
         })
     })
 }
@@ -74,6 +82,8 @@ pub fn install_host(backend: Arc<dyn Backend>) {
     c.backend = Some(backend);
     c.at = None;
     c.sample = Status::UNKNOWN;
+    c.display_sample = None;
+    c.display_at = None;
 }
 pub fn status(refresh: bool) -> Status {
     let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -88,6 +98,114 @@ pub fn status(refresh: bool) -> Status {
     }
     c.sample
 }
+/// Display power reported by the host. A headless or unsupported host can
+/// leave the virtual display in charge by returning no reading.
+pub fn host_display_is_on() -> Option<bool> {
+    let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(backend) = cache.backend.as_ref() else {
+        return native_display_is_on();
+    };
+    if cache
+        .display_at
+        .map_or(true, |time| time.elapsed() >= Duration::from_millis(100))
+    {
+        cache.display_sample = backend.display_is_on();
+        cache.display_at = Some(Instant::now());
+    }
+    cache.display_sample
+}
+
+#[cfg(windows)]
+fn native_display_is_on() -> Option<bool> {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use windows_sys::core::GUID;
+
+    const SESSION_DISPLAY_STATUS: GUID = GUID {
+        data1: 0x2b84c20e,
+        data2: 0xad23,
+        data3: 0x4ddf,
+        data4: [0x93, 0xdb, 0x05, 0xff, 0xbd, 0x7e, 0xfc, 0xa5],
+    };
+    const DEVICE_NOTIFY_CALLBACK: u32 = 2;
+    const PBT_POWERSETTINGCHANGE: u32 = 0x8013;
+
+    #[repr(C)]
+    struct Subscription {
+        callback: unsafe extern "system" fn(*mut c_void, u32, *const c_void) -> u32,
+        context: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct DisplayNotification {
+        setting: GUID,
+        length: u32,
+        data: [u8; 4],
+    }
+
+    #[link(name = "powrprof")]
+    extern "system" {
+        fn PowerSettingRegisterNotification(
+            setting: *const GUID,
+            flags: u32,
+            recipient: *const Subscription,
+            registration: *mut *mut c_void,
+        ) -> u32;
+    }
+
+    static DISPLAY: AtomicU8 = AtomicU8::new(u8::MAX);
+    static REGISTER: OnceLock<()> = OnceLock::new();
+
+    unsafe extern "system" fn receive(
+        _context: *mut c_void,
+        event: u32,
+        setting: *const c_void,
+    ) -> u32 {
+        if event == PBT_POWERSETTINGCHANGE && !setting.is_null() {
+            let notification = setting.cast::<DisplayNotification>();
+            if unsafe { std::ptr::addr_of!((*notification).length).read_unaligned() } == 4 {
+                let data = unsafe { std::ptr::addr_of!((*notification).data) }.cast::<u32>();
+                let value = unsafe { data.read_unaligned() };
+                if value <= 2 {
+                    DISPLAY.store(value as u8, Ordering::Relaxed);
+                }
+            }
+        }
+        0
+    }
+
+    REGISTER.get_or_init(|| {
+        let subscription = Subscription {
+            callback: receive,
+            context: std::ptr::null_mut(),
+        };
+        // Process-wide registration with a static callback and no owned context.
+        let mut registration = std::ptr::null_mut();
+        let result = unsafe {
+            PowerSettingRegisterNotification(
+                &SESSION_DISPLAY_STATUS,
+                DEVICE_NOTIFY_CALLBACK,
+                &subscription,
+                &mut registration,
+            )
+        };
+        if result != 0 {
+            log::debug!("Windows display power notifications unavailable: {result}");
+        }
+    });
+
+    match DISPLAY.load(Ordering::Relaxed) {
+        0 => Some(false),
+        1 | 2 => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn native_display_is_on() -> Option<bool> {
+    None
+}
+
 #[cfg(windows)]
 fn native() -> Option<Status> {
     use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
@@ -185,6 +303,10 @@ mod tests {
                     ..Status::UNKNOWN
                 })
             }
+
+            fn display_is_on(&self) -> Option<bool> {
+                Some(false)
+            }
         }
         let f = Arc::new(Fake(AtomicUsize::new(0)));
         install_host(f.clone());
@@ -192,6 +314,7 @@ mod tests {
         assert_eq!(status(false).percent, 0);
         assert_eq!(status(true).percent, 1);
         assert_eq!(f.0.load(Ordering::SeqCst), 2);
+        assert_eq!(host_display_is_on(), Some(false));
         struct Failed;
         impl Backend for Failed {
             fn read(&self) -> Option<Status> {
@@ -200,6 +323,7 @@ mod tests {
         }
         install_host(Arc::new(Failed));
         assert_eq!(status(false), Status::UNKNOWN);
+        assert_eq!(host_display_is_on(), None);
         assert_eq!(Arc::strong_count(&f), 1); // Replaced backend is released.
     }
 }

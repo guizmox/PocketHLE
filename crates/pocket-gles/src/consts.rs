@@ -222,6 +222,9 @@ pub const GL_FASTEST: u32 = 0x1101;
 pub const GL_NICEST: u32 = 0x1102;
 pub const GL_PERSPECTIVE_CORRECTION_HINT: u32 = 0x0C50;
 pub const GL_FOG_HINT: u32 = 0x0C54;
+pub const GL_MATRIX_PALETTE_OES: u32 = 0x8840;
+pub const GL_MATRIX_INDEX_ARRAY_OES: u32 = 0x8844;
+pub const GL_WEIGHT_ARRAY_OES: u32 = 0x86ad;
 
 // ---- texture units ------------------------------------------------------
 pub const GL_TEXTURE0: u32 = 0x84C0;

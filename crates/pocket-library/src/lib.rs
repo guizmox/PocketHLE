@@ -4338,6 +4338,35 @@ pub fn accelerated_renderer_build(shortcut_target: &Path) -> Option<PathBuf> {
     Some(chosen)
 }
 
+/// Identify static and explicit runtime links to the GLES 2 client library.
+pub fn uses_programmable_gles(image: &pocket_pe::LoadedImage) -> bool {
+    if image
+        .imports
+        .iter()
+        .any(|import| import.dll.eq_ignore_ascii_case("libglesv2.dll"))
+    {
+        return true;
+    }
+    let dll = b"libglesv2.dll\0";
+    let wide: Vec<_> = dll.iter().flat_map(|&byte| [byte, 0]).collect();
+    let names = [dll.as_slice(), wide.as_slice()];
+    let has_library = image.sections.iter().any(|section| {
+        names.iter().any(|name| {
+            section
+                .data
+                .windows(name.len())
+                .any(|value| value.eq_ignore_ascii_case(name))
+        })
+    });
+    has_library
+        && image.sections.iter().any(|section| {
+            section
+                .data
+                .windows(b"glCreateShader\0".len())
+                .any(|value| value == b"glCreateShader\0")
+        })
+}
+
 /// Infer a profile from the selected executable on a fresh import.
 fn apply_import_gpu_default(entry: &mut GameEntry, game_dir: &Path) {
     use gpu_profile::GpuCompatibilityProfile;
@@ -4356,7 +4385,7 @@ fn apply_import_gpu_default(entry: &mut GameEntry, game_dir: &Path) {
             .iter()
             .any(|import| import.dll.eq_ignore_ascii_case(driver))
     };
-    if imports("libglesv2.dll") {
+    if uses_programmable_gles(&image) {
         entry.settings.gpu_compatibility_profile = GpuCompatibilityProfile::Adreno200;
     } else if imports("libgles_cl.dll") {
         entry.settings.gpu_compatibility_profile = GpuCompatibilityProfile::Intel2700g;

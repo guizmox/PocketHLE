@@ -3,12 +3,23 @@ package com.pockethle.app
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.hardware.display.DisplayManager
 import android.os.BatteryManager
+import android.view.Display
 
 /** Sticky broadcast snapshot: no receiver registered, no permission, no Activity retained. */
 object BatteryHost {
     @Volatile private var context: Context? = null
     fun initialize(ctx: Context) { context = ctx.applicationContext }
+    fun displayPowerState(): Int {
+        val manager = context?.getSystemService(DisplayManager::class.java) ?: return -1
+        @Suppress("DEPRECATION")
+        return when (manager.getDisplay(Display.DEFAULT_DISPLAY)?.state) {
+            Display.STATE_ON, Display.STATE_VR, Display.STATE_ON_SUSPEND -> 1
+            Display.STATE_OFF, Display.STATE_DOZE, Display.STATE_DOZE_SUSPEND -> 0
+            else -> -1
+        }
+    }
     private fun pack(ac: Int, flags: Int, percent: Int) = ac or (flags shl 8) or (percent shl 16)
     @JvmStatic fun read(): Int {
         val unknown = pack(255, 255, 255)

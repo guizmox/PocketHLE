@@ -585,7 +585,11 @@ fn run_process_inner(
         }
     }
     let profile = entry.settings.gpu_compatibility_profile;
-    let programmable = !is_gizmondo && profile.programmable_gles();
+    let programmable = !is_gizmondo
+        && (profile.programmable_gles()
+            || image
+                .as_ref()
+                .is_ok_and(pocket_library::uses_programmable_gles));
     emu.set_gpu_renderer(!programmable && launcher_config.gpu_renderer);
     emu.set_gizmondo_goforce_driver(is_gizmondo);
     emu.set_programmable_gles(programmable);

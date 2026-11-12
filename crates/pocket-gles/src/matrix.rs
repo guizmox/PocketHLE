@@ -22,6 +22,7 @@ pub enum MatrixMode {
     Modelview,
     Projection,
     Texture,
+    Palette,
 }
 
 impl MatrixMode {
@@ -33,6 +34,7 @@ impl MatrixMode {
             super::consts::GL_MODELVIEW => Some(Self::Modelview),
             super::consts::GL_PROJECTION => Some(Self::Projection),
             super::consts::GL_TEXTURE => Some(Self::Texture),
+            super::consts::GL_MATRIX_PALETTE_OES => Some(Self::Palette),
             _ => None,
         }
     }
