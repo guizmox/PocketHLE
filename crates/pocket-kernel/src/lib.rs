@@ -360,7 +360,7 @@ pub enum KernelError {
 /// back to its synthetic timer / paint loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEvent {
-    /// Left stick, display-relative position, normalized -1000..1000.
+    /// Left stick for touch steering or simulated tilt, display-relative, -1000..1000.
     TouchSteeringPosition {
         x: i16,
         y: i16,
@@ -1473,7 +1473,7 @@ pub struct KernelState {
     pub stylus_stick: stylus_stick::StylusStick,
     pub touch_steering: touch_steering::TouchSteering,
     /// Supply HTC accelerometer readings from the display-relative direction keys.
-    pub simulate_accelerometer_tilt: bool,
+    pub virtual_tilt_axes: Option<accelerometer::TiltAxes>,
     /// Set once the guest has fetched the GAPI key list through
     /// `GXGetDefaultKeys`. Such a guest only reacts to the virtual keys
     /// that table names, so the host's confirm key has to be delivered
@@ -4545,7 +4545,7 @@ impl Process {
                 pending_input: VecDeque::new(),
                 stylus_stick: Default::default(),
                 touch_steering: Default::default(),
-                simulate_accelerometer_tilt: false,
+                virtual_tilt_axes: None,
                 gapi_keys_queried: false,
                 pocketpc_processor: None,
                 gapi_action_key: gapi::VK_A,

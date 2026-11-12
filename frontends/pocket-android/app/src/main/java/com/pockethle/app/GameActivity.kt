@@ -355,7 +355,8 @@ class GameActivity : AppCompatActivity() {
         val rootDir = LibraryPaths.root(this)
         val isGizmondo = NativeBridge.isGizmondoGame(rootDir, id)
         val gameSettings = runCatching { GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(rootDir, id))) }.getOrDefault(GameSettings.default())
-        simulateAccelerometerTilt = !isGizmondo && gameSettings.pocketpcSimulateAccelerometerTilt
+        simulateAccelerometerTilt = !isGizmondo &&
+            (gameSettings.pocketpcTiltInput ?: config.pocketpcTiltInput) != TiltInput.ACCELEROMETER
         dpadDeadzone = ControlDeadzone.from(gameSettings.dpadDeadzone)
         touchSteeringEnabled = !gizmondoGame && gameSettings.controlsMode()=="zones"
         gridRouter = if(!gizmondoGame && gameSettings.controlsMode()=="grid") StylusGridRouter(StylusGridConfig.parse(gameSettings.pocketpcStylusGridJson),JSONObject(config.originalJson).optString("gamepad_fullscreen").takeIf { it.isNotEmpty() && it!="null" }) else null
@@ -1113,9 +1114,9 @@ class GameActivity : AppCompatActivity() {
         }
         axis("DPad", event.getAxisValue(MotionEvent.AXIS_HAT_X), "Left", "Right")
         axis("DPad", event.getAxisValue(MotionEvent.AXIS_HAT_Y), "Up", "Down")
-        if (touchSteeringEnabled) {
+        if (touchSteeringEnabled || simulateAccelerometerTilt) {
             steeringDevice = event.deviceId
-            val active = activityResumed && hasWindowFocus() && !surfacePointerDown
+            val active = activityResumed && hasWindowFocus() && (simulateAccelerometerTilt || !surfacePointerDown)
             val x =
                 if (active)
                     (event.getAxisValue(MotionEvent.AXIS_X).coerceIn(-1f, 1f) * 1000).toInt()
@@ -1331,7 +1332,7 @@ class GameActivity : AppCompatActivity() {
         mainHandler.removeCallbacks(hostLongCheck)
         cancelGrid()
         gridAxes.clear()
-        if (session != 0L && touchSteeringEnabled)
+        if (session != 0L && (touchSteeringEnabled || simulateAccelerometerTilt))
             NativeBridge.nativeSendInput(session, NativeBridge.INPUT_TOUCH_STEERING, 0, 0)
         stylusKeys.clear()
         stylusAxes.clear()

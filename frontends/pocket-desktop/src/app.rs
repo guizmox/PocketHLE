@@ -23,7 +23,7 @@ use egui_extras::image::load_image_bytes;
 use pocket_core::kernel::InputEvent;
 use pocket_library::{
     is_gizmondo_game, DpadDeadzone, GameEntry, GameSettings, GuestButton, LauncherConfig, Library,
-    PreparedImport, RotationPref, ScreenPref,
+    PreparedImport, RotationPref, ScreenPref, TiltInput,
 };
 
 use crate::runner::{FrameSnapshot, InputCommand, RunOutcome, Runner, SystemMediaView};
@@ -395,6 +395,7 @@ pub struct PocketLauncher {
     grid_modifiers: [bool; 4],
     running_controls_mode: ControlsMode,
     running_swap_button_groups: bool,
+    running_simulated_tilt: bool,
     running_stylus_grid: pocket_library::stylus_grid::StylusGrid,
 }
 
@@ -1009,6 +1010,7 @@ impl PocketLauncher {
             grid_modifiers: [false; 4],
             running_controls_mode: ControlsMode::Normal,
             running_swap_button_groups: false,
+            running_simulated_tilt: false,
             running_stylus_grid: Default::default(),
         }
     }
@@ -2649,6 +2651,17 @@ impl PocketLauncher {
                 ui.label("");
                 ui.add(egui::Label::new("Identity reported to ARM PocketPC games; applies next launch. Does not change CPU speed or backend. MIPS games retain MIPS identity.").wrap(true));
                 ui.end_row();
+                ui.label("Tilt input (accelerometer)");
+                crate::controller_ui::ComboBox::from_id_source("pocketpc_tilt_input")
+                    .selected_text(draft.pocketpc_tilt_input.label())
+                    .show_ui(ui, |ui| {
+                        for mode in TiltInput::ALL {
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_tilt_input, mode, mode.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Default for PocketPC games. Simulated tilt uses direction buttons or the left stick. Applies on the next launch.");
+                ui.end_row();
         });
         } else {
         let library_root = self.library.root().display().to_string();
@@ -3023,9 +3036,17 @@ impl PocketLauncher {
                     crate::controller_ui::checkbox(ui, &mut draft.pocketpc_swap_button_groups, "Enabled")
                         .on_hover_text("Exchange A/B/C/Action with P1–P4 on the on-screen controls. Also swaps configured keyboard and gamepad inputs. Applies on the next launch.");
                     ui.end_row();
-                    ui.label("Simulate tilt (accelerometer) with Left / Right");
-                    crate::controller_ui::checkbox(ui, &mut draft.pocketpc_simulate_accelerometer_tilt, "Enabled")
-                        .on_hover_text("Use the Left and Right controls to simulate device tilt. Release both to return to neutral. Applies on the next launch.");
+                    ui.label("Tilt input (accelerometer)");
+                    crate::controller_ui::ComboBox::from_id_source("game_pocketpc_tilt_input")
+                        .selected_text(draft.pocketpc_tilt_input.map_or("Emulator Default", TiltInput::label))
+                        .show_ui(ui, |ui| {
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_tilt_input, None, "Emulator Default");
+                            for mode in TiltInput::ALL {
+                                crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_tilt_input, Some(mode), mode.label());
+                            }
+                        })
+                        .response
+                        .on_hover_text("Simulated tilt uses direction buttons or the left stick. Applies on the next launch.");
                     ui.end_row();
                     ui.label("Control mode");
                     let mut mode=draft.controls_mode();
@@ -4610,7 +4631,7 @@ impl PocketLauncher {
                     {
                         self.route_grid_axis(false, horizontal, value);
                     }
-                    if self.touch_steering_enabled()
+                    if (self.touch_steering_enabled() || (self.screen == Screen::Run && self.running_simulated_tilt))
                         && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -4832,7 +4853,7 @@ impl PocketLauncher {
                         ctx.request_repaint();
                         continue;
                     }
-                    if self.touch_steering_enabled()
+                    if (self.touch_steering_enabled() || (self.screen == Screen::Run && self.running_simulated_tilt))
                         && control.starts_with("LeftStick")
                         && Some(device) == self.gamepad_selected
                     {
@@ -5848,9 +5869,9 @@ impl PocketLauncher {
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
-        self.gamepad_rx.set_accelerometer_enabled(
-            self.running_is_gizmondo || !game.settings.pocketpc_simulate_accelerometer_tilt,
-        );
+        self.running_simulated_tilt = !self.running_is_gizmondo
+            && game.settings.effective_tilt_input(self.library.config()) != TiltInput::Accelerometer;
+        self.gamepad_rx.set_accelerometer_enabled(!self.running_simulated_tilt);
         self.running_swap_button_groups =
             !self.running_is_gizmondo && game.settings.pocketpc_swap_button_groups;
         self.running_controls_mode = if self.running_is_gizmondo {

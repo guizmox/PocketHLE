@@ -588,6 +588,28 @@ impl GameEntry {
     }
 }
 
+/// Source of the PocketPC accelerometer readings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TiltInput {
+    #[default]
+    Accelerometer,
+    LeftRight,
+    FourDirections,
+}
+
+impl TiltInput {
+    pub const ALL: [Self; 3] = [Self::Accelerometer, Self::LeftRight, Self::FourDirections];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Accelerometer => "Use physical accelerometer",
+            Self::LeftRight => "Simulate left/right tilt",
+            Self::FourDirections => "Simulate tilt in four directions",
+        }
+    }
+}
+
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSettings {
@@ -604,7 +626,7 @@ pub struct GameSettings {
     #[serde(default)]
     pub pocketpc_touch_steering: bool,
     #[serde(default)]
-    pub pocketpc_simulate_accelerometer_tilt: bool,
+    pub pocketpc_tilt_input: Option<TiltInput>,
     /// None migrates the legacy touch-steering checkbox without changing old games.
     #[serde(default)]
     pub pocketpc_controls: Option<stylus_grid::ControlsMode>,
@@ -742,6 +764,11 @@ impl GameSettings {
             .fps()
     }
 
+    pub fn effective_tilt_input(&self, config: &LauncherConfig) -> TiltInput {
+        self.pocketpc_tilt_input
+            .unwrap_or(config.pocketpc_tilt_input)
+    }
+
     pub fn controls_mode(&self) -> stylus_grid::ControlsMode {
         self.pocketpc_controls
             .unwrap_or(if self.pocketpc_touch_steering {
@@ -807,7 +834,7 @@ impl Default for GameSettings {
             storage_card_dir: None,
             frame_rate_limit: None,
             pocketpc_touch_steering: false,
-            pocketpc_simulate_accelerometer_tilt: false,
+            pocketpc_tilt_input: None,
             pocketpc_controls: None,
             pocketpc_swap_button_groups: false,
             pocketpc_stylus_grid: Default::default(),
@@ -1075,6 +1102,8 @@ pub struct LauncherConfig {
 
     #[serde(default = "default_pocketpc_processor")]
     pub pocketpc_processor: String,
+    #[serde(default)]
+    pub pocketpc_tilt_input: TiltInput,
     #[serde(default = "default_recording_format")]
     pub recording_format: String,
     /// Video recording JPEG quality preset: low, medium or high.
@@ -1403,6 +1432,7 @@ impl Default for LauncherConfig {
             frame_rate_limit: FrameRateLimit::Fps60,
             desktop_vsync: true,
             pocketpc_processor: default_pocketpc_processor(),
+            pocketpc_tilt_input: TiltInput::default(),
             recording_quality: default_recording_quality(),
             recording_format: default_recording_format(),
             device_preset_id: default_device_preset_id(),
@@ -4405,6 +4435,28 @@ fn guess_screen(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tilt_input_inherits_or_overrides_the_emulator_default() {
+        let config: LauncherConfig =
+            serde_json::from_str(r#"{"pocketpc_tilt_input":"four_directions"}"#).unwrap();
+        let mut settings: GameSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            LauncherConfig::default().pocketpc_tilt_input,
+            TiltInput::Accelerometer
+        );
+        assert_eq!(
+            settings.effective_tilt_input(&config),
+            TiltInput::FourDirections
+        );
+        settings.pocketpc_tilt_input = Some(TiltInput::Accelerometer);
+        let roundtrip: GameSettings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert_eq!(
+            roundtrip.effective_tilt_input(&config),
+            TiltInput::Accelerometer
+        );
+    }
+
     #[test]
     fn custom_settings_badge_follows_saved_overrides_and_reset() {
         let config = super::LauncherConfig::default();

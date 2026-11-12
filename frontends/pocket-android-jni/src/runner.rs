@@ -523,8 +523,16 @@ fn run_process_inner(
     }
     emu.set_gizmondo_audio_compatibility(is_gizmondo);
     if let Some(process) = emu.process_mut() {
-        process.state.simulate_accelerometer_tilt =
-            !is_gizmondo && entry.settings.pocketpc_simulate_accelerometer_tilt;
+        if !is_gizmondo {
+            use pocket_core::kernel::accelerometer::TiltAxes;
+            use pocket_library::TiltInput;
+            process.state.virtual_tilt_axes =
+                match entry.settings.effective_tilt_input(&launcher_config) {
+                    TiltInput::Accelerometer => None,
+                    TiltInput::LeftRight => Some(TiltAxes::Horizontal),
+                    TiltInput::FourDirections => Some(TiltAxes::Both),
+                };
+        }
         process.state.touch_steering.enabled = !is_gizmondo
             && (entry.settings.controls_mode() == pocket_library::stylus_grid::ControlsMode::Zones);
     }

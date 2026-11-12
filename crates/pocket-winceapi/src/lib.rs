@@ -922,6 +922,23 @@ mod tests {
     }
 
     #[test]
+    fn imm_escape_reports_unsupported_for_the_builtin_input_context() {
+        let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
+        dispatcher.halt_on_unimplemented = true;
+        assert_eq!(
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "ImmEscapeW",
+                &[0, 0x494d_0001, 0x0800, 0],
+            ),
+            pocket_kernel::DispatchOutcome::ReturnedR0(0),
+        );
+    }
+
+    #[test]
     fn constant_for_get_last_error_is_stateful() {
         let d = WinCeDispatcher::new();
         // `GetLastError` is stateful and must cross the dispatcher.

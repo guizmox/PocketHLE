@@ -68,12 +68,14 @@ fn axis_down(value: f32, held: bool) -> bool {
 struct Transitions {
     deadzone: pocket_library::DpadDeadzone,
     held: HashSet<(usize, String)>,
+    steering: BTreeMap<(usize, bool), i16>,
 }
 impl Default for Transitions {
     fn default() -> Self {
         Self {
             deadzone: pocket_library::DpadDeadzone::Medium,
             held: HashSet::new(),
+            steering: BTreeMap::new(),
         }
     }
 }
@@ -115,6 +117,7 @@ impl Transitions {
             .collect()
     }
     fn disconnect(&mut self, id: usize) -> Vec<Event> {
+        self.steering.retain(|(device, _), _| *device != id);
         let names: Vec<_> = self
             .held
             .iter()
@@ -126,6 +129,24 @@ impl Transitions {
             .filter_map(|name| self.change(id, name, false))
             .collect()
     }
+    fn steering_axis(&mut self, device: usize, axis: Axis, value: i16) -> Option<Event> {
+        let horizontal = match axis {
+            Axis::LeftX => true,
+            Axis::LeftY => false,
+            _ => return None,
+        };
+        let previous = self.steering.entry((device, horizontal)).or_default();
+        if *previous == value {
+            return None;
+        }
+        *previous = value;
+        Some(Event::SteeringAxis {
+            device,
+            horizontal,
+            value: (f32::from(value) / 32767.0).clamp(-1.0, 1.0),
+        })
+    }
+
     fn controller_axis(&mut self, id: usize, axis: Axis, value: i16) -> Vec<Event> {
         let value = value as f32 / 32767.0;
         match axis {
@@ -209,7 +230,9 @@ fn poll_controller(controller: &Gamepad, state: &mut Transitions) -> Vec<Event> 
         changes.extend(state.change(id, button_name(button), controller.button(button)));
     }
     for axis in POLLED_AXES {
-        changes.extend(state.controller_axis(id, axis, controller.axis(axis)));
+        let value = controller.axis(axis);
+        changes.extend(state.controller_axis(id, axis, value));
+        changes.extend(state.steering_axis(id, axis, value));
     }
     changes
 }
@@ -558,13 +581,7 @@ fn worker(
                     which, axis, value, ..
                 } => {
                     changes = state.controller_axis(which.raw() as usize, axis, value);
-                    if matches!(axis, Axis::LeftX | Axis::LeftY) {
-                        changes.push(Event::SteeringAxis {
-                            device: which.raw() as usize,
-                            horizontal: axis == Axis::LeftX,
-                            value: (value as f32 / 32767.0).clamp(-1.0, 1.0),
-                        });
-                    }
+                    changes.extend(state.steering_axis(which.raw() as usize, axis, value));
                     if matches!(axis, Axis::RightX | Axis::RightY) {
                         changes.push(Event::AimAxis {
                             device: which.raw() as usize,

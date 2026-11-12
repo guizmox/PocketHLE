@@ -925,6 +925,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     // applications save the old HIMC and restore it after their game UI.
     d.register_handler(dll, "ImmAssociateContext", imm_associate_context);
     d.register_handler(dll, "ImmGetContext", imm_get_context);
+    // The built-in input context has no IME-specific escape provider.
+    d.register_constant(dll, "ImmEscapeW", 0, zero_returning);
     d.register_handler(dll, "ImmGetOpenStatus", imm_get_open_status);
     d.register_handler(dll, "ImmSetOpenStatus", imm_set_open_status);
     d.register_handler(dll, "ImmReleaseContext", imm_release_context);
@@ -32710,7 +32712,7 @@ mod tests {
             pending_input: std::collections::VecDeque::new(),
             stylus_stick: Default::default(),
             touch_steering: Default::default(),
-            simulate_accelerometer_tilt: false,
+            virtual_tilt_axes: None,
             gapi_keys_queried: false,
             pocketpc_processor: None,
             gapi_action_key: pocket_kernel::gapi::VK_A,

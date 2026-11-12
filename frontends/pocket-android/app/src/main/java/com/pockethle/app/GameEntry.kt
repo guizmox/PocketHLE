@@ -55,6 +55,16 @@ data class GameEntry(
     }
 }
 
+enum class TiltInput(val id: String, val label: String) {
+    ACCELEROMETER("accelerometer", "Use physical accelerometer"),
+    LEFT_RIGHT("left_right", "Simulate left/right tilt"),
+    FOUR_DIRECTIONS("four_directions", "Simulate tilt in four directions");
+
+    companion object {
+        fun fromId(id: String): TiltInput? = values().firstOrNull { it.id == id }
+    }
+}
+
 data class GameSettings(
     val cpuBackend: String, // "stub" or "unicorn"
     val maxSlices: Long,
@@ -75,7 +85,7 @@ data class GameSettings(
     val executableHeap: Boolean? = null,
     val dpadDeadzone: String = "large",
     val pocketpcTouchSteering: Boolean = false,
-    val pocketpcSimulateAccelerometerTilt: Boolean = false,
+    val pocketpcTiltInput: TiltInput? = null,
     val pocketpcControls: String? = null,
     val pocketpcSwapButtonGroups: Boolean = false,
     val pocketpcStylusGridJson: String = "{}",
@@ -107,7 +117,7 @@ data class GameSettings(
         put("screen", screen)
         put("rotation", rotation)
         put("pocketpc_touch_steering", pocketpcTouchSteering)
-        put("pocketpc_simulate_accelerometer_tilt", pocketpcSimulateAccelerometerTilt)
+        put("pocketpc_tilt_input", pocketpcTiltInput?.id ?: JSONObject.NULL)
         put("pocketpc_controls", pocketpcControls ?: JSONObject.NULL)
         put("pocketpc_swap_button_groups", pocketpcSwapButtonGroups)
         put("pocketpc_stylus_grid", JSONObject(pocketpcStylusGridJson))
@@ -150,7 +160,7 @@ data class GameSettings(
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             executableHeap = if (obj.isNull("executable_heap")) null else obj.optBoolean("executable_heap"),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
-            pocketpcSimulateAccelerometerTilt = obj.optBoolean("pocketpc_simulate_accelerometer_tilt", false),
+            pocketpcTiltInput = TiltInput.fromId(obj.optString("pocketpc_tilt_input")),
             pocketpcControls = if(obj.isNull("pocketpc_controls")) null else obj.optString("pocketpc_controls"),
             pocketpcSwapButtonGroups = obj.optBoolean("pocketpc_swap_button_groups", false),
             pocketpcStylusGridJson = obj.optJSONObject("pocketpc_stylus_grid")?.toString() ?: "{}",
@@ -210,6 +220,7 @@ data class LauncherConfig(
     val controlsOpacity: Float,
     val pocketpcControlsSize: String = "normal",
     val pocketpcTouchLayout: String = "classic",
+    val pocketpcTiltInput: TiltInput = TiltInput.ACCELEROMETER,
     val gizmondoControlsSize: String = "normal",
     val gizmondoMaximizeScreen: Boolean = false,
     /**
@@ -263,6 +274,7 @@ data class LauncherConfig(
         put("controls_opacity", controlsOpacity.toDouble())
         put("android_pocketpc_controls_size", pocketpcControlsSize)
         put("android_pocketpc_touch_layout", pocketpcTouchLayout)
+        put("pocketpc_tilt_input", pocketpcTiltInput.id)
         put("android_gizmondo_controls_size", gizmondoControlsSize)
         put("android_gizmondo_maximize_screen", gizmondoMaximizeScreen)
         if (keybindingsJson != null) {
@@ -317,6 +329,7 @@ data class LauncherConfig(
             colorsLanguage = obj.optString("colors_language", "english").takeIf { it in listOf("english", "french", "german", "italian", "spanish") } ?: "english",
             gizmondoMaximizeScreen = obj.optBoolean("android_gizmondo_maximize_screen", false),
             gizmondoControlsSize = obj.optString("android_gizmondo_controls_size", "normal").takeIf { it == "normal" || it == "big" } ?: "normal",
+            pocketpcTiltInput = TiltInput.fromId(obj.optString("pocketpc_tilt_input")) ?: TiltInput.ACCELEROMETER,
             pocketpcTouchLayout = obj.optString("android_pocketpc_touch_layout", "classic").takeIf { it == "classic" || it == "controller" } ?: "classic",
             pocketpcControlsSize = obj.optString("android_pocketpc_controls_size", "normal").takeIf { it == "normal" || it == "big" } ?: "normal",
             controlsOpacity = obj.optDouble("controls_opacity", 1.0).toFloat()

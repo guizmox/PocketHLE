@@ -656,7 +656,7 @@ pub(crate) mod tests {
             pending_input: std::collections::VecDeque::new(),
             stylus_stick: Default::default(),
             touch_steering: Default::default(),
-            simulate_accelerometer_tilt: false,
+            virtual_tilt_axes: None,
             gapi_keys_queried: false,
             pocketpc_processor: None,
             gapi_action_key: pocket_kernel::gapi::VK_A,

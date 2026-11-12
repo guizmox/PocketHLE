@@ -15,7 +15,7 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
 
 fn open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.arg_u32(0)? != 1
-        || (!ctx.kernel.simulate_accelerometer_tilt && !accelerometer::available())
+        || (ctx.kernel.virtual_tilt_axes.is_none() && !accelerometer::available())
     {
         set_thread_error(ctx, 1167); // ERROR_DEVICE_NOT_CONNECTED
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -36,8 +36,8 @@ fn read(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if output == 0 || ctx.cpu.check_guest_access(output, 20, Prot::WRITE).is_err() {
         return Ok(DispatchOutcome::ReturnedR0(87));
     }
-    let axes = if ctx.kernel.simulate_accelerometer_tilt {
-        accelerometer::simulated_sample(ctx.kernel)
+    let axes = if let Some(axes) = ctx.kernel.virtual_tilt_axes {
+        accelerometer::simulated_sample(ctx.kernel, axes)
     } else if let Some(axes) = accelerometer::sample() {
         axes
     } else {
@@ -72,7 +72,7 @@ mod tests {
         use pocket_kernel::{gapi, InputEvent};
 
         let (mut cpu, mut kernel, mut dispatcher) = setup();
-        kernel.simulate_accelerometer_tilt = true;
+        kernel.virtual_tilt_axes = Some(accelerometer::TiltAxes::Horizontal);
         let DispatchOutcome::ReturnedR0(handle) = call(
             &mut cpu,
             &mut kernel,
@@ -127,6 +127,31 @@ mod tests {
         kernel
             .pending_input
             .push_back(InputEvent::KeyUp { vk: gapi::VK_UP });
+        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+
+        kernel
+            .pending_input
+            .push_back(InputEvent::TouchSteeringPosition { x: 560, y: -560 });
+        assert_eq!(read(&mut kernel), [250, 0, 968]);
+        kernel.virtual_tilt_axes = Some(accelerometer::TiltAxes::Both);
+        assert_eq!(read(&mut kernel), [250, 250, 935]);
+
+        // In the rotated view Up reaches the guest as Left. It overrides
+        // the stick vertically without affecting horizontal travel.
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: gapi::VK_LEFT });
+        assert_eq!(read(&mut kernel), [250, 500, 829]);
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyUp { vk: gapi::VK_LEFT });
+        kernel
+            .pending_input
+            .push_back(InputEvent::TouchSteeringPosition { x: -1000, y: 1000 });
+        assert_eq!(read(&mut kernel), [-500, -500, 707]);
+        kernel
+            .pending_input
+            .push_back(InputEvent::TouchSteeringPosition { x: 0, y: 0 });
         assert_eq!(read(&mut kernel), [0, 0, 1000]);
     }
 

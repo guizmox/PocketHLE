@@ -8,6 +8,7 @@ pub struct AsyncKeys {
     pressed: [bool; 256],
     seen: usize,
     pub display_turns: u8,
+    pub tilt_stick: [i16; 2],
 }
 impl Default for AsyncKeys {
     fn default() -> Self {
@@ -16,12 +17,17 @@ impl Default for AsyncKeys {
             pressed: [false; 256],
             seen: 0,
             display_turns: 0,
+            tilt_stick: [0, 0],
         }
     }
 }
 impl AsyncKeys {
     pub fn observe(&mut self, event: InputEvent) {
         let (key, down) = match event {
+            InputEvent::TouchSteeringPosition { x, y } => {
+                self.tilt_stick = [x, y];
+                return;
+            }
             InputEvent::KeyboardRotation { turns } => {
                 self.display_turns = turns % 4;
                 return;

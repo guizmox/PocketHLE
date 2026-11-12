@@ -116,6 +116,21 @@ class SettingsActivity : HostKeyActivity() {
                     writeConfig();true
                 }
             })
+            pocketpc.addPreference(ListPreference(requireContext()).apply {
+                key = "pocketpc_tilt_input"
+                title = "Tilt input (accelerometer)"
+                isPersistent = false
+                entries = TiltInput.values().map { it.label }.toTypedArray()
+                entryValues = TiltInput.values().map { it.id }.toTypedArray()
+                value = current.pocketpcTiltInput.id
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                setOnPreferenceChangeListener { _, value ->
+                    val input = TiltInput.fromId(value.toString()) ?: return@setOnPreferenceChangeListener false
+                    current = current.copy(pocketpcTiltInput = input)
+                    writeConfig()
+                    true
+                }
+            })
             identityField(ppc, "device_preset_id", "Device name (Preset ID — WinCE)")
             identityField(ppc, "device_platform_id", "Console identifier (Platform ID — hexadecimal, WinCE)")
             identityField(giz, "gizmondo_preset_id", "Device name (Preset ID — Gizmondo)")
