@@ -92,6 +92,8 @@ pub(super) struct Renderer {
     export: Option<ProgrammableFrameExport>,
     export_failed: bool,
     readback: Vec<u8>,
+    startup_diagnostics: bool,
+    diagnostic_frame: u64,
 }
 
 impl Renderer {
@@ -163,6 +165,8 @@ impl Renderer {
             export: None,
             export_failed: false,
             readback: Vec::new(),
+            startup_diagnostics: std::env::var_os("POCKETHLE_GLES2_STARTUP_TRACE").is_some(),
+            diagnostic_frame: 0,
         };
         let mut fbo = 0;
         let mut color = 0;
@@ -398,7 +402,8 @@ impl Renderer {
         self.host.bind_client_api().map_err(error)?;
         self.host.make_current().map_err(error)?;
         ctx.kernel.framebuffer.resize(self.width, self.height);
-        let shared = crate::gles::publish_shared_window(ctx, |source| self.snapshot(source))?;
+        let shared = !self.startup_diagnostics
+            && crate::gles::publish_shared_window(ctx, |source| self.snapshot(source))?;
         if !shared {
             self.readback_window(ctx)?;
         }
@@ -416,6 +421,28 @@ impl Renderer {
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
         ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
         ctx.kernel.framebuffer.presentation_stats.record_present();
+        Ok(())
+    }
+
+    fn report_shader_status(&mut self, operation: &str, object: u32) -> Result<()> {
+        let (status_fn, info_fn, flag) = if operation == "glCompileShader" {
+            ("glGetShaderiv", "glGetShaderInfoLog", 0x8b81)
+        } else {
+            ("glGetProgramiv", "glGetProgramInfoLog", 0x8b82)
+        };
+        let mut status = 0;
+        invoke!(self, status_fn, (object => u32, flag => u32, &mut status => *mut i32), ());
+        if status == 0 {
+            let mut info = [0u8; 2048];
+            let mut length = 0i32;
+            invoke!(self, info_fn, (object => u32, info.len() as i32 => i32,
+                &mut length => *mut i32, info.as_mut_ptr().cast() => *mut c_char), ());
+            let length = length.clamp(0, info.len() as i32) as usize;
+            log::warn!(
+                "GLES2_STARTUP {operation} object={object} failed: {:?}",
+                String::from_utf8_lossy(&info[..length])
+            );
+        }
         Ok(())
     }
 
@@ -437,6 +464,22 @@ impl Renderer {
         }
         invoke!(self, "glReadPixels", (0 => i32, 0 => i32, width as i32 => i32,
             height as i32 => i32, RGBA => u32, UNSIGNED_BYTE => u32, pixels => *mut c_void), ());
+        if self.startup_diagnostics {
+            self.diagnostic_frame += 1;
+            let frame = self.diagnostic_frame;
+            if frame <= 8 || (frame <= 3600 && frame % 120 == 0) {
+                let (mut white, mut black, mut total) = (0, 0, 0);
+                for pixel in self.readback.chunks_exact(4) {
+                    total += 1;
+                    white += usize::from(pixel[..3] == [255; 3]);
+                    black += usize::from(pixel[..3] == [0; 3]);
+                }
+                log::info!(
+                    "GLES2_STARTUP frame={frame} size={width}x{height} white={white} black={black} other={}",
+                    total - white - black
+                );
+            }
+        }
         if self.scale > 1 {
             self.resolve_window()?;
             let logical = self.logical_fbo;
@@ -587,6 +630,24 @@ impl Renderer {
 
     pub(super) fn gl(&mut self, name: &str, ctx: &mut CallCtx<'_>) -> Result<u32> {
         self.host.make_programmable_current().map_err(error)?;
+        let result = self.dispatch_gl(name, ctx);
+        if self.startup_diagnostics && self.diagnostic_frame < 8 && name != "glGetError" {
+            // Preserve the pending error for the guest while identifying the
+            // command that caused it on this host driver.
+            if let Ok(code) = (|| -> Result<u32> { Ok(invoke!(self, "glGetError", (), u32)) })() {
+                if code != 0 {
+                    self.reject(code);
+                    log::warn!(
+                        "GLES2_STARTUP frame={} {name} host_error={code:#06x}",
+                        self.diagnostic_frame + 1
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    fn dispatch_gl(&mut self, name: &str, ctx: &mut CallCtx<'_>) -> Result<u32> {
         macro_rules! u {
             ($index:expr) => {
                 ctx.arg_u32($index)?
@@ -651,9 +712,20 @@ impl Renderer {
                 });
             }
             "glFinish" | "glFlush" => gl!(),
-            "glClear" | "glGenerateMipmap" | "glCompileShader" | "glCullFace" | "glDepthFunc"
-            | "glDisable" | "glEnable" | "glLinkProgram" | "glValidateProgram" | "glFrontFace"
-            | "glBlendEquation" | "glStencilMask" => {
+            "glCompileShader" | "glLinkProgram" => {
+                let object = u!(0);
+                gl!(object => u32);
+                if self.startup_diagnostics {
+                    if let Err(error) = self.report_shader_status(name, object) {
+                        log::warn!(
+                            "GLES2_STARTUP {name} object={object} diagnostic failed: {error}"
+                        );
+                    }
+                }
+            }
+            "glClear" | "glGenerateMipmap" | "glCullFace" | "glDepthFunc" | "glDisable"
+            | "glEnable" | "glValidateProgram" | "glFrontFace" | "glBlendEquation"
+            | "glStencilMask" => {
                 gl!(u!(0) => u32)
             }
             "glActiveTexture" => {
@@ -1108,10 +1180,20 @@ impl Renderer {
             }
             "glDrawArrays" => {
                 let (mode, first, count) = (u!(0), i!(1), i!(2));
-                if !self
+                let configured = self
                     .enabled_attributes
-                    .is_subset(&self.configured_attributes)
-                {
+                    .is_subset(&self.configured_attributes);
+                if self.startup_diagnostics && self.diagnostic_frame < 8 {
+                    let mut program = 0;
+                    let mut fbo = 0;
+                    invoke!(self, "glGetIntegerv", (0x8b8d => u32, &mut program => *mut i32), ());
+                    invoke!(self, "glGetIntegerv", (0x8ca6 => u32, &mut fbo => *mut i32), ());
+                    log::info!(
+                        "GLES2_STARTUP frame={} glDrawArrays mode={mode:#x} first={first} count={count} program={program} fbo={fbo} window_fbo={} viewport={:?} attributes_configured={configured}",
+                        self.diagnostic_frame + 1, self.default_fbo, self.viewport
+                    );
+                }
+                if !configured {
                     return Ok(self.reject(0x0502));
                 }
                 if count > 0 && first >= 0 {
@@ -1194,6 +1276,18 @@ impl Renderer {
                     return Ok(self.reject(0x0501));
                 };
                 let pixels = optional_bytes(ctx, address, bytes)?;
+                if self.startup_diagnostics && self.diagnostic_frame == 0 {
+                    let nonzero = pixels
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter(|&&b| b != 0)
+                        .count();
+                    log::info!(
+                        "GLES2_STARTUP glTexImage2D size={width}x{height} format={format:#x} type={kind:#x} bytes={} nonzero={nonzero}",
+                        pixels.as_ref().map_or(0, Vec::len)
+                    );
+                }
                 gl!(u!(0) => u32, i!(1) => i32, i!(2) => i32, width => i32, height => i32,
                     i!(5) => i32, format => u32, kind => u32, data_pointer(&pixels) => *const c_void);
             }
@@ -1803,8 +1897,17 @@ fn desktop_shader(source: &[u8]) -> Vec<u8> {
     let mut output = b"#version 120\n#define lowp\n#define mediump\n#define highp\n".to_vec();
     for line in source.split_inclusive(|&byte| byte == b'\n') {
         let trimmed = line.trim_ascii_start();
-        if trimmed.starts_with(b"precision ") || trimmed.starts_with(b"#version ") {
+        if trimmed.starts_with(b"#version ") {
             output.push(b'\n');
+        } else if let Some(declaration) = trimmed
+            .strip_prefix(b"precision")
+            .filter(|rest| rest.first().is_some_and(u8::is_ascii_whitespace))
+        {
+            if let Some(end) = declaration.iter().position(|&byte| byte == b';') {
+                output.extend_from_slice(&declaration[end + 1..]);
+            } else {
+                output.extend_from_slice(line);
+            }
         } else {
             output.extend_from_slice(line);
         }
@@ -1819,6 +1922,16 @@ mod tests {
     use pocket_kernel::Thunk;
     use pocket_pe::ImportBinding;
     use std::sync::{atomic::AtomicBool, Arc};
+
+    #[test]
+    fn desktop_shader_preserves_code_after_a_precision_declaration() {
+        let source =
+            b"#version 100\nprecision mediump float;void main(){gl_FragColor = vec4(1.0);}\n";
+        assert_eq!(
+            desktop_shader(source),
+            b"#version 120\n#define lowp\n#define mediump\n#define highp\n\nvoid main(){gl_FragColor = vec4(1.0);}\n"
+        );
+    }
 
     #[test]
     fn reused_client_buffers_skip_equal_bytes_and_limit_partial_uploads() {

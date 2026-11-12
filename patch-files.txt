@@ -1,16 +1,1 @@
-crates/pocket-gles/src/consts.rs
-crates/pocket-gles/src/context.rs
-crates/pocket-gles/src/context/es11.rs
-crates/pocket-gles/src/matrix.rs
-crates/pocket-kernel/src/lib.rs
-crates/pocket-kernel/src/power.rs
-crates/pocket-library/src/lib.rs
-crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/gles.rs
-crates/pocket-winceapi/src/gles2.rs
-crates/pocket-winceapi/src/lib.rs
-frontends/pocket-android-jni/src/power.rs
-frontends/pocket-android-jni/src/runner.rs
-frontends/pocket-android/app/src/main/java/com/pockethle/app/BatteryHost.kt
-frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
-frontends/pocket-desktop/src/runner.rs
+crates/pocket-winceapi/src/gles2/renderer.rs
