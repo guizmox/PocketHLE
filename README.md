@@ -58,9 +58,8 @@ See the [Gizmondo compatibility table](docs/GIZMONDO.md#reported-game-compatibil
 Additional compatibility probes and rendering captures are available under [`proof/`](proof), including Asphalt 2 3D, Crazy Taxi, Diamond Twister, Splinter Cell Conviction and other Windows Mobile titles.
 
 The [maintainer's compatibility and test library](docs/COMPATIBILITY.md) lists
-**135 entries: 78 PocketPC / Windows Mobile and 57 Gizmondo**, updated from the
-supplied catalogue on 2026-11-10. This includes games, demos, benchmarks and
-utilities; catalogue membership is not a per-title pass/fail or completion report.
+**87 PocketPC / Windows Mobile entries reported working** on 2026-11-12
+and **57 Gizmondo entries**. It includes games, demos, benchmarks and utilities.
 
 ## Status
 

@@ -1,37 +1,30 @@
 # Reported compatibility and test library
 
-This inventory records the maintainer's test library supplied on 2026-11-10:
-**135 entries — 78 PocketPC / Windows Mobile and 57 Gizmondo**. It replaces the
-older 115-entry snapshot embedded in the project README.
-
-The supplied `library.json` records installed titles and settings, but contains
-no per-title pass/fail result, test duration, tested emulator revision or platform.
-Inclusion here therefore does not mean that every scene, feature or host platform
-works, or that a title has been validated with PocketHLE 0.4.6. The inventory
-includes games, prototypes, demos, benchmarks, utilities and other emulators;
-variants remain separate entries under their supplied display names.
+This inventory covers **144 entries (87 PocketPC / Windows Mobile and 57
+Gizmondo)**. It includes games, prototypes, demos, benchmarks, utilities and
+other emulators. Variants remain separate entries under their supplied display
+names.
 
 For detailed reported Gizmondo results and known issues, use the
 [Gizmondo compatibility table](GIZMONDO.md#reported-game-compatibility).
 Reproducible checked-in captures and probes live under [proof](../proof).
 See [validation levels](README.md#validation-levels) when reporting new results.
 
-Only title names and platform grouping are published here. Local paths, registry
-values, device identities and per-game private settings are not reproduced.
-Platform grouping follows explicit catalogue platforms first, then the launcher's
-legacy Gizmondo title-ID/collection markers. Installed game files were not supplied
-for a new executable-based platform or renderer analysis.
+Only title names and platform grouping are published here. Platform grouping
+uses the platform recorded in the catalogue when available and the launcher's
+legacy Gizmondo title IDs and collection markers for older entries.
 
 ## PocketPC / Windows Mobile
 
-**78 entries**, including **13 additional entries** compared with the previous
-README snapshot. Graphics API, playable status and required workarounds are not
-inferred from catalogue membership or saved settings.
+**87 entries reported working** by the maintainer on 2026-11-12. The report
+does not specify the PocketHLE revision, host platform, test duration or
+coverage for each title.
 
 * Age of Empires
 * Anthelion
 * Argentum
 * Aspyr Media THPS2
+* Astraware Brad Mitchum
 * Caywen Kevtris 2
 * Chix
 * Chopper Alley
@@ -41,22 +34,26 @@ inferred from catalogue membership or saved settings.
 * Cops &amp; Robbers
 * CrazyKart
 * Cube 2004
-* Desktop
 * Dgles Goforce Shw
 * Diesel FPS Technology DEMO
 * Doom 2700G
 * Dynamix 3D Benchmark
+* EA Mobile Need For Speed Shift v35.0.48
+* EA Mobile NFS Shift v1.0.2
+* Electopia Southend Qualcomm
 * Enigmo Demo
 * EverQuest® for the Pocket PC
 * Fade
 * Flight
 * FPSE CE
+* Gameloft Ferrari GT Evolution Demo
 * Gameloft Prince of Persia
 * Gapi Benchmark V2 0 Arm
 * Geo Rally 2005
 * GeoRally EX
 * GhostWorld
 * GXmark
+* HTC Teeter
 * Infectious Ground
 * Interstellar Flames
 * Intooutland
@@ -76,6 +73,7 @@ inferred from catalogue membership or saved settings.
 * OmniGSoft Eternal Throne 1.1
 * PhoenixStudio
 * Pocket Athlete
+* Pocket Mixer
 * Pocketpc Mark V1 03
 * Pvr Racer
 * Q3ce Reborn
@@ -84,10 +82,13 @@ inferred from catalogue membership or saved settings.
 * Racing Days
 * Radium
 * RedSector 2112
+* SC15 Demos
 * Sce X51v Patch
 * Siege [pack by iChanz]
 * Simcity 2000
 * Snails
+* SouthEnd Xtrakt
+* Southend Xtrakt x2
 * Spawn
 * Sphere mobile
 * Spider-Man - Toxic City
