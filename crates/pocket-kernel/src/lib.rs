@@ -1472,6 +1472,8 @@ pub struct KernelState {
     pub pending_input: VecDeque<InputEvent>,
     pub stylus_stick: stylus_stick::StylusStick,
     pub touch_steering: touch_steering::TouchSteering,
+    /// Supply HTC accelerometer readings from the display-relative direction keys.
+    pub simulate_accelerometer_tilt: bool,
     /// Set once the guest has fetched the GAPI key list through
     /// `GXGetDefaultKeys`. Such a guest only reacts to the virtual keys
     /// that table names, so the host's confirm key has to be delivered
@@ -1673,12 +1675,16 @@ pub struct MainThreadState {
 impl KernelState {
     /// Discard input and repeats when this process loses or regains focus.
     pub fn reset_foreground_input(&mut self) {
+        self.async_keys
+            .sync(&self.pending_input, self.gapi_action_key != gapi::VK_RETURN);
+        let display_turns = self.async_keys.display_turns;
         self.pending_input.clear();
         if let Some(up) = self.stylus_stick.cancel() {
             self.pending_input.push_back(up);
         }
         self.pressed_keys.fill(false);
         self.async_keys = Default::default();
+        self.async_keys.display_turns = display_turns;
         self.held_keys.clear();
         self.key_repeat_next_ms = None;
         self.key_repeat_cursor = 0;
@@ -4539,6 +4545,7 @@ impl Process {
                 pending_input: VecDeque::new(),
                 stylus_stick: Default::default(),
                 touch_steering: Default::default(),
+                simulate_accelerometer_tilt: false,
                 gapi_keys_queried: false,
                 pocketpc_processor: None,
                 gapi_action_key: gapi::VK_A,

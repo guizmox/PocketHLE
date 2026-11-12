@@ -75,6 +75,7 @@ data class GameSettings(
     val executableHeap: Boolean? = null,
     val dpadDeadzone: String = "large",
     val pocketpcTouchSteering: Boolean = false,
+    val pocketpcSimulateAccelerometerTilt: Boolean = false,
     val pocketpcControls: String? = null,
     val pocketpcSwapButtonGroups: Boolean = false,
     val pocketpcStylusGridJson: String = "{}",
@@ -106,6 +107,7 @@ data class GameSettings(
         put("screen", screen)
         put("rotation", rotation)
         put("pocketpc_touch_steering", pocketpcTouchSteering)
+        put("pocketpc_simulate_accelerometer_tilt", pocketpcSimulateAccelerometerTilt)
         put("pocketpc_controls", pocketpcControls ?: JSONObject.NULL)
         put("pocketpc_swap_button_groups", pocketpcSwapButtonGroups)
         put("pocketpc_stylus_grid", JSONObject(pocketpcStylusGridJson))
@@ -148,6 +150,7 @@ data class GameSettings(
             gpuRenderer = if (obj.isNull("gpu_renderer")) null else obj.optBoolean("gpu_renderer", false),
             executableHeap = if (obj.isNull("executable_heap")) null else obj.optBoolean("executable_heap"),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
+            pocketpcSimulateAccelerometerTilt = obj.optBoolean("pocketpc_simulate_accelerometer_tilt", false),
             pocketpcControls = if(obj.isNull("pocketpc_controls")) null else obj.optString("pocketpc_controls"),
             pocketpcSwapButtonGroups = obj.optBoolean("pocketpc_swap_button_groups", false),
             pocketpcStylusGridJson = obj.optJSONObject("pocketpc_stylus_grid")?.toString() ?: "{}",

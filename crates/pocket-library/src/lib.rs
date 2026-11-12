@@ -603,6 +603,8 @@ pub struct GameSettings {
     /// Display-relative arrows hold fixed touch zones; left-stick tilt controls position.
     #[serde(default)]
     pub pocketpc_touch_steering: bool,
+    #[serde(default)]
+    pub pocketpc_simulate_accelerometer_tilt: bool,
     /// None migrates the legacy touch-steering checkbox without changing old games.
     #[serde(default)]
     pub pocketpc_controls: Option<stylus_grid::ControlsMode>,
@@ -805,6 +807,7 @@ impl Default for GameSettings {
             storage_card_dir: None,
             frame_rate_limit: None,
             pocketpc_touch_steering: false,
+            pocketpc_simulate_accelerometer_tilt: false,
             pocketpc_controls: None,
             pocketpc_swap_button_groups: false,
             pocketpc_stylus_grid: Default::default(),

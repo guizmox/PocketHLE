@@ -98,6 +98,18 @@ class GameSettingsActivity : HostKeyActivity() {
                         writeGameSettings();true
                     }
                 })
+                controlsCategory.addPreference(androidx.preference.SwitchPreferenceCompat(requireContext()).apply {
+                    key = "pocketpc_simulate_accelerometer_tilt"
+                    title = "Simulate tilt (accelerometer) with Left / Right"
+                    isPersistent = false
+                    isChecked = current.pocketpcSimulateAccelerometerTilt
+                    summary = "Use the Left and Right controls to simulate device tilt. Release both to return to neutral. Restart the game to apply."
+                    setOnPreferenceChangeListener { _, value ->
+                        current = current.copy(pocketpcSimulateAccelerometerTilt = value as Boolean)
+                        writeGameSettings()
+                        true
+                    }
+                })
                 controlsCategory.addPreference(editor);updateEditor()
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
                     identityCategory.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {

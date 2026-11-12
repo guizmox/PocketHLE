@@ -3,6 +3,8 @@ crates\pocket-core\src\cab_files.rs
 crates\pocket-core\src\cab_setup.rs
 crates\pocket-gles\src\gpu\mod.rs
 crates\pocket-gles\src\gpu\shared.rs
+crates\pocket-kernel\src\accelerometer.rs
+crates\pocket-kernel\src\async_keys.rs
 crates\pocket-kernel\src\dll_lifecycle.rs
 crates\pocket-kernel\src\lib.rs
 crates\pocket-kernel\src\vfs.rs
@@ -22,4 +24,11 @@ crates\pocket-winceapi\src\htcsensor.rs
 crates\pocket-winceapi\src\lib.rs
 crates\pocket-winceapi\src\ole32.rs
 docs\AGENTS.md
+frontends\pocket-android-jni\src\runner.rs
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameActivity.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameEntry.kt
+frontends\pocket-android\app\src\main\java\com\pockethle\app\GameSettingsActivity.kt
 frontends\pocket-cli\src\archive.rs
+frontends\pocket-desktop\src\app.rs
+frontends\pocket-desktop\src\gamepad.rs
+frontends\pocket-desktop\src\runner.rs

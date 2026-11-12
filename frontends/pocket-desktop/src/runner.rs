@@ -297,6 +297,8 @@ impl Runner {
         }
         emu.set_gizmondo_audio_compatibility(is_gizmondo);
         if let Some(process) = emu.process_mut() {
+            process.state.simulate_accelerometer_tilt =
+                !is_gizmondo && game.settings.pocketpc_simulate_accelerometer_tilt;
             process.state.touch_steering.enabled = !is_gizmondo
                 && (game.settings.controls_mode()
                     == pocket_library::stylus_grid::ControlsMode::Zones);

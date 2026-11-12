@@ -90,6 +90,7 @@ class GameActivity : AppCompatActivity() {
      */
     private var rotationDegrees: Int = 0
     private var gizmondoGame = true
+    private var simulateAccelerometerTilt = false
     private var gameId = ""
     private var gameRoot = ""
     private var pocketPcFullscreen = false
@@ -354,6 +355,7 @@ class GameActivity : AppCompatActivity() {
         val rootDir = LibraryPaths.root(this)
         val isGizmondo = NativeBridge.isGizmondoGame(rootDir, id)
         val gameSettings = runCatching { GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(rootDir, id))) }.getOrDefault(GameSettings.default())
+        simulateAccelerometerTilt = !isGizmondo && gameSettings.pocketpcSimulateAccelerometerTilt
         dpadDeadzone = ControlDeadzone.from(gameSettings.dpadDeadzone)
         touchSteeringEnabled = !gizmondoGame && gameSettings.controlsMode()=="zones"
         gridRouter = if(!gizmondoGame && gameSettings.controlsMode()=="grid") StylusGridRouter(StylusGridConfig.parse(gameSettings.pocketpcStylusGridJson),JSONObject(config.originalJson).optString("gamepad_fullscreen").takeIf { it.isNotEmpty() && it!="null" }) else null
@@ -398,7 +400,7 @@ class GameActivity : AppCompatActivity() {
     private fun startSession(rootDir: String, id: String) {
         if (!presentationReady) { presentationStart = rootDir to id; return }
         if (isFinishing || isDestroyed) return
-        accelerometer.start()
+        if (!simulateAccelerometerTilt) accelerometer.start()
         val handle = NativeBridge.nativeStartGame(rootDir, id, presentationHandle)
         if (handle == 0L) {
             accelerometer.stop()
@@ -472,7 +474,7 @@ class GameActivity : AppCompatActivity() {
         VibrationHost.resume()
         val handle = session
         if (handle != 0L) {
-            accelerometer.start()
+            if (!simulateAccelerometerTilt) accelerometer.start()
             if (!audioRunning) startAudio(handle)
         }
     }

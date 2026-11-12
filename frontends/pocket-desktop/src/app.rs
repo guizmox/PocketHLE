@@ -3023,6 +3023,10 @@ impl PocketLauncher {
                     crate::controller_ui::checkbox(ui, &mut draft.pocketpc_swap_button_groups, "Enabled")
                         .on_hover_text("Exchange A/B/C/Action with P1–P4 on the on-screen controls. Also swaps configured keyboard and gamepad inputs. Applies on the next launch.");
                     ui.end_row();
+                    ui.label("Simulate tilt (accelerometer) with Left / Right");
+                    crate::controller_ui::checkbox(ui, &mut draft.pocketpc_simulate_accelerometer_tilt, "Enabled")
+                        .on_hover_text("Use the Left and Right controls to simulate device tilt. Release both to return to neutral. Applies on the next launch.");
+                    ui.end_row();
                     ui.label("Control mode");
                     let mut mode=draft.controls_mode();
                     crate::controller_ui::ComboBox::from_id_source("ppc_controls_mode")
@@ -5844,6 +5848,9 @@ impl PocketLauncher {
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
+        self.gamepad_rx.set_accelerometer_enabled(
+            self.running_is_gizmondo || !game.settings.pocketpc_simulate_accelerometer_tilt,
+        );
         self.running_swap_button_groups =
             !self.running_is_gizmondo && game.settings.pocketpc_swap_button_groups;
         self.running_controls_mode = if self.running_is_gizmondo {

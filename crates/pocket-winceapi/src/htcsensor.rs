@@ -14,7 +14,9 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
 }
 
 fn open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.arg_u32(0)? != 1 || !accelerometer::available() {
+    if ctx.arg_u32(0)? != 1
+        || (!ctx.kernel.simulate_accelerometer_tilt && !accelerometer::available())
+    {
         set_thread_error(ctx, 1167); // ERROR_DEVICE_NOT_CONNECTED
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -34,7 +36,11 @@ fn read(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if output == 0 || ctx.cpu.check_guest_access(output, 20, Prot::WRITE).is_err() {
         return Ok(DispatchOutcome::ReturnedR0(87));
     }
-    let Some(axes) = accelerometer::sample() else {
+    let axes = if ctx.kernel.simulate_accelerometer_tilt {
+        accelerometer::simulated_sample(ctx.kernel)
+    } else if let Some(axes) = accelerometer::sample() {
+        axes
+    } else {
         return Ok(DispatchOutcome::ReturnedR0(21)); // ERROR_NOT_READY
     };
     // TiltX/Y/Z are signed 16-bit counts, approximately 1000 per g.
@@ -60,6 +66,69 @@ mod tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
+
+    #[test]
+    fn virtual_tilt_tracks_display_direction_and_centers_on_release() {
+        use pocket_kernel::{gapi, InputEvent};
+
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel.simulate_accelerometer_tilt = true;
+        let DispatchOutcome::ReturnedR0(handle) = call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            DLL,
+            "HTCSensorOpen",
+            &[1],
+        ) else {
+            panic!("expected sensor handle");
+        };
+        assert_ne!(handle, 0);
+        let mut read = |kernel: &mut pocket_kernel::KernelState| {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    kernel,
+                    &mut dispatcher,
+                    DLL,
+                    "HTCSensorGetDataOutput",
+                    &[handle, 0x1100]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            let bytes = cpu.read_mem(0x1100, 6).unwrap();
+            std::array::from_fn::<_, 3, _>(|i| i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
+        };
+        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyboardRotation { turns: 1 });
+        // At 90 degrees clockwise, display Left reaches the guest as Down.
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: gapi::VK_DOWN });
+        assert_eq!(read(&mut kernel), [-500, 0, 866]);
+        while kernel.pop_pending_input().is_some() {}
+        assert_eq!(read(&mut kernel), [-500, 0, 866]);
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: gapi::VK_UP });
+        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyUp { vk: gapi::VK_DOWN });
+        assert_eq!(read(&mut kernel), [500, 0, 866]);
+        kernel.reset_foreground_input();
+        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: gapi::VK_UP });
+        assert_eq!(read(&mut kernel), [500, 0, 866]);
+        kernel
+            .pending_input
+            .push_back(InputEvent::KeyUp { vk: gapi::VK_UP });
+        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+    }
 
     #[test]
     fn physical_samples_use_htc_units_and_closed_handles_are_rejected() {

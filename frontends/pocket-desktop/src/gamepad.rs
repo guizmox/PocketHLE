@@ -371,6 +371,7 @@ fn worker(
     profile: &AtomicU8,
     selected: &AtomicUsize,
     enabled: &AtomicBool,
+    accelerometer_enabled: &AtomicBool,
     commands: &Receiver<crate::rumble::Command>,
     steam_deck: bool,
 ) -> Result<(), String> {
@@ -406,7 +407,8 @@ fn worker(
     let mut last_rumble = Instant::now() - Duration::from_secs(1);
     let mut next_scan = Instant::now() + Duration::from_secs(1);
     let sensors = sdl.sensor().ok();
-    let mut host_accelerometer = sensors.as_ref().and_then(open_host_accelerometer);
+    let mut physical_sensor = accelerometer_enabled.load(Ordering::Relaxed);
+    let mut host_accelerometer = sensors.as_ref().filter(|_| physical_sensor).and_then(open_host_accelerometer);
     let mut next_acceleration = Instant::now();
     let mut acceleration_controller = None;
     let publish_acceleration = pocket_core::kernel::accelerometer::publish;
@@ -655,7 +657,15 @@ fn worker(
             }
         }
         if Instant::now() >= next_acceleration {
-            let active = enabled.load(Ordering::Relaxed);
+            let requested = accelerometer_enabled.load(Ordering::Relaxed);
+            if requested != physical_sensor {
+                physical_sensor = requested;
+                host_accelerometer = sensors
+                    .as_ref()
+                    .filter(|_| physical_sensor)
+                    .and_then(open_host_accelerometer);
+            }
+            let active = physical_sensor && enabled.load(Ordering::Relaxed);
             let current = active.then_some(selected as u32);
             if current != acceleration_controller {
                 if let Some(Device::Controller(controller)) =
@@ -687,7 +697,7 @@ fn worker(
             next_acceleration = Instant::now() + Duration::from_millis(16);
         }
         if Instant::now() >= next_scan {
-            if host_accelerometer.is_none() {
+            if accelerometer_enabled.load(Ordering::Relaxed) && host_accelerometer.is_none() {
                 host_accelerometer = sensors.as_ref().and_then(open_host_accelerometer);
             }
             let gone: Vec<_> = devices
@@ -729,6 +739,7 @@ pub struct Monitor {
     profile: Arc<AtomicU8>,
     selected: Arc<AtomicUsize>,
     enabled: Arc<AtomicBool>,
+    accelerometer_enabled: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     _commands: SyncSender<crate::rumble::Command>,
 }
@@ -743,6 +754,10 @@ impl Monitor {
             Ordering::Relaxed,
         );
     }
+    pub fn set_accelerometer_enabled(&self, enabled: bool) {
+        self.accelerometer_enabled.store(enabled, Ordering::Relaxed);
+    }
+
     pub fn set_output(&self, device: Option<usize>, enabled: bool) {
         self.selected
             .store(device.unwrap_or(usize::MAX), Ordering::Relaxed);
@@ -767,6 +782,8 @@ pub fn start(ctx: egui::Context, steam_deck: bool) -> Monitor {
     let worker_selected = selected.clone();
     let enabled = Arc::new(AtomicBool::new(false));
     let worker_enabled = enabled.clone();
+    let accelerometer_enabled = Arc::new(AtomicBool::new(true));
+    let worker_accelerometer_enabled = accelerometer_enabled.clone();
     let (command_tx, command_rx) = mpsc::sync_channel(32);
     pocket_core::kernel::vibration::install_host(Arc::new(crate::rumble::Bridge::new(
         command_tx.clone(),
@@ -781,6 +798,7 @@ pub fn start(ctx: egui::Context, steam_deck: bool) -> Monitor {
                 &worker_profile,
                 &worker_selected,
                 &worker_enabled,
+                &worker_accelerometer_enabled,
                 &command_rx,
                 steam_deck,
             ) {
@@ -794,6 +812,7 @@ pub fn start(ctx: egui::Context, steam_deck: bool) -> Monitor {
         profile,
         selected,
         enabled,
+        accelerometer_enabled,
         thread: Some(thread),
         _commands: command_tx,
     }

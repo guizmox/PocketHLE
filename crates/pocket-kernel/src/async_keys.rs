@@ -7,6 +7,7 @@ pub struct AsyncKeys {
     down: [bool; 256],
     pressed: [bool; 256],
     seen: usize,
+    pub display_turns: u8,
 }
 impl Default for AsyncKeys {
     fn default() -> Self {
@@ -14,12 +15,17 @@ impl Default for AsyncKeys {
             down: [false; 256],
             pressed: [false; 256],
             seen: 0,
+            display_turns: 0,
         }
     }
 }
 impl AsyncKeys {
     pub fn observe(&mut self, event: InputEvent) {
         let (key, down) = match event {
+            InputEvent::KeyboardRotation { turns } => {
+                self.display_turns = turns % 4;
+                return;
+            }
             InputEvent::KeyDown { vk } => (usize::from(vk), true),
             InputEvent::KeyUp { vk } => (usize::from(vk), false),
             InputEvent::PointerDown { .. } => (1, true),
@@ -71,6 +77,10 @@ impl AsyncKeys {
     pub fn requeued_front(&mut self) {
         self.seen += 1;
     }
+    pub fn is_down(&self, key: u16) -> bool {
+        self.down.get(usize::from(key)).copied().unwrap_or(false)
+    }
+
     pub fn take(&mut self, key: usize) -> bool {
         self.pressed.get_mut(key).is_some_and(|p| std::mem::take(p))
     }
