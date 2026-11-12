@@ -1046,10 +1046,13 @@ at teardown. No production instrumentation or game-name special case is added.
 
 Generic CreateProcessW launches a CPU/kernel on its own host thread. A shared
 handle domain assigns unique process/thread IDs and provides a gate around
-API dispatch and teardown. Do not hold this gate during guest CPU execution,
-frame hooks or startup acknowledgement: recursive SDCreateProcess and remote
-startup would deadlock. SDCreateProcess retains the preserved-parent foreground
-handoff, independent of the generic CreateProcessW behavior.
+API dispatch and teardown. A guest CPU slice also takes the gate when the
+process has mapped file views, because the CPU can access shared pages directly.
+Processes with private CPU mappings can run instruction slices in parallel.
+Frame hooks and startup acknowledgement run outside the gate so recursive
+SDCreateProcess and remote startup can proceed. SDCreateProcess retains the
+preserved-parent foreground handoff, independent of the generic CreateProcessW
+behavior.
 
 Creation is transactional: resolve/validate the image, construct the child,
 attach shared handles and physical RAM, initialize WinMain/GetCommandLineW,

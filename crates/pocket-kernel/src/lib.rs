@@ -1191,6 +1191,7 @@ pub struct ChildProcess {
 /// One kernel-object domain shared by a launcher and its foreground children.
 #[derive(Clone)]
 pub struct ProcessHandleContext {
+    display_turns: u8,
     pub table: handles::HandleTable,
     vfs_shared: vfs::VfsShared,
     registry_store: std::sync::Arc<std::sync::Mutex<registry::RegistryStore>>,
@@ -1893,7 +1894,10 @@ impl KernelState {
 
     pub fn child_handle_context(&mut self, handle: u32) -> Option<ProcessHandleContext> {
         self.publish_handles();
+        self.async_keys
+            .sync(&self.pending_input, self.gapi_action_key != gapi::VK_RETURN);
         Some(ProcessHandleContext {
+            display_turns: self.async_keys.display_turns,
             table: self.object_handles.child(handle)?,
             vfs_shared: self.vfs.shared_context(),
             registry_store: self.registry.store.clone(),
@@ -2011,6 +2015,7 @@ impl KernelState {
         Ok(())
     }
     pub fn attach_handle_context(&mut self, context: ProcessHandleContext) {
+        self.async_keys.display_turns = context.display_turns;
         self.vfs.attach_shared_context(context.vfs_shared);
         // Registry values belong to the device; handles and overrides stay local.
         self.registry.store = context.registry_store;
@@ -5114,7 +5119,11 @@ pub fn run_main_loop_with_hook(
         let stop = if pc == THREAD_SCHEDULER_IDLE_VA {
             Ok(StopReason::Hook(pc))
         } else {
-            let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
+            // Shared file views expose aliased host pages to guest instructions.
+            // With only private CPU mappings, serialize the WinCE API boundaries
+            // but let separate guests execute their instruction slices in parallel.
+            let _guard = (!process.state.mapped_views.is_empty())
+                .then(|| process_gate.lock().unwrap_or_else(|e| e.into_inner()));
             cpu.run_until_hook(pc, instruction_budget_per_slice)
         };
         let stop = match stop {
@@ -6546,6 +6555,41 @@ mod tests {
             resources: vec![],
             managed_runtime: None,
         }
+    }
+
+    #[test]
+    fn child_process_inherits_display_rotation_without_held_input() {
+        let mut cpu = StubCpu::new();
+        let mut parent = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let (handle, _) = parent.state.object_handles.new_child().unwrap();
+        parent
+            .state
+            .pending_input
+            .push_back(InputEvent::KeyboardRotation { turns: 3 });
+        parent
+            .state
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: gapi::VK_DOWN });
+
+        let context = parent.state.child_handle_context(handle).unwrap();
+        let mut child_cpu = StubCpu::new();
+        let mut child = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut child_cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        child.state.attach_handle_context(context);
+        assert_eq!(child.state.async_keys.display_turns, 3);
+        assert!(!child.state.async_keys.is_down(gapi::VK_DOWN));
+        assert!(child.state.pending_input.is_empty());
     }
 
     #[test]

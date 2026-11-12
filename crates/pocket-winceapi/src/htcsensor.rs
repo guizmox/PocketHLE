@@ -18,10 +18,26 @@ fn available(kernel: &pocket_kernel::KernelState) -> bool {
 }
 
 fn sample_counts(kernel: &mut pocket_kernel::KernelState) -> Option<[i16; 3]> {
-    let axes = if let Some(axes) = kernel.virtual_tilt_axes {
-        accelerometer::simulated_sample(kernel, axes)
+    // The HTC sensor reports gravity in device axes (X right, Y down,
+    // Z toward the screen). Host sensors report proper acceleration in
+    // display axes (X right, Y up, Z toward the screen).
+    let [x, y, z] = if let Some(axes) = kernel.virtual_tilt_axes {
+        let [x, y, z] = accelerometer::simulated_sample(kernel, axes);
+        [x, -y, -z]
     } else {
-        accelerometer::sample()?
+        kernel.async_keys.sync(
+            &kernel.pending_input,
+            kernel.gapi_action_key != pocket_kernel::gapi::VK_RETURN,
+        );
+        let [x, y, z] = accelerometer::sample()?;
+        [-x, y, -z]
+    };
+    // Undo the presentation rotation before exposing the raw device axes.
+    let axes = match kernel.async_keys.display_turns {
+        1 => [y, -x, z],
+        2 => [-x, -y, z],
+        3 => [-y, x, z],
+        _ => [x, y, z],
     };
     Some(axes.map(|value| (value / 0.0098).round() as i16))
 }
@@ -166,6 +182,27 @@ mod tests {
         );
         assert_eq!(cpu.read_mem(0x1100, 2).unwrap(), 500i16.to_le_bytes());
         assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 6);
+        kernel.pending_input.extend([
+            InputEvent::KeyUp { vk: gapi::VK_RIGHT },
+            InputEvent::KeyboardRotation { turns: 3 },
+            // Counter-clockwise display rotation maps display Right to guest Down.
+            InputEvent::KeyDown { vk: gapi::VK_DOWN },
+        ]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "DeviceIoControl",
+                &[handle, 0x0100_0001, 0, 0, 0x1100, 0, 0x1200, 0],
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            cpu.read_mem(0x1100, 6).unwrap(),
+            [0, 0, 0xf4, 1, 0x9e, 0xfc]
+        );
         assert_eq!(
             call(
                 &mut cpu,
@@ -212,7 +249,7 @@ mod tests {
             let bytes = cpu.read_mem(0x1100, 6).unwrap();
             std::array::from_fn::<_, 3, _>(|i| i16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
         };
-        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+        assert_eq!(read(&mut kernel), [0, 0, -1000]);
         kernel
             .pending_input
             .push_back(InputEvent::KeyboardRotation { turns: 1 });
@@ -220,52 +257,52 @@ mod tests {
         kernel
             .pending_input
             .push_back(InputEvent::KeyDown { vk: gapi::VK_DOWN });
-        assert_eq!(read(&mut kernel), [-500, 0, 866]);
+        assert_eq!(read(&mut kernel), [0, 500, -866]);
         while kernel.pop_pending_input().is_some() {}
-        assert_eq!(read(&mut kernel), [-500, 0, 866]);
+        assert_eq!(read(&mut kernel), [0, 500, -866]);
         kernel
             .pending_input
             .push_back(InputEvent::KeyDown { vk: gapi::VK_UP });
-        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+        assert_eq!(read(&mut kernel), [0, 0, -1000]);
         kernel
             .pending_input
             .push_back(InputEvent::KeyUp { vk: gapi::VK_DOWN });
-        assert_eq!(read(&mut kernel), [500, 0, 866]);
+        assert_eq!(read(&mut kernel), [0, -500, -866]);
         kernel.reset_foreground_input();
-        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+        assert_eq!(read(&mut kernel), [0, 0, -1000]);
         kernel
             .pending_input
             .push_back(InputEvent::KeyDown { vk: gapi::VK_UP });
-        assert_eq!(read(&mut kernel), [500, 0, 866]);
+        assert_eq!(read(&mut kernel), [0, -500, -866]);
         kernel
             .pending_input
             .push_back(InputEvent::KeyUp { vk: gapi::VK_UP });
-        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+        assert_eq!(read(&mut kernel), [0, 0, -1000]);
 
         kernel
             .pending_input
             .push_back(InputEvent::TouchSteeringPosition { x: 560, y: -560 });
-        assert_eq!(read(&mut kernel), [250, 0, 968]);
+        assert_eq!(read(&mut kernel), [0, -250, -968]);
         kernel.virtual_tilt_axes = Some(accelerometer::TiltAxes::Both);
-        assert_eq!(read(&mut kernel), [250, 250, 935]);
+        assert_eq!(read(&mut kernel), [-250, -250, -935]);
 
         // In the rotated view Up reaches the guest as Left. It overrides
         // the stick vertically without affecting horizontal travel.
         kernel
             .pending_input
             .push_back(InputEvent::KeyDown { vk: gapi::VK_LEFT });
-        assert_eq!(read(&mut kernel), [250, 500, 829]);
+        assert_eq!(read(&mut kernel), [-500, -250, -829]);
         kernel
             .pending_input
             .push_back(InputEvent::KeyUp { vk: gapi::VK_LEFT });
         kernel
             .pending_input
             .push_back(InputEvent::TouchSteeringPosition { x: -1000, y: 1000 });
-        assert_eq!(read(&mut kernel), [-500, -500, 707]);
+        assert_eq!(read(&mut kernel), [500, 500, -707]);
         kernel
             .pending_input
             .push_back(InputEvent::TouchSteeringPosition { x: 0, y: 0 });
-        assert_eq!(read(&mut kernel), [0, 0, 1000]);
+        assert_eq!(read(&mut kernel), [0, 0, -1000]);
     }
 
     #[test]
@@ -296,7 +333,7 @@ mod tests {
         );
         assert_eq!(
             cpu.read_mem(0x1100, 6).unwrap(),
-            [0xf4, 0x01, 0x18, 0xfc, 0, 0]
+            [0x0c, 0xfe, 0x18, 0xfc, 0, 0]
         );
         assert_eq!(
             api!("HTCSensorGetDataOutput", &[handle, 0x4ff8]),

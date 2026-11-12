@@ -1,1 +1,3 @@
 crates/pocket-kernel/src/lib.rs
+crates/pocket-winceapi/src/htcsensor.rs
+docs/AGENTS.md
