@@ -2300,8 +2300,10 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
             set_egl_error(pocket_gles::EGL_BAD_ALLOC);
             return 0;
         }
-        let handle = if !s.window_issued {
-            s.window_issued = true;
+        let first_window = !std::mem::replace(&mut s.window_issued, true);
+        // A probe can terminate EGL before the first window is created.
+        // The backing image may still be active while pending deletion.
+        let handle = if first_window && s.images.get(&SURFACE_HANDLE).is_none_or(|i| !i.deleted) {
             SURFACE_HANDLE
         } else {
             let h = s.next;
@@ -6666,6 +6668,59 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn egl_window_after_probe_termination_uses_a_live_surface() {
+        let _g = guard();
+        reset_for_session();
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_initialize,
+                &[DISPLAY_HANDLE, 0, 0]
+            ),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]),
+            EGL_TRUE
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_initialize,
+                &[DISPLAY_HANDLE, 0, 0]
+            ),
+            EGL_TRUE
+        );
+        let context = call(
+            &mut cpu,
+            &mut kernel,
+            egl_create_context,
+            &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0],
+        );
+        let surface = call(
+            &mut cpu,
+            &mut kernel,
+            egl_create_window_surface,
+            &[DISPLAY_HANDLE, CONFIG_HANDLE, 0x1234, 0],
+        );
+        assert_ne!(surface, EGL_NO_SURFACE);
+        assert_ne!(surface, SURFACE_HANDLE);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_make_current,
+                &[DISPLAY_HANDLE, surface, surface, context]
+            ),
+            EGL_TRUE
+        );
+        assert!(SURFACES.with(|s| !s.borrow().images.contains_key(&SURFACE_HANDLE)));
     }
 
     #[test]

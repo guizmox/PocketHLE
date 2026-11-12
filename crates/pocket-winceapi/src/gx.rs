@@ -708,6 +708,8 @@ pub(crate) mod tests {
             msg_queues: std::collections::HashMap::new(),
             next_msg_queue_handle: 0xDEAD_E500,
             power_notifications: Default::default(),
+            device_notification_queues: Default::default(),
+            next_device_notification: 0xda80_0000,
             battery_alerts: Default::default(),
             menus: std::collections::HashMap::new(),
             menu_items: std::collections::HashMap::new(),

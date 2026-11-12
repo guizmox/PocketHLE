@@ -434,6 +434,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "feof", crt_feof);
     d.register_handler(dll, "ferror", crt_ferror);
     d.register_handler(dll, "fflush", crt_fflush);
+    d.register_handler(dll, "setvbuf", crt_setvbuf);
     d.register_handler(dll, "_fcloseall", crt_fcloseall);
     // CeGCC's C runtime startup (`crt3.c`) calls `_fpreset` before it
     // reaches `main`; MSVC-built images never do.
@@ -636,6 +637,12 @@ pub fn register(d: &mut WinCeDispatcher) {
         "RequestPowerNotifications",
         request_power_notifications,
     );
+    d.register_handler(
+        dll,
+        "RequestDeviceNotifications",
+        request_device_notifications,
+    );
+    d.register_handler(dll, "StopDeviceNotifications", stop_device_notifications);
     d.register_handler(dll, "StopPowerNotifications", stop_power_notifications);
     d.register_handler(dll, "GetSystemPowerState", get_system_power_state);
     d.register_handler(
@@ -680,6 +687,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "SendMessageW", send_message_w);
     d.register_handler(dll, "GetUpdateRect", get_update_rect);
     d.register_handler(dll, "InvalidateRect", invalidate_rect);
+    d.register_handler(dll, "RedrawWindow", redraw_window);
     d.register_handler(dll, "InvalidateRgn", invalidate_rgn);
     d.register_constant(dll, "ValidateRect", 1, one_returning);
     d.register_handler(dll, "GetSystemMetrics", get_system_metrics);
@@ -733,6 +741,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_constant(dll, "UnregisterFunc1", 0, zero_returning);
 
     // ---- GDI (real, framebuffer-backed) ----
+    d.register_handler(dll, "GetDoubleClickTime", get_double_click_time);
+    d.register_handler(dll, "MulDiv", mul_div);
     d.register_handler(dll, "GetDC", get_dc);
     d.register_handler(dll, "GetDCEx", get_dc_ex);
     // Same DC: this HLE has one screen surface and no non-client area to
@@ -9984,6 +9994,20 @@ fn crt_fpreset(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
+fn crt_setvbuf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let stream = ctx.arg_u32(0)?;
+    let mode = ctx.arg_u32(2)?;
+    // stdio writes already go straight to the VFS. Accept unbuffered
+    // mode for both the CE and desktop CRT constant spellings.
+    let valid = matches!(mode, 2 | 4)
+        && (std_file_label(stream).is_some() || ctx.kernel.vfs.is_open(stream));
+    Ok(DispatchOutcome::ReturnedR0(if valid {
+        0
+    } else {
+        u32::MAX
+    }))
+}
+
 fn crt_fflush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     let success = ctx.kernel.vfs.flush(h).is_ok();
@@ -12141,6 +12165,42 @@ fn write_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
+fn request_device_notifications(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let class = ctx.arg_u32(0)?;
+    let queue = ctx.arg_u32(1)?;
+    if !ctx.kernel.msg_queues.contains_key(&queue) {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if class != 0 && ctx.cpu.check_guest_access(class, 16, Prot::READ).is_err() {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let handle = ctx.kernel.next_device_notification;
+    if handle >= 0xda90_0000 || ctx.kernel.device_notification_queues.len() >= 1024 {
+        set_thread_error(ctx, 8);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    // The emulator exposes mounted filesystems through the VFS. Its device
+    // manager has no advertised PnP interfaces to enumerate or hotplug.
+    ctx.kernel.next_device_notification += 1;
+    ctx.kernel.device_notification_queues.insert(handle, queue);
+    Ok(DispatchOutcome::ReturnedR0(handle))
+}
+
+fn stop_device_notifications(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let stopped = ctx
+        .kernel
+        .device_notification_queues
+        .remove(&handle)
+        .is_some();
+    if !stopped {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+    }
+    Ok(DispatchOutcome::ReturnedR0(u32::from(stopped)))
+}
+
 /// Register a process-owned CE power-manager subscription. Spore Origins
 /// requires registration to succeed even when no power change has occurred.
 fn request_power_notifications(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -12219,6 +12279,9 @@ fn close_msg_queue(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     Ok(DispatchOutcome::ReturnedR0(
         if ctx.kernel.msg_queues.remove(&handle).is_some() {
             ctx.kernel.power_notifications.close_queue(handle);
+            ctx.kernel
+                .device_notification_queues
+                .retain(|_, queue| *queue != handle);
             1
         } else {
             0
@@ -16280,6 +16343,27 @@ fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
     ctx.kernel.gdi.pending_window_erases.insert(hwnd);
     dc
 }
+fn get_double_click_time(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    Ok(DispatchOutcome::ReturnedR0(500))
+}
+
+fn mul_div(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let product = i64::from(ctx.arg_u32(0)? as i32) * i64::from(ctx.arg_u32(1)? as i32);
+    let divisor = i64::from(ctx.arg_u32(2)? as i32);
+    if divisor == 0 {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    let magnitude = (product.abs() + divisor.abs() / 2) / divisor.abs();
+    let signed = if (product < 0) ^ (divisor < 0) {
+        -magnitude
+    } else {
+        magnitude
+    };
+    Ok(DispatchOutcome::ReturnedR0(
+        i32::try_from(signed).unwrap_or(-1) as u32,
+    ))
+}
+
 fn get_dc_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ctx.arg_u32(1)? == 0 && ctx.arg_u32(2)? == 0 {
         return get_dc(ctx);
@@ -19868,6 +19952,95 @@ fn queue_visible_window_paints(kernel: &mut KernelState, hwnd: u32) {
     }
 }
 
+fn redraw_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const INVALIDATE: u32 = 0x001;
+    const INTERNAL_PAINT: u32 = 0x002;
+    const ERASE: u32 = 0x004;
+    const VALIDATE: u32 = 0x008;
+    const NO_INTERNAL_PAINT: u32 = 0x010;
+    const NO_ERASE: u32 = 0x020;
+    const NO_CHILDREN: u32 = 0x040;
+    const ALL_CHILDREN: u32 = 0x080;
+
+    let hwnd = ctx.arg_u32(0)?;
+    let rect = ctx.arg_u32(1)?;
+    let region = ctx.arg_u32(2)?;
+    let flags = ctx.arg_u32(3)?;
+    if hwnd != 0 && !is_live_hwnd(hwnd) {
+        set_thread_error(ctx, 1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let empty = if region != 0 {
+        let Some(rects) = ctx.kernel.gdi.regions.get(&region) else {
+            set_thread_error(ctx, ERROR_INVALID_HANDLE);
+            return Ok(DispatchOutcome::ReturnedR0(0));
+        };
+        rects.is_empty()
+    } else if rect != 0 {
+        let bytes = match ctx.cpu.read_mem(rect, 16) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+                return Ok(DispatchOutcome::ReturnedR0(0));
+            }
+        };
+        let coordinate =
+            |index: usize| i32::from_le_bytes(bytes[index..index + 4].try_into().unwrap());
+        coordinate(0) >= coordinate(8) || coordinate(4) >= coordinate(12)
+    } else {
+        false
+    };
+    let mut windows: Vec<_> = if hwnd == 0 {
+        ctx.kernel
+            .window_procs
+            .keys()
+            .copied()
+            .filter(|window| {
+                flags & NO_CHILDREN == 0 || !ctx.kernel.window_parents.contains_key(window)
+            })
+            .collect()
+    } else {
+        vec![hwnd]
+    };
+    if hwnd != 0 && flags & (ALL_CHILDREN | NO_CHILDREN) == ALL_CHILDREN {
+        let mut index = 0;
+        while index < windows.len() {
+            let parent = windows[index];
+            for (&child, &owner) in &ctx.kernel.window_parents {
+                if owner == parent && !windows.contains(&child) {
+                    windows.push(child);
+                }
+            }
+            index += 1;
+        }
+    }
+    windows.sort_unstable();
+    for window in windows {
+        if flags & (VALIDATE | NO_INTERNAL_PAINT) != 0 && !empty {
+            cancel_generated_paint(ctx.kernel, window);
+        }
+        if flags & NO_ERASE != 0 {
+            ctx.kernel.gdi.pending_window_erases.remove(&window);
+            if window == FAKE_HWND {
+                ctx.kernel.window_background_erase_pending = false;
+            }
+        }
+        if (flags & INVALIDATE != 0 && !empty)
+            || flags & (INTERNAL_PAINT | NO_INTERNAL_PAINT) == INTERNAL_PAINT
+        {
+            // Use the existing full-client update queue, like UpdateWindow.
+            queue_window_paint(ctx.kernel, window);
+            if flags & (INVALIDATE | ERASE | NO_ERASE) == INVALIDATE | ERASE && !empty {
+                ctx.kernel.gdi.pending_window_erases.insert(window);
+                if window == FAKE_HWND {
+                    ctx.kernel.window_background_erase_pending = true;
+                }
+            }
+        }
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
 fn invalidate_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     queue_window_paint(ctx.kernel, hwnd);
@@ -22322,6 +22495,10 @@ fn tls_alloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn tls_free(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let slot = ctx.arg_u32(0)?;
+    free_tls_slot(ctx, slot)
+}
+
+fn free_tls_slot(ctx: &mut CallCtx<'_>, slot: u32) -> Result<DispatchOutcome, KernelError> {
     if slot >= TLS_SLOT_COUNT || ctx.kernel.tls_slots_used & (1u64 << slot) == 0 {
         set_thread_error(ctx, ERROR_INVALID_PARAMETER);
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -24728,8 +24905,20 @@ fn acquire_wait_signal(kernel: &mut KernelState, handle: u32) -> u32 {
     0
 }
 
-fn tls_call(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(0))
+fn tls_call(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // CE SDKs expose TlsAlloc and TlsFree as TlsCall macros. Share the
+    // slot bitmap and per-thread KData values with the named imports.
+    match ctx.arg_u32(0)? {
+        0 => tls_alloc(ctx),
+        1 => {
+            let slot = ctx.arg_u32(1)?;
+            free_tls_slot(ctx, slot)
+        }
+        _ => {
+            set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+            Ok(DispatchOutcome::ReturnedR0(0))
+        }
+    }
 }
 
 fn ce_set_thread_quantum(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -32573,6 +32762,8 @@ mod tests {
             msg_queues: std::collections::HashMap::new(),
             next_msg_queue_handle: 0xDEAD_E500,
             power_notifications: Default::default(),
+            device_notification_queues: Default::default(),
+            next_device_notification: 0xda80_0000,
             battery_alerts: Default::default(),
             menus: std::collections::HashMap::new(),
             menu_items: std::collections::HashMap::new(),
@@ -41606,6 +41797,29 @@ mod tests {
         )
         .unwrap();
         cpu
+    }
+
+    #[test]
+    fn tls_call_and_named_imports_share_slots() {
+        let mut cpu = tls_test_cpu();
+        let mut kernel = fresh_kernel();
+        let first = tls_test_call(&mut cpu, &mut kernel, tls_call, &[0, 0]);
+        let second = tls_test_call(&mut cpu, &mut kernel, tls_call, &[0, 0]);
+        assert_ne!(first, second);
+        tls_test_call(&mut cpu, &mut kernel, tls_set_value, &[first, 0x1234]);
+        assert_eq!(
+            tls_test_call(&mut cpu, &mut kernel, tls_get_value, &[second]),
+            0
+        );
+        assert_eq!(
+            tls_test_call(&mut cpu, &mut kernel, tls_call, &[1, first]),
+            1
+        );
+        assert_eq!(tls_test_call(&mut cpu, &mut kernel, tls_alloc, &[]), first);
+        assert_eq!(
+            tls_test_call(&mut cpu, &mut kernel, tls_get_value, &[first]),
+            0
+        );
     }
 
     #[test]

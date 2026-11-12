@@ -3776,3 +3776,29 @@ fn display_escape_queries_match_available_framebuffer_layouts() {
         SYNTHETIC_FRAMEBUFFER_BASE
     );
 }
+
+#[test]
+fn region_data_reports_required_size_and_serializes_rectangles() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let thunk = thunk_at(0x7000_0100);
+    let region = kernel
+        .gdi
+        .create_region(vec![[2, 3, 10, 12], [0, 18, 4, 20]]);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    let handler = super::window_graphics::get_region_data;
+    assert_eq!(call(&mut ctx, handler, &[region, 0, 0]), 64);
+    let output = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
+    ctx.cpu.write_mem(output, &[0xa5; 68]).unwrap();
+    assert_eq!(call(&mut ctx, handler, &[region, 63, output]), 64);
+    assert_eq!(ctx.cpu.read_mem(output, 68).unwrap(), [0xa5; 68]);
+    assert_eq!(call(&mut ctx, handler, &[region, 64, output]), 64);
+    let fields = [32u32, 1, 2, 32, 0, 3, 10, 20, 2, 3, 10, 12, 0, 18, 4, 20];
+    let expected: Vec<_> = fields.into_iter().flat_map(u32::to_le_bytes).collect();
+    assert_eq!(ctx.cpu.read_mem(output, 64).unwrap(), expected);
+    assert_eq!(ctx.cpu.read_mem(output + 64, 4).unwrap(), [0xa5; 4]);
+}

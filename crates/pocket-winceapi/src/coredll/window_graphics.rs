@@ -13,6 +13,7 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
         ("CreateRectRgnIndirect", create_region_indirect),
         ("SetRectRgn", set_region),
         ("GetRgnBox", get_region_box),
+        ("GetRegionData", get_region_data),
     ] {
         d.register_handler("coredll.dll", name, handler);
     }
@@ -265,6 +266,37 @@ pub(super) fn get_region_box(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     write_rect_value(ctx, out, r)?;
     ret(kind)
 }
+pub(super) fn get_region_data(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const HEADER_BYTES: u32 = 32;
+    const RECT_BYTES: u32 = 16;
+    let region = ctx.arg_u32(0)?;
+    let capacity = ctx.arg_u32(1)?;
+    let out = ctx.arg_u32(2)?;
+    let Some(rects) = ctx.kernel.gdi.regions.get(&region) else {
+        return fail(ctx, ERROR_INVALID_HANDLE);
+    };
+    let count = rects.len() as u32;
+    let payload_bytes = count * RECT_BYTES;
+    let size = HEADER_BYTES + payload_bytes;
+    if out == 0 || capacity < size {
+        return ret(size);
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    for field in [HEADER_BYTES, 1, count, payload_bytes] {
+        bytes.extend_from_slice(&field.to_le_bytes());
+    }
+    for rect in std::iter::once(bounds(rects)).chain(rects.iter().copied()) {
+        for coordinate in rect {
+            bytes.extend_from_slice(&coordinate.to_le_bytes());
+        }
+    }
+    if !vfs_probe_output(ctx, out, size) {
+        return fail(ctx, ERROR_INVALID_PARAMETER);
+    }
+    ctx.cpu.write_mem(out, &bytes)?;
+    ret(size)
+}
+
 fn scroll_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let dx = ctx.arg_u32(1)? as i32;

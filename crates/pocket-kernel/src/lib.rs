@@ -1635,6 +1635,9 @@ pub struct KernelState {
     pub msg_queues: HashMap<u32, MsgQueue>,
     pub next_msg_queue_handle: u32,
     pub power_notifications: power::Notifications,
+    /// Device-interface registrations, keyed by notification handle.
+    pub device_notification_queues: HashMap<u32, u32>,
+    pub next_device_notification: u32,
     pub battery_alerts: power::GizmondoAlerts,
     /// Per-menu table of `(item_id -> flags)`. We track the flags so
     /// that `CheckMenuItem`/`GetMenuState` round-trip the previously
@@ -2077,6 +2080,7 @@ impl KernelState {
         }
         self.legacy_winsock.startups = 0;
         self.notification_icons.clear();
+        self.device_notification_queues.clear();
         self.tls_slots_used = 0;
         self.thread_tls.clear();
         self.dll_notification_frame = None;
@@ -4587,6 +4591,8 @@ impl Process {
                 msg_queues: HashMap::new(),
                 next_msg_queue_handle: 0xDEAD_E500,
                 power_notifications: Default::default(),
+                device_notification_queues: Default::default(),
+                next_device_notification: 0xda80_0000,
                 battery_alerts: Default::default(),
                 menus: HashMap::new(),
                 menu_items: HashMap::new(),
