@@ -931,6 +931,10 @@ pub enum ScreenPref {
     Landscape,
     /// 176x220 — the small Smartphone panel.
     SmallPortrait,
+    /// 240x400 WQVGA Pocket PC display.
+    Wqvga,
+    /// 400x240 landscape WQVGA Pocket PC display.
+    WqvgaLandscape,
     /// 480x640 VGA Pocket PC display.
     Vga,
     /// 640x480 landscape VGA Pocket PC display.
@@ -999,6 +1003,8 @@ impl ScreenPref {
             ScreenPref::Qvga => "240x320 (QVGA portrait)",
             ScreenPref::Landscape => "320x240 (landscape)",
             ScreenPref::SmallPortrait => "176x220 (small)",
+            ScreenPref::Wqvga => "240x400 (WQVGA portrait)",
+            ScreenPref::WqvgaLandscape => "400x240 (WQVGA landscape)",
             ScreenPref::Vga => "480x640 (VGA portrait)",
             ScreenPref::VgaLandscape => "640x480 (VGA landscape)",
             ScreenPref::Wvga => "480x800 (WVGA portrait)",
@@ -1013,6 +1019,8 @@ impl ScreenPref {
             ScreenPref::Portrait | ScreenPref::Qvga => (240, 320),
             ScreenPref::Landscape => (320, 240),
             ScreenPref::SmallPortrait => (176, 220),
+            ScreenPref::Wqvga => (240, 400),
+            ScreenPref::WqvgaLandscape => (400, 240),
             ScreenPref::Vga => (480, 640),
             ScreenPref::VgaLandscape => (640, 480),
             ScreenPref::Wvga => (480, 800),
@@ -7007,6 +7015,8 @@ mod tests {
             ScreenPref::Landscape,
             ScreenPref::VgaLandscape,
             ScreenPref::Hpc,
+            ScreenPref::Wqvga,
+            ScreenPref::WqvgaLandscape,
             ScreenPref::Wvga,
             ScreenPref::WvgaLandscape,
         ] {
@@ -7015,6 +7025,19 @@ mod tests {
         image.sections[0].data[..2].copy_from_slice(&[0, 0]);
         assert_eq!(ScreenPref::Portrait.resolve_image(Some(&image)), (240, 320));
         assert_eq!(ScreenPref::Portrait.resolve_image(None), (240, 320));
+    }
+
+    #[test]
+    fn wqvga_screen_preferences_round_trip_with_native_dimensions() {
+        for (pref, name, size) in [
+            (ScreenPref::Wqvga, "wqvga", (240, 400)),
+            (ScreenPref::WqvgaLandscape, "wqvga_landscape", (400, 240)),
+        ] {
+            let json = serde_json::to_string(&pref).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<ScreenPref>(&json).unwrap(), pref);
+            assert_eq!(pref.size(), size);
+        }
     }
 
     #[test]

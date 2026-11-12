@@ -40,6 +40,8 @@
         <item>240x320 (QVGA portrait)</item>
         <item>320x240 (landscape)</item>
         <item>176x220 (small)</item>
+        <item>240x400 (WQVGA portrait)</item>
+        <item>400x240 (WQVGA landscape)</item>
         <item>480x640 (VGA portrait)</item>
         <item>640x480 (VGA landscape)</item>
         <item>480x800 (WVGA portrait)</item>
@@ -50,6 +52,8 @@
         <item>qvga</item>
         <item>landscape</item>
         <item>small_portrait</item>
+        <item>wqvga</item>
+        <item>wqvga_landscape</item>
         <item>vga</item>
         <item>vga_landscape</item>
         <item>wvga</item>

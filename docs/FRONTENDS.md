@@ -38,8 +38,9 @@ diagnostics and miscellaneous settings.
 Per-game Graphics settings list **Screen**, **Rotate display**, then **Frame rate
 limit**, with an explanation under each option on desktop and Android (Screen
 remains hidden for Gizmondo on Android). Screen changes the dimensions reported
-to the game and applies at the next launch; rotation turns the presented image
-and adapts touch/directional input without changing those dimensions. These
+to the game and applies at the next launch. WQVGA is available as 240x400
+portrait or 400x240 landscape. Rotation turns the presented image and
+adapts touch/directional input without changing those dimensions. These
 settings are independent. Frame-limit inheritance and its existing help remain
 unchanged.
 

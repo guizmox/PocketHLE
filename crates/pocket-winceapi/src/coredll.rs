@@ -646,6 +646,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "StopPowerNotifications", stop_power_notifications);
     d.register_handler(dll, "GetSystemPowerState", get_system_power_state);
     d.register_handler(dll, "SetSystemPowerState", set_system_power_state);
+    d.register_handler(dll, "PowerPolicyNotify", power_policy_notify);
     d.register_handler(
         dll,
         "MsgWaitForMultipleObjectsEx",
@@ -12285,6 +12286,25 @@ fn set_system_power_state(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     } else {
         ERROR_NOT_SUPPORTED
     }))
+}
+
+/// BOOL PowerPolicyNotify(DWORD dwMessage, DWORD dwData).
+fn power_policy_notify(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const PPN_UNATTENDEDMODE: u32 = 3;
+    if ctx.arg_u32(0)? != PPN_UNATTENDEDMODE {
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+
+    let enable = ctx.arg_u32(1)? != 0;
+    let accepted = ctx
+        .kernel
+        .power_notifications
+        .request_unattended_mode(enable);
+    if !accepted {
+        set_thread_error(ctx, 8); // ERROR_NOT_ENOUGH_MEMORY
+    }
+    Ok(DispatchOutcome::ReturnedR0(u32::from(accepted)))
 }
 
 fn get_msg_queue_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -44060,6 +44080,31 @@ mod power_requirement_api_tests {
                 DispatchOutcome::ReturnedR0(expected)
             );
         }
+    }
+
+    #[test]
+    fn power_policy_accepts_unattended_mode_and_rejects_unknown_notifications() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        for (args, expected) in [
+            ([3, 1], 1),
+            ([3, 1], 1),
+            ([3, 0], 1),
+            ([3, 0], 1),
+            ([u32::MAX, 0], 0),
+        ] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "PowerPolicyNotify",
+                    &args,
+                ),
+                DispatchOutcome::ReturnedR0(expected)
+            );
+        }
+        assert_eq!(kernel.thread_last_errors[&kernel.current_thread], 50);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Host battery projection. No timers, device handles or subscriptions.
+//! Host battery projection and guest power-manager state.
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -213,6 +213,7 @@ pub struct Notifications {
     next: u32,
     /// Guest device constraints; independent of notification subscriptions.
     pub requirements: Requirements,
+    unattended_requests: u32,
 }
 struct Subscription {
     queue: u32,
@@ -221,6 +222,20 @@ struct Subscription {
     ac: u8,
 }
 impl Notifications {
+    /// Track balanced unattended-mode requests within the guest process.
+    /// The emulated system stays active and has no automatic suspend timer.
+    pub fn request_unattended_mode(&mut self, enable: bool) -> bool {
+        if enable {
+            let Some(count) = self.unattended_requests.checked_add(1) else {
+                return false;
+            };
+            self.unattended_requests = count;
+        } else {
+            self.unattended_requests = self.unattended_requests.saturating_sub(1);
+        }
+        true
+    }
+
     pub fn register(&mut self, queue: u32, flags: u32, current: Status) -> Result<u32, u32> {
         // Bound registrations and never recycle handles during this process.
         if self.subscriptions.len() >= 1024 {

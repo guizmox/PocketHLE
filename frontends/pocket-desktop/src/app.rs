@@ -3108,6 +3108,8 @@ impl PocketLauncher {
                                 ScreenPref::Qvga,
                                 ScreenPref::Landscape,
                                 ScreenPref::SmallPortrait,
+                                ScreenPref::Wqvga,
+                                ScreenPref::WqvgaLandscape,
                                 ScreenPref::Vga,
                                 ScreenPref::VgaLandscape,
                                 ScreenPref::Wvga,
