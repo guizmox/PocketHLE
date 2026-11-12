@@ -770,6 +770,7 @@ mod tests {
             ResourceEntry {
                 ty: ResourceKey::Name("WAVE".into()),
                 name: ResourceKey::Id(7),
+                native_leaves: Vec::new(),
                 data_rva: 0x800,
                 size: wave.len() as u32,
                 codepage: 0,
@@ -777,6 +778,7 @@ mod tests {
             ResourceEntry {
                 ty: ResourceKey::Name("PTMOD".into()),
                 name: ResourceKey::Id(7),
+                native_leaves: Vec::new(),
                 data_rva: 0x1000,
                 size: module.len() as u32,
                 codepage: 0,
@@ -850,12 +852,14 @@ mod tests {
             handle: 0x3000,
             name: "audio-fixture.dll".into(),
             base: 0x3000,
+            guest_path: String::new(),
             image_size: 0x1000,
             image_entry: 0,
             refcount: 1,
             resources: vec![ResourceEntry {
                 ty: ResourceKey::Name("WAVE".into()),
                 name: ResourceKey::Id(7),
+                native_leaves: Vec::new(),
                 data_rva: 0x100,
                 size: wave.len() as u32,
                 codepage: 0,

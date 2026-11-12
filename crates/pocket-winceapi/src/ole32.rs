@@ -57,6 +57,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "CoInitializeEx", s_ok);
     d.register_handler(dll, "CoUninitialize", void_returning);
     d.register_handler(dll, "CoCreateGuid", co_create_guid);
+    d.register_handler(dll, "StringFromGUID2", string_from_guid2);
     d.register_handler(dll, "OleInitialize", s_ok);
     d.register_handler(dll, "OleUninitialize", void_returning);
     d.register_handler(dll, "CoCreateInstance", co_create_instance);
@@ -261,6 +262,49 @@ fn co_task_mem_realloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     }
     ctx.kernel.heap.free(p);
     Ok(DispatchOutcome::ReturnedR0(new_p))
+}
+
+fn string_from_guid2(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // 38 characters including braces, plus the terminator.
+    const LENGTH: u32 = 39;
+    let guid = ctx.arg_u32(0)?;
+    let out = ctx.arg_u32(1)?;
+    if guid == 0
+        || out == 0
+        || (ctx.arg_u32(2)? as i32) < LENGTH as i32
+        || ctx
+            .cpu
+            .check_guest_access(guid, 16, pocket_cpu::Prot::READ)
+            .is_err()
+        || ctx
+            .cpu
+            .check_guest_access(out, LENGTH * 2, pocket_cpu::Prot::WRITE)
+            .is_err()
+    {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let bytes = ctx.cpu.read_mem(guid, 16)?;
+    let text = format!(
+        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+        u16::from_le_bytes(bytes[4..6].try_into().unwrap()),
+        u16::from_le_bytes(bytes[6..8].try_into().unwrap()),
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    );
+    let encoded: Vec<_> = text
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    ctx.cpu.write_mem(out, &encoded)?;
+    Ok(DispatchOutcome::ReturnedR0(LENGTH))
 }
 
 fn co_create_guid(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {

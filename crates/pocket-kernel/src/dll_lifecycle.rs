@@ -162,7 +162,9 @@ impl KernelState {
         let mut pending: Vec<_> = self
             .modules
             .iter()
-            .filter(|module| module.refcount != 0)
+            .filter(|module| {
+                module.refcount != 0 || self.static_module_roots.contains(&module.base)
+            })
             .map(|module| module.base)
             .collect();
         while let Some(base) = pending.pop() {
@@ -196,6 +198,7 @@ impl KernelState {
             self.modules[index].resident_regions.pop();
         }
         let satellites = self.modules.remove(index).satellites;
+        self.static_module_roots.retain(|&root| root != base);
         for satellite in satellites {
             if let Some(module) = self
                 .modules

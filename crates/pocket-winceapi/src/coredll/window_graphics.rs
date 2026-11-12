@@ -8,6 +8,7 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
         ("GetClassLongW", get_class_long),
         ("ScrollWindowEx", scroll_window_ex),
         ("ScrollWindow", scroll_window),
+        ("ScrollDC", scroll_dc),
         ("CreateRectRgn", create_region),
         ("CreateRectRgnIndirect", create_region_indirect),
         ("SetRectRgn", set_region),
@@ -284,6 +285,21 @@ pub(super) fn scroll_window_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome,
     let flags = ctx.arg_u32(7)?;
     ret(scroll(ctx, hwnd, dx, dy, source, clip, region, out, flags)?)
 }
+fn scroll_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let dc = ctx.arg_u32(0)?;
+    let dx = ctx.arg_u32(1)? as i32;
+    let dy = ctx.arg_u32(2)? as i32;
+    let source = ctx.arg_u32(3)?;
+    let clip = ctx.arg_u32(4)?;
+    let region = ctx.arg_u32(5)?;
+    let out = ctx.arg_u32(6)?;
+    let Some(_) = scroll_dc_pixels(ctx, dc, dx, dy, source, clip, region, out)? else {
+        return ret(0);
+    };
+    sync_dst_dib_to_guest(ctx, dc)?;
+    ret(1)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scroll(
     ctx: &mut CallCtx<'_>,
@@ -304,58 +320,11 @@ fn scroll(
         set_thread_error(ctx, 1400);
         return Ok(0);
     }
-    if region != 0 && !ctx.kernel.gdi.regions.contains_key(&region) {
-        set_thread_error(ctx, 6);
-        return Ok(0);
-    }
-    if out != 0 {
-        ctx.cpu.read_mem(out, 16)?;
-    }
     let dc = window_dc(ctx, hwnd);
-    sync_dib_from_guest(ctx, dc)?;
-    let (w, h) = surface_for_dc(ctx.kernel, dc).unwrap().dimensions();
-    let client = [0, 0, w as i32, h as i32];
-    let source = intersection(read_rect_or(ctx, source, client)?, client);
-    let clip = intersection(read_rect_or(ctx, clip, client)?, client);
-    let shifted = [
-        source[0].saturating_add(dx),
-        source[1].saturating_add(dy),
-        source[2].saturating_add(dx),
-        source[3].saturating_add(dy),
-    ];
-    let dest = intersection(shifted, clip);
-    let exposed = subtract(intersection(source, clip), dest);
-    if dx != 0 || dy != 0 {
-        let mut surf = surface_for_dc(ctx.kernel, dc).unwrap();
-        let before = surf.pixels().to_vec();
-        let mut changed = false;
-        for y in dest[1]..dest[3] {
-            for x in dest[0]..dest[2] {
-                let sx = i64::from(x) - i64::from(dx);
-                let sy = i64::from(y) - i64::from(dy);
-                if sx < i64::from(source[0])
-                    || sx >= i64::from(source[2])
-                    || sy < i64::from(source[1])
-                    || sy >= i64::from(source[3])
-                {
-                    continue;
-                }
-                let from = (sy as usize * w as usize + sx as usize) * 2;
-                let to = (y as usize * w as usize + x as usize) * 2;
-                if surf.pixels()[to..to + 2] != before[from..from + 2] {
-                    changed = true;
-                    surf.pixels_mut()[to..to + 2].copy_from_slice(&before[from..from + 2]);
-                }
-            }
-        }
-        if changed {
-            surf.mark_dirty();
-        }
-    }
-    if region != 0 {
-        *ctx.kernel.gdi.regions.get_mut(&region).unwrap() = exposed.clone();
-    }
-    write_rect_value(ctx, out, bounds(&exposed))?;
+    let Some((source, exposed)) = scroll_dc_pixels(ctx, dc, dx, dy, source, clip, region, out)?
+    else {
+        return Ok(0);
+    };
     if flags & 1 != 0 {
         let mut children: Vec<_> = ctx
             .kernel
@@ -425,6 +394,77 @@ fn scroll(
     sync_dst_dib_to_guest(ctx, dc)?;
     Ok(complexity(&exposed))
 }
+#[allow(clippy::too_many_arguments)]
+fn scroll_dc_pixels(
+    ctx: &mut CallCtx<'_>,
+    dc: u32,
+    dx: i32,
+    dy: i32,
+    source: u32,
+    clip: u32,
+    region: u32,
+    out: u32,
+) -> Result<Option<([i32; 4], Vec<[i32; 4]>)>, KernelError> {
+    if region != 0 && !ctx.kernel.gdi.regions.contains_key(&region) {
+        set_thread_error(ctx, 6);
+        return Ok(None);
+    }
+    if out != 0 && !vfs_probe_output(ctx, out, 16) {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(None);
+    }
+    sync_dib_from_guest(ctx, dc)?;
+    let Some(surface) = surface_for_dc(ctx.kernel, dc) else {
+        set_thread_error(ctx, ERROR_INVALID_HANDLE);
+        return Ok(None);
+    };
+    let (w, h) = surface.dimensions();
+    drop(surface);
+    let client = [0, 0, w as i32, h as i32];
+    let source = intersection(read_rect_or(ctx, source, client)?, client);
+    let clip = intersection(read_rect_or(ctx, clip, client)?, client);
+    let shifted = [
+        source[0].saturating_add(dx),
+        source[1].saturating_add(dy),
+        source[2].saturating_add(dx),
+        source[3].saturating_add(dy),
+    ];
+    let dest = intersection(shifted, clip);
+    let exposed = subtract(intersection(source, clip), dest);
+    if (dx != 0 || dy != 0) && dest != [0; 4] {
+        let mut surf = surface_for_dc(ctx.kernel, dc).unwrap();
+        let before = surf.pixels().to_vec();
+        let mut changed = false;
+        for y in dest[1]..dest[3] {
+            for x in dest[0]..dest[2] {
+                let sx = i64::from(x) - i64::from(dx);
+                let sy = i64::from(y) - i64::from(dy);
+                if sx < i64::from(source[0])
+                    || sx >= i64::from(source[2])
+                    || sy < i64::from(source[1])
+                    || sy >= i64::from(source[3])
+                {
+                    continue;
+                }
+                let from = (sy as usize * w as usize + sx as usize) * 2;
+                let to = (y as usize * w as usize + x as usize) * 2;
+                if surf.pixels()[to..to + 2] != before[from..from + 2] {
+                    changed = true;
+                    surf.pixels_mut()[to..to + 2].copy_from_slice(&before[from..from + 2]);
+                }
+            }
+        }
+        if changed {
+            surf.mark_dirty();
+        }
+    }
+    if region != 0 {
+        *ctx.kernel.gdi.regions.get_mut(&region).unwrap() = exposed.clone();
+    }
+    write_rect_value(ctx, out, bounds(&exposed))?;
+    Ok(Some((source, exposed)))
+}
+
 /// Apply deferred class-brush erasure only to newly exposed pixels.
 pub(super) fn erase_scroll_region(
     ctx: &mut CallCtx<'_>,

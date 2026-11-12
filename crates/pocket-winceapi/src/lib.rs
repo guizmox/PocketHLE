@@ -236,6 +236,8 @@ pub trait UnimplementedApiSink: Send {
     fn record(&mut self, call: UnimplementedApiCall<'_>);
 }
 
+type CallFilter = fn(&mut CallCtx<'_>, &str) -> Result<bool, KernelError>;
+
 /// Top-level dispatcher that owns per-DLL handler tables.
 pub struct WinCeDispatcher {
     /// Key is `(dll_lowercased, friendly_name)`.
@@ -259,6 +261,7 @@ pub struct WinCeDispatcher {
     /// If `true`, an unimplemented call halts the emulator instead of
     /// returning 0. Useful for the Linux CLI tracing run.
     pub halt_on_unimplemented: bool,
+    call_filter: Option<CallFilter>,
     /// Optional JSON-lines sink. One record per dispatched call.
     trace_sink: Option<Box<dyn Write + Send>>,
     unimplemented_sink: Option<Box<dyn UnimplementedApiSink>>,
@@ -285,6 +288,7 @@ impl WinCeDispatcher {
             by_name_constant: HashMap::new(),
             by_thunk_va: HashMap::new(),
             halt_on_unimplemented: false,
+            call_filter: None,
             trace_sink: None,
             unimplemented_sink: None,
             dependency_notice: None,
@@ -334,6 +338,11 @@ impl WinCeDispatcher {
             }
         }
         d
+    }
+
+    /// Limit API calls in an isolated setup process.
+    pub fn set_call_filter(&mut self, filter: CallFilter) {
+        self.call_filter = Some(filter);
     }
 
     /// Only frontends launching PocketPC games enable user-facing diagnostics.
@@ -533,6 +542,22 @@ impl Dispatcher for WinCeDispatcher {
         names
     }
 
+    fn attach_static_imports(
+        &mut self,
+        cpu: &mut dyn Cpu,
+        kernel: &mut KernelState,
+    ) -> Result<Option<u32>, KernelError> {
+        coredll::attach_static_imports(cpu, kernel, false)
+    }
+
+    fn continue_static_attach(
+        &mut self,
+        cpu: &mut dyn Cpu,
+        kernel: &mut KernelState,
+    ) -> Result<Option<u32>, KernelError> {
+        coredll::attach_static_imports(cpu, kernel, true)
+    }
+
     fn dispatch(
         &mut self,
         cpu: &mut dyn Cpu,
@@ -569,6 +594,15 @@ impl Dispatcher for WinCeDispatcher {
             thunk
         };
         let programmable_handler = gles2::handler(thunk);
+        if let Some(filter) = self.call_filter {
+            let name = import_name(thunk);
+            if !filter(&mut CallCtx { cpu, thunk, kernel }, &name)? {
+                return Err(KernelError::Dispatch(format!(
+                    "CAB setup cannot call {}!{name}",
+                    thunk.dll
+                )));
+            }
+        }
         let handler_opt = if programmable_handler.is_some() {
             programmable_handler
         } else if coredll::native_import_preferred(kernel, thunk) {

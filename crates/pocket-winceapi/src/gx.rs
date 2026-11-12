@@ -133,6 +133,13 @@ pub(crate) fn ensure_fb_mapped(ctx: &mut CallCtx<'_>) -> Result<(), KernelError>
             )?;
         }
     }
+    ctx.kernel.gx_readback_scratch.clone_from(
+        &ctx.kernel
+            .framebuffer
+            .cpu()
+            .map_err(KernelError::Dispatch)?
+            .pixels,
+    );
     ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     ctx.kernel.fb_mapped = true;
     Ok(())
@@ -251,6 +258,13 @@ fn gx_begin_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
                 )?;
             }
         }
+        ctx.kernel.gx_readback_scratch.clone_from(
+            &ctx.kernel
+                .framebuffer
+                .cpu()
+                .map_err(KernelError::Dispatch)?
+                .pixels,
+        );
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
     }
     ctx.kernel.gx_draw_active = true;
@@ -564,6 +578,7 @@ pub(crate) mod tests {
             gles_local_ordinals: std::collections::HashMap::new(),
             runtime_thunks: std::collections::HashMap::new(),
             module_attach_frames: Vec::new(),
+            static_module_roots: Vec::new(),
             dll_notification_frame: None,
             next_module_handle: 0x1000_0001,
             modules: Vec::new(),
@@ -574,6 +589,7 @@ pub(crate) mod tests {
             guest_fb_pitch: 0,
             direct_fb_frames: 0,
             gx_readback_scratch: Vec::new(),
+            gx_previous_readback: Vec::new(),
             gx_layout_scratch: Vec::new(),
             gapi_column_major: false,
             mem_op_scratch: Vec::new(),
@@ -655,6 +671,7 @@ pub(crate) mod tests {
             notification_icons: Default::default(),
             winsock_last_errors: Default::default(),
             crt_new_handler: 0,
+            crt_new_mode: 0,
             cpp_new_handler: 0,
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),

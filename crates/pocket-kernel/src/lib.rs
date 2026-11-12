@@ -121,6 +121,7 @@ pub const DEFAULT_STACK_TOP: u32 = 0x6000_0000;
 /// have to make the address space at least valid. We map a 64 KiB
 /// page filled with `bx lr` so any such jump returns harmlessly.
 pub const KERNEL_TRAP_BASE: u32 = 0xF000_0000;
+pub const STATIC_DLL_ATTACH_RETURN_VA: u32 = KERNEL_TRAP_BASE + 12;
 pub const KERNEL_TRAP_SIZE: u32 = 0x0001_0000;
 // CE implicit-call ABI: FIRST_METHOD - ((api_set << 8) | method) * 4.
 const CE_FIRST_METHOD: u32 = 0xF001_0000;
@@ -1008,6 +1009,23 @@ pub trait Dispatcher {
         kernel: &mut KernelState,
     ) -> Result<DispatchOutcome, KernelError>;
 
+    /// Bind native data imports and schedule their process-attach callbacks.
+    fn attach_static_imports(
+        &mut self,
+        _cpu: &mut dyn Cpu,
+        _kernel: &mut KernelState,
+    ) -> Result<Option<u32>, KernelError> {
+        Ok(None)
+    }
+
+    fn continue_static_attach(
+        &mut self,
+        _cpu: &mut dyn Cpu,
+        _kernel: &mut KernelState,
+    ) -> Result<Option<u32>, KernelError> {
+        Ok(None)
+    }
+
     /// If this thunk is bound to a pure constant-return stub (i.e.
     /// the handler reads no arguments and returns a fixed `u32` in
     /// `r0`), return that constant so the kernel can patch the
@@ -1062,6 +1080,8 @@ pub struct LoadedModule {
     pub handle: u32,
     /// Lower-cased file name, no directory (`pegcards.dll`).
     pub name: String,
+    /// Installed WinCE path of this module.
+    pub guest_path: String,
     /// Address the image was mapped at.
     pub base: u32,
     /// PE SizeOfImage copied from the loaded module header.
@@ -1183,6 +1203,8 @@ pub struct KernelState {
     pub gles_local_ordinals: HashMap<String, HashMap<u16, String>>,
     pub runtime_thunks: HashMap<u32, Thunk>,
     pub module_attach_frames: Vec<ModuleAttachFrame>,
+    /// Native modules referenced directly by the main image IAT.
+    pub static_module_roots: Vec<u32>,
     pub dll_notification_frame: Option<dll_lifecycle::DllNotificationFrame>,
     pub next_module_handle: u32,
     /// DLLs the guest brought in at runtime via `LoadLibraryW`, in load
@@ -1219,6 +1241,8 @@ pub struct KernelState {
     /// allocation per `GXEndDraw` (which can fire 60+ times a
     /// second).
     pub gx_readback_scratch: Vec<u8>,
+    /// Previous raw guest image while the polling buffer is refreshed.
+    pub gx_previous_readback: Vec<u8>,
     /// Raw column-major GAPI display memory for legacy PocketPC panels.
     pub gx_layout_scratch: Vec<u8>,
     /// Physical GAPI panel layout; false preserves the linear display profile.
@@ -1484,6 +1508,7 @@ pub struct KernelState {
     pub notification_icons: HashMap<(u32, u32), desktop_services::NotificationIcon>,
     pub winsock_last_errors: HashMap<usize, u32>,
     pub crt_new_handler: u32,
+    pub crt_new_mode: u32,
     pub cpp_new_handler: u32,
     /// Next worker index to consider at a cooperative scheduling point.
     pub worker_schedule_cursor: usize,
@@ -3762,6 +3787,8 @@ pub const GLES_CL_MODULE_HANDLE: u32 = 0x1000_0005;
 /// Standalone EGL library; shares the client libraries' EGL implementation.
 pub const EGL_MODULE_HANDLE: u32 = 0x1000_000d;
 pub const HTCSENSOR_MODULE_HANDLE: u32 = 0x1000_000e;
+/// Fake HMODULE for the resident DirectDraw compatibility module.
+pub const DDRAW_MODULE_HANDLE: u32 = 0x1000_0003;
 /// Fake `HMODULE` for the Hekkus Sound System compatibility layer.
 pub const HSS_MODULE_HANDLE: u32 = 0x1000_0006;
 /// Fake HMODULE for the resident `aygshell.dll` compatibility module.
@@ -3872,7 +3899,7 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
         exports.insert(0x1000_0000, coredll);
     }
     if !ddraw.is_empty() {
-        exports.insert(0x1000_0003, ddraw);
+        exports.insert(DDRAW_MODULE_HANDLE, ddraw);
     }
     if !commctrl.is_empty() {
         exports.insert(0x1000_0002, commctrl);
@@ -4422,6 +4449,7 @@ impl Process {
                 gles_local_ordinals: HashMap::new(),
                 runtime_thunks: HashMap::new(),
                 module_attach_frames: Vec::new(),
+                static_module_roots: Vec::new(),
                 dll_notification_frame: None,
                 next_module_handle: 0x1000_0001,
                 modules: Vec::new(),
@@ -4432,6 +4460,7 @@ impl Process {
                 guest_fb_pitch: 0,
                 direct_fb_frames: 0,
                 gx_readback_scratch: Vec::new(),
+                gx_previous_readback: Vec::new(),
                 gx_layout_scratch: Vec::new(),
                 gapi_column_major: false,
                 mem_op_scratch: Vec::new(),
@@ -4521,6 +4550,7 @@ impl Process {
                 notification_icons: HashMap::new(),
                 winsock_last_errors: HashMap::new(),
                 crt_new_handler: 0,
+                crt_new_mode: 0,
                 cpp_new_handler: 0,
                 worker_schedule_cursor: 0,
                 worker_round_seen: Vec::new(),
@@ -4657,10 +4687,23 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
     if !state.fb_mapped
         || state.gx_draw_active
         || !state.framebuffer.directdraw.primary_locks.is_empty()
-        || state.framebuffer.frame_counter != state.gx_last_pushed_counter
     {
         return;
     }
+    let host_changed = state.framebuffer.frame_counter != state.gx_last_pushed_counter;
+    if host_changed
+        && (state.gx_explicit_present
+            || state.framebuffer.gpu_source().is_some()
+            || state.gx_readback_scratch.is_empty())
+    {
+        return;
+    }
+    // A window repaint can advance the host revision while a game keeps
+    // writing through a raw display pointer. Publish only fresh guest bytes.
+    std::mem::swap(
+        &mut state.gx_readback_scratch,
+        &mut state.gx_previous_readback,
+    );
     let pitch = state.guest_fb_pitch.max(state.framebuffer.stride_bytes()) as usize;
     let row_bytes = state.framebuffer.stride_bytes() as usize;
     let len = state.framebuffer.byte_size() as usize;
@@ -4673,6 +4716,10 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
             cpu.read_mem_into(SYNTHETIC_FRAMEBUFFER_BASE, &mut state.gx_layout_scratch)
         {
             log::warn!("unable to read column-major GAPI framebuffer: {error}");
+            std::mem::swap(
+                &mut state.gx_readback_scratch,
+                &mut state.gx_previous_readback,
+            );
             return;
         }
         gapi_copy_columns(
@@ -4687,6 +4734,10 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
             cpu.read_mem_into(SYNTHETIC_FRAMEBUFFER_BASE, &mut state.gx_readback_scratch)
         {
             log::warn!("unable to read the GAPI framebuffer: {error}");
+            std::mem::swap(
+                &mut state.gx_readback_scratch,
+                &mut state.gx_previous_readback,
+            );
             return;
         }
     } else {
@@ -4697,14 +4748,25 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
                 cpu.read_mem_into(src, &mut state.gx_readback_scratch[dst..dst + row_bytes])
             {
                 log::warn!("unable to read the GAPI framebuffer row: {error}");
+                std::mem::swap(
+                    &mut state.gx_readback_scratch,
+                    &mut state.gx_previous_readback,
+                );
                 return;
             }
         }
+    }
+    if host_changed && state.gx_readback_scratch == state.gx_previous_readback {
+        return;
     }
     let frame = match state.framebuffer.cpu() {
         Ok(frame) => frame,
         Err(error) => {
             log::error!("GAPI synchronization could not access GPU pixels: {error}");
+            std::mem::swap(
+                &mut state.gx_readback_scratch,
+                &mut state.gx_previous_readback,
+            );
             return;
         }
     };
@@ -4789,6 +4851,13 @@ pub fn run_main_loop_with_hook(
         pc,
         process.stack_top
     );
+    let main_entry = pc;
+    if cpu.arch() == pocket_cpu::Arch::Arm {
+        process.state.sync_thread_tls(cpu)?;
+        if let Some(entry) = dispatcher.attach_static_imports(cpu, &mut process.state)? {
+            pc = entry;
+        }
+    }
     let mut slice = 0u64;
     // Millisecond value already sitting in the tick page; see
     // [`native_thunks::refresh_tick_page`].
@@ -5021,6 +5090,12 @@ pub fn run_main_loop_with_hook(
                     // (pc=0x00000000) at the very end of execution.
                     if addr == PROCESS_EXIT_TRAMPOLINE_VA {
                         pc = addr;
+                        continue;
+                    }
+                    if addr == STATIC_DLL_ATTACH_RETURN_VA {
+                        pc = dispatcher
+                            .continue_static_attach(cpu, &mut process.state)?
+                            .unwrap_or(main_entry);
                         continue;
                     }
                     if addr == dll_lifecycle::DLL_NOTIFICATION_RETURN_VA {
@@ -5602,6 +5677,15 @@ mod tests {
         assert_eq!(
             &k.framebuffer.resident_cpu().unwrap().pixels[..2],
             &0x07e0u16.to_le_bytes()
+        );
+        // A subsequent raw guest write is fresh even while GDI owns the
+        // last displayed image.
+        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &0xf800u16.to_le_bytes())
+            .unwrap();
+        sync_guest_framebuffer(&mut cpu, k);
+        assert_eq!(
+            &k.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &0xf800u16.to_le_bytes()
         );
     }
 

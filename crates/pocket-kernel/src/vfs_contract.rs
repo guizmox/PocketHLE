@@ -921,6 +921,27 @@ impl Vfs {
         self.account_resize(h, old, size, &mut state);
         true
     }
+    /// Return the guest store name and CE volume attributes for a directory.
+    pub fn volume_info(&self, path: &str) -> Result<(String, u32), u32> {
+        let normalised = self.normalise_guest_path(path);
+        if normalised == "/" {
+            return Ok(("Object Store".into(), 8));
+        }
+        if self.attributes(path)? & 0x10 == 0 {
+            return Err(3);
+        }
+        let root = normalised
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or("");
+        let volume = format!("/{root}/vol:");
+        if let Some(mount) = self.volume_mount(&volume) {
+            return Ok((root.to_string(), u32::from(mount.read_only)));
+        }
+        Ok(("Object Store".into(), 8))
+    }
+
     pub fn disk_space(&self, path: &str) -> Result<(u64, u64), u32> {
         if self.is_ram_path(path) {
             if path != "\\" && path != "/" && self.list_dir(path).is_none() {

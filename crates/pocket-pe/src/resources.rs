@@ -26,8 +26,17 @@ pub struct ResourceEntry {
     pub name: ResourceKey,
     /// Resource virtual address relative to the image base.
     pub data_rva: u32,
+    /// All language leaves, which native resource walkers can address directly.
+    pub native_leaves: Vec<ResourceLeaf>,
     pub size: u32,
     pub codepage: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceLeaf {
+    pub directory_entry_rva: u32,
+    pub data_rva: u32,
+    pub size: u32,
 }
 
 /// Walk the resource directory and return one [`ResourceEntry`] per
@@ -55,9 +64,10 @@ pub fn collect_resources(bytes: &[u8], pe: &PE) -> Result<Vec<ResourceEntry>, Lo
         None => return Ok(out),
     };
 
-    let section_va = rsrc_section.virtual_address;
-    let section_off = rsrc_section.pointer_to_raw_data as usize;
-    let section_size = rsrc_section.size_of_raw_data.max(rsrc_section.virtual_size) as usize;
+    // Resource-directory offsets are relative to the directory root.
+    let root_offset = (dir.virtual_address - rsrc_section.virtual_address) as usize;
+    let section_off = rsrc_section.pointer_to_raw_data as usize + root_offset;
+    let section_size = (rsrc_section.size_of_raw_data as usize).saturating_sub(root_offset);
 
     let read = |off: usize, n: usize| -> Option<&[u8]> {
         let abs = section_off + off;
@@ -99,7 +109,7 @@ pub fn collect_resources(bytes: &[u8], pe: &PE) -> Result<Vec<ResourceEntry>, Lo
         let entries_abs = dir_abs + 16;
         for i in 0..total {
             let entry_abs = entries_abs + i * 8;
-            if entry_abs + 8 > bytes.len() {
+            if entry_abs + 8 > bytes.len() || entry_abs + 8 - section_off > section_size {
                 break;
             }
             let entry = &bytes[entry_abs..entry_abs + 8];
@@ -122,13 +132,12 @@ pub fn collect_resources(bytes: &[u8], pe: &PE) -> Result<Vec<ResourceEntry>, Lo
     };
 
     // Three-level walk: type -> name -> language -> data.
-    let root = dir.virtual_address - section_va;
     let mut type_entries: Vec<(u32, u32)> = Vec::new();
     parse_directory(
         section_off,
         section_size,
         bytes,
-        root,
+        0,
         &mut |name, is_dir, off| {
             if is_dir {
                 type_entries.push((name, off));
@@ -171,20 +180,32 @@ pub fn collect_resources(bytes: &[u8], pe: &PE) -> Result<Vec<ResourceEntry>, Lo
                     }
                 },
             );
-            if let Some(data_entry_off) = lang_entries.first() {
-                let abs = section_off + (*data_entry_off as usize);
-                if abs + 16 > bytes.len() {
+            let mut leaves = Vec::new();
+            let mut codepage = 0;
+            for offset in lang_entries {
+                let Some(data) = read(offset as usize, 16) else {
                     continue;
+                };
+                let Some(directory_entry_rva) = dir.virtual_address.checked_add(offset) else {
+                    continue;
+                };
+                if leaves.is_empty() {
+                    codepage = LittleEndian::read_u32(&data[8..12]);
                 }
-                let data_rva = LittleEndian::read_u32(&bytes[abs..abs + 4]);
-                let size = LittleEndian::read_u32(&bytes[abs + 4..abs + 8]);
-                let codepage = LittleEndian::read_u32(&bytes[abs + 8..abs + 12]);
+                leaves.push(ResourceLeaf {
+                    directory_entry_rva,
+                    data_rva: LittleEndian::read_u32(&data[..4]),
+                    size: LittleEndian::read_u32(&data[4..8]),
+                });
+            }
+            if let Some(first) = leaves.first() {
                 out.push(ResourceEntry {
                     ty: ty.clone(),
                     name,
-                    data_rva,
-                    size,
+                    data_rva: first.data_rva,
+                    size: first.size,
                     codepage,
+                    native_leaves: leaves,
                 });
             }
         }

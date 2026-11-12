@@ -202,6 +202,7 @@ mod dispatch_tests {
         k.resources.push(pocket_pe::resources::ResourceEntry {
             ty: ResourceKey::Id(9),
             name: ResourceKey::Id(101),
+            native_leaves: Vec::new(),
             data_rva: 0x200,
             size: 8,
             codepage: 0,

@@ -24,6 +24,7 @@ fn entry(ty: u32, id: u32, address: u32, raw: &[u8]) -> ResourceEntry {
     ResourceEntry {
         ty: ResourceKey::Id(ty),
         name: ResourceKey::Id(id),
+        native_leaves: Vec::new(),
         data_rva: address,
         size: raw.len() as u32,
         codepage: 0,

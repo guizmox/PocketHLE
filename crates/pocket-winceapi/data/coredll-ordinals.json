@@ -1683,6 +1683,7 @@
     "1875": "__security_gen_cookie",
     "1876": "__report_gsfailure",
     "_wm5_1967_comment": "Inferred from WM5 ostream sentry cleanup: a no-argument call guards unitbuf synchronization during exception unwinding.",
-    "1967": "uncaught_exception"
+    "1967": "uncaught_exception",
+    "1978": "CeGetVolumeInfo"
   }
 }

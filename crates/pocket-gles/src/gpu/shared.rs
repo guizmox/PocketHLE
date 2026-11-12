@@ -407,16 +407,7 @@ impl FramePool {
             slot.width = width;
             slot.height = height;
         }
-        (self.copy)(
-            GL_TEXTURE_2D,
-            0,
-            0,
-            0,
-            0,
-            0,
-            width as i32,
-            height as i32,
-        );
+        (self.copy)(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width as i32, height as i32);
         s.ready = self.sync.publish(gl.Flush);
         let result = check_native_error(gl);
         s.poisoned = result.is_err() || s.ready == 0;

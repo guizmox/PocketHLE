@@ -87,7 +87,10 @@ mod tests {
             api!("HTCSensorGetDataOutput", &[handle, 0x1100]),
             DispatchOutcome::ReturnedR0(0)
         );
-        assert_eq!(cpu.read_mem(0x1100, 6).unwrap(), [0xf4, 0x01, 0x18, 0xfc, 0, 0]);
+        assert_eq!(
+            cpu.read_mem(0x1100, 6).unwrap(),
+            [0xf4, 0x01, 0x18, 0xfc, 0, 0]
+        );
         assert_eq!(
             api!("HTCSensorGetDataOutput", &[handle, 0x4ff8]),
             DispatchOutcome::ReturnedR0(87)

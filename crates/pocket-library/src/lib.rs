@@ -4280,7 +4280,10 @@ fn apply_import_gpu_default(entry: &mut GameEntry, game_dir: &Path) {
         return;
     };
     let imports = |driver: &str| {
-        image.imports.iter().any(|import| import.dll.eq_ignore_ascii_case(driver))
+        image
+            .imports
+            .iter()
+            .any(|import| import.dll.eq_ignore_ascii_case(driver))
     };
     if imports("libglesv2.dll") {
         entry.settings.gpu_compatibility_profile = GpuCompatibilityProfile::Adreno200;
@@ -6901,6 +6904,7 @@ mod tests {
         let resource = ResourceEntry {
             ty: ResourceKey::Name("CEUX".into()),
             name: ResourceKey::Name("HI_RES_AWARE".into()),
+            native_leaves: Vec::new(),
             data_rva: image.sections[0].virtual_address,
             size: 2,
             codepage: 0,

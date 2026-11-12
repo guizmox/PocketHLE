@@ -196,8 +196,8 @@ often ships one executable per 3D chip and leaves the choice to a setup
 DLL that runs at install time. Call of Duty 2's `SETUPDLL.999` probes
 `Software\NVIDIA Corporation\GFSDK` and `\Windows\wmv9decoder2700g.dll`,
 then renames `cod2_goforce.exe` or `cod2_gles.exe` over the `cod2.exe`
-its shortcut points at. PocketHLE runs no install-time DLLs, so following
-the shortcut lands on the software renderer — a correct run at 13.7 fps
+its shortcut points at. The isolated CAB registry setup cannot rename files,
+so following the shortcut lands on the software renderer — a correct run at 13.7 fps
 where the GoForce build does 39.1 fps on the same scenario, with the
 whole GL ES layer sitting unused.
 `pocket_library::accelerated_renderer_build` makes the choice the setup
@@ -210,6 +210,11 @@ behind the recorded `guest_exe_path`, so `GetModuleFileNameW` still
 answers `\Program Files\COD2\cod2.exe`. Pinned by
 `a_cabinet_that_ships_a_hardware_renderer_build_launches_it` and
 `the_driver_the_cabinet_ships_decides_between_two_hardware_builds`.
+
+CAB registry setup can execute ARM and Thumb callbacks with a staged registry
+and read-only package files. Check the dispatched API, since an installer can
+import functions it never invokes. Commit registry changes only after the
+callbacks complete successfully.
 
 `Process::map_into` (`crates/pocket-kernel/src/lib.rs:1453`) is the whole
 load path. In order:
@@ -909,14 +914,16 @@ imports bind directly to relocated guest exports, by name or ordinal. Resolve
 new dependencies beside the importing DLL first (case-insensitive filename),
 then through the existing module search. Publish exports before traversing
 imports so cycles bind without allocating duplicate copies. Native forwarder
-exports remain rejected by prepare_runtime_module; static EXE import loading
-is not added by this runtime loader. Image page commitment follows §19.
+exports remain rejected by prepare_runtime_module. Image page commitment follows §19.
+ARM EXEs with imports into supplied native DLL data sections use the same
+loader before entry. Bind their IAT slots and complete PROCESS_ATTACH before
+executing the EXE. Native function-only imports retain lazy dispatch.
 
 LoadedModule.dependencies stores unique native import edges. Its refcount
 counts explicit LoadLibrary references, not imported edges. A dependency first
 loaded by an import starts with zero explicit references. A cached explicit
 LoadLibrary adds one, even when the module originally came from an import.
-FreeLibrary collects modules unreachable from remaining explicit roots;
+FreeLibrary collects modules unreachable from remaining explicit or main-image roots;
 cycles are therefore reclaimed together without leaking reference counts.
 Resource satellites retain their existing owner-reference contract.
 

@@ -917,6 +917,41 @@ impl Vfs {
             .collect()
     }
 
+    /// Prefer the guest spelling used to load a file, or locate it in a
+    /// mounted directory when the loader found it through a search path.
+    pub fn guest_path_for_file(&self, request: &str, host: &Path) -> String {
+        let requested = self.absolute(request);
+        let host = host.canonicalize().unwrap_or_else(|_| host.to_path_buf());
+        let resolves_to_file = |path: &str| {
+            self.resolve(path)
+                .and_then(|file| file.canonicalize().ok())
+                .as_ref()
+                == Some(&host)
+        };
+        if resolves_to_file(&requested) {
+            return requested;
+        }
+        let leaf = host
+            .file_name()
+            .map(|name| self.absolute(&name.to_string_lossy()));
+        if let Some(leaf) = leaf.filter(|path| resolves_to_file(path)) {
+            return leaf;
+        }
+        self.mounts
+            .iter()
+            .find_map(|mount| {
+                let root = mount.host_dir.canonicalize().ok()?;
+                let relative = host.strip_prefix(root).ok()?;
+                let path = format!(
+                    "{}\\{}",
+                    mount.display_prefix.trim_end_matches(['/', '\\']),
+                    relative.to_string_lossy().replace('/', "\\")
+                );
+                resolves_to_file(&path).then_some(path)
+            })
+            .unwrap_or(requested)
+    }
+
     pub fn mounts_snapshot(&self) -> Vec<(String, PathBuf)> {
         self.mounts
             .iter()

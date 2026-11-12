@@ -1094,6 +1094,7 @@ mod resource_and_focus_tests {
         kernel.resources.push(ResourceEntry {
             ty: ResourceKey::Name("GIF".into()),
             name: ResourceKey::Id(106),
+            native_leaves: Vec::new(),
             data_rva: 0x1000,
             size: bytes.len() as u32,
             codepage: 0,
@@ -1143,6 +1144,7 @@ mod resource_and_focus_tests {
         kernel.resources.push(ResourceEntry {
             ty: ResourceKey::Id(2),
             name: ResourceKey::Id(7),
+            native_leaves: Vec::new(),
             data_rva: 0x1000,
             size: dib.len() as u32,
             codepage: 0,

@@ -149,6 +149,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "GetProcAddress", get_proc_address_a);
     d.register_handler(dll, "GetProcAddressA", get_proc_address_a);
     d.register_handler(dll, "LoadLibraryW", load_library_w);
+    d.register_handler(dll, "LoadLibraryExW", load_library_ex_w);
     crate::dc_state::register(d);
     crate::imgdecmp::register(d);
     d.register_handler(dll, "DecompressImageIndirect", crate::imgdecmp::decompress);
@@ -316,6 +317,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "CharUpperW", char_upper_w);
     d.register_handler(dll, "_wcsupr", char_upper_w);
     d.register_handler(dll, "CharLowerW", char_lower_w);
+    d.register_handler(dll, "CharLowerBuffW", char_lower_buff_w);
     d.register_handler(dll, "CharUpperA", char_upper_a);
     d.register_handler(dll, "CharLowerA", char_lower_a);
     d.register_handler(dll, "swprintf", swprintf);
@@ -377,6 +379,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "SetSystemMemoryDivision", set_system_memory_division);
     d.register_handler(dll, "GetStoreInformation", get_store_information);
     d.register_handler(dll, "GetDiskFreeSpaceExW", get_disk_free_space_ex_w);
+    d.register_handler(dll, "CeGetVolumeInfo", ce_get_volume_info);
     d.register_handler(dll, "#323", get_store_information);
     d.register_handler(dll, "DeviceIoControl", device_io_control);
     d.register_handler(dll, "SetFilePointer", set_file_pointer);
@@ -727,9 +730,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "KillTimer", kill_timer);
     d.register_handler(dll, "RegisterHotKey", register_hot_key);
     d.register_handler(dll, "UnregisterHotKey", unregister_hot_key);
+    d.register_constant(dll, "UnregisterFunc1", 0, zero_returning);
 
     // ---- GDI (real, framebuffer-backed) ----
     d.register_handler(dll, "GetDC", get_dc);
+    d.register_handler(dll, "GetDCEx", get_dc_ex);
     // Same DC: this HLE has one screen surface and no non-client area to
     // distinguish. An EGL/GL renderer asks for the window DC to build
     // its surface, and a NULL here reads as "no display" and aborts
@@ -1400,6 +1405,8 @@ pub fn register(d: &mut WinCeDispatcher) {
         crt_query_new_handler,
     );
     d.register_handler(dll, "_set_new_handler", crt_set_new_handler);
+    d.register_handler(dll, "_set_new_mode", crt_set_new_mode);
+    d.register_handler(dll, "?_set_new_mode@@YAHH@Z", crt_set_new_mode);
     d.register_handler(dll, "_query_new_handler", crt_query_new_handler);
 
     // ---- Clipboard (no-op) ----
@@ -4110,6 +4117,37 @@ fn get_store_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
+fn ce_get_volume_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const SIZE: u32 = 144;
+    let level = ctx.arg_u32(1)?;
+    let output = ctx.arg_u32(2)?;
+    if level != 0 || !vfs_probe_output(ctx, output, SIZE) || ctx.cpu.read_u32_le(output)? != SIZE {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let (name, attributes) =
+        match vfs_api_path(ctx, 0).and_then(|path| ctx.kernel.vfs.volume_info(&path)) {
+            Ok(info) => info,
+            Err(error) => {
+                set_thread_error(ctx, error);
+                return Ok(DispatchOutcome::ReturnedR0(0));
+            }
+        };
+    let mut info = [0; SIZE as usize];
+    info[..4].copy_from_slice(&SIZE.to_le_bytes());
+    info[4..8].copy_from_slice(&attributes.to_le_bytes());
+    info[12..16].copy_from_slice(&512u32.to_le_bytes());
+    for (unit, bytes) in name
+        .encode_utf16()
+        .take(31)
+        .zip(info[16..80].chunks_exact_mut(2))
+    {
+        bytes.copy_from_slice(&unit.to_le_bytes());
+    }
+    ctx.cpu.write_mem(output, &info)?;
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
 fn get_disk_free_space_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let ptr = ctx.arg_u32(0)?;
     let outputs = [ctx.arg_u32(1)?, ctx.arg_u32(2)?, ctx.arg_u32(3)?];
@@ -4601,6 +4639,8 @@ fn get_module_handle_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
         0x1000_0001
     } else if name == "commctrl.dll" || name == "commctrl" {
         0x1000_0002
+    } else if name == "ddraw.dll" || name == "ddraw" {
+        pocket_kernel::DDRAW_MODULE_HANDLE
     } else if name == "note_prj.dll" || name == "note_prj" {
         pocket_kernel::NOTE_PRJ_MODULE_HANDLE
     } else if name == "wininet.dll" || name == "wininet" {
@@ -4663,10 +4703,30 @@ fn get_module_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kern
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
+fn load_library_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // A DllMain return reenters this thunk with callback registers.
+    if let Some(result) = finish_module_attach(ctx)? {
+        return Ok(result);
+    }
+    if ctx.arg_u32(1)? != 0 {
+        set_thread_error(ctx, ERROR_INVALID_PARAMETER);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    if ctx.arg_u32(2)? != 0 {
+        set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    load_library(ctx)
+}
+
 fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if let Some(result) = finish_module_attach(ctx)? {
         return Ok(result);
     }
+    load_library(ctx)
+}
+
+fn load_library(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let path_p = ctx.arg_u32(0)?;
     let path = match read_wstr(ctx, path_p, 260) {
         Ok(path) if path_p != 0 && !path.is_empty() => path,
@@ -4733,6 +4793,14 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         }
         return Ok(DispatchOutcome::ReturnedR0(handle));
     }
+    if module_file_name(&name) == "ddraw.dll" {
+        let handle = pocket_kernel::DDRAW_MODULE_HANDLE;
+        if ctx.kernel.dynamic_exports.contains_key(&handle) {
+            return Ok(DispatchOutcome::ReturnedR0(handle));
+        }
+        set_thread_error(ctx, 126);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
     if name.ends_with("commctrl.dll") || name == "commctrl" {
         let handle = if ctx.kernel.dynamic_exports.contains_key(&0x1000_0002) {
             0x1000_0002
@@ -4749,7 +4817,9 @@ fn load_library_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         name.rsplit(['\\', '/']).next(),
         Some("htcsensorsdk" | "htcsensorsdk.dll")
     ) {
-        return Ok(DispatchOutcome::ReturnedR0(pocket_kernel::HTCSENSOR_MODULE_HANDLE));
+        return Ok(DispatchOutcome::ReturnedR0(
+            pocket_kernel::HTCSENSOR_MODULE_HANDLE,
+        ));
     }
     if name.ends_with("hss.dll") || name == "hss" {
         let handle = if ctx.kernel.dynamic_exports.contains_key(&HSS_MODULE_HANDLE) {
@@ -4950,8 +5020,145 @@ pub(crate) fn runtime_hle_dll(dll: &str) -> bool {
             | "winsock.dll"
             | "ws2.dll"
             | "wininet.dll"
+            | "mmtimer.dll"
+            | "winmm.dll"
             | "zlib.dll"
     ) || gles_module_handle(&name).is_some()
+}
+
+/// WinCE EXEs can import DLL data directly through the IAT. Resolve these
+/// slots before entry, since the guest may dereference them without a call.
+pub(crate) fn attach_static_imports(
+    cpu: &mut dyn pocket_cpu::Cpu,
+    kernel: &mut KernelState,
+    resume: bool,
+) -> Result<Option<u32>, KernelError> {
+    use pocket_kernel::STATIC_DLL_ATTACH_RETURN_VA;
+    let thunk = pocket_kernel::Thunk {
+        thunk_va: STATIC_DLL_ATTACH_RETURN_VA,
+        iat_va: 0,
+        dll: "coredll.dll".into(),
+        binding: pocket_pe::ImportBinding::Name("LoadLibraryW".into()),
+        friendly_name: None,
+    };
+    let mut ctx = CallCtx {
+        cpu,
+        thunk: &thunk,
+        kernel,
+    };
+    let outcome = if resume {
+        finish_module_attach(&mut ctx)?.ok_or_else(|| {
+            KernelError::Loader("Static DLL attach returned without its saved context".into())
+        })?
+    } else {
+        let mut modules = std::collections::BTreeMap::new();
+        for import in &ctx.kernel.image_imports {
+            if !runtime_hle_dll(&import.dll) {
+                modules
+                    .entry(import.dll.to_ascii_lowercase())
+                    .or_insert_with(Vec::new)
+                    .push(import.clone());
+            }
+        }
+        let mut bindings = Vec::new();
+        for (dll, imports) in modules {
+            let Some(path) = ctx.kernel.find_module_file(&dll) else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(image) = pocket_pe::load_bytes(&bytes) else {
+                continue;
+            };
+            let key = |binding: &pocket_pe::ImportBinding| match binding {
+                pocket_pe::ImportBinding::Name(name) => name.clone(),
+                pocket_pe::ImportBinding::Ordinal(ordinal) => format!("#{ordinal}"),
+            };
+            if !imports.iter().any(|import| {
+                image.exports.get(&key(&import.binding)).is_some_and(|rva| {
+                    image.sections.iter().any(|section| {
+                        !section.is_executable()
+                            && *rva >= section.virtual_address
+                            && *rva - section.virtual_address
+                                < section.virtual_size.max(section.data.len() as u32)
+                    })
+                })
+            }) {
+                continue;
+            }
+            let base = if let Some(module) = ctx.kernel.module_by_name(&dll) {
+                module.base
+            } else {
+                let base = load_resource_module(&mut ctx, &dll)?.ok_or_else(|| {
+                    KernelError::Loader(format!("Cannot load static DLL data imports from {dll}"))
+                })?;
+                // The mapper retains an explicit LoadLibrary reference by default.
+                // The main executable's imports instead pin this module until exit.
+                if let Some(module) = ctx.kernel.modules.iter_mut().find(|m| m.base == base) {
+                    module.refcount = 0;
+                }
+                base
+            };
+            if !ctx.kernel.static_module_roots.contains(&base) {
+                ctx.kernel.static_module_roots.push(base);
+            }
+            for import in imports {
+                if let Some(address) = ctx.kernel.dynamic_exports[&base].get(&key(&import.binding))
+                {
+                    bindings.push((import.iat_va, *address));
+                }
+            }
+        }
+        if bindings.is_empty() {
+            return Ok(None);
+        }
+        for (slot, address) in bindings {
+            ctx.cpu.write_mem(slot, &address.to_le_bytes())?;
+        }
+        let cleanup: Vec<_> = ctx
+            .kernel
+            .modules
+            .iter()
+            .filter(|m| !m.attached)
+            .map(|m| m.base)
+            .collect();
+        if cleanup.is_empty() {
+            return Ok(None);
+        }
+        let sequence = cleanup.iter().rev().copied().collect();
+        let frame = GuestCallFrame {
+            args: [
+                ctx.arg_u32(0)?,
+                ctx.arg_u32(1)?,
+                ctx.arg_u32(2)?,
+                ctx.arg_u32(3)?,
+            ],
+            lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+            sp: ctx.cpu.read_reg(ArmReg::Sp)?,
+        };
+        ctx.cpu.add_code_hook(STATIC_DLL_ATTACH_RETURN_VA)?;
+        let pending = pocket_kernel::ModuleAttachFrame {
+            detaching: false,
+            base: 0,
+            thunk: STATIC_DLL_ATTACH_RETURN_VA,
+            thread: ctx.kernel.current_thread,
+            frame,
+            sequence,
+            cleanup,
+            completed: vec![],
+            result: 1,
+            error: None,
+        };
+        advance_module_callback(&mut ctx, pending)?
+    };
+    match outcome {
+        DispatchOutcome::JumpTo(entry) => Ok(Some(entry)),
+        DispatchOutcome::ReturnedR0(1) => Ok(None),
+        _ => Err(KernelError::Loader(
+            "Static DLL process attach failed".into(),
+        )),
+    }
 }
 
 fn begin_module_attach(ctx: &mut CallCtx<'_>, base: u32) -> Result<DispatchOutcome, KernelError> {
@@ -5629,6 +5836,7 @@ fn map_resource_module_inner(
         resident_regions: resident,
         handle: base,
         name,
+        guest_path: ctx.kernel.vfs.guest_path_for_file(request, host_path),
         base,
         image_size: image.size_of_image,
         image_entry,
@@ -5737,14 +5945,21 @@ pub(crate) fn lookup_resource(
     None
 }
 
-/// Resolve a resource *address* previously handed to the guest by
-/// `FindResourceW` back to the entry it came from, whichever image that
-/// was.
-fn resource_at_address(kernel: &KernelState, addr: u32) -> Option<(ResourceEntry, u32)> {
+/// Resolve the payload or native directory-entry address in a loaded image.
+fn resource_at_address(kernel: &KernelState, addr: u32) -> Option<(u32, u32)> {
     for (entries, base) in kernel.resource_scopes() {
         let rva = addr.wrapping_sub(base);
-        if let Some(e) = entries.iter().find(|e| e.data_rva == rva) {
-            return Some((e.clone(), base));
+        for entry in entries {
+            if entry.data_rva == rva {
+                return Some((addr, entry.size));
+            }
+            if let Some(leaf) = entry
+                .native_leaves
+                .iter()
+                .find(|leaf| leaf.directory_entry_rva == rva || leaf.data_rva == rva)
+            {
+                return Some((base.wrapping_add(leaf.data_rva), leaf.size));
+            }
         }
     }
     None
@@ -5773,12 +5988,15 @@ fn write_wide_str(
 }
 
 fn get_module_file_name_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // GetModuleFileNameW(HINSTANCE hModule, LPWSTR lpFilename, DWORD nSize) -> DWORD
-    let _h = ctx.arg_u32(0)?;
+    let module = ctx.arg_u32(0)?;
     let dst = ctx.arg_u32(1)?;
     let cap = ctx.arg_u32(2)?;
-    let path = ctx.kernel.module_path.clone();
-    let written = write_wide_str(ctx.cpu, dst, cap, &path)?;
+    let path = ctx
+        .kernel
+        .module_by_handle(module)
+        .filter(|module| !module.guest_path.is_empty())
+        .map_or(&ctx.kernel.module_path, |module| &module.guest_path);
+    let written = write_wide_str(ctx.cpu, dst, cap, path)?;
     Ok(DispatchOutcome::ReturnedR0(written))
 }
 
@@ -9026,6 +9244,28 @@ fn char_upper_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(p))
 }
 
+fn char_lower_buff_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let ptr = ctx.arg_u32(0)?;
+    let count = ctx.arg_u32(1)?;
+    let Some(size) = count.checked_mul(2).filter(|&size| size != 0) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    if !vfs_probe_output(ctx, ptr, size) {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let mut bytes = ctx.cpu.read_mem(ptr, size)?;
+    for unit in bytes.chunks_exact_mut(2) {
+        let original = u16::from_le_bytes([unit[0], unit[1]]);
+        if let Some(character) = char::from_u32(original as u32) {
+            let lower = character.to_lowercase().next().unwrap_or(character);
+            let value = u16::try_from(lower as u32).unwrap_or(original);
+            unit.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    ctx.cpu.write_mem(ptr, &bytes)?;
+    Ok(DispatchOutcome::ReturnedR0(count))
+}
+
 fn char_lower_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
     if p == 0 {
@@ -10593,7 +10833,10 @@ fn virtual_protect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     }
     // Check the output's original writability above, even when it resides
     // inside the protected range. A host write can still fail on page-in.
-    if let Err(error) = ctx.cpu.write_mem(old_protect_out, &old_ranges[0].2.to_le_bytes()) {
+    if let Err(error) = ctx
+        .cpu
+        .write_mem(old_protect_out, &old_ranges[0].2.to_le_bytes())
+    {
         for (base, len, old) in old_ranges {
             let old = virtual_page_permissions(old & !PAGE_NOCACHE)
                 .expect("committed virtual pages have supported protection");
@@ -10601,7 +10844,9 @@ fn virtual_protect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         }
         return Err(error.into());
     }
-    ctx.kernel.heap.set_virtual_page_protect(start, end - start, protect);
+    ctx.kernel
+        .heap
+        .set_virtual_page_protect(start, end - start, protect);
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -16035,6 +16280,14 @@ fn window_dc(ctx: &mut CallCtx<'_>, hwnd: u32) -> u32 {
     ctx.kernel.gdi.pending_window_erases.insert(hwnd);
     dc
 }
+fn get_dc_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if ctx.arg_u32(1)? == 0 && ctx.arg_u32(2)? == 0 {
+        return get_dc(ctx);
+    }
+    set_thread_error(ctx, ERROR_NOT_SUPPORTED);
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
 fn get_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     Ok(DispatchOutcome::ReturnedR0(window_dc(ctx, hwnd)))
@@ -18232,11 +18485,11 @@ fn find_resource_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
 }
 
 fn load_resource(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // LoadResource just returns the same handle on Windows when the
-    // resource is in-image. We've already encoded the data VA in the
-    // FindResource result.
-    let h = ctx.arg_u32(1)?;
-    Ok(DispatchOutcome::ReturnedR0(h))
+    // FindResourceW returns a payload VA. Native resource walkers also
+    // pass the address of the PE directory's IMAGE_RESOURCE_DATA_ENTRY.
+    let handle = ctx.arg_u32(1)?;
+    let address = resource_at_address(ctx.kernel, handle).map_or(handle, |(payload, _)| payload);
+    Ok(DispatchOutcome::ReturnedR0(address))
 }
 
 fn lock_resource(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -18248,8 +18501,8 @@ fn sizeof_resource(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     // SizeofResource(hModule, hResInfo) — hResInfo is the VA we
     // returned from FindResourceW. We look up by data_rva.
     let h = ctx.arg_u32(1)?;
-    if let Some((entry, _base)) = resource_at_address(ctx.kernel, h) {
-        return Ok(DispatchOutcome::ReturnedR0(entry.size));
+    if let Some((_, size)) = resource_at_address(ctx.kernel, h) {
+        return Ok(DispatchOutcome::ReturnedR0(size));
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
@@ -26818,6 +27071,53 @@ fn find_close_change_notification(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
 #[cfg(test)]
 mod tests {
     #[test]
+    fn resource_descriptor_and_payload_addresses_resolve_to_the_same_data() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        kernel.image_base = 0x10000;
+        kernel.resources.push(ResourceEntry {
+            ty: ResourceKey::Id(10),
+            name: ResourceKey::Id(7),
+            data_rva: 0x2000,
+            native_leaves: vec![
+                pocket_pe::resources::ResourceLeaf {
+                    directory_entry_rva: 0x1000,
+                    data_rva: 0x2000,
+                    size: 16,
+                },
+                pocket_pe::resources::ResourceLeaf {
+                    directory_entry_rva: 0x1010,
+                    data_rva: 0x2100,
+                    size: 24,
+                },
+            ],
+            size: 16,
+            codepage: 0,
+        });
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (handle, address, size) in [
+            (0x11000, 0x12000, 16),
+            (0x12000, 0x12000, 16),
+            (0x11010, 0x12100, 24),
+        ] {
+            ctx.cpu.write_reg(ArmReg::R1, handle).unwrap();
+            assert_eq!(
+                load_resource(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(address)
+            );
+            assert_eq!(
+                sizeof_resource(&mut ctx).unwrap(),
+                DispatchOutcome::ReturnedR0(size)
+            );
+        }
+    }
+
+    #[test]
     fn retained_frame_cap_is_obeyed_by_message_pumps_and_sleep() {
         use std::time::{Duration, Instant};
         for boundary in 0..3 {
@@ -26983,6 +27283,7 @@ mod tests {
         let entry = |name: &str, rva: u32| ResourceEntry {
             ty: ResourceKey::Name("TXT".into()),
             name: ResourceKey::Name(name.into()),
+            native_leaves: Vec::new(),
             data_rva: rva,
             size: 16,
             codepage: 0,
@@ -27810,6 +28111,7 @@ mod tests {
         kernel.resources.push(ResourceEntry {
             ty: ResourceKey::Id(2),
             name: ResourceKey::Id(211),
+            native_leaves: Vec::new(),
             data_rva: 0x100,
             size: 48,
             codepage: 0,
@@ -30130,6 +30432,7 @@ mod tests {
             handle: base,
             name: format!("{base:x}.dll"),
             base,
+            guest_path: String::new(),
             image_size: 4096,
             image_entry: entry,
             resources: vec![],
@@ -30620,6 +30923,7 @@ mod tests {
                 handle: base,
                 base,
                 name: "test.dll".into(),
+                guest_path: String::new(),
                 image_size: 0x2000,
                 image_entry: base + 0x1000,
                 resources: vec![],
@@ -31128,6 +31432,45 @@ mod tests {
     }
 
     #[test]
+    fn native_data_import_is_bound_and_pins_the_dll_before_main() {
+        let root = tempfile::tempdir().unwrap();
+        let mut dll = loader_fixture_dll(None);
+        // Export Value from .data instead of .text.
+        dll[0xc2c..0xc30].copy_from_slice(&0x3000u32.to_le_bytes());
+        std::fs::write(root.path().join("loader-test.dll"), dll).unwrap();
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.map_region(
+            pocket_kernel::KERNEL_TRAP_BASE,
+            0x1000,
+            Prot::READ | Prot::EXEC,
+        )
+        .unwrap();
+        let mut kernel = fresh_kernel();
+        kernel.module_search_dirs.push(root.path().to_path_buf());
+        kernel.image_imports.push(pocket_pe::ImportSymbol {
+            dll: "loader-test.dll".into(),
+            binding: pocket_pe::ImportBinding::Name("Value".into()),
+            iat_va: 0x1100,
+        });
+        cpu.write_reg(ArmReg::R0, 0x1234).unwrap();
+        let entry = attach_static_imports(&mut cpu, &mut kernel, false).unwrap();
+        let base = kernel.modules[0].base;
+        assert_eq!(entry, Some(base + 0x1000));
+        assert_eq!(cpu.read_u32_le(0x1100).unwrap(), base + 0x3000);
+        cpu.write_reg(ArmReg::R0, 1).unwrap();
+        assert_eq!(
+            attach_static_imports(&mut cpu, &mut kernel, true).unwrap(),
+            None
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 0x1234);
+        assert!(kernel.modules[0].attached);
+        assert_eq!(kernel.modules[0].refcount, 0);
+        assert!(kernel.unreachable_runtime_modules().is_empty());
+    }
+
+    #[test]
     fn native_import_binds_function_and_data_iat_as_one_runtime() {
         for missing_export in [false, true] {
             let mut cpu = StubCpu::new();
@@ -31206,6 +31549,7 @@ mod tests {
                 handle: base,
                 base,
                 name: "audio.dll".into(),
+                guest_path: String::new(),
                 image_size: 0x2000,
                 image_entry: base + 0x1000,
                 resources: vec![],
@@ -32099,6 +32443,7 @@ mod tests {
             gles_local_ordinals: std::collections::HashMap::new(),
             runtime_thunks: std::collections::HashMap::new(),
             module_attach_frames: Vec::new(),
+            static_module_roots: Vec::new(),
             dll_notification_frame: None,
             next_module_handle: 0x1000_0001,
             modules: Vec::new(),
@@ -32109,6 +32454,7 @@ mod tests {
             guest_fb_pitch: 0,
             direct_fb_frames: 0,
             gx_readback_scratch: Vec::new(),
+            gx_previous_readback: Vec::new(),
             gx_layout_scratch: Vec::new(),
             gapi_column_major: false,
             mem_op_scratch: Vec::new(),
@@ -32190,6 +32536,7 @@ mod tests {
             notification_icons: Default::default(),
             winsock_last_errors: Default::default(),
             crt_new_handler: 0,
+            crt_new_mode: 0,
             cpp_new_handler: 0,
             worker_schedule_cursor: 0,
             worker_round_seen: Vec::new(),
@@ -37075,7 +37422,14 @@ mod tests {
         let (mut cpu, mut kernel, mut dispatcher) = setup();
         macro_rules! api {
             ($name:literal, $args:expr) => {
-                call(&mut cpu, &mut kernel, &mut dispatcher, "coredll.dll", $name, $args)
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    $name,
+                    $args,
+                )
             };
         }
         let base = 0x58f3_0000;
@@ -37107,7 +37461,9 @@ mod tests {
             DispatchOutcome::ReturnedR0(1)
         );
         assert_eq!(cpu.read_u32_le(out).unwrap(), 0x204);
-        assert!(cpu.check_guest_access(base, 8192, Prot::READ | Prot::EXEC).is_ok());
+        assert!(cpu
+            .check_guest_access(base, 8192, Prot::READ | Prot::EXEC)
+            .is_ok());
         assert_eq!(cpu.read_mem(base, 4).unwrap(), b"code");
         assert!(cpu.check_guest_access(base + 4096, 1, Prot::WRITE).is_err());
         for args in [
@@ -37117,8 +37473,13 @@ mod tests {
             [base, 1, 0x104, out],
             [0xffff_ffff, 2, 4, out],
         ] {
-            assert_eq!(api!("VirtualProtect", &args), DispatchOutcome::ReturnedR0(0));
-            assert!(cpu.check_guest_access(base, 8192, Prot::READ | Prot::EXEC).is_ok());
+            assert_eq!(
+                api!("VirtualProtect", &args),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert!(cpu
+                .check_guest_access(base, 8192, Prot::READ | Prot::EXEC)
+                .is_ok());
             assert!(cpu.check_guest_access(base, 1, Prot::WRITE).is_err());
             assert_eq!(cpu.read_u32_le(out).unwrap(), 0x204);
         }
@@ -41589,6 +41950,15 @@ fn set_file_attributes_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
     let flags = ctx.arg_u32(1)?;
     let result = vfs_api_path(ctx, 0).and_then(|p| ctx.kernel.vfs.set_attributes(&p, flags));
     vfs_api_bool(ctx, result)
+}
+
+fn crt_set_new_mode(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let next = ctx.arg_u32(0)?;
+    if next > 1 {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    let previous = std::mem::replace(&mut ctx.kernel.crt_new_mode, next);
+    Ok(DispatchOutcome::ReturnedR0(previous))
 }
 
 fn crt_set_new_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {

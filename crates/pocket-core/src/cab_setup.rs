@@ -1,6 +1,6 @@
 //! Deferred CAB registry setup, executed by the cabinet's own ARM DLL.
 //! Declared shared CAB files are installed separately through the VFS. Only
-//! registry/time setup callbacks are supported; callbacks needing file mutation,
+//! registry, time and read-only file APIs are supported; callbacks needing file mutation,
 //! GUI, services or child processes remain unsupported, rather than
 //! running partially against the read-only installed package (IonFx resources
 //! have their separate extraction path in pocket-cab).
@@ -10,45 +10,93 @@ mod installed_files;
 use crate::Emulator;
 use anyhow::{ensure, Context, Result};
 use pocket_kernel::registry::RegistryValue;
-use pocket_pe::{ImportBinding, LoadedImage};
+use pocket_pe::LoadedImage;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const MARKERS: &str = r"HKCU\Software\PocketHLE\CabRegistrySetup";
 
 fn supported(image: &LoadedImage) -> bool {
-    image.machine == 0x1c0
-        && image.imports.iter().all(|import| {
-            if !import.dll.eq_ignore_ascii_case("coredll.dll") {
-                return false;
+    matches!(
+        image.machine,
+        pocket_pe::machine::ARM | pocket_pe::machine::THUMB
+    ) && image.imports.iter().all(|import| {
+        ["coredll.dll", "ole32.dll"]
+            .iter()
+            .any(|dll| import.dll.eq_ignore_ascii_case(dll))
+    })
+}
+
+#[cfg(feature = "unicorn")]
+fn setup_call_allowed(
+    ctx: &mut crate::winceapi::CallCtx<'_>,
+    name: &str,
+) -> Result<bool, pocket_kernel::KernelError> {
+    if ctx.thunk.dll.eq_ignore_ascii_case("ole32.dll") {
+        return Ok(matches!(name, "StringFromGUID2" | "CoCreateGuid"));
+    }
+    if !ctx.thunk.dll.eq_ignore_ascii_case("coredll.dll") {
+        return Ok(false);
+    }
+    if name == "CreateFileW" {
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const OPEN_EXISTING: u32 = 3;
+        if ctx.arg_u32(1)? & !GENERIC_READ != 0 || ctx.arg_u32(4)? != OPEN_EXISTING {
+            return Ok(false);
+        }
+        let mut address = ctx.arg_u32(0)?;
+        for _ in 0..260 {
+            let bytes = ctx.cpu.read_mem(address, 2)?;
+            match u16::from_le_bytes([bytes[0], bytes[1]]) {
+                0 => return Ok(true),
+                58 => return Ok(false), // Device names (COM8:, Vol:, etc.).
+                _ => address = address.wrapping_add(2),
             }
-            let name = match &import.binding {
-                ImportBinding::Name(name) => Some(name.clone()),
-                ImportBinding::Ordinal(ord) => crate::winceapi::resolve_ordinal(&import.dll, *ord),
-            };
-            matches!(
-                name.as_deref(),
-                Some(
-                    "RegCloseKey"
-                        | "RegCreateKeyExW"
-                        | "RegOpenKeyExW"
-                        | "RegQueryValueExW"
-                        | "RegSetValueExW"
-                        | "RegDeleteValueW"
-                        | "GetLocalTime"
-                        | "GetSystemTime"
-                        | "SystemTimeToFileTime"
-                        | "FileTimeToSystemTime"
-                        | "GetTickCount"
-                        | "GetLastError"
-                        | "SetLastError"
-                        | "memcpy"
-                        | "memset"
-                        | "memcmp"
-                        | "wcslen"
-                )
-            )
-        })
+        }
+        return Ok(false);
+    }
+    Ok(matches!(
+        name,
+        "RegCloseKey"
+            | "RegCreateKeyExW"
+            | "RegOpenKeyExW"
+            | "RegQueryValueExW"
+            | "RegSetValueExW"
+            | "RegDeleteValueW"
+            | "GetLocalTime"
+            | "GetSystemTime"
+            | "SystemTimeToFileTime"
+            | "FileTimeToSystemTime"
+            | "GetTickCount"
+            | "GetLastError"
+            | "SetLastError"
+            | "GetUserDefaultLangID"
+            | "MultiByteToWideChar"
+            | "GetModuleFileNameW"
+            | "GetModuleInformation"
+            | "GetProcAddressA"
+            | "LoadResource"
+            | "CeGetVolumeInfo"
+            | "ReadFile"
+            | "SetFilePointer"
+            | "CloseHandle"
+            | "LocalAlloc"
+            | "LocalFree"
+            | "malloc"
+            | "free"
+            | "memcpy"
+            | "memset"
+            | "memcmp"
+            | "wcslen"
+            | "wcsrchr"
+            | "_itow"
+            | "_wcsdup"
+            | "_wcsnicmp"
+            | "??2@YAPAXI@Z"
+            | "??3@YAXPAX@Z"
+            | "?_set_new_handler@@YAP6AHI@ZP6AHI@Z@Z"
+            | "?_set_new_mode@@YAHH@Z"
+    ))
 }
 
 fn setup_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -187,6 +235,15 @@ impl Emulator {
                 let mut helper = Emulator::with_unicorn_cpu()?;
                 helper.load_pe(&path)?;
                 helper.process.as_mut().unwrap().state.registry = baseline.isolated_copy();
+                helper.mount_read_only_dir(install_dir, root);
+                helper.set_default_dir(install_dir);
+                let file_name = path.file_name().context("CAB setup DLL has no filename")?;
+                helper.set_module_path(format!(
+                    "{}\\{}",
+                    install_dir.trim_end_matches('\\'),
+                    file_name.to_string_lossy()
+                ));
+                helper.dispatcher.set_call_filter(setup_call_allowed);
                 helper.set_halt_on_unimplemented(true);
                 helper.run_setup_callbacks(install_dir)?;
                 let staged = &mut helper.process.as_mut().unwrap().state.registry;
@@ -227,7 +284,17 @@ impl Emulator {
             .map_region(HARNESS, 0x2000, Prot::READ | Prot::WRITE | Prot::EXEC)?;
         let process = self.process.as_mut().unwrap();
         let image = &process.image;
-        let attach = (image.entry_point != 0).then(|| image.entry_va());
+        let attach = if image.entry_point == 0 {
+            None
+        } else {
+            Some(
+                (image.entry_va() & !1)
+                    | u32::from(pocket_kernel::image_uses_thumb_entry(
+                        self.cpu.as_mut(),
+                        image,
+                    )?),
+            )
+        };
         let init = image
             .exports
             .get("Install_Init")
@@ -484,15 +551,17 @@ mod tests {
         assert_eq!(emu.read_guest_memory(0x60001000, 4).unwrap(), [0; 4]);
     }
     #[test]
-    fn capability_gate_requires_registry_only_arm_setup() {
+    fn capability_gate_requires_arm_and_coredll_imports() {
         // Fixtures are synthetic; no commercial binaries in unit tests.
         let mut image = fixture();
         assert!(supported(&image));
         image.imports.push(pocket_pe::ImportSymbol {
             dll: "coredll.dll".into(),
-            binding: ImportBinding::Name("CreateFileW".into()),
+            binding: pocket_pe::ImportBinding::Name("CreateFileW".into()),
             iat_va: 0,
         });
+        assert!(supported(&image));
+        image.imports.last_mut().unwrap().dll = "thirdparty.dll".into();
         assert!(!supported(&image));
     }
 }

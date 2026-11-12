@@ -88,6 +88,14 @@ pub(super) fn complete(vfs: &mut Vfs, root: &Path, install_dir: &str) -> Result<
                     == Some(&canonical_source),
                 "CAB payload is not mounted at its install path"
             );
+            if vfs
+                .resolve(&destination)
+                .and_then(|path| path.canonicalize().ok())
+                .as_ref()
+                == Some(&canonical_source)
+            {
+                continue; // An install mount already exposes this file.
+            }
             match vfs.copy_file(&guest_source, &destination, true) {
                 Ok(()) => installed += 1,
                 Err(80 | 183) => {} // Existing guest data always wins, on every launch.
