@@ -7,6 +7,8 @@ use pocket_gles::gpu::{
     SharedContextSource, SharedFrame,
 };
 
+use pocket_gles::GL_TEXTURE0;
+
 use super::{error, CallCtx, Result};
 
 const FRAMEBUFFER: u32 = 0x8d40;
@@ -65,6 +67,9 @@ pub(super) struct Renderer {
     index_data: HashMap<u32, Vec<u8>>,
     client_attributes: HashMap<u32, ClientAttribute>,
     enabled_attributes: HashSet<u32>,
+    max_attributes: u32,
+    active_texture: u32,
+    texture_units: u32,
     configured_attributes: HashSet<u32>,
     unpack: usize,
     guest_error: u32,
@@ -118,6 +123,9 @@ impl Renderer {
             index_data: HashMap::new(),
             client_attributes: HashMap::new(),
             enabled_attributes: HashSet::new(),
+            max_attributes: 0,
+            active_texture: GL_TEXTURE0,
+            texture_units: 0,
             configured_attributes: HashSet::new(),
             unpack: 4,
             guest_error: 0,
@@ -157,6 +165,12 @@ impl Renderer {
         invoke!(r, "glBindRenderbuffer", (RENDERBUFFER => u32, 0 => u32), ());
         invoke!(r, "glViewport", (0 => i32, 0 => i32, width as i32 => i32, height as i32 => i32), ());
         r.default_fbo = fbo;
+        let mut max_attributes = 0i32;
+        let mut texture_units = 0i32;
+        invoke!(r, "glGetIntegerv", (0x8869 => u32, &mut max_attributes => *mut i32), ());
+        invoke!(r, "glGetIntegerv", (0x8b4d => u32, &mut texture_units => *mut i32), ());
+        r.max_attributes = max_attributes.clamp(0, 32) as u32;
+        r.texture_units = texture_units.max(0) as u32;
         let mut count = 0i32;
         invoke!(r, "glGetIntegerv", (0x86a2 => u32, &mut count => *mut i32), ());
         if (1..=4096).contains(&count) {
@@ -369,8 +383,7 @@ impl Renderer {
     }
 
     pub(super) fn gl(&mut self, name: &str, ctx: &mut CallCtx<'_>) -> Result<u32> {
-        self.host.bind_client_api().map_err(error)?;
-        self.host.make_current().map_err(error)?;
+        self.host.make_programmable_current().map_err(error)?;
         macro_rules! u {
             ($index:expr) => {
                 ctx.arg_u32($index)?
@@ -405,19 +418,32 @@ impl Renderer {
                 });
             }
             "glFinish" | "glFlush" => gl!(),
-            "glActiveTexture" | "glClear" | "glCompileShader" | "glCullFace"
-            | "glDeleteProgram" | "glDeleteShader" | "glDepthFunc" | "glDisable" | "glEnable"
-            | "glLinkProgram" | "glUseProgram" => gl!(u!(0) => u32),
+            "glClear" | "glCompileShader" | "glCullFace" | "glDeleteProgram" | "glDeleteShader"
+            | "glDepthFunc" | "glDisable" | "glEnable" | "glLinkProgram" | "glUseProgram" => {
+                gl!(u!(0) => u32)
+            }
+            "glActiveTexture" => {
+                let unit = u!(0);
+                if unit.wrapping_sub(GL_TEXTURE0) >= self.texture_units {
+                    return Ok(self.reject(0x0500));
+                }
+                if self.active_texture != unit {
+                    gl!(unit => u32);
+                    self.active_texture = unit;
+                }
+            }
             "glEnableVertexAttribArray" | "glDisableVertexAttribArray" => {
                 let index = u!(0);
-                if index >= 32 {
+                if index >= self.max_attributes {
                     return Ok(self.reject(0x0501));
                 }
-                gl!(index => u32);
-                if name == "glEnableVertexAttribArray" {
-                    self.enabled_attributes.insert(index);
+                let changed = if name == "glEnableVertexAttribArray" {
+                    self.enabled_attributes.insert(index)
                 } else {
-                    self.enabled_attributes.remove(&index);
+                    self.enabled_attributes.remove(&index)
+                };
+                if changed {
+                    gl!(index => u32);
                 }
             }
             "glAttachShader" | "glBindRenderbuffer" | "glBindTexture" | "glBlendFunc" => {
@@ -431,11 +457,18 @@ impl Renderer {
                 if buffer != 0 && !self.guest_buffers.contains(&buffer) {
                     return Ok(self.reject(0x0502));
                 }
-                gl!(target => u32, buffer => u32);
-                match target {
-                    ARRAY_BUFFER => self.array = buffer,
-                    ELEMENT_BUFFER => self.elements = buffer,
-                    _ => {}
+                let previous = if target == ARRAY_BUFFER {
+                    self.array
+                } else {
+                    self.elements
+                };
+                if previous != buffer {
+                    gl!(target => u32, buffer => u32);
+                    if target == ARRAY_BUFFER {
+                        self.array = buffer;
+                    } else {
+                        self.elements = buffer;
+                    }
                 }
             }
             "glBindFramebuffer" => {
@@ -571,7 +604,7 @@ impl Renderer {
                     0x1406 | 0x140c => 4,
                     _ => return Ok(self.reject(0x0500)),
                 };
-                if index >= 32 || !(1..=4).contains(&size) || stride < 0 {
+                if index >= self.max_attributes || !(1..=4).contains(&size) || stride < 0 {
                     return Ok(self.reject(0x0501));
                 }
                 self.configured_attributes.insert(index);
@@ -1022,8 +1055,17 @@ mod tests {
         with_shared_context_source(Some(source.clone()), || {
             crate::gles::with_shared_frame_export(Arc::new(AtomicBool::new(true)), || {
                 let mut renderer = Renderer::new(8, 8)?;
-                invoke!(&mut renderer, "glClearColor", (1.0 => f32, 0.0 => f32, 0.0 => f32, 0.0 => f32), ());
-                invoke!(&mut renderer, "glClear", (0x4000 => u32), ());
+                // A different native context can become current on the worker.
+                // The GL entry point must rebind the renderer before drawing.
+                let foreign = ProgrammableHost::new_programmable().map_err(error)?;
+                use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
+                for (reg, value) in [(R0, 1.0f32.to_bits()), (R1, 0), (R2, 0), (R3, 0)] {
+                    call.cpu.write_reg(reg, value)?;
+                }
+                renderer.gl("glClearColor", &mut call)?;
+                drop(foreign);
+                call.cpu.write_reg(R0, 0x4000)?;
+                renderer.gl("glClear", &mut call)?;
                 renderer.present(&mut call)?;
                 assert!(renderer.readback.is_empty());
                 assert!(!call.kernel.framebuffer.cpu_resident());

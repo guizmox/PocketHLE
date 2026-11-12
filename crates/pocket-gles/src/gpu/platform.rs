@@ -648,6 +648,16 @@ mod native {
                 Ok(())
             }
         }
+        /// Activate an owned offscreen renderer whose context is only ever
+        /// bound to its own drawable. Context identity is enough on the hot
+        /// path. Bind the client API when a different context is current.
+        pub fn make_programmable_current(&self) -> Result<(), String> {
+            if unsafe { (self.current_context)() == self.context } {
+                return Ok(());
+            }
+            self.bind_client_api()?;
+            self.make_current()
+        }
         pub fn make_current(&self) -> Result<(), String> {
             unsafe {
                 // Preserve actual native thread state across parent/child switches.
@@ -1436,6 +1446,13 @@ mod native {
         }
         pub fn bind_client_api(&self) -> Result<(), String> {
             Ok(())
+        }
+        /// An owned offscreen context is only made current on its own DC.
+        pub fn make_programmable_current(&self) -> Result<(), String> {
+            if unsafe { wglGetCurrentContext() == self.context } {
+                return Ok(());
+            }
+            self.make_current()
         }
         pub fn make_current(&self) -> Result<(), String> {
             unsafe {
