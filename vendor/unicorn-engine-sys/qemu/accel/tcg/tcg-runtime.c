@@ -165,30 +165,35 @@ void HELPER(exit_atomic)(CPUArchState *env)
     cpu_loop_exit_atomic(env_cpu(env), GETPC());
 }
 
-void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {
+static QEMU_NOINLINE void check_exit_request_slow(uc_engine *uc,
+                                                 uintptr_t host_pc)
+{
+    /* Only the outermost uc_emu_start unlocks the JIT for writing. */
+    if (uc->nested_level == 1) {
+        tb_exec_unlock(uc);
+    }
+    uc->cpu->tcg_exit_req = 0;
+
+    if (uc->skip_sync_pc_on_exit) {
+        uc->skip_sync_pc_on_exit = false;
+        cpu_loop_exit(uc->cpu);
+    } else {
+        cpu_loop_exit_restore(uc->cpu, host_pc);
+    }
+}
+
+void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot)
+{
     uc_engine *uc = p;
 
     /* A PC redirect restarts cpu_exec and clears the CPU-local exit flag.
      * A concurrent timeout can already have set stop_request at that point.
      * Honor that persistent request too: otherwise a code hook can be skipped
      * by helper_uc_tracecode while the intercepted instruction still runs. */
-    if ((cpu_loop_exit_requested(uc->cpu) || uc->stop_request) &&
-        !in_delay_slot) {
-        // There are stil something we have to before exiting to be compatible with previous behaviors
-
-        // from cpu_tb_exec
-        if (uc->nested_level == 1) {
-            // Only unlock (allow writing to JIT area) if we are the outmost uc_emu_start
-            tb_exec_unlock(uc);
-        }
-        uc->cpu->tcg_exit_req = 0;
-
-        if (uc->skip_sync_pc_on_exit) {
-            uc->skip_sync_pc_on_exit = false;
-            cpu_loop_exit(uc->cpu);
-        } else {
-            cpu_loop_exit_restore(uc->cpu, GETPC());
-        }
+    if (unlikely((cpu_loop_exit_requested(uc->cpu) || uc->stop_request) &&
+                 !in_delay_slot)) {
+        /* Capture the translated caller's PC before entering the slow path. */
+        check_exit_request_slow(uc, GETPC());
     }
 }
 
