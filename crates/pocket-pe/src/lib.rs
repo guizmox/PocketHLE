@@ -276,7 +276,9 @@ fn load_bytes_inner(
         {
             let camera_repaired = repair_arm_camera_preview(&mut data, va);
             if camera_repaired != 0 {
-                log::debug!("enabled continuous camera preview in the matched Catapult ARM routine");
+                log::debug!(
+                    "enabled continuous camera preview in the matched Catapult ARM routine"
+                );
             }
             let repaired = repair_patched_arm_packed_eof(&mut data, va);
             if repaired != 0 {
