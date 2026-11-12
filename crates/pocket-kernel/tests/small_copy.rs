@@ -45,7 +45,7 @@ fn copies_preserve_bytes_overlap_guards_and_arm_thumb_return() {
     for slot in [SLOT, 0x7100_0000, 0x30000000] {
         for name in ["memcpy", "memmove"] {
             let mut cpu = setup(slot, name);
-            for len in (0..=16).chain([32, 48]) {
+            for len in (0..=16).chain([32, 48, 64]) {
                 for src in [
                     0x2200, 0x2201, 0x2202, 0x2203, 0x2fe0, 0x2fff, 0x3ffb, 0x3ffc,
                 ] {
@@ -108,6 +108,10 @@ fn other_sizes_reach_host_with_original_arguments_and_without_writes() {
         (0x2300, 0x2201, 32),
         (0x2301, 0x2200, 48),
         (0x2300, 0x2ff0, 48),
+        (0x2300, 0x2201, 64),
+        (0x2300, 0x2fe0, 64),
+        (0x2fe0, 0x2200, 64),
+        (pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE, 0x2200, 64),
         (0x2ff0, 0x2200, 32),
         (pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE - 16, 0x2200, 32),
         (pocket_kernel::SYNTHETIC_FRAMEBUFFER_BASE, 0x2200, 48),
@@ -138,7 +142,7 @@ fn native_copy_honours_unmapped_and_read_only_memory() {
         args(&mut cpu, dst, src, 4, false);
         assert!(cpu.run_until_hook(SLOT, 100).is_err());
     }
-    for len in [4, 32, 48] {
+    for len in [4, 32, 48, 64] {
         let mut cpu = setup(SLOT, "memcpy");
         cpu.protect_region(0x3000, 0x1000, Prot::READ).unwrap();
         args(&mut cpu, 0x3000, 0x2000, len, false);

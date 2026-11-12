@@ -43,6 +43,9 @@
 #include "cpu.h"
 
 #include "exec/exec-all.h"
+#if defined(TARGET_ARM) && !defined(TARGET_AARCH64)
+#include "exec/helper-proto.h"
+#endif
 
 #include "tcg/tcg-op.h"
 

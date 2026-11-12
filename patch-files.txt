@@ -1,1 +1,4 @@
-crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/native_thunks.rs
+crates/pocket-kernel/tests/small_copy.rs
+vendor/unicorn-engine-sys/qemu/tcg/tcg.c
+vendor/unicorn-engine-sys/qemu/tcg/i386/tcg-target.inc.c

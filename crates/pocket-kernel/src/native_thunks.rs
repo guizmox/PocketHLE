@@ -209,11 +209,12 @@ fn install_copy_selector(
 ) -> Result<(), pocket_cpu::CpuError> {
     // The framebuffer boundary below is encoded as an ARM immediate.
     const _: () = assert!(crate::SYNTHETIC_FRAMEBUFFER_BASE == 0x7800_0000);
-    let words: [u32; 33] = [
+    let words: [u32; 34] = [
         0xe3520010, // cmp r2,#16
         0x9affff7d, // bls original small-copy helper (selector - 0x200)
         0xe3520020, // cmp r2,#32
         0x13520030, // cmpne r2,#48
+        0x13520040, // cmpne r2,#64
         0x112fff1c, // bxne ip
         0xe1803001, // orr r3,r0,r1
         0xe3130003, // tst r3,#3

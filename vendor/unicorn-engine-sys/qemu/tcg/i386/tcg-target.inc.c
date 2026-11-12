@@ -330,6 +330,7 @@ static inline int tcg_target_const_match(tcg_target_long val, TCGType type,
 #define P_VEXL          0x80000         /* Set VEX.L = 1 */
 
 #define OPC_ARITH_EvIz	(0x81)
+#define OPC_ARITH_EbIb  (0x80)
 #define OPC_ARITH_EvIb	(0x83)
 #define OPC_ARITH_GvEv	(0x03)		/* ... plus (ARITH_FOO << 3) */
 #define OPC_ANDN        (0xf2 | P_EXT38)
@@ -1628,6 +1629,36 @@ static void tcg_out_branch(TCGContext *s, int call, tcg_insn_unit *dest)
 
 static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *dest)
 {
+#if TCG_TARGET_REG_BITS == 64 && defined(TARGET_ARM) && !defined(TARGET_AARCH64)
+    if (dest == (tcg_insn_unit *)HELPER(check_exit_request) &&
+        sizeof(((uc_engine *)0)->stop_request) == 1) {
+        const int uc_arg = tcg_target_call_iarg_regs[0];
+        /* The call allocator already treats RAX as clobbered. Neither
+         * x86-64 calling convention puts an input argument there. */
+        const int cpu = TCG_REG_RAX;
+        const int countdown = (int)offsetof(ArchCPU, neg.icount_decr.u32) -
+                              (int)offsetof(ArchCPU, parent_obj);
+        TCGLabel *slow = gen_new_label(s);
+        TCGLabel *done = gen_new_label(s);
+
+        /* Keep both stop checks, including the persistent request after
+         * a PC redirect. A real exit still goes through the original
+         * helper so its return address identifies the translated code. */
+        tcg_out_modrm_offset(s, OPC_MOVL_GvEv | P_REXW, cpu, uc_arg,
+                             offsetof(uc_engine, cpu));
+        tcg_out_modrm_offset(s, OPC_ARITH_EvIb, ARITH_CMP, cpu, countdown);
+        tcg_out8(s, 0);
+        tcg_out_jxx(s, JCC_JS, slow, 1);
+        tcg_out_modrm_offset(s, OPC_ARITH_EbIb, ARITH_CMP, uc_arg,
+                             offsetof(uc_engine, stop_request));
+        tcg_out8(s, 0);
+        tcg_out_jxx(s, JCC_JE, done, 1);
+        tcg_out_label(s, slow, s->code_ptr);
+        tcg_out_branch(s, 1, dest);
+        tcg_out_label(s, done, s->code_ptr);
+        return;
+    }
+#endif
     tcg_out_branch(s, 1, dest);
 }
 
