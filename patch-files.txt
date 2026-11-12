@@ -1,1 +1,8 @@
+crates/pocket-library/src/gpu_profile.rs
+crates/pocket-winceapi/src/gles2.rs
 crates/pocket-winceapi/src/gles2/renderer.rs
+docs/GPU.md
+docs/history/VALIDATION.md
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameSettingsActivity.kt
+frontends/pocket-cli/src/main.rs
+frontends/pocket-desktop/src/app.rs

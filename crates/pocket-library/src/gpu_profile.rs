@@ -23,7 +23,7 @@ impl GpuCompatibilityProfile {
             Self::Generic => "Generic OpenGL ES (1.1, Common)",
             Self::NvidiaGoforce5500 => "NVIDIA GoForce 5500 (OpenGL ES 1.1, Common)",
             Self::Intel2700g => "Intel 2700G (OpenGL ES 1.0, Common-Lite)",
-            Self::Adreno200 => "Adreno 200 (OpenGL ES 2.0)",
+            Self::Adreno200 => "Generic OpenGL ES (2.0, Common)",
         }
     }
     pub fn nvidia_combiners(self) -> bool {

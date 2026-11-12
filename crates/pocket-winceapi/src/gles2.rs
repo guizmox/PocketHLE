@@ -213,11 +213,11 @@ impl Session {
                     match Renderer::new(width, height) {
                         Ok(renderer) => {
                             self.renderer = Some(renderer);
-                            log::info!("Adreno 200 GLES2 context ready at {width}x{height}");
+                            log::info!("GLES2 context ready at {width}x{height}");
                             CONTEXT
                         }
                         Err(error) => {
-                            log::error!("Adreno 200 GLES2 context creation failed: {error}");
+                            log::error!("GLES2 context creation failed: {error}");
                             self.fail(0x3003)
                         }
                     }
@@ -273,7 +273,7 @@ impl Session {
                 1
             }
             _ => {
-                log::warn!("Unsupported Adreno 200 EGL call {name}");
+                log::warn!("Unsupported GLES2 EGL call {name}");
                 self.fail(EGL_BAD_MATCH)
             }
         };

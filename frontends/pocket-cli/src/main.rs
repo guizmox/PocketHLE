@@ -73,8 +73,8 @@ enum Command {
     /// `--cpu stub` is available for trace-only analysis.
     Run {
         path: PathBuf,
-        /// Use the Adreno 200 programmable GLES2 profile.
-        #[arg(long)]
+        /// Use the Generic OpenGL ES (2.0, Common) profile.
+        #[arg(long = "gles2", visible_alias = "adreno200")]
         adreno200: bool,
         /// CPU backend.
         #[arg(long, default_value = DEFAULT_CPU_BACKEND)]

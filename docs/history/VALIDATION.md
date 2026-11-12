@@ -252,7 +252,7 @@ were measured separately and remain historical. GPU texture decoding on the
 software fallback path and direct rendering into the publication pool are
 investigation topics. Current behavior is described in the
 [architecture](../AGENTS.md#always-on-execution-optimizations) and
-[graphics](../GPU.md#adreno-200-programmable-rendering) guides.
+[graphics](../GPU.md#generic-opengl-es-20-programmable-rendering) guides.
 
 ## Colors investigation records
 

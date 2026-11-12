@@ -69,13 +69,13 @@ settings, immediately above **GPU rendering**, on desktop and Android:
 | Generic OpenGL ES (1.1, Common) | Standard behavior; no Intel bias or NVIDIA combiners. This is the default. |
 | NVIDIA GoForce 5500 (OpenGL ES 1.1, Common) | Allows detected clients to use AR10/AR11 combiners, exposes legacy OES VBO entry points and an RGBA8 pbuffer configuration without depth; standard depth bias. |
 | Intel 2700G (OpenGL ES 1.0, Common-Lite) | Enables the Intel depth-bias model and opaque coplanar tolerance; NVIDIA combiners disabled. |
-| Adreno 200 (OpenGL ES 2.0) | Selects the programmable guest EGL and GLES path for `libEGL.dll` and `libGLESv2.dll`. |
+| Generic OpenGL ES (2.0, Common) | Selects the programmable guest EGL and GLES path for `libEGL.dll` and `libGLESv2.dll`. |
 
 The persisted per-game `gpu_compatibility_profile` enum replaces both global
 compatibility booleans. Old global values are ignored, not inherited; existing
 entries without the field use Generic. The GLES 1.x profiles apply in software
-and GPU modes. Adreno 200 uses the native host graphics driver. Profile changes
-take effect on the next launch. Gizmondo uses its own driver and combiner policy.
+and GPU modes. The GLES 2.0 profile uses the native host graphics driver.
+Profile changes take effect on the next launch. Gizmondo uses its own driver and combiner policy.
 The profile labels identify guest compatibility targets. The host driver still
 determines the actual rendering device.
 
@@ -83,16 +83,16 @@ An imported PocketPC game receives one combined launch-settings prompt for
 screen/orientation, optional FPS advice and, when the existing executable analysis
 identifies OpenGL ES, the GPU compatibility profile. The FPS detector and
 message are shared across desktop and Android. On a new PocketPC import, a direct
-`libGLESv2.dll` import selects Adreno 200, and `libGLES_CL.dll` selects Intel
-2700G when the executable has no GLES 2.0 import. If the installation contains
+`libGLESv2.dll` import selects **Generic OpenGL ES (2.0, Common)**.
+`libGLES_CL.dll` selects Intel 2700G when the executable has no GLES 2.0 import. If the installation contains
 multiple supported executables, the selected executable determines the profile.
 Users can override the profile in Graphics settings. Updating or reimporting an
 installed game preserves its saved profile. NVIDIA selection gates extension
 advertisement and entry points and permits existing program detection.
 
-### Adreno 200 programmable rendering
+### Generic OpenGL ES 2.0 programmable rendering
 
-The profile provides an initial GLES 2.0 implementation with its own EGL
+The profile provides a GLES 2.0 implementation with its own EGL
 context, programmable state and object namespaces. The window configuration
 advertises RGB565 color, 16 depth bits and 8 stencil bits. The native window
 framebuffer uses an RGBA color texture and a packed `DEPTH24_STENCIL8`
@@ -126,16 +126,23 @@ for GLSL 1.20.
   storage until updated or deleted. The application can reuse them across
   draws and swaps.
 
-For Electopia, select Adreno 200 and **800×480 (WVGA landscape)**. The CLI
-equivalent is:
+For Electopia, select **Generic OpenGL ES (2.0, Common)** and
+**800×480 (WVGA landscape)**. The CLI accepts both `--gles2` and the
+existing `--adreno200` flag.
 
 ```sh
-pockethle run ElectopiaSetup.cab --adreno200 --screen 800x480
+pockethle run ElectopiaSetup.cab --gles2 --screen 800x480
 ```
 
+The profile dispatches all 142 core GLES 2.0 entry points.
+Framebuffer-to-texture copies use native OpenGL calls without reading back
+pixels. Compressed subimage uploads use host-supported formats. The profile
+advertises zero shader binary formats.
+
 Electopia reached its menu and attract mode under Linux Mesa llvmpipe.
-GLBenchmark 2.0.3 reached the test menu and rendered Egypt. It enumerates and
-queries EGL configurations and the window surface before running GLES2 tests.
+GLBenchmark 2.0.3 reached the test menu and rendered Egypt. GLBenchmark
+enumerates and queries EGL configurations and the window surface before
+running GLES2 tests.
 After **More → Run the test**, the default selection can leave a black image
 visible while the benchmark loads resources and draws without swapping. The
 **Swapbuffers** test provides a short presentation check.

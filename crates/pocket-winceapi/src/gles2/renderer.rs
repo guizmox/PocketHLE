@@ -58,6 +58,8 @@ pub(super) struct Renderer {
     width: u32,
     height: u32,
     default_fbo: u32,
+    window_color: u32,
+    window_depth_stencil: u32,
     framebuffer: u32,
     array: u32,
     elements: u32,
@@ -75,6 +77,11 @@ pub(super) struct Renderer {
     pack: usize,
     guest_error: u32,
     native_compressed_formats: Vec<i32>,
+    guest_textures: HashSet<u32>,
+    guest_renderbuffers: HashSet<u32>,
+    guest_framebuffers: HashSet<u32>,
+    desktop_shader_sources: HashMap<u32, Vec<u8>>,
+    deleted_shaders: HashSet<u32>,
     export: Option<ProgrammableFrameExport>,
     export_failed: bool,
     readback: Vec<u8>,
@@ -103,7 +110,7 @@ impl Renderer {
             .and_then(|source| match ProgrammableHost::shared(&source) {
                 Ok(host) => Some(host),
                 Err(error) => {
-                    log::warn!("Adreno 200 shared context unavailable: {error}");
+                    log::warn!("GLES2 shared context unavailable: {error}");
                     None
                 }
             })
@@ -115,6 +122,8 @@ impl Renderer {
             width,
             height,
             default_fbo: 0,
+            window_color: 0,
+            window_depth_stencil: 0,
             framebuffer: 0,
             array: 0,
             elements: 0,
@@ -132,6 +141,11 @@ impl Renderer {
             pack: 4,
             guest_error: 0,
             native_compressed_formats: Vec::new(),
+            guest_textures: HashSet::new(),
+            guest_renderbuffers: HashSet::new(),
+            guest_framebuffers: HashSet::new(),
+            desktop_shader_sources: HashMap::new(),
+            deleted_shaders: HashSet::new(),
             export: None,
             export_failed: false,
             readback: Vec::new(),
@@ -167,6 +181,8 @@ impl Renderer {
         invoke!(r, "glBindRenderbuffer", (RENDERBUFFER => u32, 0 => u32), ());
         invoke!(r, "glViewport", (0 => i32, 0 => i32, width as i32 => i32, height as i32 => i32), ());
         r.default_fbo = fbo;
+        r.window_color = color;
+        r.window_depth_stencil = depth_stencil;
         let mut max_attributes = 0i32;
         let mut texture_units = 0i32;
         invoke!(r, "glGetIntegerv", (0x8869 => u32, &mut max_attributes => *mut i32), ());
@@ -216,7 +232,7 @@ impl Renderer {
         match snapshot {
             Ok(frame) => frame,
             Err(error) => {
-                log::warn!("Adreno 200 shared frame export unavailable: {error}");
+                log::warn!("GLES2 shared frame export unavailable: {error}");
                 self.export_failed = true;
                 None
             }
@@ -415,9 +431,24 @@ impl Renderer {
         }
         match name {
             "glCreateProgram" => return Ok(invoke!(self, name, (), u32)),
-            "glIsProgram" => return Ok(u32::from(invoke!(self, name, (u!(0) => u32), u8))),
+            "glIsProgram" | "glIsShader" | "glIsEnabled" => {
+                return Ok(u32::from(invoke!(self, name, (u!(0) => u32), u8)));
+            }
             "glCreateShader" | "glCheckFramebufferStatus" => {
                 return Ok(invoke!(self, name, (u!(0) => u32), u32));
+            }
+            "glIsBuffer" | "glIsFramebuffer" | "glIsRenderbuffer" | "glIsTexture" => {
+                let id = u!(0);
+                let objects = match name {
+                    "glIsBuffer" => &self.guest_buffers,
+                    "glIsFramebuffer" => &self.guest_framebuffers,
+                    "glIsRenderbuffer" => &self.guest_renderbuffers,
+                    _ => &self.guest_textures,
+                };
+                if !objects.contains(&id) {
+                    return Ok(0);
+                }
+                return Ok(u32::from(invoke!(self, name, (id => u32), u8)));
             }
             "glGetString" => {
                 let value = match u!(0) {
@@ -442,9 +473,9 @@ impl Renderer {
                 });
             }
             "glFinish" | "glFlush" => gl!(),
-            "glClear" | "glGenerateMipmap" | "glCompileShader" | "glCullFace"
-            | "glDeleteProgram" | "glDeleteShader" | "glDepthFunc" | "glDisable" | "glEnable"
-            | "glLinkProgram" | "glUseProgram" | "glValidateProgram" | "glFrontFace" => {
+            "glClear" | "glGenerateMipmap" | "glCompileShader" | "glCullFace" | "glDepthFunc"
+            | "glDisable" | "glEnable" | "glLinkProgram" | "glValidateProgram" | "glFrontFace"
+            | "glBlendEquation" | "glStencilMask" => {
                 gl!(u!(0) => u32)
             }
             "glActiveTexture" => {
@@ -471,9 +502,67 @@ impl Renderer {
                     gl!(index => u32);
                 }
             }
-            "glAttachShader" | "glBindRenderbuffer" | "glBindTexture" | "glBlendFunc" => {
+            "glAttachShader"
+            | "glBlendFunc"
+            | "glBlendEquationSeparate"
+            | "glStencilMaskSeparate" => {
                 gl!(u!(0) => u32, u!(1) => u32);
             }
+            "glDeleteShader" => {
+                let shader = u!(0);
+                gl!(shader => u32);
+                if self.desktop_shader_sources.contains_key(&shader) {
+                    self.deleted_shaders.insert(shader);
+                    self.reap_shader_sources()?;
+                }
+            }
+            "glDeleteProgram" | "glUseProgram" => {
+                gl!(u!(0) => u32);
+                self.reap_shader_sources()?;
+            }
+            "glDetachShader" => {
+                gl!(u!(0) => u32, u!(1) => u32);
+                self.reap_shader_sources()?;
+            }
+            "glBindTexture" => {
+                let (target, texture) = (u!(0), u!(1));
+                if texture == self.window_color {
+                    return Ok(self.reject(0x0502));
+                }
+                gl!(target => u32, texture => u32);
+                if texture != 0 && matches!(target, TEXTURE_2D | 0x8513) {
+                    self.guest_textures.insert(texture);
+                }
+            }
+            "glBindRenderbuffer" => {
+                let (target, buffer) = (u!(0), u!(1));
+                if buffer == self.window_depth_stencil {
+                    return Ok(self.reject(0x0502));
+                }
+                gl!(target => u32, buffer => u32);
+                if target == RENDERBUFFER && buffer != 0 {
+                    self.guest_renderbuffers.insert(buffer);
+                }
+            }
+            "glBlendColor" => gl!(f!(0) => f32, f!(1) => f32, f!(2) => f32, f!(3) => f32),
+            "glBlendFuncSeparate" | "glStencilOpSeparate" => {
+                gl!(u!(0) => u32, u!(1) => u32, u!(2) => u32, u!(3) => u32);
+            }
+            "glClearStencil" => gl!(i!(0) => i32),
+            "glStencilFunc" => gl!(u!(0) => u32, i!(1) => i32, u!(2) => u32),
+            "glStencilFuncSeparate" => gl!(u!(0) => u32, u!(1) => u32, i!(2) => i32, u!(3) => u32),
+            "glStencilOp" => gl!(u!(0) => u32, u!(1) => u32, u!(2) => u32),
+            "glHint" => {
+                let target = u!(0);
+                if target != 0x8192 {
+                    // GL_GENERATE_MIPMAP_HINT
+                    return Ok(self.reject(0x0500));
+                }
+                gl!(target => u32, u!(1) => u32);
+            }
+            "glLineWidth" => gl!(f!(0) => f32),
+            "glPolygonOffset" => gl!(f!(0) => f32, f!(1) => f32),
+            "glSampleCoverage" => gl!(f!(0) => f32, u!(1) as u8 => u8),
             "glBindBuffer" => {
                 let (target, buffer) = (u!(0), u!(1));
                 if !matches!(target, ARRAY_BUFFER | ELEMENT_BUFFER) {
@@ -503,6 +592,9 @@ impl Renderer {
                         return Ok(self.reject(0x0502));
                     }
                     self.framebuffer = framebuffer;
+                    if framebuffer != 0 {
+                        self.guest_framebuffers.insert(framebuffer);
+                    }
                 }
                 let default_fbo = self.default_fbo;
                 gl!(target => u32, if framebuffer == 0 { default_fbo } else { framebuffer } => u32);
@@ -525,6 +617,35 @@ impl Renderer {
             }
             "glTexParameteri" => gl!(u!(0) => u32, u!(1) => u32, i!(2) => i32),
             "glTexParameterf" => gl!(u!(0) => u32, u!(1) => u32, f!(2) => f32),
+            "glTexParameterfv"
+            | "glTexParameteriv"
+            | "glGetTexParameterfv"
+            | "glGetTexParameteriv" => {
+                let (target, pname, address) = (u!(0), u!(1), u!(2));
+                if !matches!(target, TEXTURE_2D | 0x8513) || !matches!(pname, 0x2800..=0x2803) {
+                    return Ok(self.reject(0x0500));
+                }
+                match name {
+                    "glTexParameterfv" => {
+                        let value = f32::from_bits(ctx.cpu.read_u32_le(address)?);
+                        gl!(target => u32, pname => u32, &value => *const f32);
+                    }
+                    "glTexParameteriv" => {
+                        let value = ctx.cpu.read_u32_le(address)? as i32;
+                        gl!(target => u32, pname => u32, &value => *const i32);
+                    }
+                    "glGetTexParameterfv" => {
+                        let mut value = 0.0f32;
+                        gl!(target => u32, pname => u32, &mut value => *mut f32);
+                        ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                    }
+                    _ => {
+                        let mut value = 0i32;
+                        gl!(target => u32, pname => u32, &mut value => *mut i32);
+                        ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                    }
+                }
+            }
             "glPixelStorei" => {
                 let (parameter, alignment) = (u!(0), i!(1));
                 if !matches!(alignment, 1 | 2 | 4 | 8) {
@@ -538,6 +659,34 @@ impl Renderer {
                 gl!(parameter => u32, alignment => i32);
             }
             "glRenderbufferStorage" => gl!(u!(0) => u32, u!(1) => u32, i!(2) => i32, i!(3) => i32),
+            "glGetFramebufferAttachmentParameteriv" => {
+                let (target, attachment, pname, address) = (u!(0), u!(1), u!(2), u!(3));
+                if target != FRAMEBUFFER
+                    || !matches!(attachment, 0x8ce0 | 0x8d00 | 0x8d20)
+                    || !matches!(pname, 0x8cd0..=0x8cd3)
+                {
+                    return Ok(self.reject(0x0500));
+                }
+                if self.framebuffer == 0 {
+                    return Ok(self.reject(0x0502));
+                }
+                let mut value = -1i32;
+                gl!(target => u32, attachment => u32, pname => u32, &mut value => *mut i32);
+                if value >= 0 {
+                    ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                }
+            }
+            "glGetRenderbufferParameteriv" => {
+                let (target, pname, address) = (u!(0), u!(1), u!(2));
+                if target != RENDERBUFFER || !matches!(pname, 0x8d42..=0x8d44 | 0x8d50..=0x8d55) {
+                    return Ok(self.reject(0x0500));
+                }
+                let mut value = -1i32;
+                gl!(target => u32, pname => u32, &mut value => *mut i32);
+                if value >= 0 {
+                    ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                }
+            }
             "glFramebufferTexture2D" => {
                 if self.framebuffer == 0 {
                     return Ok(self.reject(0x0502));
@@ -556,10 +705,13 @@ impl Renderer {
                 gl!(count => i32, names.as_mut_ptr() => *mut u32);
                 let out = u!(1);
                 write_words(ctx, out, &names)?;
-                if name == "glGenBuffers" {
-                    self.guest_buffers
-                        .extend(names.into_iter().filter(|&id| id != 0));
-                }
+                let objects = match name {
+                    "glGenBuffers" => &mut self.guest_buffers,
+                    "glGenFramebuffers" => &mut self.guest_framebuffers,
+                    "glGenRenderbuffers" => &mut self.guest_renderbuffers,
+                    _ => &mut self.guest_textures,
+                };
+                objects.extend(names.into_iter().filter(|&id| id != 0));
             }
             "glDeleteBuffers"
             | "glDeleteFramebuffers"
@@ -568,11 +720,13 @@ impl Renderer {
                 let count = i!(0);
                 let address = u!(1);
                 let mut names = read_words(ctx, address, transfer_size(count, 4)? / 4)?;
-                if name == "glDeleteFramebuffers" {
-                    names.retain(|&id| id != self.default_fbo);
-                } else if name == "glDeleteBuffers" {
-                    names.retain(|id| self.guest_buffers.remove(id));
-                }
+                let objects = match name {
+                    "glDeleteBuffers" => &mut self.guest_buffers,
+                    "glDeleteFramebuffers" => &mut self.guest_framebuffers,
+                    "glDeleteRenderbuffers" => &mut self.guest_renderbuffers,
+                    _ => &mut self.guest_textures,
+                };
+                names.retain(|id| objects.remove(id));
                 gl!(names.len() as i32 => i32, names.as_ptr() => *const u32);
                 if name == "glDeleteBuffers" {
                     for id in &names {
@@ -645,6 +799,27 @@ impl Renderer {
                     }
                 }
             }
+            "glVertexAttrib1f" => gl!(u!(0) => u32, f!(1) => f32),
+            "glVertexAttrib2f" => gl!(u!(0) => u32, f!(1) => f32, f!(2) => f32),
+            "glVertexAttrib3f" => gl!(u!(0) => u32, f!(1) => f32, f!(2) => f32, f!(3) => f32),
+            "glVertexAttrib4f" => {
+                gl!(u!(0) => u32, f!(1) => f32, f!(2) => f32, f!(3) => f32, f!(4) => f32);
+            }
+            "glVertexAttrib1fv" | "glVertexAttrib2fv" | "glVertexAttrib3fv"
+            | "glVertexAttrib4fv" => {
+                let (index, address) = (u!(0), u!(1));
+                if index >= self.max_attributes {
+                    return Ok(self.reject(0x0501));
+                }
+                let components = match name {
+                    "glVertexAttrib2fv" => 2,
+                    "glVertexAttrib3fv" => 3,
+                    "glVertexAttrib4fv" => 4,
+                    _ => 1,
+                };
+                let values = read_words(ctx, address, components)?;
+                gl!(index => u32, values.as_ptr().cast() => *const f32);
+            }
             "glVertexAttribPointer" => {
                 let (index, size, kind, normalized, stride, address) =
                     (u!(0), i!(1), u!(2), u!(3) as u8, i!(4), u!(5));
@@ -676,6 +851,61 @@ impl Renderer {
                     self.client_attributes.remove(&index);
                     // Keep its staging buffer available if this slot switches
                     // back from a guest VBO to client memory.
+                }
+            }
+            "glGetVertexAttribPointerv" => {
+                let (index, pname, out) = (u!(0), u!(1), u!(2));
+                if index >= self.max_attributes {
+                    return Ok(self.reject(0x0501));
+                }
+                if pname != 0x8645 {
+                    return Ok(self.reject(0x0500));
+                }
+                let address = if let Some(attribute) = self.client_attributes.get(&index) {
+                    attribute.address
+                } else {
+                    let mut pointer = std::ptr::null_mut();
+                    gl!(index => u32, pname => u32, &mut pointer => *mut *mut c_void);
+                    pointer as usize as u32
+                };
+                ctx.cpu.write_mem(out, &address.to_le_bytes())?;
+            }
+            "glGetVertexAttribfv" | "glGetVertexAttribiv" => {
+                let (index, pname, out) = (u!(0), u!(1), u!(2));
+                if index >= self.max_attributes {
+                    return Ok(self.reject(0x0501));
+                }
+                if !matches!(pname, 0x8622..=0x8626 | 0x886a | 0x889f) {
+                    return Ok(self.reject(0x0500));
+                }
+                let float = name == "glGetVertexAttribfv";
+                let client_value =
+                    self.client_attributes
+                        .get(&index)
+                        .and_then(|attribute| match pname {
+                            0x8623 => Some(attribute.size),
+                            0x8624 => Some(attribute.stride),
+                            0x8625 => Some(attribute.kind as i32),
+                            0x886a => Some(i32::from(attribute.normalized != 0)),
+                            0x889f => Some(0),
+                            _ => None,
+                        });
+                if let Some(value) = client_value {
+                    let bits = if float {
+                        (value as f32).to_bits()
+                    } else {
+                        value as u32
+                    };
+                    ctx.cpu.write_mem(out, &bits.to_le_bytes())?;
+                } else {
+                    let count = if pname == 0x8626 { 4 } else { 1 };
+                    let mut values = [0u32; 4];
+                    if float {
+                        gl!(index => u32, pname => u32, values.as_mut_ptr().cast() => *mut f32);
+                    } else {
+                        gl!(index => u32, pname => u32, values.as_mut_ptr().cast() => *mut i32);
+                    }
+                    write_words(ctx, out, &values[..count])?;
                 }
             }
             "glDrawArrays" => {
@@ -769,6 +999,58 @@ impl Renderer {
                 gl!(u!(0) => u32, i!(1) => i32, i!(2) => i32, width => i32, height => i32,
                     i!(5) => i32, format => u32, kind => u32, data_pointer(&pixels) => *const c_void);
             }
+            "glTexSubImage2D" => {
+                let (width, height, format, kind, address) = (i!(4), i!(5), u!(6), u!(7), u!(8));
+                if width < 0 || height < 0 {
+                    return Ok(self.reject(0x0501));
+                }
+                let Some(bytes) = texture_size(width, height, format, kind, self.unpack) else {
+                    return Ok(self.reject(0x0500));
+                };
+                let pixels = if bytes == 0 {
+                    Vec::new()
+                } else {
+                    ctx.cpu.read_mem(address, bytes as u32)?
+                };
+                gl!(u!(0) => u32, i!(1) => i32, i!(2) => i32, i!(3) => i32,
+                    width => i32, height => i32, format => u32, kind => u32,
+                    pixels.as_ptr().cast() => *const c_void);
+            }
+            "glCopyTexImage2D" => {
+                gl!(u!(0) => u32, i!(1) => i32, u!(2) => u32, i!(3) => i32,
+                    i!(4) => i32, i!(5) => i32, i!(6) => i32, i!(7) => i32);
+            }
+            "glCopyTexSubImage2D" => {
+                gl!(u!(0) => u32, i!(1) => i32, i!(2) => i32, i!(3) => i32,
+                    i!(4) => i32, i!(5) => i32, i!(6) => i32, i!(7) => i32);
+            }
+            "glCompressedTexSubImage2D" => {
+                let (target, level, x, y, width, height, format, size, address) = (
+                    u!(0),
+                    i!(1),
+                    i!(2),
+                    i!(3),
+                    i!(4),
+                    i!(5),
+                    u!(6),
+                    i!(7),
+                    u!(8),
+                );
+                if !self.native_compressed_formats.contains(&(format as i32)) {
+                    return Ok(self.reject(0x0500));
+                }
+                if size < 0 || width < 0 || height < 0 {
+                    return Ok(self.reject(0x0501));
+                }
+                let bytes = transfer_size(size, 1)?;
+                let data = if bytes == 0 {
+                    Vec::new()
+                } else {
+                    ctx.cpu.read_mem(address, bytes as u32)?
+                };
+                gl!(target => u32, level => i32, x => i32, y => i32, width => i32, height => i32,
+                    format => u32, size => i32, data.as_ptr().cast() => *const c_void);
+            }
             "glCompressedTexImage2D" => {
                 let (target, level, format, width, height, border, size, address) =
                     (u!(0), i!(1), u!(2), i!(3), i!(4), i!(5), i!(6), u!(7));
@@ -836,17 +1118,138 @@ impl Renderer {
                         return Err(error("Shader source exceeds 1 MiB"));
                     }
                 }
-                if !self.host.es {
-                    source = desktop_shader(&source);
+                if !self.host.es && invoke!(self, "glIsShader", (shader => u32), u8) != 0 {
+                    let adapted = desktop_shader(&source);
+                    let pointer = adapted.as_ptr().cast();
+                    let length = adapted.len() as i32;
+                    gl!(shader => u32, 1 => i32, &pointer => *const *const c_char, &length => *const i32);
+                    self.desktop_shader_sources.insert(shader, source);
+                } else {
+                    let pointer = source.as_ptr().cast();
+                    let length = source.len() as i32;
+                    gl!(shader => u32, 1 => i32, &pointer => *const *const c_char, &length => *const i32);
                 }
-                let pointer = source.as_ptr().cast();
-                let length = source.len() as i32;
-                gl!(shader => u32, 1 => i32, &pointer => *const *const c_char, &length => *const i32);
+            }
+            "glReleaseShaderCompiler" => {
+                if self.host.es {
+                    gl!();
+                }
+            }
+            "glShaderBinary" => return Ok(self.reject(0x0500)),
+            "glGetShaderPrecisionFormat" => {
+                let (shader, precision, range_out, precision_out) = (u!(0), u!(1), u!(2), u!(3));
+                if !matches!(shader, 0x8b30 | 0x8b31) || !matches!(precision, 0x8df0..=0x8df5) {
+                    return Ok(self.reject(0x0500));
+                }
+                let (mut range, mut bits) = if precision <= 0x8df2 {
+                    ([127i32, 127], 23i32)
+                } else {
+                    ([31i32, 30], 0i32)
+                };
+                if self.host.es {
+                    gl!(shader => u32, precision => u32, range.as_mut_ptr() => *mut i32, &mut bits => *mut i32);
+                }
+                write_words(ctx, range_out, &range.map(|n| n as u32))?;
+                ctx.cpu.write_mem(precision_out, &bits.to_le_bytes())?;
+            }
+            "glGetShaderSource" => {
+                let (shader, capacity, length_out, source_out) = (u!(0), i!(1), u!(2), u!(3));
+                if capacity < 0 {
+                    return Ok(self.reject(0x0501));
+                }
+                let mut length = 0i32;
+                if self.host.es {
+                    let mut source = vec![0u8; transfer_size(capacity, 1)?];
+                    gl!(shader => u32, capacity => i32, &mut length => *mut i32,
+                        source.as_mut_ptr().cast() => *mut c_char);
+                    if capacity > 0 {
+                        ctx.cpu.write_mem(
+                            source_out,
+                            &source[..length.clamp(0, capacity - 1) as usize + 1],
+                        )?;
+                    }
+                } else {
+                    if invoke!(self, "glIsShader", (shader => u32), u8) == 0 {
+                        return Ok(self.reject(0x0501));
+                    }
+                    if capacity > 0 {
+                        let source = self
+                            .desktop_shader_sources
+                            .get(&shader)
+                            .map_or(&[][..], Vec::as_slice);
+                        let source = &source[..source.len().min((capacity - 1) as usize)];
+                        length = source.len() as i32;
+                        ctx.cpu.write_mem(source_out, source)?;
+                        let terminator = source_out
+                            .checked_add(length as u32)
+                            .ok_or_else(|| error("Guest shader source address overflow"))?;
+                        ctx.cpu.write_mem(terminator, &[0])?;
+                    }
+                }
+                if length_out != 0 {
+                    ctx.cpu.write_mem(length_out, &length.to_le_bytes())?;
+                }
+            }
+            "glGetActiveAttrib" | "glGetActiveUniform" => {
+                let (program, index, capacity, length_out, size_out, type_out, name_out) =
+                    (u!(0), u!(1), i!(2), u!(3), u!(4), u!(5), u!(6));
+                if capacity < 0 {
+                    return Ok(self.reject(0x0501));
+                }
+                let mut symbol = vec![0u8; transfer_size(capacity, 1)?];
+                let (mut length, mut size, mut kind) = (0i32, 0i32, 0u32);
+                gl!(program => u32, index => u32, capacity => i32, &mut length => *mut i32,
+                    &mut size => *mut i32, &mut kind => *mut u32, symbol.as_mut_ptr().cast() => *mut c_char);
+                if kind != 0 {
+                    if length_out != 0 {
+                        ctx.cpu.write_mem(length_out, &length.to_le_bytes())?;
+                    }
+                    ctx.cpu.write_mem(size_out, &size.to_le_bytes())?;
+                    ctx.cpu.write_mem(type_out, &kind.to_le_bytes())?;
+                    if capacity > 0 {
+                        ctx.cpu.write_mem(
+                            name_out,
+                            &symbol[..length.clamp(0, capacity - 1) as usize + 1],
+                        )?;
+                    }
+                }
+            }
+            "glGetUniformfv" | "glGetUniformiv" => {
+                let (program, location, out) = (u!(0), i!(1), u!(2));
+                // ES2 writes one uniform element, with up to 16 components.
+                // Different initial bit patterns identify the written prefix even
+                // when a legitimate value matches one of the patterns.
+                let mut values = [0u32; 16];
+                let mut check = [u32::MAX; 16];
+                for storage in [&mut values, &mut check] {
+                    if name == "glGetUniformfv" {
+                        gl!(program => u32, location => i32, storage.as_mut_ptr().cast() => *mut f32);
+                    } else {
+                        gl!(program => u32, location => i32, storage.as_mut_ptr().cast() => *mut i32);
+                    }
+                }
+                let count = values
+                    .iter()
+                    .zip(check)
+                    .take_while(|(a, b)| **a == *b)
+                    .count();
+                write_words(ctx, out, &values[..count])?;
             }
             "glGetProgramiv" | "glGetShaderiv" => {
                 let mut value = 0i32;
-                gl!(u!(0) => u32, u!(1) => u32, &mut value => *mut i32);
-                let out = u!(2);
+                let (object, pname, out) = (u!(0), u!(1), u!(2));
+                if name == "glGetShaderiv"
+                    && pname == 0x8b88
+                    && !self.host.es
+                    && invoke!(self, "glIsShader", (object => u32), u8) != 0
+                {
+                    value = self
+                        .desktop_shader_sources
+                        .get(&object)
+                        .map_or(0, |source| source.len() as i32 + 1);
+                } else {
+                    gl!(object => u32, pname => u32, &mut value => *mut i32);
+                }
                 ctx.cpu.write_mem(out, &value.to_le_bytes())?;
             }
             "glGetProgramInfoLog" | "glGetShaderInfoLog" => {
@@ -931,31 +1334,33 @@ impl Renderer {
                     }
                 }
             }
-            "glGetIntegerv" | "glGetBooleanv" => {
+            "glGetIntegerv" | "glGetBooleanv" | "glGetFloatv" => {
                 let (parameter, address) = (u!(0), u!(1));
                 let boolean = name == "glGetBooleanv";
+                let float = name == "glGetFloatv";
                 let count = match parameter {
-                    0x0ba2 | 0x0c10 | 0x0c23 => 4,
-                    0x0d3a | 0x846d | 0x846e => 2,
+                    0x0ba2 | 0x0c10 | 0x0c22 | 0x0c23 | 0x8005 => 4,
+                    0x0b70 | 0x0d3a | 0x846d | 0x846e => 2,
                     0x8df8 => return Ok(0), // Shader binary formats: none.
-                    0x8ca6 | 0x8df9 | 0x8dfa => {
+                    0x8869 | 0x8b9a | 0x8b9b | 0x8ca6 | 0x8df9 | 0x8dfa => {
                         let value = match parameter {
+                            0x8869 => self.max_attributes,
+                            0x8b9a => UNSIGNED_BYTE,
+                            0x8b9b => RGBA,
                             0x8ca6 => self.framebuffer,
                             0x8dfa => 1, // Source shaders are compiled on either host API.
                             _ => 0,      // Shader binaries are not exposed.
                         };
                         if boolean {
                             ctx.cpu.write_mem(address, &[u8::from(value != 0)])?;
+                        } else if float {
+                            ctx.cpu.write_mem(address, &(value as f32).to_le_bytes())?;
                         } else {
                             ctx.cpu.write_mem(address, &value.to_le_bytes())?;
                         }
                         return Ok(0);
                     }
-                    0x86a3 => {
-                        let mut count = 0i32;
-                        gl!(0x86a2 => u32, &mut count => *mut i32);
-                        transfer_size(count, 4)? / 4
-                    }
+                    0x86a3 => self.native_compressed_formats.len(),
                     // Scalar ES2 queries.
                     0x0b21
                     | 0x0b44
@@ -966,6 +1371,14 @@ impl Renderer {
                     | 0x0b73
                     | 0x0b74
                     | 0x0b90..=0x0b98
+                    | 0x8009
+                    | 0x8037..=0x8038
+                    | 0x80c8..=0x80cb
+                    | 0x8192
+                    | 0x883d
+                    | 0x8800..=0x8803
+                    | 0x8ca3..=0x8ca5
+                    | 0x0bd0
                     | 0x0be2
                     | 0x0c11
                     | 0x0cf5
@@ -973,13 +1386,10 @@ impl Renderer {
                     | 0x0d33
                     | 0x0d50..=0x0d57
                     | 0x2a00
-                    | 0x8037
-                    | 0x8038
                     | 0x8069
                     | 0x809e
                     | 0x80a0
-                    | 0x80a8
-                    | 0x80a9
+                    | 0x80a8..=0x80ab
                     | 0x84e0
                     | 0x84e8
                     | 0x8514
@@ -990,9 +1400,7 @@ impl Renderer {
                     | 0x8b49..=0x8b4d
                     | 0x8b8d
                     | 0x8ca7
-                    | 0x8d9a
-                    | 0x8d9b
-                    | 0x8dfa..=0x8dfd => 1,
+                    | 0x8dfb..=0x8dfd => 1,
                     _ => return Ok(self.reject(0x0500)),
                 };
                 if count != 0 && boolean {
@@ -1001,35 +1409,49 @@ impl Renderer {
                     ctx.cpu.write_mem(address, &values)?;
                 } else if count != 0 {
                     let mut values = vec![0u32; count];
-                    gl!(parameter => u32, values.as_mut_ptr().cast() => *mut i32);
+                    if float {
+                        gl!(parameter => u32, values.as_mut_ptr().cast() => *mut f32);
+                    } else {
+                        gl!(parameter => u32, values.as_mut_ptr().cast() => *mut i32);
+                    }
                     write_words(ctx, address, &values)?;
                 }
             }
             "glUniform1i" => gl!(i!(0) => i32, i!(1) => i32),
+            "glUniform2i" => gl!(i!(0) => i32, i!(1) => i32, i!(2) => i32),
+            "glUniform3i" => gl!(i!(0) => i32, i!(1) => i32, i!(2) => i32, i!(3) => i32),
+            "glUniform4i" => {
+                gl!(i!(0) => i32, i!(1) => i32, i!(2) => i32, i!(3) => i32, i!(4) => i32)
+            }
             "glUniform1f" => gl!(i!(0) => i32, f!(1) => f32),
             "glUniform2f" => gl!(i!(0) => i32, f!(1) => f32, f!(2) => f32),
             "glUniform3f" => gl!(i!(0) => i32, f!(1) => f32, f!(2) => f32, f!(3) => f32),
             "glUniform4f" => {
                 gl!(i!(0) => i32, f!(1) => f32, f!(2) => f32, f!(3) => f32, f!(4) => f32)
             }
-            "glUniform1fv" | "glUniform2fv" | "glUniform3fv" | "glUniform4fv" | "glUniform1iv" => {
+            "glUniform1fv" | "glUniform2fv" | "glUniform3fv" | "glUniform4fv" | "glUniform1iv"
+            | "glUniform2iv" | "glUniform3iv" | "glUniform4iv" => {
                 let (location, count, address) = (i!(0), i!(1), u!(2));
                 let components = match name {
-                    "glUniform2fv" => 2,
-                    "glUniform3fv" => 3,
-                    "glUniform4fv" => 4,
+                    "glUniform2fv" | "glUniform2iv" => 2,
+                    "glUniform3fv" | "glUniform3iv" => 3,
+                    "glUniform4fv" | "glUniform4iv" => 4,
                     _ => 1,
                 };
                 let values = read_words(ctx, address, transfer_size(count, components * 4)? / 4)?;
-                if name == "glUniform1iv" {
+                if name.ends_with("iv") {
                     gl!(location => i32, count => i32, values.as_ptr().cast() => *const i32);
                 } else {
                     gl!(location => i32, count => i32, values.as_ptr().cast() => *const f32);
                 }
             }
-            "glUniformMatrix3fv" | "glUniformMatrix4fv" => {
+            "glUniformMatrix2fv" | "glUniformMatrix3fv" | "glUniformMatrix4fv" => {
                 let (location, count, transpose, address) = (i!(0), i!(1), u!(2), u!(3));
-                let components = if name == "glUniformMatrix3fv" { 9 } else { 16 };
+                let components = match name {
+                    "glUniformMatrix2fv" => 4,
+                    "glUniformMatrix3fv" => 9,
+                    _ => 16,
+                };
                 let values = read_words(ctx, address, transfer_size(count, components * 4)? / 4)?;
                 gl!(location => i32, count => i32, transpose as u8 => u8, values.as_ptr().cast() => *const f32);
             }
@@ -1039,6 +1461,20 @@ impl Renderer {
             }
         }
         Ok(0)
+    }
+
+    fn reap_shader_sources(&mut self) -> Result<()> {
+        if self.deleted_shaders.is_empty() {
+            return Ok(());
+        }
+        for shader in std::mem::take(&mut self.deleted_shaders) {
+            if invoke!(self, "glIsShader", (shader => u32), u8) == 0 {
+                self.desktop_shader_sources.remove(&shader);
+            } else {
+                self.deleted_shaders.insert(shader);
+            }
+        }
+        Ok(())
     }
 
     fn reject(&mut self, code: u32) -> u32 {
@@ -1160,6 +1596,140 @@ mod tests {
         assert_eq!(changed_range(&previous, &[1, 2, 3]), None);
         assert_eq!(changed_range(&previous, &[1, 2, 8, 4, 5]), Some(2..3));
         assert_eq!(changed_range(&previous, &[1, 2, 8, 4, 9]), Some(2..5));
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL"]
+    fn programmable_queries_and_texture_copies_preserve_guest_data() -> Result<()> {
+        use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "libglesv2.dll".into(),
+            binding: ImportBinding::Name("glTexSubImage2D".into()),
+            friendly_name: None,
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &thunk,
+            kernel: &mut kernel,
+        };
+        let mut renderer = Renderer::new(8, 8)?;
+        let mut run = |ctx: &mut CallCtx<'_>, name, args: &[u32]| -> Result<u32> {
+            for (reg, &value) in [R0, R1, R2, R3].into_iter().zip(args) {
+                ctx.cpu.write_reg(reg, value)?;
+            }
+            write_words(ctx, 0x4000, args.get(4..).unwrap_or_default())?;
+            renderer.gl(name, ctx)
+        };
+
+        run(
+            &mut ctx,
+            "glVertexAttribPointer",
+            &[0, 2, 0x1406, 0, 12, 0x2000],
+        )?;
+        run(&mut ctx, "glGetVertexAttribPointerv", &[0, 0x8645, 0x1000])?;
+        run(&mut ctx, "glGetVertexAttribiv", &[0, 0x8624, 0x1004])?;
+        assert_eq!(read_words(&mut ctx, 0x1000, 2)?, [0x2000, 12]);
+
+        let source = b"#version 100\nvoid main() { gl_Position = vec4(0.0); }";
+        ctx.cpu.write_mem(0x2000, source)?;
+        write_words(&mut ctx, 0x1000, &[0x2000, source.len() as u32])?;
+        let shader = run(&mut ctx, "glCreateShader", &[0x8b31])?;
+        run(&mut ctx, "glShaderSource", &[shader, 1, 0x1000, 0x1004])?;
+        run(&mut ctx, "glGetShaderiv", &[shader, 0x8b88, 0x1010])?;
+        run(
+            &mut ctx,
+            "glGetShaderSource",
+            &[shader, 256, 0x1014, 0x3000],
+        )?;
+        assert_eq!(
+            read_words(&mut ctx, 0x1010, 2)?,
+            [source.len() as u32 + 1, source.len() as u32]
+        );
+        assert_eq!(ctx.cpu.read_mem(0x3000, source.len() as u32)?, source);
+        run(&mut ctx, "glDeleteShader", &[shader])?;
+
+        run(&mut ctx, "glGenTextures", &[1, 0x1000])?;
+        let texture = read_words(&mut ctx, 0x1000, 1)?[0];
+        run(&mut ctx, "glBindTexture", &[TEXTURE_2D, texture])?;
+        run(
+            &mut ctx,
+            "glTexImage2D",
+            &[TEXTURE_2D, 0, RGBA, 1, 2, 0, RGBA, UNSIGNED_BYTE, 0],
+        )?;
+        run(&mut ctx, "glPixelStorei", &[0x0cf5, 8])?;
+        ctx.cpu.write_mem(
+            0x2000,
+            &[255, 0, 0, 255, 0x55, 0x55, 0x55, 0x55, 0, 255, 0, 255],
+        )?;
+        run(
+            &mut ctx,
+            "glTexSubImage2D",
+            &[TEXTURE_2D, 0, 0, 0, 1, 2, RGBA, UNSIGNED_BYTE, 0x2000],
+        )?;
+        run(&mut ctx, "glGenFramebuffers", &[1, 0x1000])?;
+        let framebuffer = read_words(&mut ctx, 0x1000, 1)?[0];
+        run(&mut ctx, "glBindFramebuffer", &[FRAMEBUFFER, framebuffer])?;
+        run(
+            &mut ctx,
+            "glFramebufferTexture2D",
+            &[FRAMEBUFFER, 0x8ce0, TEXTURE_2D, texture, 0],
+        )?;
+        assert_eq!(
+            run(&mut ctx, "glCheckFramebufferStatus", &[FRAMEBUFFER])?,
+            0x8cd5
+        );
+        run(
+            &mut ctx,
+            "glReadPixels",
+            &[0, 0, 1, 2, RGBA, UNSIGNED_BYTE, 0x3000],
+        )?;
+        assert_eq!(run(&mut ctx, "glGetError", &[])?, 0);
+        assert_eq!(
+            ctx.cpu.read_mem(0x3000, 8)?,
+            [255, 0, 0, 255, 0, 255, 0, 255]
+        );
+        run(&mut ctx, "glGenTextures", &[1, 0x1000])?;
+        let copied = read_words(&mut ctx, 0x1000, 1)?[0];
+        run(&mut ctx, "glBindTexture", &[TEXTURE_2D, copied])?;
+        run(
+            &mut ctx,
+            "glCopyTexImage2D",
+            &[TEXTURE_2D, 0, RGBA, 0, 0, 1, 2, 0],
+        )?;
+        run(
+            &mut ctx,
+            "glCopyTexSubImage2D",
+            &[TEXTURE_2D, 0, 0, 0, 0, 1, 1, 1],
+        )?;
+        run(
+            &mut ctx,
+            "glFramebufferTexture2D",
+            &[FRAMEBUFFER, 0x8ce0, TEXTURE_2D, copied, 0],
+        )?;
+        run(
+            &mut ctx,
+            "glReadPixels",
+            &[0, 0, 1, 2, RGBA, UNSIGNED_BYTE, 0x3000],
+        )?;
+        assert_eq!(run(&mut ctx, "glGetError", &[])?, 0);
+        assert_eq!(
+            ctx.cpu.read_mem(0x3000, 8)?,
+            [0, 255, 0, 255, 0, 255, 0, 255]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires desktop OpenGL"]
+    fn programmable_queries_and_copies_work_through_desktop_gl() -> Result<()> {
+        let ui = NativeRenderer::new(8, 8).map_err(error)?;
+        with_shared_context_source(Some(ui.shared_context_source()), || {
+            programmable_queries_and_texture_copies_preserve_guest_data()
+        })
     }
 
     #[test]
