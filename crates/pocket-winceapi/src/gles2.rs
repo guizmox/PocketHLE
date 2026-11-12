@@ -60,6 +60,14 @@ pub fn set_enabled(enabled: bool) {
     restore_session(enabled.then(Session::default));
 }
 
+pub fn set_internal_resolution(policy: u8) {
+    SESSION.with(|slot| {
+        if let Some(session) = slot.borrow_mut().as_mut() {
+            session.resolution_policy = policy;
+        }
+    });
+}
+
 pub(crate) fn handler(thunk: &pocket_kernel::Thunk) -> Option<Handler> {
     if !(thunk.dll.eq_ignore_ascii_case("libglesv2.dll")
         || thunk.dll.eq_ignore_ascii_case("libegl.dll"))
@@ -92,6 +100,7 @@ fn dispatch(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome> {
 
 pub(crate) struct Session {
     renderer: Option<Renderer>,
+    resolution_policy: u8,
     initialized: bool,
     window: bool,
     owner: Option<usize>,
@@ -102,6 +111,7 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             renderer: None,
+            resolution_policy: 1,
             initialized: false,
             window: false,
             owner: None,
@@ -210,10 +220,11 @@ impl Session {
                 } else {
                     let width = ctx.kernel.framebuffer.width;
                     let height = ctx.kernel.framebuffer.height;
-                    match Renderer::new(width, height) {
+                    match Renderer::new(width, height, self.resolution_policy) {
                         Ok(renderer) => {
+                            let (render_width, render_height) = renderer.render_size();
+                            log::info!("GLES2 context ready at {width}x{height}, rendering at {render_width}x{render_height}");
                             self.renderer = Some(renderer);
-                            log::info!("GLES2 context ready at {width}x{height}");
                             CONTEXT
                         }
                         Err(error) => {

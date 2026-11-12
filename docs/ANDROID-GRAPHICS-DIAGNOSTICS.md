@@ -26,7 +26,7 @@ Turn it off after collecting the report. Verbosity 2/3 is unnecessary and its
 existing per-call debug logs can distort measurements.
 
 To compare renderers, use a GLES 1.x game and set **OpenGL ES internal
-resolution (GPU only)** to **Native** in the global graphics settings. Use the
+resolution (host OpenGL)** to **Native** in the global graphics settings. Use the
 same game, scene and filter for both runs. Run approximately 20 seconds of
 intro and 20 seconds of gameplay with global **GPU rendering** off, then
 enable it and relaunch the game for the second run. Keep the phone's power

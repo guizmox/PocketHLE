@@ -359,13 +359,17 @@ per-draw program decode, screenshot comparison or GPU readback is introduced.
 ## Internal resolution
 
 Internal rasterization resolution, guest logical resolution and display zoom are
-three different quantities. In **Emulator Options**, the GLES 1.x host OpenGL
-backend offers **Native**, **2×**, **3×** and **4×**. By default, a multiplier
+three different quantities. In **Emulator Options**, host OpenGL for GLES 1.x and GLES 2.0
+offers **Native**, **2×**, **3×** and **4×**. By default, a multiplier
 applies only to 320×240 and 240×320 surfaces. Check **Apply to all resolutions,
 including sizes other than 320×240** to apply the same multiplier to all
 supported surface sizes. The checkbox is disabled at **Native**. A surface
 stays at its native size if enlargement would exceed the renderer's
-dimension limit. Changes apply the next time a game launches.
+dimension limit. GLES 2.0 uses the multiplier on its EGL window framebuffer.
+Offscreen guest framebuffers retain their allocated sizes. The scaled window
+frame is presented at render resolution, and guest read/copy calls resolve
+to the logical size on the GPU. Hosts without scaled framebuffer blits use
+native window resolution. Changes apply the next time a game launches.
 
 | Serialized value | Multiplier | Surface sizes |
 | --- | --- | --- |

@@ -82,7 +82,7 @@ PocketHLE can currently:
 
 The desktop frontend offers fullscreen (F12), screenshots (F10), video
 recording (F11), and separate VSync and game FPS settings. Desktop and Android
-offer global GLES 1.x rendering options. The host OpenGL path supports Native,
+offer global rendering options. Both GLES profiles support Native,
 2×, 3× and 4× internal resolution, with a checkbox to include surfaces other
 than 320×240 and 240×320. The Android frontend offers per-game settings,
 orientation controls and on-screen controls. See the [frontend guide](docs/FRONTENDS.md) and

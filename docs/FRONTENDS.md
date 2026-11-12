@@ -21,8 +21,8 @@ next launch unless an individual live control explicitly says otherwise.
 Host optimizations are permanently active; no user optimization switches remain.
 See [always-on execution optimizations](AGENTS.md#always-on-execution-optimizations).
 In the global graphics settings, **GPU rendering** selects host OpenGL or the
-PocketHLE software rasterizer for GLES 1.x. With host OpenGL enabled,
-**OpenGL ES internal resolution (GPU only)** offers **Native**, **2×**, **3×**
+PocketHLE software rasterizer for GLES 1.x. For host OpenGL on GLES 1.x and 2.0,
+**OpenGL ES internal resolution (host OpenGL)** offers **Native**, **2×**, **3×**
 and **4×**. Enable **Apply to all resolutions, including sizes other than
 320×240** to extend the chosen multiplier beyond 320×240 and 240×320 surfaces.
 The per-game **GPU compatibility profile** controls the guest API, and

@@ -1,6 +1,6 @@
 //! Native GLES calls and bounded copies from the guest address space.
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 
 use pocket_gles::gpu::{
     configured_shared_context_source, ProgrammableFrameExport, ProgrammableHost,
@@ -58,6 +58,13 @@ pub(super) struct Renderer {
     width: u32,
     height: u32,
     default_fbo: u32,
+    scale: u32,
+    viewport: [i32; 4],
+    scissor: [i32; 4],
+    logical_fbo: u32,
+    logical_color: u32,
+    blit: &'static str,
+    logical_readback: Vec<u8>,
     window_color: u32,
     window_depth_stencil: u32,
     framebuffer: u32,
@@ -101,7 +108,7 @@ impl Renderer {
         Ok(address)
     }
 
-    pub(super) fn new(width: u32, height: u32) -> Result<Self> {
+    pub(super) fn new(width: u32, height: u32, policy: u8) -> Result<Self> {
         let bytes = width as usize * height as usize * 4;
         if width == 0 || height == 0 || bytes > MAX_TRANSFER {
             return Err(error("Invalid GLES2 framebuffer size"));
@@ -122,6 +129,13 @@ impl Renderer {
             width,
             height,
             default_fbo: 0,
+            scale: 1,
+            viewport: [0, 0, width as i32, height as i32],
+            scissor: [0, 0, width as i32, height as i32],
+            logical_fbo: 0,
+            logical_color: 0,
+            blit: "glBlitFramebuffer",
+            logical_readback: Vec::new(),
             window_color: 0,
             window_depth_stencil: 0,
             framebuffer: 0,
@@ -154,19 +168,21 @@ impl Renderer {
         let mut color = 0;
         let mut depth_stencil = 0;
         let r = &mut renderer;
+        r.configure_scale(policy)?;
+        let (render_width, render_height) = r.render_size();
         invoke!(r, "glGenFramebuffers", (1 => i32, &mut fbo => *mut u32), ());
         invoke!(r, "glBindFramebuffer", (FRAMEBUFFER => u32, fbo => u32), ());
         invoke!(r, "glGenTextures", (1 => i32, &mut color => *mut u32), ());
         invoke!(r, "glBindTexture", (TEXTURE_2D => u32, color => u32), ());
         invoke!(r, "glTexImage2D", (TEXTURE_2D => u32, 0 => i32, RGBA as i32 => i32,
-            width as i32 => i32, height as i32 => i32, 0 => i32, RGBA => u32,
+            render_width as i32 => i32, render_height as i32 => i32, 0 => i32, RGBA => u32,
             UNSIGNED_BYTE => u32, std::ptr::null() => *const c_void), ());
         invoke!(r, "glFramebufferTexture2D", (FRAMEBUFFER => u32, 0x8ce0 => u32,
             TEXTURE_2D => u32, color => u32, 0 => i32), ());
         invoke!(r, "glGenRenderbuffers", (1 => i32, &mut depth_stencil => *mut u32), ());
         invoke!(r, "glBindRenderbuffer", (RENDERBUFFER => u32, depth_stencil => u32), ());
         invoke!(r, "glRenderbufferStorage", (RENDERBUFFER => u32, 0x88f0 => u32,
-            width as i32 => i32, height as i32 => i32), ());
+            render_width as i32 => i32, render_height as i32 => i32), ());
         for attachment in [0x8d00, 0x8d20] {
             invoke!(r, "glFramebufferRenderbuffer", (FRAMEBUFFER => u32, attachment => u32,
                 RENDERBUFFER => u32, depth_stencil => u32), ());
@@ -179,7 +195,7 @@ impl Renderer {
         }
         invoke!(r, "glBindTexture", (TEXTURE_2D => u32, 0 => u32), ());
         invoke!(r, "glBindRenderbuffer", (RENDERBUFFER => u32, 0 => u32), ());
-        invoke!(r, "glViewport", (0 => i32, 0 => i32, width as i32 => i32, height as i32 => i32), ());
+        r.apply_window_rects()?;
         r.default_fbo = fbo;
         r.window_color = color;
         r.window_depth_stencil = depth_stencil;
@@ -199,6 +215,144 @@ impl Renderer {
         Ok(renderer)
     }
 
+    pub(super) fn render_size(&self) -> (u32, u32) {
+        (self.width * self.scale, self.height * self.scale)
+    }
+
+    fn configure_scale(&mut self, policy: u8) -> Result<()> {
+        let scale = pocket_gles::gpu::render_scale_for(policy, self.width, self.height);
+        if scale == 1 {
+            return Ok(());
+        }
+        let read_string = |renderer: &mut Self, parameter| -> Result<String> {
+            let ptr = invoke!(renderer, "glGetString", (parameter => u32), *const c_char);
+            Ok(if ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        };
+        let version = read_string(self, 0x1f02)?;
+        let major = version
+            .trim_start_matches("OpenGL ES ")
+            .split('.')
+            .next()
+            .and_then(|n| n.parse::<u32>().ok())
+            .unwrap_or(0);
+        let extensions = read_string(self, 0x1f03)?;
+        let blit = if major >= 3
+            || extensions
+                .split_ascii_whitespace()
+                .any(|s| s == "GL_ARB_framebuffer_object")
+        {
+            "glBlitFramebuffer"
+        } else if extensions
+            .split_ascii_whitespace()
+            .any(|s| s == "GL_EXT_framebuffer_blit")
+        {
+            "glBlitFramebufferEXT"
+        } else {
+            log::warn!(
+                "GLES2 internal resolution stays native: host lacks scaled framebuffer blits"
+            );
+            return Ok(());
+        };
+        if self.symbol(blit).is_err() {
+            log::warn!("GLES2 internal resolution stays native: {blit} is unavailable");
+            return Ok(());
+        }
+        let mut max_texture = 0i32;
+        let mut max_renderbuffer = 0i32;
+        let mut max_viewport = [0i32; 2];
+        invoke!(self, "glGetIntegerv", (0x0d33 => u32, &mut max_texture => *mut i32), ());
+        invoke!(self, "glGetIntegerv", (0x84e8 => u32, &mut max_renderbuffer => *mut i32), ());
+        invoke!(self, "glGetIntegerv", (0x0d3a => u32, max_viewport.as_mut_ptr() => *mut i32), ());
+        let (width, height) = ((self.width * scale) as i32, (self.height * scale) as i32);
+        if width > max_viewport[0]
+            || height > max_viewport[1]
+            || width.max(height) > max_texture.min(max_renderbuffer)
+            || width as usize * height as usize * 4 > MAX_TRANSFER
+        {
+            log::warn!("GLES2 internal resolution stays native: {width}x{height} exceeds render target limits");
+            return Ok(());
+        }
+
+        let (mut fbo, mut texture) = (0u32, 0u32);
+        invoke!(self, "glGenFramebuffers", (1 => i32, &mut fbo => *mut u32), ());
+        invoke!(self, "glGenTextures", (1 => i32, &mut texture => *mut u32), ());
+        invoke!(self, "glBindTexture", (TEXTURE_2D => u32, texture => u32), ());
+        let (w, h) = (self.width as i32, self.height as i32);
+        invoke!(self, "glTexImage2D", (TEXTURE_2D => u32, 0 => i32, RGBA as i32 => i32,
+            w => i32, h => i32, 0 => i32, RGBA => u32, UNSIGNED_BYTE => u32,
+            std::ptr::null() => *const c_void), ());
+        invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, fbo => u32), ());
+        invoke!(self, "glFramebufferTexture2D", (FRAMEBUFFER => u32, 0x8ce0 => u32,
+            TEXTURE_2D => u32, texture => u32, 0 => i32), ());
+        let status = invoke!(self, "glCheckFramebufferStatus", (FRAMEBUFFER => u32), u32);
+        if status != 0x8cd5 {
+            return Err(error(format!(
+                "GLES2 logical framebuffer incomplete ({status:#x})"
+            )));
+        }
+        self.scale = scale;
+        self.blit = blit;
+        self.logical_fbo = fbo;
+        self.logical_color = texture;
+        Ok(())
+    }
+
+    fn set_rect(&mut self, name: &str, rect: [i32; 4]) -> Result<()> {
+        let scale = if self.framebuffer == 0 {
+            self.scale as i32
+        } else {
+            1
+        };
+        let [x, y, w, h] = rect.map(|n| n.saturating_mul(scale));
+        invoke!(self, name, (x => i32, y => i32, w => i32, h => i32), ());
+        Ok(())
+    }
+
+    fn apply_window_rects(&mut self) -> Result<()> {
+        self.set_rect("glViewport", self.viewport)?;
+        self.set_rect("glScissor", self.scissor)
+    }
+
+    fn resolve_window(&mut self) -> Result<()> {
+        let (width, height) = self.render_size();
+        let (w, h) = (self.width as i32, self.height as i32);
+        let (source, target) = (self.default_fbo, self.logical_fbo);
+        let scissor = invoke!(self, "glIsEnabled", (0x0c11 => u32), u8) != 0;
+        if scissor {
+            invoke!(self, "glDisable", (0x0c11 => u32), ());
+        }
+        invoke!(self, "glBindFramebuffer", (0x8ca8 => u32, source => u32), ());
+        invoke!(self, "glBindFramebuffer", (0x8ca9 => u32, target => u32), ());
+        let blit = self.blit;
+        invoke!(self, blit, (0 => i32, 0 => i32, width as i32 => i32, height as i32 => i32,
+            0 => i32, 0 => i32, w => i32, h => i32, 0x4000 => u32, 0x2601 => u32), ());
+        if scissor {
+            invoke!(self, "glEnable", (0x0c11 => u32), ());
+        }
+        Ok(())
+    }
+
+    fn with_logical_read_target<T>(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        if self.scale == 1 || self.framebuffer != 0 {
+            return read(self);
+        }
+        self.resolve_window()?;
+        let (target, restore) = (self.logical_fbo, self.default_fbo);
+        invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, target => u32), ());
+        let result = read(self);
+        invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, restore => u32), ());
+        result
+    }
+
     fn snapshot(&mut self, source: &SharedContextSource) -> Option<SharedFrame> {
         if self.export_failed {
             return None;
@@ -213,6 +367,7 @@ impl Renderer {
                 }
                 self.reject(pending);
             }
+            let size = self.render_size();
             let export = match self.export.as_mut() {
                 Some(export) => export,
                 None => self
@@ -226,7 +381,7 @@ impl Renderer {
                 self.framebuffer
             };
             export
-                .snapshot(&self.host, fbo, restore, (self.width, self.height))
+                .snapshot(&self.host, fbo, restore, size)
                 .map_err(error)
         })();
         match snapshot {
@@ -271,7 +426,7 @@ impl Renderer {
         } else {
             self.framebuffer
         };
-        let (width, height) = (self.width, self.height);
+        let (width, height) = self.render_size();
         invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, default_fbo => u32), ());
         self.readback
             .resize(width as usize * height as usize * 4, 0);
@@ -282,6 +437,16 @@ impl Renderer {
         }
         invoke!(self, "glReadPixels", (0 => i32, 0 => i32, width as i32 => i32,
             height as i32 => i32, RGBA => u32, UNSIGNED_BYTE => u32, pixels => *mut c_void), ());
+        if self.scale > 1 {
+            self.resolve_window()?;
+            let logical = self.logical_fbo;
+            let (w, h) = (self.width, self.height);
+            invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, logical => u32), ());
+            self.logical_readback.resize(w as usize * h as usize * 4, 0);
+            let pixels = self.logical_readback.as_mut_ptr().cast();
+            invoke!(self, "glReadPixels", (0 => i32, 0 => i32, w as i32 => i32, h as i32 => i32,
+                RGBA => u32, UNSIGNED_BYTE => u32, pixels => *mut c_void), ());
+        }
         if pack > 4 {
             invoke!(self, "glPixelStorei", (0x0d05 => u32, pack => i32), ());
         }
@@ -295,13 +460,26 @@ impl Renderer {
                 .zip(self.readback.rchunks_exact(stride))
             {
                 dest.copy_from_slice(source);
+                for pixel in dest.chunks_exact_mut(4) {
+                    pixel[3] = 255;
+                }
             }
-            for (pixel, dest) in native.chunks_exact_mut(4).zip(rgb.chunks_exact_mut(2)) {
-                pixel[3] = 255;
-                let packed = ((pixel[0] as u16 & 0xf8) << 8)
-                    | ((pixel[1] as u16 & 0xfc) << 3)
-                    | (pixel[2] as u16 >> 3);
-                dest.copy_from_slice(&packed.to_le_bytes());
+            let logical = if self.scale > 1 {
+                &self.logical_readback
+            } else {
+                &self.readback
+            };
+            let stride = self.width as usize * 4;
+            for (source, dest) in logical
+                .rchunks_exact(stride)
+                .zip(rgb.chunks_exact_mut(stride / 2))
+            {
+                for (pixel, dest) in source.chunks_exact(4).zip(dest.chunks_exact_mut(2)) {
+                    let packed = ((pixel[0] as u16 & 0xf8) << 8)
+                        | ((pixel[1] as u16 & 0xfc) << 3)
+                        | (pixel[2] as u16 >> 3);
+                    dest.copy_from_slice(&packed.to_le_bytes());
+                }
             }
             Some((width, height))
         });
@@ -526,7 +704,7 @@ impl Renderer {
             }
             "glBindTexture" => {
                 let (target, texture) = (u!(0), u!(1));
-                if texture == self.window_color {
+                if texture == self.window_color || (texture != 0 && texture == self.logical_color) {
                     return Ok(self.reject(0x0502));
                 }
                 gl!(target => u32, texture => u32);
@@ -587,17 +765,25 @@ impl Renderer {
             }
             "glBindFramebuffer" => {
                 let (target, framebuffer) = (u!(0), u!(1));
-                if target == FRAMEBUFFER {
-                    if framebuffer == self.default_fbo {
-                        return Ok(self.reject(0x0502));
-                    }
-                    self.framebuffer = framebuffer;
-                    if framebuffer != 0 {
-                        self.guest_framebuffers.insert(framebuffer);
-                    }
+                if target != FRAMEBUFFER {
+                    return Ok(self.reject(0x0500));
+                }
+                if framebuffer == self.default_fbo
+                    || (framebuffer != 0 && framebuffer == self.logical_fbo)
+                {
+                    return Ok(self.reject(0x0502));
+                }
+                let changes_scale =
+                    self.scale > 1 && ((self.framebuffer == 0) != (framebuffer == 0));
+                self.framebuffer = framebuffer;
+                if framebuffer != 0 {
+                    self.guest_framebuffers.insert(framebuffer);
                 }
                 let default_fbo = self.default_fbo;
                 gl!(target => u32, if framebuffer == 0 { default_fbo } else { framebuffer } => u32);
+                if changes_scale {
+                    self.apply_window_rects()?;
+                }
             }
             "glDepthMask" => gl!(u!(0) as u8 => u8),
             "glColorMask" => {
@@ -613,7 +799,16 @@ impl Renderer {
             "glDepthRangef" => gl!(f!(0) => f32, f!(1) => f32),
             "glClearColor" => gl!(f!(0) => f32, f!(1) => f32, f!(2) => f32, f!(3) => f32),
             "glScissor" | "glViewport" => {
-                gl!(i!(0) => i32, i!(1) => i32, i!(2) => i32, i!(3) => i32)
+                let rect = [i!(0), i!(1), i!(2), i!(3)];
+                if rect[2] < 0 || rect[3] < 0 {
+                    return Ok(self.reject(0x0501));
+                }
+                self.set_rect(name, rect)?;
+                if name == "glViewport" {
+                    self.viewport = rect;
+                } else {
+                    self.scissor = rect;
+                }
             }
             "glTexParameteri" => gl!(u!(0) => u32, u!(1) => u32, i!(2) => i32),
             "glTexParameterf" => gl!(u!(0) => u32, u!(1) => u32, f!(2) => f32),
@@ -743,6 +938,9 @@ impl Renderer {
                     self.framebuffer = 0;
                     let default_fbo = self.default_fbo;
                     invoke!(self, "glBindFramebuffer", (FRAMEBUFFER => u32, default_fbo => u32), ());
+                    if self.scale > 1 {
+                        self.apply_window_rects()?;
+                    }
                 }
             }
             "glBufferData" => {
@@ -1016,13 +1214,19 @@ impl Renderer {
                     width => i32, height => i32, format => u32, kind => u32,
                     pixels.as_ptr().cast() => *const c_void);
             }
-            "glCopyTexImage2D" => {
-                gl!(u!(0) => u32, i!(1) => i32, u!(2) => u32, i!(3) => i32,
-                    i!(4) => i32, i!(5) => i32, i!(6) => i32, i!(7) => i32);
-            }
-            "glCopyTexSubImage2D" => {
-                gl!(u!(0) => u32, i!(1) => i32, i!(2) => i32, i!(3) => i32,
-                    i!(4) => i32, i!(5) => i32, i!(6) => i32, i!(7) => i32);
+            "glCopyTexImage2D" | "glCopyTexSubImage2D" => {
+                let (target, level, a, b, c, d, e, f) =
+                    (u!(0), i!(1), u!(2), i!(3), i!(4), i!(5), i!(6), i!(7));
+                self.with_logical_read_target(|renderer| {
+                    if name == "glCopyTexImage2D" {
+                        invoke!(renderer, name, (target => u32, level => i32, a => u32, b => i32,
+                            c => i32, d => i32, e => i32, f => i32), ());
+                    } else {
+                        invoke!(renderer, name, (target => u32, level => i32, a as i32 => i32, b => i32,
+                            c => i32, d => i32, e => i32, f => i32), ());
+                    }
+                    Ok(())
+                })?;
             }
             "glCompressedTexSubImage2D" => {
                 let (target, level, x, y, width, height, format, size, address) = (
@@ -1319,8 +1523,11 @@ impl Renderer {
                 if previous != 0 {
                     self.reject(previous);
                 }
-                gl!(x => i32, y => i32, width => i32, height => i32, format => u32, kind => u32,
-                    pixels.as_mut_ptr().cast() => *mut c_void);
+                self.with_logical_read_target(|renderer| {
+                    invoke!(renderer, name, (x => i32, y => i32, width => i32, height => i32,
+                        format => u32, kind => u32, pixels.as_mut_ptr().cast() => *mut c_void), ());
+                    Ok(())
+                })?;
                 let read_error = invoke!(self, "glGetError", (), u32);
                 if read_error != 0 {
                     return Ok(self.reject(read_error));
@@ -1338,6 +1545,30 @@ impl Renderer {
                 let (parameter, address) = (u!(0), u!(1));
                 let boolean = name == "glGetBooleanv";
                 let float = name == "glGetFloatv";
+                if self.scale > 1 && matches!(parameter, 0x0ba2 | 0x0c10) {
+                    let rect = if parameter == 0x0ba2 {
+                        self.viewport
+                    } else {
+                        self.scissor
+                    };
+                    if boolean {
+                        ctx.cpu
+                            .write_mem(address, &rect.map(|n| u8::from(n != 0)))?;
+                    } else {
+                        write_words(
+                            ctx,
+                            address,
+                            &rect.map(|n| {
+                                if float {
+                                    (n as f32).to_bits()
+                                } else {
+                                    n as u32
+                                }
+                            }),
+                        )?;
+                    }
+                    return Ok(0);
+                }
                 let count = match parameter {
                     0x0ba2 | 0x0c10 | 0x0c22 | 0x0c23 | 0x8005 => 4,
                     0x0b70 | 0x0d3a | 0x846d | 0x846e => 2,
@@ -1615,7 +1846,7 @@ mod tests {
             thunk: &thunk,
             kernel: &mut kernel,
         };
-        let mut renderer = Renderer::new(8, 8)?;
+        let mut renderer = Renderer::new(8, 8, 1)?;
         let mut run = |ctx: &mut CallCtx<'_>, name, args: &[u32]| -> Result<u32> {
             for (reg, &value) in [R0, R1, R2, R3].into_iter().zip(args) {
                 ctx.cpu.write_reg(reg, value)?;
@@ -1733,6 +1964,81 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires native OpenGL with framebuffer blits"]
+    fn programmable_scaling_keeps_window_coordinates_and_reads_logical() -> Result<()> {
+        use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "libglesv2.dll".into(),
+            binding: ImportBinding::Name("glViewport".into()),
+            friendly_name: None,
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &thunk,
+            kernel: &mut kernel,
+        };
+        let mut renderer = Renderer::new(640, 480, 7)?;
+        assert_eq!(renderer.render_size(), (2560, 1920));
+        let run =
+            |renderer: &mut Renderer, ctx: &mut CallCtx<'_>, name, args: &[u32]| -> Result<u32> {
+                for (reg, &value) in [R0, R1, R2, R3].into_iter().zip(args) {
+                    ctx.cpu.write_reg(reg, value)?;
+                }
+                write_words(ctx, 0x4000, args.get(4..).unwrap_or_default())?;
+                renderer.gl(name, ctx)
+            };
+        run(&mut renderer, &mut ctx, "glViewport", &[0, 0, 640, 480])?;
+        run(&mut renderer, &mut ctx, "glGetIntegerv", &[0x0ba2, 0x1000])?;
+        assert_eq!(read_words(&mut ctx, 0x1000, 4)?, [0, 0, 640, 480]);
+        let mut viewport = [0i32; 4];
+        invoke!(&mut renderer, "glGetIntegerv", (0x0ba2 => u32, viewport.as_mut_ptr() => *mut i32), ());
+        assert_eq!(viewport, [0, 0, 2560, 1920]);
+
+        run(&mut renderer, &mut ctx, "glEnable", &[0x0c11])?;
+        run(&mut renderer, &mut ctx, "glScissor", &[300, 200, 2, 2])?;
+        run(
+            &mut renderer,
+            &mut ctx,
+            "glClearColor",
+            &[1.0f32.to_bits(), 0, 0, 1.0f32.to_bits()],
+        )?;
+        run(&mut renderer, &mut ctx, "glClear", &[0x4000])?;
+        run(
+            &mut renderer,
+            &mut ctx,
+            "glReadPixels",
+            &[300, 200, 1, 1, RGBA, UNSIGNED_BYTE, 0x2000],
+        )?;
+        assert_eq!(ctx.cpu.read_mem(0x2000, 4)?, [255, 0, 0, 255]);
+        assert_eq!(run(&mut renderer, &mut ctx, "glIsEnabled", &[0x0c11])?, 1);
+        run(&mut renderer, &mut ctx, "glGenFramebuffers", &[1, 0x1000])?;
+        let fbo = read_words(&mut ctx, 0x1000, 1)?[0];
+        run(
+            &mut renderer,
+            &mut ctx,
+            "glBindFramebuffer",
+            &[FRAMEBUFFER, fbo],
+        )?;
+        invoke!(&mut renderer, "glGetIntegerv", (0x0ba2 => u32, viewport.as_mut_ptr() => *mut i32), ());
+        assert_eq!(viewport, [0, 0, 640, 480]);
+        run(
+            &mut renderer,
+            &mut ctx,
+            "glBindFramebuffer",
+            &[FRAMEBUFFER, 0],
+        )?;
+        invoke!(&mut renderer, "glGetIntegerv", (0x0ba2 => u32, viewport.as_mut_ptr() => *mut i32), ());
+        assert_eq!(viewport, [0, 0, 2560, 1920]);
+        renderer.present(&mut ctx)?;
+        assert_eq!(ctx.kernel.framebuffer.logical_size(), (640, 480));
+        assert_eq!(run(&mut renderer, &mut ctx, "glGetError", &[])?, 0);
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "requires native OpenGL with shared-context fences"]
     fn programmable_swap_publishes_gpu_pixels_and_defers_readback() -> Result<()> {
         let ui = NativeRenderer::new(8, 8).map_err(error)?;
@@ -1752,7 +2058,7 @@ mod tests {
         };
         with_shared_context_source(Some(source.clone()), || {
             crate::gles::with_shared_frame_export(Arc::new(AtomicBool::new(true)), || {
-                let mut renderer = Renderer::new(8, 8)?;
+                let mut renderer = Renderer::new(8, 8, 2)?;
                 // A different native context can become current on the worker.
                 // The GL entry point must rebind the renderer before drawing.
                 let foreign = ProgrammableHost::new_programmable().map_err(error)?;
@@ -1782,7 +2088,7 @@ mod tests {
                 assert!(!call.kernel.framebuffer.cpu_resident());
                 let frame = crate::gles::take_shared_window_frame(&call.kernel.framebuffer)
                     .expect("programmable swap must publish a shared frame");
-                assert_eq!(frame.size(), (8, 8));
+                assert_eq!(frame.size(), (16, 16));
                 assert!(frame.belongs_to_source(&source));
 
                 // Changing the renderer's window must leave the snapshot intact.

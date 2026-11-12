@@ -1470,7 +1470,7 @@ pub struct Renderer {
 }
 const MAX_RENDER_DIMENSION: u32 = 8192;
 
-fn render_scale_for(policy: u8, width: u32, height: u32) -> u32 {
+pub fn render_scale_for(policy: u8, width: u32, height: u32) -> u32 {
     let scale = match policy {
         2 => 2,
         6 => 3,

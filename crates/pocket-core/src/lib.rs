@@ -157,6 +157,7 @@ impl Emulator {
 
     pub fn set_gles_internal_resolution(&mut self, scale: u8) {
         pocket_winceapi::gles::set_internal_resolution(scale);
+        pocket_winceapi::gles2::set_internal_resolution(scale);
     }
 
     /// Per-session EGL format profile; configure after loading, before guest execution.

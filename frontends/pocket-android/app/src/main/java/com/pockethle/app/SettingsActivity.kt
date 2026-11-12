@@ -237,27 +237,23 @@ class SettingsActivity : HostKeyActivity() {
                 summary="Host OpenGL for OpenGL ES 1.x. Takes effect the next time a game launches."
                 setOnPreferenceChangeListener { _, v ->
                     current = current.copy(gpuRenderer = v as Boolean)
-                    findPreference<ListPreference>("gles_internal_resolution")?.isEnabled = current.gpuRenderer
-                    findPreference<CheckBoxPreference>("gles_resolution_all_sizes")?.isEnabled =
-                        current.gpuRenderer && current.glesResolutionScale > 1
                     writeConfig()
                     true
                 }
             })
             findPreference<androidx.preference.PreferenceCategory>("graphics_options")!!.addPreference(ListPreference(requireContext()).apply {
                 key = "gles_internal_resolution"
-                title = "OpenGL ES internal resolution (GPU only)"
+                title = "OpenGL ES internal resolution (host OpenGL)"
                 isPersistent = false
                 entries = arrayOf("Native", "2×", "3×", "4×")
                 entryValues = arrayOf("1", "2", "3", "4")
                 value = current.glesResolutionScale.toString()
-                isEnabled = current.gpuRenderer
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, v ->
                     current = current.withGlesResolution(v.toString().toInt(), current.glesResolutionAllSizes)
                     findPreference<CheckBoxPreference>("gles_resolution_all_sizes")?.apply {
                         isChecked = current.glesResolutionAllSizes
-                        isEnabled = current.gpuRenderer && current.glesResolutionScale > 1
+                        isEnabled = current.glesResolutionScale > 1
                     }
                     writeConfig()
                     true
@@ -269,7 +265,7 @@ class SettingsActivity : HostKeyActivity() {
                 summary = "When unchecked, only 320×240 and 240×320 are scaled. Applies the next time a game launches."
                 isPersistent = false
                 isChecked = current.glesResolutionAllSizes
-                isEnabled = current.gpuRenderer && current.glesResolutionScale > 1
+                isEnabled = current.glesResolutionScale > 1
                 setOnPreferenceChangeListener { _, v ->
                     current = current.withGlesResolution(current.glesResolutionScale, v as Boolean)
                     writeConfig()

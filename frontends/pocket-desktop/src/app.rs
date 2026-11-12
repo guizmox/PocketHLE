@@ -2685,8 +2685,8 @@ impl PocketLauncher {
                     ui.end_row();
                 }
                 let (mut scale, mut all_resolutions) = draft.gles_resolution_selection();
-                ui.label("OpenGL ES internal resolution (GPU only)");
-                ui.add_enabled_ui(draft.gpu_renderer, |ui| {
+                ui.label("OpenGL ES internal resolution (host OpenGL)");
+                ui.vertical(|ui| {
                     let scales = [(1, "Native"), (2, "2×"), (3, "3×"), (4, "4×")];
                     let selected = scales[usize::from(scale) - 1].1;
                     crate::controller_ui::ComboBox::from_id_source("gles_internal_resolution")
@@ -2696,12 +2696,12 @@ impl PocketLauncher {
                                 crate::controller_ui::selectable_value(ui, &mut scale, value, label);
                             }
                         });
+                    crate::controller_ui::add_enabled(
+                        ui,
+                        scale > 1,
+                        egui::Checkbox::new(&mut all_resolutions, "Apply to all resolutions, including sizes other than 320×240"),
+                    ).on_hover_text("When unchecked, only 320×240 and 240×320 are scaled. Applies the next time a game launches.");
                 });
-                ui.end_row();
-                ui.label("");
-                ui.add_enabled_ui(draft.gpu_renderer && scale > 1, |ui| {
-                    crate::controller_ui::checkbox(ui, &mut all_resolutions, "Apply to all resolutions, including sizes other than 320×240");
-                }).response.on_hover_text("When unchecked, only 320×240 and 240×320 are scaled. Applies the next time a game launches.");
                 ui.end_row();
                 draft.set_gles_resolution_selection(scale, all_resolutions);
                 ui.label("VSync (PC / Steam Deck)");
