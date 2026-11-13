@@ -1,2 +1,1 @@
-frontends/pocket-android/app/src/main/res/values/strings.xml
-proof/zuma/README.md
+crates/pocket-winceapi/src/coredll.rs

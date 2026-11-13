@@ -22196,6 +22196,10 @@ fn ext_escape(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             raw[16..20].copy_from_slice(&ctx.kernel.framebuffer.width.to_le_bytes());
             raw[20..24].copy_from_slice(&ctx.kernel.framebuffer.height.to_le_bytes());
             ctx.cpu.write_mem(out_data, &raw)?;
+            // Raw framebuffer clients can retain this pointer and draw
+            // without calling GXBeginDraw or GXEndDraw.
+            ctx.kernel.gx_draw_active = true;
+            ctx.kernel.gx_draw_thread = ctx.kernel.current_thread;
             Ok(DispatchOutcome::ReturnedR0(24))
         }
         GETGXINFO if out_count >= 0x84 => {
@@ -39013,7 +39017,16 @@ mod tests {
             ]
             .concat()
         );
-        ctx.kernel.gx_draw_active = true;
+        assert!(ctx.kernel.gx_draw_active);
+        assert_eq!(ctx.kernel.gx_draw_thread, ctx.kernel.current_thread);
+        let before = ctx.kernel.framebuffer.frame_counter;
+        ctx.cpu
+            .write_mem(SYNTHETIC_FRAMEBUFFER_BASE + 2, &[7, 0])
+            .unwrap();
+        assert_eq!(crate::gx::publish_held_framebuffer(&mut ctx).unwrap(), None);
+        assert_eq!(ctx.kernel.framebuffer.cpu().unwrap().pixels[..2], [7, 0]);
+        assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
+
         ctx.cpu
             .write_mem(0x1200, &[4, 0, 1, 0, 5, 0, 2, 0, 6, 0, 3, 0])
             .unwrap();
