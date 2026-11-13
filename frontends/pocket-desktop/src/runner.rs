@@ -241,6 +241,20 @@ impl Runner {
             pocket_library::Library::open_with_profile(library_root, self.library_profile)
                 .map(|l| l.config().clone())
                 .unwrap_or_default();
+        if guest_path.is_none()
+            && metadata
+                .as_ref()
+                .is_some_and(|image| image.managed_runtime.is_some())
+        {
+            return run_compact_framework(
+                &exe,
+                game,
+                library_root,
+                metadata.as_ref(),
+                &launcher_config,
+                hook,
+            );
+        }
         let requested_backend = game.settings.cpu_backend;
         let mut effective_backend = requested_backend;
         let mut emu = match requested_backend {
@@ -1425,6 +1439,56 @@ impl RunHook {
             launch_context: None,
         }
     }
+}
+
+fn run_compact_framework(
+    exe: &std::path::Path,
+    game: &GameEntry,
+    library_root: &std::path::Path,
+    image: Option<&pocket_core::pe::LoadedImage>,
+    config: &pocket_library::LauncherConfig,
+    hook: &mut RunHook,
+) -> (RunOutcome, u32) {
+    use pocket_core::kernel::accelerometer::TiltAxes;
+    use pocket_library::TiltInput;
+
+    let tilt = match game.settings.effective_tilt_input(config) {
+        TiltInput::Accelerometer => None,
+        TiltInput::LeftRight => Some(TiltAxes::Horizontal),
+        TiltInput::FourDirections => Some(TiltAxes::Both),
+    };
+    let mut input = std::collections::VecDeque::new();
+    let sender = hook.frame_tx.clone();
+    let mut framebuffer = None;
+    let result = pocket_netcf::host::run(
+        exe,
+        pocket_netcf::host::Options {
+            size: game.settings.screen.resolve_image(image),
+            save_root: Some(game.save_dir(library_root)),
+            guest_path: game.guest_exe_path(),
+            tilt,
+            frame_rate_limit: game.settings.effective_frame_rate_limit(config),
+        },
+        |events| {
+            let stop = hook.drain_input(&mut input);
+            events.extend(input.drain(..));
+            !stop
+        },
+        |frame| {
+            let snapshot = FrameSnapshot::from_framebuffer(frame);
+            if let Some(sender) = &sender {
+                let _ = sender.send(snapshot.clone());
+            }
+            framebuffer = Some(snapshot);
+        },
+    );
+    hook.started = framebuffer.is_some();
+    hook.runtime_error = result.as_ref().err().cloned();
+    let (summary, code) = match result {
+        Ok(()) => ("Compact Framework session ended.".into(), 0),
+        Err(error) => (error, 0xc0000135),
+    };
+    (RunOutcome { summary, framebuffer }, code)
 }
 
 impl FrameHook for RunHook {

@@ -4184,11 +4184,12 @@ const IMAGE_FILE_DLL: u16 = 0x2000;
 struct PeSniff {
     machine: u16,
     characteristics: u16,
+    managed: bool,
 }
 
 impl PeSniff {
     fn is_supported_guest(self) -> bool {
-        is_supported_guest_machine(self.machine)
+        is_supported_guest_machine(self.machine) || self.managed
     }
 
     fn is_dll(self) -> bool {
@@ -4275,8 +4276,22 @@ fn sniff_pe(path: &Path) -> std::io::Result<Option<PeSniff>> {
     if &coff[0..4] != b"PE\0\0" {
         return Ok(None);
     }
+    let machine = u16::from_le_bytes([coff[4], coff[5]]);
+    let managed = if machine == pocket_pe::machine::I386 {
+        let mut optional = [0u8; 216];
+        u16::from_le_bytes([coff[20], coff[21]]) >= 216
+            && f.read_exact(&mut optional).is_ok()
+            && optional[..2] == [0x0b, 0x01]
+            && u32::from_le_bytes(optional[92..96].try_into().unwrap()) >= 15
+            && u32::from_le_bytes(optional[208..212].try_into().unwrap()) != 0
+            && f.metadata()?.len() <= 32 * 1024 * 1024
+            && pocket_netcf::entry_point(&fs::read(path)?).is_some()
+    } else {
+        false
+    };
     Ok(Some(PeSniff {
-        machine: u16::from_le_bytes([coff[4], coff[5]]),
+        machine,
+        managed,
         characteristics: u16::from_le_bytes([coff[22], coff[23]]),
     }))
 }

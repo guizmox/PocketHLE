@@ -2986,7 +2986,9 @@ dependencies = [
  "log",
  "pocket-core",
  "pocket-library",
+ "pocket-netcf",
  "serde_json",
+ "tempfile",
  "xbrz-rs",
 ]
 
@@ -3064,6 +3066,7 @@ dependencies = [
  "pocket-core",
  "pocket-gles",
  "pocket-library",
+ "pocket-netcf",
  "pocket-pe",
  "rfd",
  "sdl3",
@@ -3127,6 +3130,7 @@ dependencies = [
  "newtua-nsis",
  "png 0.17.16",
  "pocket-cab",
+ "pocket-netcf",
  "pocket-pe",
  "rars",
  "rustls",
@@ -3139,6 +3143,18 @@ dependencies = [
  "ureq",
  "webpki-roots 0.26.11",
  "zip",
+]
+
+[[package]]
+name = "pocket-netcf"
+version = "0.4.8"
+dependencies = [
+ "image 0.24.9",
+ "pocket-cab",
+ "pocket-gles",
+ "pocket-kernel",
+ "quick-xml",
+ "tempfile",
 ]
 
 [[package]]

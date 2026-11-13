@@ -460,11 +460,7 @@ fn run_process_inner(
         .unwrap_or(pocket_core::pe::machine::ARM);
     summary_lines.push(format!("Executable: {}", exe.display()));
 
-    // Managed .NET Compact Framework images cannot run on the native
-    // emulation path: there is no CLR to interpret the IL, so the
-    // emulator would sit on a black frame forever. The desktop CLI
-    // (pocket-cli) runs these through a host .NET runtime instead —
-    // tell the user instead of leaving them on a black screen.
+    // Route IL applications through the managed runtime before selecting a native CPU.
     if let Ok(image) = &image {
         if let Some(runtime) = &image.managed_runtime {
             let screen = entry.settings.screen.resolve_image(Some(image));
@@ -481,9 +477,10 @@ fn run_process_inner(
                     0,
                 );
             }
-            summary_lines.push(format!(
-                "Managed image: CLR metadata {runtime} (.NET Compact Framework). Android has no general CLR backend for this title."
-            ));
+            if guest_path.is_none() {
+                return run_compact_framework(&exe, entry, library_root, hook, screen);
+            }
+            summary_lines.push(format!("Unsupported managed child process ({runtime})."));
             return (summary_lines.join("\n"), 0xc0000135);
         }
     }
@@ -966,6 +963,63 @@ fn build_unicorn_for_machine(_machine: u16) -> anyhow::Result<Emulator> {
     Err(anyhow::anyhow!(
         "binary was not compiled with the `unicorn` feature"
     ))
+}
+
+fn run_compact_framework(
+    exe: &std::path::Path,
+    entry: &GameEntry,
+    library_root: &std::path::Path,
+    hook: &mut SessionHook,
+    size: (u32, u32),
+) -> (String, u32) {
+    use pocket_core::kernel::accelerometer::TiltAxes;
+    use pocket_library::TiltInput;
+
+    let config = pocket_library::Library::open(library_root)
+        .map(|library| library.config().clone())
+        .unwrap_or_default();
+    let tilt = match entry.settings.effective_tilt_input(&config) {
+        TiltInput::Accelerometer => None,
+        TiltInput::LeftRight => Some(TiltAxes::Horizontal),
+        TiltInput::FourDirections => Some(TiltAxes::Both),
+    };
+    let rx = hook.take_input_receiver();
+    let stop_all = Arc::clone(&hook.stop_all);
+    let state = Arc::clone(&hook.state);
+    let mut presented = false;
+    let result = pocket_netcf::host::run(
+        exe,
+        pocket_netcf::host::Options {
+            size,
+            save_root: Some(entry.save_dir(library_root)),
+            guest_path: entry.guest_exe_path(),
+            tilt,
+            frame_rate_limit: entry.settings.effective_frame_rate_limit(&config),
+        },
+        |events| {
+            if stop_all.load(Ordering::Acquire) {
+                return false;
+            }
+            loop {
+                match rx.try_recv() {
+                    Ok(InputCommand::Input(event)) => events.push(event),
+                    Ok(InputCommand::Stop) | Err(TryRecvError::Disconnected) => return false,
+                    Ok(InputCommand::SystemMedia(_)) => {}
+                    Err(TryRecvError::Empty) => return true,
+                }
+            }
+        },
+        |frame| {
+            push_frame(&state, FrameSnapshot::from_framebuffer(frame));
+            presented = true;
+        },
+    );
+    hook.started = presented;
+    hook.runtime_error = result.as_ref().err().cloned();
+    match result {
+        Ok(()) => ("Compact Framework session ended.".into(), 0),
+        Err(error) => (error, 0xc0000135),
+    }
 }
 
 pub(crate) fn push_frame(state: &Arc<SessionState>, frame: FrameSnapshot) {
@@ -1827,3 +1881,7 @@ mod deferred_read_tests {
         assert!(state.latest_frame.lock().unwrap().as_ref().unwrap().rgb565);
     }
 }
+
+#[cfg(test)]
+#[path = "netcf_session_test.rs"]
+mod netcf_session_test;

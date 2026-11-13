@@ -26,6 +26,7 @@ video-static = ["pocket-core/video-static"]
 unicorn = ["pocket-core/unicorn"]
 
 [dependencies]
+pocket-netcf = { path = "../../crates/pocket-netcf" }
 xbrz = { package = "xbrz-rs", version = "0.1.0" }
 anyhow.workspace = true
 log.workspace = true
@@ -35,3 +36,6 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 jni = "0.21"
 pocket-core = { path = "../../crates/pocket-core" }
 pocket-library = { path = "../../crates/pocket-library" }
+
+[dev-dependencies]
+tempfile = "3"

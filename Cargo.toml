@@ -8,6 +8,7 @@ members = [
     "crates/pocket-kernel",
     "crates/pocket-winceapi",
     "crates/pocket-gles",
+    "crates/pocket-netcf",
     "crates/pocket-core",
     "crates/pocket-library",
     "frontends/pocket-cli",

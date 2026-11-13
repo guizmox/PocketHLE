@@ -1,0 +1,13 @@
+[package]
+name = "pocket-netcf"
+version = "0.4.8"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+[dependencies]
+pocket-kernel = { path = "../pocket-kernel", default-features = false }
+pocket-gles = { path = "../pocket-gles" }
+image = { version = "0.24", default-features = false, features = ["png", "bmp", "jpeg"] }
+pocket-cab = { path = "../pocket-cab" }
+quick-xml = "0.39"
+tempfile = "3"
