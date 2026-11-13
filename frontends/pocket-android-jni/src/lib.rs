@@ -544,6 +544,23 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_removeGame<'local>(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_cleanupCabInstallFiles<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
+        Ok(pocket_library::cab_cleanup::run(&root)?)
+    })();
+    let response = match result {
+        Ok(message) => serde_json::json!({"ok": true, "message": message}).to_string(),
+        Err(error) => error_json(&format!("{error:#}")),
+    };
+    new_jstring(&env, response)
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_readConfig<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,

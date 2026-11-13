@@ -87,6 +87,8 @@ object NativeBridge {
     /** Returns the launcher config as JSON. */
     @JvmStatic external fun readConfig(libraryRoot: String): String
 
+    @JvmStatic external fun cleanupCabInstallFiles(libraryRoot: String): String
+
     /** Persists the launcher config from a JSON blob. */
     @JvmStatic external fun writeConfig(libraryRoot: String, configJson: String): String
 

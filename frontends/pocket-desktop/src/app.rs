@@ -753,6 +753,7 @@ pub enum UiEvent {
     DataPrepared(Result<pocket_library::add_data::PreparedData, String>),
     DataFinished(Result<String, String>),
     BackupFinished(Result<String, String>),
+    CabCleanupFinished(Result<String, String>),
     ColorsUnlocked(Result<String, String>),
     ReleaseAvailable(pocket_library::updates::Update),
     ImportFinished(Result<ImportedGames, String>),
@@ -1116,6 +1117,14 @@ impl PocketLauncher {
                             ("Add/Replace Data complete", message)
                         }
                         Err(message) => ("Add/Replace Data failed", message),
+                    };
+                    self.add_data = Some(DataPrompt::Notice { title, message });
+                }
+                UiEvent::CabCleanupFinished(result) => {
+                    self.library_busy = false;
+                    let (title, message) = match result {
+                        Ok(message) => ("CAB cleanup complete", message),
+                        Err(message) => ("CAB cleanup failed", message),
                     };
                     self.add_data = Some(DataPrompt::Notice { title, message });
                 }
@@ -1614,7 +1623,7 @@ impl PocketLauncher {
             | Action::PocketPc
             | Action::Gizmondo => {
                 self.release_all_keys();
-                self.config_draft = Some(self.settings_draft(ctx));
+                self.config_draft = Some(self.settings_draft());
                 self.screen = match action {
                     Action::Emulator => Screen::Settings,
                     Action::PocketPc => Screen::PocketPcOptions,
@@ -1719,9 +1728,8 @@ impl PocketLauncher {
         ctx.request_repaint();
     }
 
-    fn settings_draft(&mut self, ctx: &egui::Context) -> LauncherConfig {
+    fn settings_draft(&mut self) -> LauncherConfig {
         let mut draft = self.library.config().clone();
-        draft.fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
         for (file, platform) in [
             ("registry-pocketpc.json", &mut draft.device_platform_id),
             ("registry-gizmondo.json", &mut draft.gizmondo_platform_id),
@@ -2755,30 +2763,8 @@ impl PocketLauncher {
         });
         ui.add_space(10.0);
         ui.separator();
-        ui.heading("Diagnostics");
-        egui::Grid::new("emulator_diagnostics").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
-                ui.label("Verbosity (0..3)");
-                let slider = ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
-                crate::controller_ui::track_focus(ui, &slider);
-                ui.end_row();
-
-                ui.label("Log unimplemented APIs");
-                crate::controller_ui::checkbox(ui, &mut draft.log_unimplemented_apis,"")
-                    .on_hover_text("Write game, process and missing API details to pockethle-unimplemented-apis.log next to the main log. Changes apply after Save, including a running game.");
-                ui.end_row();
-
-
-
-        });
-        ui.add_space(10.0);
-        ui.separator();
         ui.heading("Misc");
         egui::Grid::new("emulator_misc").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
-                ui.label("Borderless fullscreen");
-                if crate::controller_ui::checkbox(ui, &mut draft.fullscreen, "").changed() {
-                    self.set_fullscreen(ui.ctx(), draft.fullscreen);
-                }
-                ui.end_row();
                 ui.label("Show FPS on game screen");
                 crate::controller_ui::checkbox(ui, &mut draft.show_fps, "");
                 ui.end_row();
@@ -2798,10 +2784,47 @@ impl PocketLauncher {
                 ui.add(egui::Label::new(EXECUTABLE_HEAP_HELP).wrap(true));
                 ui.end_row();
                 ui.label("Library root");
-                ui.label(library_root);
+                let cleanup_available = !self.library_busy
+                    && self.running_game.is_none()
+                    && self.pending_run.is_none();
+                let cleanup_clicked = ui.vertical(|ui| {
+                    ui.label(library_root);
+                    ui.add_enabled_ui(cleanup_available, |ui| {
+                        crate::controller_ui::button(ui, "Clean up CAB install files")
+                            .on_hover_text("Move verified duplicate CAB files to a backup folder in the library.")
+                            .clicked()
+                    }).inner
+                }).inner;
+                if cleanup_clicked {
+                    self.library_busy = true;
+                    self.status = "Checking CAB install files…".into();
+                    let root = self.library.root().to_path_buf();
+                    let tx = self.events_tx.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let result = pocket_library::cab_cleanup::run(&root)
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(UiEvent::CabCleanupFinished(result));
+                        ctx.request_repaint();
+                    });
+                }
                 ui.end_row();
         });
 
+        ui.add_space(10.0);
+        ui.separator();
+        ui.heading("Diagnostics");
+        egui::Grid::new("emulator_diagnostics").num_columns(2).spacing(Vec2::new(12.0, 8.0)).show(ui, |ui| {
+                ui.label("Verbosity (0..3)");
+                let slider = ui.add(egui::Slider::new(&mut draft.verbosity, 0..=3));
+                crate::controller_ui::track_focus(ui, &slider);
+                ui.end_row();
+
+                ui.label("Log unimplemented APIs");
+                crate::controller_ui::checkbox(ui, &mut draft.log_unimplemented_apis,"")
+                    .on_hover_text("Write game, process and missing API details to pockethle-unimplemented-apis.log next to the main log. Changes apply after Save, including a running game.");
+                ui.end_row();
+        });
         ui.add_space(12.0);
         }
 

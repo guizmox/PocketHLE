@@ -1,7 +1,9 @@
 package com.pockethle.app
 
 import android.os.Bundle
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.Toolbar
+import androidx.lifecycle.lifecycleScope
 import androidx.preference.CheckBoxPreference
 import androidx.preference.ListPreference
 import androidx.preference.Preference
@@ -9,6 +11,9 @@ import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.SeekBarPreference
 import androidx.preference.SwitchPreferenceCompat
 import org.json.JSONObject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Global launcher settings (default backend, log verbosity). */
 class SettingsActivity : HostKeyActivity() {
@@ -340,6 +345,29 @@ class SettingsActivity : HostKeyActivity() {
                 }
             }
             findPreference<Preference>("library_root")?.summary = rootDir
+            findPreference<Preference>("cleanup_cab")?.setOnPreferenceClickListener { preference ->
+                preference.isEnabled = false
+                lifecycleScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        runCatching { JSONObject(NativeBridge.cleanupCabInstallFiles(rootDir)) }
+                    }
+                    preference.isEnabled = true
+                    val response = result.getOrNull()
+                    if (isAdded) {
+                        val ok = response?.optBoolean("ok") == true
+                        AlertDialog.Builder(requireContext())
+                            .setTitle(if (ok) "CAB cleanup complete" else "CAB cleanup failed")
+                            .setMessage(
+                                response?.optString(if (ok) "message" else "error")
+                                    ?: result.exceptionOrNull()?.localizedMessage
+                                    ?: "Could not check CAB install files."
+                            )
+                            .setPositiveButton(android.R.string.ok, null)
+                            .show()
+                    }
+                }
+                true
+            }
             if (rootKey != null) preferenceScreen = findPreference<androidx.preference.PreferenceScreen>(rootKey)!!
         }
 

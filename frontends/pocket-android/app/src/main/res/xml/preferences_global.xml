@@ -2,12 +2,13 @@
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
  <PreferenceScreen android:key="emulator_options" android:title="Emulator Settings">
   <PreferenceCategory android:key="graphics_options" android:title="Graphics" android:order="10"/>
-  <PreferenceCategory android:key="diagnostic_options" android:title="Diagnostics" android:order="20">
+  <PreferenceCategory android:key="misc_options" android:title="Misc" android:order="20">
+  <Preference android:key="library_root" android:title="Game library folder" android:selectable="false"/>
+  <Preference android:key="cleanup_cab" android:title="Clean up CAB install files" android:summary="Move verified duplicate CAB files to a backup folder in the library."/>
+  </PreferenceCategory>
+  <PreferenceCategory android:key="diagnostic_options" android:title="Diagnostics" android:order="30">
   <SwitchPreferenceCompat android:key="android_graphics_diagnostics" android:title="Graphics diagnostics" android:summary="CPU, transfer and asynchronous GPU timings in the log. Apply at next game launch; disable after testing." android:defaultValue="false"/>
   <SeekBarPreference android:key="verbosity" android:title="Log verbosity" android:max="3" app:min="0" app:showSeekBarValue="true"/>
-  </PreferenceCategory>
-  <PreferenceCategory android:key="misc_options" android:title="Misc" android:order="30">
-  <Preference android:key="library_root" android:title="Game library folder" android:selectable="false"/>
   </PreferenceCategory>
  </PreferenceScreen>
  <PreferenceScreen android:key="display_options" android:title="Display and controls">
