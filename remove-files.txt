@@ -1,1 +1,9 @@
-crates/pocket-gles/src/visibility.rs
+crates/pocket-core/src/simcity_layout.rs
+crates/pocket-cpu/src/call_profile.rs
+crates/pocket-cpu/src/image_page_profile.rs
+crates/pocket-cpu/src/indirect_watch.rs
+crates/pocket-kernel/src/audio_diagnostic.rs
+crates/pocket-kernel/src/profile.rs
+crates/pocket-kernel/src/stutter_profile.rs
+crates/pocket-kernel/src/vfs_fallback_index.rs
+frontends/pocket-desktop/src/frame_pacing.rs
