@@ -132,8 +132,7 @@ is unchanged by this desktop-only toolbar.
 ## Adding data to an installed game
 
 Every PocketPC and Gizmondo game has **Add/Replace Data** in its library tile
-overflow menu (between Settings and Remove) on desktop and Android. It is not a
-per-game settings entry. The file picker accepts any single file. Non-ZIP files are
+overflow menu on desktop and Android. The file picker accepts any single file. Non-ZIP files are
 copied with their original filename to `games/<id>/extracted/`. For ZIP files,
 the user chooses **Extract contents** or **Copy ZIP unchanged**. Extraction keeps
 the archive's directory structure, including wrapper directories; it does not
@@ -833,16 +832,25 @@ viewport-bounded fixed dimensions and an internal scroll area. Assignment labels
 and feedback do not resize or reposition the window. Cancel assignment retains
 its place while disabled outside capture, keeping the controls stationary.
 
-The modal **PocketPC launch settings** prompt combines screen/orientation help,
-conditional FPS advice and a GPU-profile reminder for detected OpenGL ES titles.
-The shared detector and GPU profile policy are described in
-[the graphics guide](GPU.md#pocketpc-graphics-compatibility-options).
-It consumes its own controller buttons: **South = Not Now**, **East = Settings**. Their displayed
-markings come from the active controller (for example, Deck A/B or Switch B/A),
-with explicit positions as the unknown-label fallback. Literal keyboard A/B
-shortcuts remain available and are indicated separately. These actions do not
-depend on an old page focus or the normal launcher confirm/back convention. Other game/library
-input and navigation repeat are suspended while this prompt owns the buttons.
+On desktop and Android, a new Pocket PC import keeps the detected name.
+Use **Rename** in the library tile menu to change it. When the import contains
+multiple launchable executables, select one before the import is committed.
+The **Pocket PC launch settings** dialog groups screen and rotation guidance,
+FPS advice when applicable, and a GPU profile selector when the executable's
+OpenGL ES profile is ambiguous. **Continue** keeps the current profile.
+**Save profile** applies a changed selection. **Open game settings** applies
+the selected profile and opens the full settings page.
+
+**Switch Launch Executable** is directly below **Add/Replace Data** in the
+Pocket PC tile menu. After switching, the GPU profile dialog appears only
+when the new executable's profile is ambiguous. The same applies when
+**Add/Replace Data** installs an executable and the user selects it for launch.
+In that case the profile dialog follows the copy directly. Existing-file
+conflicts still require confirmation before any replacement.
+
+Use the controller's directional controls to move focus and its confirm
+button to activate a control. The dialog uses the same focus navigation as
+other launcher dialogs.
 
 ## Desktop input lifecycle
 

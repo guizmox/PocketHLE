@@ -681,7 +681,7 @@ fn pocketpc_launch_options(
     Ok(Some(serde_json::json!({
         "id": game.id,
         "display_name": game.display_name,
-        "import_settings_message": advice.message(),
+        "message": advice.message(),
         "show_display_advice": advice.show_display_advice,
         "profiles": profiles,
         "current_profile": game.settings.gpu_compatibility_profile,

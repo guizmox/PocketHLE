@@ -2463,7 +2463,7 @@ impl PocketLauncher {
         let Some((id, advice)) = self.pocketpc_import_options.front() else {
             return false;
         };
-        let Some(game) = self.library.games().iter().find(|game| &game.id == id) else {
+        let Some(game) = self.library.get(id) else {
             self.pocketpc_import_options.pop_front();
             ctx.request_repaint();
             return false;
@@ -2477,7 +2477,6 @@ impl PocketLauncher {
         let mut profile = ctx.data(|data| data.get_temp(profile_id)).unwrap_or(current);
         let mut open_settings = false;
         let mut dismiss = false;
-        self.deck_library_actions.clear();
         egui::CentralPanel::default().show(ctx, |_| {});
         let title = if advice.show_display_advice { "Pocket PC launch settings" } else { "GPU compatibility profile" };
         egui::Window::new(title)

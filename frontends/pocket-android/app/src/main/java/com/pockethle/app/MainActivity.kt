@@ -755,7 +755,7 @@ class MainActivity : HostKeyActivity() {
         val id = entry.getString("id")
         val currentProfile = entry.optString("current_profile")
         val profiles = entry.optJSONArray("profiles")
-        val message = "${entry.optString("display_name")}\n\n${entry.optString("import_settings_message")}"
+        val message = "${entry.optString("display_name")}\n\n${entry.optString("message")}"
         val displayAdvice = entry.optBoolean("show_display_advice")
         val title = if (displayAdvice) "Pocket PC launch settings" else "GPU compatibility profile"
         val builder = AlertDialog.Builder(this).setTitle(title)

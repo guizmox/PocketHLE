@@ -86,16 +86,20 @@ Profile changes take effect on the next launch. Gizmondo uses its own driver and
 The profile labels identify guest compatibility targets. The host driver still
 determines the actual rendering device.
 
-An imported PocketPC game receives one combined launch-settings prompt for
-screen/orientation, optional FPS advice and, when the existing executable analysis
-identifies OpenGL ES, the GPU compatibility profile. The FPS detector and
-message are shared across desktop and Android. On a new PocketPC import, a direct
-`libGLESv2.dll` import selects **Generic OpenGL ES (2.0, Common)**.
-`libGLES_CL.dll` selects Intel 2700G when the executable has no GLES 2.0 import. If the installation contains
-multiple supported executables, the selected executable determines the profile.
-Users can override the profile in Graphics settings. Updating or reimporting an
-installed game preserves its saved profile. NVIDIA selection gates extension
-advertisement and entry points and permits existing program detection.
+A new Pocket PC import presents one launch-settings dialog on desktop and
+Android. It includes screen and rotation guidance, optional FPS advice, and
+a GPU profile selector when the selected executable uses OpenGL ES and its
+profile remains ambiguous. The same selector is offered after switching the
+launch executable or choosing a newly added executable in **Add/Replace Data**.
+
+A direct `libGLESv2.dll` import, or the existing runtime-link signature
+using `libGLESv2.dll` and `glCreateShader`, selects **Generic OpenGL ES (2.0,
+Common)** on a fresh import. A direct `libGLES_CL.dll` import selects
+**Intel 2700G** when GLES 2.0 was not detected. A reference to
+`libGLES_CM.dll` leaves the GPU profile ambiguous on Pocket PC. Users can
+change the profile later under **Graphics**. Reimporting an installed game
+preserves its saved profile. NVIDIA selection enables the existing
+extension and program detection paths.
 
 ### Generic OpenGL ES 2.0 programmable rendering
 
