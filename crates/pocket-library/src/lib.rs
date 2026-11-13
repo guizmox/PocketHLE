@@ -768,6 +768,18 @@ impl GameSettings {
             .unwrap_or(config.pocketpc_tilt_input)
     }
 
+    pub fn effective_tilt_axes(
+        &self,
+        config: &LauncherConfig,
+    ) -> Option<pocket_kernel::accelerometer::TiltAxes> {
+        use pocket_kernel::accelerometer::TiltAxes;
+        match self.effective_tilt_input(config) {
+            TiltInput::Accelerometer => None,
+            TiltInput::LeftRight => Some(TiltAxes::Horizontal),
+            TiltInput::FourDirections => Some(TiltAxes::Both),
+        }
+    }
+
     pub fn controls_mode(&self) -> stylus_grid::ControlsMode {
         self.pocketpc_controls
             .unwrap_or(if self.pocketpc_touch_steering {

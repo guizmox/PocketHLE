@@ -6,28 +6,40 @@ use crate::{forms, graphics, sensors, storage, system, vm};
 struct Startup<'a> {
     assembly: Assembly<'a>,
     unresolved: Option<&'a str>,
-    streams: Vec<&'a [u8]>,
+    streams: Vec<Option<&'a [u8]>>,
     unresolved_type: Option<(&'a str, &'a str)>,
     system: system::Services,
     forms: forms::Forms,
     graphics: graphics::Graphics,
     sensors: sensors::Sensors,
-    strings: Vec<String>,
+    strings: Vec<std::rc::Rc<str>>,
+    string_ids: std::collections::BTreeMap<std::rc::Rc<str>, usize>,
+    string_bytes: usize,
     program_path: String,
     storage: storage::Storage,
     started: std::time::Instant,
+    tables: std::collections::BTreeMap<usize, std::collections::BTreeSet<u32>>,
+    resource_types: std::collections::BTreeMap<usize, u32>,
+    drawing_colors: std::collections::BTreeMap<usize, u16>,
+    audio: pocket_kernel::AudioEngine,
+    fmod: crate::fmod::Fmod,
+    asset_root: Option<std::path::PathBuf>,
+    data_slots: Vec<(String, vm::Value)>,
 }
 
-impl vm::Environment for Startup<'_> {
+impl<'image> vm::Environment<'image> for Startup<'image> {
     fn signature(&self, token: u32) -> Option<vm::Signature> {
         self.assembly.signature(token)
     }
 
-    fn body(&self, token: u32) -> Option<&[u8]> {
-        self.assembly.method(token).map(|method| method.il)
+    fn body(&self, token: u32) -> Option<&'image [u8]> {
+        self.assembly
+            .method(self.assembly.local_method(token).unwrap_or(token))
+            .map(|method| method.il)
     }
 
     fn exception_clauses(&self, token: u32) -> Vec<vm::ExceptionClause> {
+        let token = self.assembly.local_method(token).unwrap_or(token);
         let Some(method) = self.assembly.method(token) else {
             return Vec::new();
         };
@@ -130,6 +142,42 @@ impl vm::Environment for Startup<'_> {
         Some(vm::Value::Vector3(values))
     }
 
+    fn unbox_any(&self, machine: &vm::Machine, method: u32, ty: u32, value: vm::Value) -> bool {
+        use vm::Value;
+        let ty = self.resolve_type(method, ty);
+        match ty >> 24 {
+            2 => {
+                value == Value::Null
+                    || machine
+                        .constructor(value)
+                        .is_some_and(|ctor| self.assembly.type_owns_method(ty, ctor))
+            }
+            1 => match self.assembly.type_ref((ty & 0xffffff) as usize) {
+                Some(("System", "Object")) => true,
+                Some(("System", "Single")) => matches!(value, Value::Float(_)),
+                Some(("System", "Double")) => matches!(value, Value::Double(_)),
+                Some(("System", "Int32")) => matches!(value, Value::Int(_)),
+                Some(("System", "String")) => matches!(
+                    value,
+                    Value::Null | Value::StringToken(_) | Value::HostString(_)
+                ),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn resolve_type(&self, method: u32, token: u32) -> u32 {
+        self.assembly
+            .generic_context(method)
+            .and_then(|(method, args)| self.assembly.generic_type(token, args, method))
+            .unwrap_or(token)
+    }
+
+    fn resolve_field(&self, token: u32) -> u32 {
+        self.assembly.local_field(token).unwrap_or(token)
+    }
+
     fn field_default(&self, token: u32) -> vm::Value {
         self.assembly.field_default(token)
     }
@@ -160,7 +208,9 @@ impl vm::Environment for Startup<'_> {
         }
         match (self.assembly.member_type(token)?, args) {
             (
-                ("System", "EventHandler") | ("System.ComponentModel", "CancelEventHandler"),
+                ("System", "EventHandler")
+                | ("System.ComponentModel", "CancelEventHandler")
+                | ("System.Windows.Forms", "MouseEventHandler"),
                 [target, Function(method)],
             ) => {
                 let target = match target {
@@ -190,6 +240,72 @@ impl vm::Environment for Startup<'_> {
         token: u32,
         args: &[vm::Value],
     ) -> Result<Option<vm::Value>, vm::Fault> {
+        if let [address @ (vm::Value::LocalAddress(..)
+        | vm::Value::FieldAddress(..)
+        | vm::Value::ArgumentAddress(..)
+        | vm::Value::ArrayAddress(..)), values @ ..] = args
+        {
+            if let Some(value) = self.construct_value(token, values) {
+                machine.write_address(*address, value)?;
+                return Ok(None);
+            }
+        }
+        if let Some((module, name)) = self.assembly.pinvoke(token) {
+            if module.eq_ignore_ascii_case("fmodce.dll") || module.eq_ignore_ascii_case("fmodce") {
+                use vm::Value::{Int, Reference};
+                let value = match (name, args) {
+                    ("FSOUND_Init", [Int(rate), Int(channels), Int(0)]) => {
+                        Some(i32::from(self.fmod.init(&self.audio, *rate, *channels)))
+                    }
+                    (
+                        "FSOUND_Sample_Load",
+                        [Int(-1), Reference(array), Int(64), Int(0), Int(0)],
+                    ) => {
+                        let path = machine
+                            .array(Reference(*array))
+                            .and_then(|values| {
+                                values
+                                    .iter()
+                                    .take_while(|value| **value != Int(0))
+                                    .map(|value| match value {
+                                        Int(byte) => u8::try_from(*byte).ok(),
+                                        _ => None,
+                                    })
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .and_then(|bytes| String::from_utf8(bytes).ok());
+                        let sample = path
+                            .as_deref()
+                            .and_then(|path| path.rsplit_once(['\\', '/']))
+                            .filter(|(parent, _)| {
+                                self.program_path
+                                    .rsplit_once(['\\', '/'])
+                                    .is_some_and(|(dir, _)| dir.eq_ignore_ascii_case(parent))
+                            })
+                            .and_then(|(_, name)| {
+                                self.asset_root
+                                    .as_deref()
+                                    .and_then(|root| self.fmod.load(root, name))
+                            });
+                        Some(sample.unwrap_or(0))
+                    }
+                    ("FSOUND_PlaySound", [Int(channel), Int(sample)]) => {
+                        Some(self.fmod.play(&self.audio, *channel, *sample).unwrap_or(-1))
+                    }
+                    ("FSOUND_Sample_Free", [Int(sample)]) => {
+                        Some(i32::from(self.fmod.free(*sample)))
+                    }
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    return Ok(self
+                        .assembly
+                        .signature(token)
+                        .filter(|signature| signature.returns_value)
+                        .map(|_| Int(value)));
+                }
+            }
+        }
         let member = self.assembly.member_name(token);
         let kind = self.assembly.member_type(token);
         if kind == Some(("System", "Environment"))
@@ -201,12 +317,334 @@ impl vm::Environment for Startup<'_> {
             )));
         }
         use vm::Value;
+        if let Some((target, _)) = self.assembly.method_spec(token) {
+            if self.assembly.member_type(target)
+                == Some(("Microsoft.VisualBasic.CompilerServices", "Conversions"))
+                && self.assembly.member_name(target) == Some("ToGenericParameter")
+            {
+                if let [value @ (Value::Null | Value::Reference(_))] = args {
+                    return Ok(Some(*value));
+                }
+            }
+        }
         let string = |value| match value {
             Value::StringToken(token) => self.assembly.user_string(token),
-            Value::HostString(index) => self.strings.get(index).cloned(),
+            Value::HostString(index) => self.strings.get(index).map(|text| text.to_string()),
             _ => None,
         };
         let text = match (kind, member, args) {
+            (Some(("System.Text", "Encoding")), Some("get_Default"), []) => {
+                return Ok(Some(Value::DefaultEncoding))
+            }
+            (
+                Some(("System.Text", "Encoding")),
+                Some("GetBytes"),
+                [Value::DefaultEncoding, text],
+            ) => {
+                let text = string(*text).ok_or(vm::Fault::Reference)?;
+                return machine.byte_array(text.as_bytes()).map(Some);
+            }
+
+            (
+                Some(("System.Windows.Forms", "MouseEventArgs")),
+                Some("get_X" | "get_Y"),
+                [Value::MouseEvent(x, y)],
+            ) => {
+                return Ok(Some(Value::Int(if member == Some("get_X") {
+                    *x
+                } else {
+                    *y
+                })));
+            }
+            (Some(("System.Windows.Forms", "Application")), Some("Exit"), []) => {
+                self.forms.request_close();
+                return Ok(None);
+            }
+            (Some(("Microsoft.VisualBasic", "Conversion")), Some("Hex"), [Value::Float(bits)]) => {
+                Some(format!(
+                    "{:X}",
+                    f32::from_bits(*bits).round_ties_even() as i32
+                ))
+            }
+            (
+                Some(("Microsoft.VisualBasic.CompilerServices", "Conversions")),
+                Some("ToString"),
+                [value],
+            ) => match value {
+                Value::Int(n) => Some(n.to_string()),
+                Value::Float(n) => Some(f32::from_bits(*n).to_string()),
+                Value::Double(n) => Some(f64::from_bits(*n).to_string()),
+                Value::DateTime(n) => Some(system::date_text(*n)),
+                _ => None,
+            },
+            (Some(("Microsoft.VisualBasic", "DateAndTime")), Some("get_Now"), []) => {
+                let seconds = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                return Ok(Some(Value::DateTime(seconds)));
+            }
+            (Some(("System", "DateTime")), Some("get_Date"), [address]) => {
+                if let Some(Value::DateTime(seconds)) = machine.read_address(*address) {
+                    return Ok(Some(Value::DateTime(seconds / 86400 * 86400)));
+                }
+                return Err(vm::Fault::Reference);
+            }
+            (
+                Some(("Microsoft.VisualBasic", "Strings")),
+                Some("Format"),
+                [Value::DateTime(seconds), pattern],
+            ) if string(*pattern).as_deref() == Some("HH:mm:ss") => Some(format!(
+                "{:02}:{:02}:{:02}",
+                seconds / 3600 % 24,
+                seconds / 60 % 60,
+                seconds % 60
+            )),
+            (
+                Some(("System.Windows.Forms", "Control")),
+                Some("get_Font"),
+                [Value::Reference(_)],
+            ) => return Ok(Some(Value::Font)),
+            (Some(("System.Drawing", "Font")), Some("get_Name"), [Value::Font]) => {
+                Some("Tahoma".into())
+            }
+            (Some(("System.Drawing", "Font")), Some("get_Name"), [Value::Reference(id)]) => {
+                return Ok(Some(
+                    self.forms.font_family(*id).ok_or(vm::Fault::Reference)?,
+                ));
+            }
+            (
+                Some(("System.Drawing", "Graphics")),
+                Some("DrawString"),
+                [Value::DrawingSurface(target), text, Value::Reference(font), Value::Reference(brush), Value::Float(x), Value::Float(y)],
+            ) => {
+                let text: Vec<_> = string(*text)
+                    .ok_or(vm::Fault::Reference)?
+                    .encode_utf16()
+                    .collect();
+                let color = *self.drawing_colors.get(brush).ok_or(vm::Fault::Reference)?;
+                let font = self.forms.render_font(*font).ok_or(vm::Fault::Reference)?;
+                let bitmap = self.forms.bitmap_mut(*target).ok_or(vm::Fault::Reference)?;
+                let bounds = [0, 0, bitmap.width as i32, bitmap.height as i32];
+                pocket_kernel::text::layout(Some(&font), &text).draw(
+                    &mut pocket_kernel::gdi::Surface::Screen(bitmap),
+                    f32::from_bits(*x) as i32,
+                    f32::from_bits(*y) as i32,
+                    color,
+                    bounds,
+                );
+                return Ok(None);
+            }
+            (
+                Some(("System.Drawing", "Graphics")),
+                Some("DrawPolygon"),
+                [Value::DrawingSurface(target), Value::Reference(pen), array],
+            ) => {
+                let color = *self.drawing_colors.get(pen).ok_or(vm::Fault::Reference)?;
+                let points = machine.array(*array).ok_or(vm::Fault::Reference)?;
+                let bitmap = self.forms.bitmap_mut(*target).ok_or(vm::Fault::Reference)?;
+                if let Some(last) = points.last() {
+                    let mut surface = pocket_kernel::gdi::Surface::Screen(bitmap);
+                    for (from, to) in std::iter::once(last).chain(points).zip(points) {
+                        let (Value::Point(x, y), Value::Point(u, v)) = (*from, *to) else {
+                            return Err(vm::Fault::InvalidSignature);
+                        };
+                        surface.line((x, y), (u, v), color, 1);
+                    }
+                }
+                return Ok(None);
+            }
+            (
+                Some(("System.Drawing", "Graphics")),
+                Some("DrawImage"),
+                [Value::DrawingSurface(target), Value::Image(image), Value::Int(x), Value::Int(y)],
+            ) => {
+                self.forms
+                    .draw_resource(*target, *image, *x, *y)
+                    .ok_or(vm::Fault::Reference)?;
+                return Ok(None);
+            }
+            (
+                Some(("System.Drawing", "SolidBrush" | "Pen")),
+                Some(".ctor"),
+                [Value::Reference(id), Value::Int(color)],
+            ) => {
+                let color = pocket_kernel::framebuffer::pack_rgb565(
+                    (*color >> 16) as u8,
+                    (*color >> 8) as u8,
+                    *color as u8,
+                );
+                self.drawing_colors.insert(*id, color);
+                return Ok(None);
+            }
+            (
+                Some(("System.Drawing", "Graphics")),
+                Some("FillEllipse" | "FillRectangle"),
+                [Value::DrawingSurface(target), Value::Reference(brush), Value::Int(x), Value::Int(y), Value::Int(w), Value::Int(h)],
+            ) => {
+                let color = *self.drawing_colors.get(brush).ok_or(vm::Fault::Reference)?;
+                let bitmap = self.forms.bitmap_mut(*target).ok_or(vm::Fault::Reference)?;
+                if member == Some("FillEllipse") {
+                    pocket_kernel::gdi::Surface::Screen(bitmap).ellipse(
+                        [*x, *y, x.saturating_add(*w), y.saturating_add(*h)],
+                        Some(color),
+                        None,
+                    );
+                } else {
+                    bitmap.fill_rect(*x, *y, *w, *h, color);
+                }
+                return Ok(None);
+            }
+            (Some(("Microsoft.VisualBasic", "Conversion")), Some("Int"), [Value::Double(bits)]) => {
+                return Ok(Some(Value::Double(f64::from_bits(*bits).floor().to_bits())))
+            }
+            (Some(("Microsoft.VisualBasic", "Conversion")), Some("Int"), [Value::Float(bits)]) => {
+                return Ok(Some(Value::Float(f32::from_bits(*bits).floor().to_bits())))
+            }
+            (
+                Some(("System.Drawing", "Bitmap")),
+                Some(".ctor"),
+                [Value::Reference(id), Value::Int(w), Value::Int(h)],
+            ) => {
+                if !(1..=2048).contains(w) || !(1..=2048).contains(h) {
+                    return Err(vm::Fault::InvalidSignature);
+                }
+                self.forms.set_bitmap(*id, *w as u32, *h as u32);
+                return Ok(None);
+            }
+            (Some(("System.Drawing", "Graphics")), Some("FromImage"), [Value::Reference(id)]) => {
+                return Ok(Some(Value::DrawingSurface(*id)));
+            }
+            (
+                Some(("CompassHTC", "HTCCompass")),
+                Some(".ctor" | "Start" | "Stop"),
+                [Value::Reference(_)],
+            ) => return Ok(None),
+            (Some(("CompassHTC", "HTCCompass")), Some("get_Angle"), [Value::Reference(_)]) => {
+                return Ok(Some(Value::Double(self.sensors.tilt_heading().to_bits())))
+            }
+            (
+                Some(("System.ComponentModel", "ComponentResourceManager")),
+                Some(".ctor"),
+                [Value::Reference(id), Value::ManagedType(ty)],
+            ) => {
+                self.resource_types.insert(*id, *ty);
+                return Ok(None);
+            }
+            (
+                Some(("System.Resources", "ResourceManager")),
+                Some("GetObject"),
+                [Value::Reference(id), key],
+            ) => {
+                let key = string(*key).ok_or(vm::Fault::Reference)?;
+                let ty = *self.resource_types.get(id).ok_or(vm::Fault::Reference)?;
+                let name = self
+                    .assembly
+                    .resource_type_name(ty)
+                    .ok_or(vm::Fault::InvalidSignature)?;
+                let Some(image) = self
+                    .assembly
+                    .resource(&name)
+                    .and_then(|bytes| crate::resources::image(bytes, &key))
+                else {
+                    return Ok(Some(Value::Null));
+                };
+                return Ok(Some(Value::Image(self.forms.add_image(image))));
+            }
+            (Some(("System.Collections", "Hashtable")), Some(".ctor"), [Value::Reference(id)]) => {
+                self.tables.insert(*id, Default::default());
+                return Ok(None);
+            }
+            (
+                Some(("System.Collections", "Hashtable")),
+                Some("ContainsKey"),
+                [Value::Reference(id), Value::ManagedType(ty)],
+            ) => {
+                return Ok(Some(Value::Int(i32::from(
+                    self.tables
+                        .get(id)
+                        .ok_or(vm::Fault::Reference)?
+                        .contains(ty),
+                ))));
+            }
+            (
+                Some(("System.Collections", "Hashtable")),
+                Some("Add"),
+                [Value::Reference(id), Value::ManagedType(ty), Value::Null],
+            ) => {
+                if !self
+                    .tables
+                    .get_mut(id)
+                    .ok_or(vm::Fault::Reference)?
+                    .insert(*ty)
+                {
+                    return Err(vm::Fault::ManagedException);
+                }
+                return Ok(None);
+            }
+            (
+                Some(("System.Collections", "Hashtable")),
+                Some("Remove"),
+                [Value::Reference(id), Value::ManagedType(ty)],
+            ) => {
+                self.tables
+                    .get_mut(id)
+                    .ok_or(vm::Fault::Reference)?
+                    .remove(ty);
+                return Ok(None);
+            }
+            (Some(("System", "Activator")), Some("CreateInstance"), [Value::ManagedType(ty)]) => {
+                let ctor = self
+                    .assembly
+                    .constructor(*ty)
+                    .ok_or(vm::Fault::InvalidSignature)?;
+                return machine.construct(self, ctor, depth + 1).map(Some);
+            }
+            (
+                Some(("System.Runtime.CompilerServices", "RuntimeHelpers")),
+                Some("GetObjectValue"),
+                [value],
+            ) => return Ok(Some(*value)),
+            (Some(("System.Globalization", "CultureInfo")), Some("get_CurrentCulture"), []) => {
+                return Ok(Some(Value::Culture));
+            }
+            (Some(("System", "String")), Some("get_Length"), [value]) => {
+                let text = string(*value).ok_or(vm::Fault::Reference)?;
+                return Ok(Some(Value::Int(text.encode_utf16().count() as i32)));
+            }
+            (Some(("System", "String")), Some("Format"), [Value::Culture, format, array]) => {
+                let format = string(*format).ok_or(vm::Fault::Reference)?;
+                let items = machine.array(*array).ok_or(vm::Fault::Reference)?;
+                if let [Value::Int(value)] = items {
+                    Some(format.replace("{0}", &value.to_string()))
+                } else {
+                    return Err(vm::Fault::InvalidSignature);
+                }
+            }
+            (Some(("System.Threading", "Thread")), Some("GetNamedDataSlot"), [name]) => {
+                let name = string(*name).ok_or(vm::Fault::Reference)?;
+                let id = self
+                    .data_slots
+                    .iter()
+                    .position(|(key, _)| key == &name)
+                    .unwrap_or_else(|| {
+                        self.data_slots.push((name, Value::Null));
+                        self.data_slots.len() - 1
+                    });
+                return Ok(Some(Value::DataSlot(id)));
+            }
+            (Some(("System.Threading", "Thread")), Some("GetData"), [Value::DataSlot(id)]) => {
+                return Ok(Some(
+                    self.data_slots.get(*id).ok_or(vm::Fault::Reference)?.1,
+                ));
+            }
+            (
+                Some(("System.Threading", "Thread")),
+                Some("SetData"),
+                [Value::DataSlot(id), value],
+            ) => {
+                self.data_slots.get_mut(*id).ok_or(vm::Fault::Reference)?.1 = *value;
+                return Ok(None);
+            }
             (Some(("System.Reflection", "Assembly")), Some("GetName"), [Value::Assembly]) => {
                 return Ok(Some(Value::AssemblyName));
             }
@@ -217,6 +655,14 @@ impl vm::Environment for Startup<'_> {
             ) => Some(self.program_path.clone()),
             (Some(("System.IO", "Path")), Some("GetDirectoryName"), [path]) => string(*path)
                 .and_then(|path| path.rsplit_once(['\\', '/']).map(|(dir, _)| dir.to_owned())),
+            (Some(("System", "String")), Some("Concat"), [first, second, third]) => Some(
+                [first, second, third]
+                    .into_iter()
+                    .map(|value| string(*value))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(vm::Fault::InvalidSignature)?
+                    .concat(),
+            ),
             (Some(("System", "String")), Some("Concat"), [left, right]) => string(*left)
                 .zip(string(*right))
                 .map(|(left, right)| left + &right),
@@ -285,8 +731,21 @@ impl vm::Environment for Startup<'_> {
             _ => {}
         }
         if let Some(text) = text {
+            if let Some(&index) = self.string_ids.get(text.as_str()) {
+                return Ok(Some(Value::HostString(index)));
+            }
+            let bytes = self
+                .string_bytes
+                .checked_add(text.len())
+                .ok_or(vm::Fault::Budget)?;
+            if bytes > 16 * 1024 * 1024 || self.strings.len() >= 262_144 {
+                return Err(vm::Fault::Budget);
+            }
             let index = self.strings.len();
+            let text: std::rc::Rc<str> = text.into();
+            self.string_ids.insert(text.clone(), index);
             self.strings.push(text);
+            self.string_bytes = bytes;
             return Ok(Some(Value::HostString(index)));
         }
         if let (Some(("System.Windows.Forms", "Application")), Some("Run"), [form]) =
@@ -309,6 +768,7 @@ impl vm::Environment for Startup<'_> {
                 (Some("Sin"), [value]) => float(*value).map(f64::sin),
                 (Some("Cos"), [value]) => float(*value).map(f64::cos),
                 (Some("Sqrt"), [value]) => float(*value).map(f64::sqrt),
+                (Some("Round"), [value]) => float(*value).map(f64::round_ties_even),
                 _ => None,
             };
             if let Some(value) = result {
@@ -361,8 +821,13 @@ impl vm::Environment for Startup<'_> {
                     .user_string(*name)
                     .and_then(|name| self.assembly.resource(&name))
                 {
-                    let id = self.streams.len();
-                    self.streams.push(data);
+                    let id = if let Some(id) = self.streams.iter().position(Option::is_none) {
+                        self.streams[id] = Some(data);
+                        id
+                    } else {
+                        self.streams.push(Some(data));
+                        self.streams.len() - 1
+                    };
                     return Ok(Some(vm::Value::ResourceStream(id)));
                 }
                 return Ok(Some(vm::Value::Null));
@@ -375,7 +840,7 @@ impl vm::Environment for Startup<'_> {
                 if let Some(texture) = self
                     .streams
                     .get(*id)
-                    .and_then(|data| self.graphics.texture(data, *filter != 0))
+                    .and_then(|data| self.graphics.texture((*data)?, *filter != 0))
                 {
                     return Ok(Some(vm::Value::Int(texture as i32)));
                 }
@@ -449,6 +914,11 @@ impl vm::Environment for Startup<'_> {
                 }
             }
         }
+        if let (Some(("Microsoft.VisualBasic", "VBMath")), Some(name)) = (kind, member) {
+            if let Some(result) = self.system.vb_random(name, args) {
+                return Ok(result);
+            }
+        }
         if let (Some(("System", "Random")), Some(name)) = (kind, member) {
             if let Some(result) = self.system.random(name, args) {
                 return result;
@@ -459,7 +929,7 @@ impl vm::Environment for Startup<'_> {
                 "System.Windows.Forms",
                 class @ ("Form" | "ScrollableControl" | "Panel" | "Label" | "Button" | "CheckBox"
                 | "ComboBox" | "Timer" | "MenuItem" | "MainMenu" | "Control"
-                | "ContainerControl" | "ListControl"),
+                | "ContainerControl" | "ListControl" | "PictureBox"),
             )),
             Some(name),
         ) = (kind, member)
@@ -569,6 +1039,9 @@ pub enum StartupError<'a> {
 
 pub struct Session<'a> {
     startup: Startup<'a>,
+    forms_frame: Option<(u64, pocket_kernel::Framebuffer)>,
+    forms_canvas: Option<pocket_kernel::Framebuffer>,
+    next_collection: u64,
     machine: vm::Machine,
 }
 
@@ -578,7 +1051,7 @@ impl<'a> Session<'a> {
         size: (u32, u32),
         budget: usize,
     ) -> Result<Self, StartupError<'a>> {
-        Self::start_in(bytes, size, budget, None, None, false)
+        Self::start_in(bytes, size, budget, None, None, false, None)
     }
 
     pub(crate) fn start_in(
@@ -588,6 +1061,7 @@ impl<'a> Session<'a> {
         save_root: Option<std::path::PathBuf>,
         guest_path: Option<String>,
         gpu_renderer: bool,
+        asset_root: Option<std::path::PathBuf>,
     ) -> Result<Self, StartupError<'a>> {
         if !(1..=2048).contains(&size.0) || !(1..=2048).contains(&size.1) {
             return Err(StartupError::InvalidScreen);
@@ -604,7 +1078,16 @@ impl<'a> Session<'a> {
             graphics: graphics::Graphics::new(size, gpu_renderer),
             sensors: sensors::Sensors::default(),
             strings: Vec::new(),
+            string_ids: Default::default(),
+            string_bytes: 0,
             started: std::time::Instant::now(),
+            audio: pocket_kernel::AudioEngine::new(),
+            fmod: Default::default(),
+            asset_root,
+            data_slots: Vec::new(),
+            drawing_colors: Default::default(),
+            resource_types: Default::default(),
+            tables: Default::default(),
             program_path: guest_path
                 .unwrap_or_else(|| r"\Program Files\Application\application.exe".into()),
             storage: storage::Storage::default(),
@@ -625,7 +1108,19 @@ impl<'a> Session<'a> {
                 .paint(&mut startup, form, paint, budget)
                 .map_err(|fault| startup.error(fault))?;
         }
-        Ok(Self { startup, machine })
+        let mut session = Self {
+            startup,
+            machine,
+            forms_frame: None,
+            forms_canvas: None,
+            next_collection: 1000,
+        };
+        session.refresh_forms_frame();
+        Ok(session)
+    }
+
+    pub(crate) fn audio(&mut self) -> &mut pocket_kernel::AudioEngine {
+        &mut self.startup.audio
     }
 
     pub fn set_acceleration(&mut self, value: [f32; 3]) {
@@ -633,12 +1128,23 @@ impl<'a> Session<'a> {
     }
 
     pub fn click(&mut self, x: u16, y: u16, budget: usize) -> Result<(), StartupError<'a>> {
+        let (x, y) = if self.startup.graphics.frame().is_none() {
+            let (width, height) = self.startup.forms.display_size();
+            let (w, h) = self.startup.forms.canvas_size();
+            (
+                (u32::from(x) * w / width).min(w - 1) as u16,
+                (u32::from(y) * h / height).min(h - 1) as u16,
+            )
+        } else {
+            (x, y)
+        };
         self.startup.forms.set_pointer(x, y);
-        for (sender, handler) in self.startup.forms.click_events(x, y) {
+        for (sender, handler, event) in self.startup.forms.click_events(x, y) {
             self.machine
-                .event(&mut self.startup, sender, handler, budget)
+                .event_with_args(&mut self.startup, sender, handler, event, budget)
                 .map_err(|fault| self.startup.error(fault))?;
         }
+        self.refresh_forms_frame();
         self.finish_close(budget)
     }
 
@@ -659,21 +1165,100 @@ impl<'a> Session<'a> {
     }
 
     pub(crate) fn paint_controls(&self, frame: &mut pocket_kernel::Framebuffer) {
-        self.startup
-            .forms
-            .paint_controls(frame, |token| self.startup.assembly.user_string(token));
+        if self.startup.graphics.frame().is_some() {
+            self.startup
+                .forms
+                .paint_controls(frame, |token| self.startup.assembly.user_string(token));
+        }
+    }
+
+    fn refresh_forms_frame(&mut self) {
+        if self.startup.graphics.frame().is_some() || !self.startup.forms.running() {
+            return;
+        }
+        let (width, height) = self.startup.forms.display_size();
+        let (generation, framebuffer) = self
+            .forms_frame
+            .get_or_insert_with(|| (0, pocket_kernel::Framebuffer::new(width, height)));
+        let (w, h) = self.startup.forms.canvas_size();
+        let draw = |target: &mut pocket_kernel::Framebuffer| {
+            target.fill(0);
+            self.startup
+                .forms
+                .paint_controls(target, |token| self.startup.assembly.user_string(token));
+        };
+        if (w, h) == (width, height) {
+            draw(framebuffer);
+        } else {
+            if self
+                .forms_canvas
+                .as_ref()
+                .is_none_or(|canvas| (canvas.width, canvas.height) != (w, h))
+            {
+                self.forms_canvas = Some(pocket_kernel::Framebuffer::new(w, h));
+            }
+            let canvas = self.forms_canvas.as_mut().unwrap();
+            draw(canvas);
+            for y in 0..height {
+                for x in 0..width {
+                    let src = ((y * h / height) * w + x * w / width) as usize * 2;
+                    let dst = (y * width + x) as usize * 2;
+                    framebuffer.pixels[dst..dst + 2].copy_from_slice(&canvas.pixels[src..src + 2]);
+                }
+            }
+        }
+        *generation = generation.wrapping_add(1);
     }
 
     pub fn frame(&self) -> Option<(u64, (u32, u32), &[u8])> {
-        self.startup.graphics.frame()
+        self.startup.graphics.frame().or_else(|| {
+            let (generation, frame) = self.forms_frame.as_ref()?;
+            Some((
+                *generation,
+                (frame.width, frame.height),
+                frame.pixels.as_slice(),
+            ))
+        })
     }
 
     pub fn running(&self) -> bool {
         self.startup.forms.running()
     }
 
+    fn collect_objects(&mut self) {
+        let mut roots = Vec::new();
+        self.startup.forms.roots(&mut roots);
+        self.startup.graphics.roots(&mut roots);
+        roots.extend(self.startup.data_slots.iter().map(|(_, value)| *value));
+        let mut images = std::collections::BTreeSet::new();
+        let mut streams = std::collections::BTreeSet::new();
+        let live = self.machine.collect(roots, |value, pending| match value {
+            vm::Value::Reference(id) => self.startup.forms.trace_control(id, pending),
+            vm::Value::Image(id) => {
+                images.insert(id);
+            }
+            vm::Value::ResourceStream(id) => {
+                streams.insert(id);
+            }
+            _ => {}
+        });
+        self.startup.forms.sweep(&live, &images);
+        for (id, stream) in self.startup.streams.iter_mut().enumerate() {
+            if !streams.contains(&id) {
+                *stream = None;
+            }
+        }
+        self.startup.storage.sweep(&live);
+        self.startup.system.sweep(&live);
+        self.startup.tables.retain(|&id, _| live[id]);
+        self.startup.resource_types.retain(|&id, _| live[id]);
+        self.startup.drawing_colors.retain(|&id, _| live[id]);
+    }
+
     pub fn tick(&mut self, now_ms: u64, budget: usize) -> Result<(), StartupError<'a>> {
-        for (sender, handler) in self.startup.forms.timer_events(now_ms) {
+        let events = self.startup.forms.timer_events(now_ms);
+        let changed = !events.is_empty();
+        for (sender, handler) in events {
             self.machine
                 .event(&mut self.startup, sender, handler, budget)
                 .map_err(|fault| self.startup.error(fault))?;
@@ -682,6 +1267,13 @@ impl<'a> Session<'a> {
             self.machine
                 .paint(&mut self.startup, form, paint, budget)
                 .map_err(|fault| self.startup.error(fault))?;
+        }
+        if changed || self.startup.forms.take_invalidated() {
+            self.refresh_forms_frame();
+        }
+        if now_ms >= self.next_collection {
+            self.collect_objects();
+            self.next_collection = now_ms.saturating_add(1000);
         }
         Ok(())
     }
@@ -700,6 +1292,59 @@ impl<'a> Startup<'a> {
 #[cfg(test)]
 mod tests {
     use super::Session;
+    #[test]
+    #[ignore = "requires POCKETHLE_DETECTOR_VELES_EXE"]
+    fn detector_veles_displays_and_runs_its_forms_timers() {
+        let exe = std::env::var_os("POCKETHLE_DETECTOR_VELES_EXE").unwrap();
+        let bytes = std::fs::read(exe).unwrap();
+        assert!(crate::references_accelerometer(&bytes));
+        let assets =
+            std::env::var_os("POCKETHLE_DETECTOR_VELES_ASSETS").map(std::path::PathBuf::from);
+        let verify_audio = assets.is_some();
+        let mut session =
+            Session::start_in(&bytes, (480, 640), 500_000, None, None, false, assets).unwrap();
+        let tap = session.audio().tap();
+        if let Some(root) = &session.startup.asset_root {
+            let sample = session.startup.fmod.load(root, "anomaly.wav").unwrap();
+            assert!(session
+                .startup
+                .fmod
+                .play(&session.startup.audio, -1, sample)
+                .is_some());
+            assert!(session.startup.fmod.free(sample));
+        }
+        let mut pcm = [0i16; 4096];
+        let mut heard = false;
+        session.set_acceleration([4.9, 8.487, 0.0]);
+        assert!((session.startup.sensors.tilt_heading() - 30.0).abs() < 0.1);
+        let initial = session.frame().unwrap().2.to_vec();
+        assert!(initial.iter().any(|byte| *byte != 0));
+        for now in (0..120_000).step_by(40) {
+            session
+                .tick(now, 500_000)
+                .unwrap_or_else(|error| panic!("timer at {now}: {error:?}"));
+            let samples = tap.drain_into(&mut pcm);
+            heard |= pcm[..samples].iter().any(|&sample| sample != 0);
+        }
+        assert_ne!(initial, session.frame().unwrap().2);
+        session.click(270, 360, 500_000).unwrap();
+        for now in (120_000..123_000).step_by(40) {
+            session
+                .tick(now, 500_000)
+                .unwrap_or_else(|error| panic!("after click at {now}: {error:?}"));
+        }
+        assert!(session.running());
+        eprintln!(
+            "Veles at 33s: {} objects, {} host strings",
+            session.machine.object_count(),
+            session.startup.strings.len()
+        );
+        assert!(session.machine.object_count() < 512);
+        if verify_audio {
+            assert!(heard, "Detector Veles produced no mixed PCM");
+        }
+    }
+
     /// Check the liquid itself, independently of moving bubbles and UI controls.
     #[test]
     #[ignore = "requires POCKETHLE_DIAMOND_BEER_EXE"]
@@ -717,6 +1362,7 @@ mod tests {
                 Some(save.path().to_path_buf()),
                 None,
                 gpu,
+                None,
             )
             .unwrap();
             if show_logo {

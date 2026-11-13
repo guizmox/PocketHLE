@@ -411,7 +411,7 @@ fn read_memory_clip(ctx: &mut CallCtx<'_>, address: u32) -> Result<Option<Vec<u8
 /// on a device and it is not load-bearing here either — both decoders
 /// are tried against the content.
 fn decode_clip(bytes: &[u8]) -> Option<(GuestFormat, Vec<i16>)> {
-    if let Some(decoded) = crate::coredll::decode_pcm_wave(bytes) {
+    if let Some(decoded) = pocket_kernel::audio::decode_pcm_wave(bytes) {
         return Some(decoded);
     }
     let module = Module::parse(bytes)?;

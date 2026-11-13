@@ -21,6 +21,7 @@ fn main() -> Result<(), String> {
             frames.set(frames.get() + 1);
             frame.snapshot_presentation_rgba8888_into(&mut last);
         },
+        |_| {},
     )?;
     if frames.get() != 30 || !last.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]) {
         return Err(format!(

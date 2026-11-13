@@ -13,3 +13,7 @@ pub mod vm;
 
 pub use metadata::{entry_point, method, referenced_member, references_accelerometer, EntryPoint};
 pub use runtime::{Session, StartupError};
+
+mod resources;
+
+mod fmod;

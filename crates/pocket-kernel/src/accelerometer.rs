@@ -46,17 +46,28 @@ pub fn simulated_sample(state: &mut crate::KernelState, axes: TiltAxes) -> [f32;
         .async_keys
         .sync(&state.pending_input, state.gapi_action_key != VK_RETURN);
     let directions = [VK_UP, VK_RIGHT, VK_DOWN, VK_LEFT];
-    let turns = usize::from(state.async_keys.display_turns);
-    let held = |direction: usize| {
-        state
-            .async_keys
-            .is_down(directions[(direction + 4 - turns) % 4])
-    };
     simulated_axes(
         axes,
-        [held(0), held(1), held(2), held(3)],
+        display_directions(
+            directions.map(|key| state.async_keys.is_down(key)),
+            usize::from(state.async_keys.display_turns),
+        ),
         state.async_keys.tilt_stick,
     )
+}
+
+/// Frontends inverse-rotate directional keys before dispatch.
+pub fn display_directions(directions: [bool; 4], turns: usize) -> [bool; 4] {
+    std::array::from_fn(|direction| directions[(direction + 4 - turns % 4) % 4])
+}
+
+pub fn undo_display_rotation([x, y, z]: [f32; 3], turns: usize) -> [f32; 3] {
+    match turns % 4 {
+        1 => [y, -x, z],
+        2 => [-x, -y, z],
+        3 => [-y, x, z],
+        _ => [x, y, z],
+    }
 }
 
 /// Convert display-relative Up, Right, Down, Left and stick input to m/s².

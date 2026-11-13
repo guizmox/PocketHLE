@@ -28,6 +28,11 @@ pub enum Instruction {
     LoadNull,
     LoadString(u32),
     LoadFunction(u32),
+    LoadVirtualFunction(u32),
+    BoxValue,
+    UnboxAny(u32),
+    ConvertChecked(u8),
+    Compare(u8),
     LoadToken(u32),
     Duplicate,
     Pop,
@@ -113,7 +118,9 @@ pub fn decode(code: &[u8], offset: usize) -> Result<(Instruction, usize), Decode
             )
         }
         0x3b..=0x44 => (BranchCompare(token()? as i32, opcode - 0x3b), 5),
-        0x58..=0x5e => (Arithmetic(opcode), 1),
+        0xfe if matches!(operand.first(), Some(1..=5)) => (Compare(operand[0]), 2),
+        0x58..=0x61 => (Arithmetic(opcode), 1),
+        0xd6 | 0xd8 | 0xda => (Arithmetic(opcode), 1),
         0x56 => (StoreIndirectFloat, 1),
         0x65 => (Negate, 1),
         0x6b => (ConvertFloat, 1),
@@ -175,9 +182,19 @@ pub fn decode(code: &[u8], offset: usize) -> Result<(Instruction, usize), Decode
         0x7e => (LoadStaticField(token()?), 5),
         0x80 => (StoreStaticField(token()?), 5),
         0x7d => (StoreField(token()?), 5),
+        0x86 | 0xb4 | 0xb5 | 0xb7 => (ConvertChecked(opcode), 1),
+        0xa5 => (UnboxAny(token()?), 5),
+        0x8c => (BoxValue, {
+            token()?;
+            5
+        }),
         0x8d => (NewArray(token()?), 5),
-        0xfe if operand.first() == Some(&6) => (
-            LoadFunction(u32::from_le_bytes(
+        0xfe if matches!(operand.first(), Some(6 | 7)) => (
+            (if operand[0] == 6 {
+                LoadFunction
+            } else {
+                LoadVirtualFunction
+            })(u32::from_le_bytes(
                 operand
                     .get(1..5)
                     .ok_or(truncated)?

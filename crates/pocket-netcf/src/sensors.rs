@@ -17,6 +17,12 @@ impl Default for Sensors {
 }
 
 impl Sensors {
+    /// Approximate a compass heading from screen-plane tilt.
+    pub fn tilt_heading(&self) -> f64 {
+        let [x, y, _] = self.acceleration.map(f64::from);
+        x.atan2(y).to_degrees().rem_euclid(360.0)
+    }
+
     pub fn set_acceleration(&mut self, mut value: [f32; 3]) {
         if value.iter().all(|axis| axis.is_finite()) {
             // Preserve a defined screen-plane angle when both components are zero.

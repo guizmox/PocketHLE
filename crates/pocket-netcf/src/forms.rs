@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub struct Forms {
+    bitmaps: BTreeMap<usize, pocket_kernel::Framebuffer>,
+    images: Vec<Option<image::RgbaImage>>,
     controls: BTreeMap<usize, Control>,
     fonts: BTreeMap<usize, Font>,
     main_form: Option<usize>,
@@ -17,20 +19,20 @@ pub struct Forms {
 }
 
 struct Font {
-    family: u32,
+    family: Value,
     size: u32,
-    style: i32,
 }
 
 #[derive(Default)]
 struct Control {
     kind: &'static str,
     is_form: bool,
+    image: Option<Value>,
     integer_properties: BTreeMap<&'static str, i32>,
     layout_suspensions: usize,
     back_color: Option<i32>,
     name: Option<u32>,
-    font: Option<(u32, u32, i32)>,
+    font: Option<usize>,
     text: Option<u32>,
     children: Vec<usize>,
     items: Vec<Value>,
@@ -41,6 +43,83 @@ struct Control {
 }
 
 impl Forms {
+    pub fn roots(&self, roots: &mut Vec<Value>) {
+        roots.extend(self.main_form.map(Value::Reference));
+        roots.extend(self.controls.iter().filter_map(|(&id, control)| {
+            (control.handlers.contains_key("Tick")
+                && control.integer_properties.get("Enabled") == Some(&1))
+            .then_some(Value::Reference(id))
+        }));
+    }
+
+    pub fn trace_control(&self, id: usize, roots: &mut Vec<Value>) {
+        if let Some(control) = self.controls.get(&id) {
+            roots.extend(control.children.iter().copied().map(Value::Reference));
+            roots.extend(control.image);
+            roots.extend(control.font.map(Value::Reference));
+            roots.extend(control.items.iter().copied());
+            roots.extend(control.handlers.values().flatten().copied());
+        }
+    }
+
+    pub fn sweep(&mut self, live: &[bool], images: &std::collections::BTreeSet<usize>) {
+        self.controls.retain(|&id, _| live[id]);
+        self.next_tick.retain(|&id, _| live[id]);
+        self.fonts.retain(|&id, _| live[id]);
+        self.bitmaps.retain(|&id, _| live[id]);
+        for (id, image) in self.images.iter_mut().enumerate() {
+            if !images.contains(&id) {
+                *image = None;
+            }
+        }
+    }
+
+    pub fn set_bitmap(&mut self, id: usize, w: u32, h: u32) {
+        self.bitmaps
+            .insert(id, pocket_kernel::Framebuffer::new(w, h));
+    }
+
+    pub fn bitmap_mut(&mut self, id: usize) -> Option<&mut pocket_kernel::Framebuffer> {
+        self.bitmaps.get_mut(&id)
+    }
+
+    pub fn draw_resource(&mut self, target: usize, image: usize, x: i32, y: i32) -> Option<()> {
+        let bitmap = self.bitmaps.get_mut(&target)?;
+        let bounds = [0, 0, bitmap.width as i32, bitmap.height as i32];
+        Self::draw_image(bitmap, self.images.get(image)?.as_ref()?, x, y, bounds);
+        Some(())
+    }
+
+    fn draw_image(
+        target: &mut pocket_kernel::Framebuffer,
+        image: &image::RgbaImage,
+        x: i32,
+        y: i32,
+        bounds: [i32; 4],
+    ) {
+        let [left, top, right, bottom] = bounds;
+        for py in top.max(y)..bottom.min(y.saturating_add(image.height() as i32)) {
+            for px in left.max(x)..right.min(x.saturating_add(image.width() as i32)) {
+                let [r, g, b, a] = image.get_pixel((px - x) as u32, (py - y) as u32).0;
+                if a != 0 {
+                    let offset = (py as usize * target.width as usize + px as usize) * 2;
+                    target.pixels[offset..offset + 2].copy_from_slice(
+                        &pocket_kernel::framebuffer::pack_rgb565(r, g, b).to_le_bytes(),
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn add_image(&mut self, image: image::RgbaImage) -> usize {
+        if let Some(id) = self.images.iter().position(Option::is_none) {
+            self.images[id] = Some(image);
+            return id;
+        }
+        self.images.push(Some(image));
+        self.images.len() - 1
+    }
+
     pub fn run(&mut self, value: Value, paint: Option<u32>) -> Option<()> {
         let Value::Reference(id) = value else {
             return None;
@@ -60,13 +139,14 @@ impl Forms {
         self.pointer = (i32::from(x), i32::from(y));
     }
 
-    pub fn click_events(&mut self, x: u16, y: u16) -> Vec<(usize, Value)> {
+    pub fn click_events(&mut self, x: u16, y: u16) -> Vec<(usize, Value, Value)> {
         let Some(root) = self.main_form else {
             return Vec::new();
         };
         let mut pending = vec![(root, (0i32, 0i32))];
         let mut seen = std::collections::BTreeSet::new();
         let mut hit = root;
+        let mut position = (0, 0);
         let (x, y) = (i32::from(x), i32::from(y));
         while let Some((id, (left, top))) = pending.pop() {
             if !seen.insert(id) {
@@ -89,6 +169,7 @@ impl Forms {
                     && y < top.saturating_add(control.size.1))
             {
                 hit = id;
+                position = (left, top);
                 pending.extend(control.children.iter().map(|id| (*id, (left, top))));
             }
         }
@@ -112,13 +193,23 @@ impl Forms {
             _ => None,
         };
         self.invalidated = true;
-        let events = changed
+        let mut events = Vec::new();
+        if let Some(handlers) = changed
             .and_then(|event| control.handlers.get(event))
-            .or_else(|| control.handlers.get("Click"));
-        if let Some(events) = events {
-            return events.iter().map(|handler| (hit, *handler)).collect();
+            .or_else(|| control.handlers.get("Click"))
+        {
+            events.extend(
+                handlers
+                    .iter()
+                    .map(|handler| (hit, *handler, Value::EventArgs)),
+            );
         }
-        Vec::new()
+        if let Some(handlers) = control.handlers.get("MouseUp") {
+            let args =
+                Value::MouseEvent(x.saturating_sub(position.0), y.saturating_sub(position.1));
+            events.extend(handlers.iter().map(|handler| (hit, *handler, args)));
+        }
+        events
     }
 
     pub fn paint_controls(
@@ -157,6 +248,29 @@ impl Forms {
             let right = x.saturating_add(w).clamp(0, screen_w);
             let bottom = y.saturating_add(h).clamp(0, screen_h);
             if left < right && top < bottom {
+                match control.image {
+                    Some(Value::Reference(id)) => {
+                        if let Some(bitmap) = self.bitmaps.get(&id) {
+                            framebuffer.blit_from(
+                                left,
+                                top,
+                                left - x,
+                                top - y,
+                                right - left,
+                                bottom - top,
+                                &bitmap.pixels,
+                                bitmap.width,
+                                bitmap.height,
+                            );
+                        }
+                    }
+                    Some(Value::Image(id)) => {
+                        if let Some(image) = self.images.get(id).and_then(Option::as_ref) {
+                            Self::draw_image(framebuffer, image, x, y, [left, top, right, bottom]);
+                        }
+                    }
+                    _ => {}
+                }
                 let back = control
                     .back_color
                     .map(|color| pack_rgb565((color >> 16) as u8, (color >> 8) as u8, color as u8));
@@ -202,11 +316,7 @@ impl Forms {
                 };
                 if let Some(text) = selected.or(control.text).and_then(&mut string) {
                     let utf16: Vec<_> = text.encode_utf16().collect();
-                    let font = control.font.map(|(_, size, _)| {
-                        pocket_kernel::gdi::Font::new(
-                            -(f32::from_bits(size).clamp(6.0, 48.0) as i32),
-                        )
-                    });
+                    let font = control.font.and_then(|id| self.render_font(id));
                     let layout = pocket_kernel::text::layout(font.as_ref(), &utf16);
                     layout.draw(
                         &mut pocket_kernel::gdi::Surface::Screen(framebuffer),
@@ -241,8 +351,33 @@ impl Forms {
         )
     }
 
+    pub fn canvas_size(&self) -> (u32, u32) {
+        let (width, height) = self.display_size();
+        let (w, h) = self
+            .main_form
+            .and_then(|id| self.controls.get(&id))
+            .map_or((0, 0), |form| form.size);
+        if (1..=2048).contains(&w)
+            && (1..=2048).contains(&h)
+            && (w as u32 > width || h as u32 > height)
+        {
+            (w as u32, h as u32)
+        } else {
+            (width, height)
+        }
+    }
+
+    pub fn display_size(&self) -> (u32, u32) {
+        (self.display_size.0 as u32, self.display_size.1 as u32)
+    }
+
+    pub fn take_invalidated(&mut self) -> bool {
+        std::mem::take(&mut self.invalidated)
+    }
+
     pub fn take_paint(&mut self) -> Option<(usize, u32)> {
-        if !std::mem::take(&mut self.invalidated) {
+        self.paint?;
+        if !self.take_invalidated() {
             return None;
         }
         Some((self.main_form?, self.paint?))
@@ -294,8 +429,19 @@ impl Forms {
         events
     }
 
+    pub fn render_font(&self, id: usize) -> Option<pocket_kernel::gdi::Font> {
+        let font = self.fonts.get(&id)?;
+        Some(pocket_kernel::gdi::Font::new(
+            -(f32::from_bits(font.size).clamp(6.0, 48.0) as i32),
+        ))
+    }
+
+    pub fn font_family(&self, id: usize) -> Option<Value> {
+        Some(self.fonts.get(&id)?.family)
+    }
+
     pub fn font(&mut self, args: &[Value]) -> Option<()> {
-        let [Value::Reference(id), Value::StringToken(family), Value::Float(size), Value::Int(style)] =
+        let [Value::Reference(id), family @ (Value::StringToken(_) | Value::HostString(_)), Value::Float(size), Value::Int(_style)] =
             args
         else {
             return None;
@@ -305,7 +451,6 @@ impl Forms {
             Font {
                 family: *family,
                 size: *size,
-                style: *style,
             },
         );
         Some(())
@@ -326,6 +471,7 @@ impl Forms {
                     "ComboBox" => "ComboBox",
                     "Button" => "Button",
                     "Label" => "Label",
+                    "PictureBox" => "PictureBox",
                     _ => "Container",
                 };
                 self.controls.insert(
@@ -353,8 +499,8 @@ impl Forms {
                 Some(None)
             }
             ("set_Font", [Value::Reference(id), Value::Reference(font)]) => {
-                let font = self.fonts.get(font)?;
-                self.controls.get_mut(id)?.font = Some((font.family, font.size, font.style));
+                self.fonts.get(font)?;
+                self.controls.get_mut(id)?.font = Some(*font);
                 Some(None)
             }
             ("set_Name", [Value::Reference(id), Value::StringToken(name)]) => {
@@ -386,10 +532,12 @@ impl Forms {
                 self.close_requested = true;
                 Some(None)
             }
-            ("get_Checked" | "get_SelectedIndex", [Value::Reference(id)]) => {
+            ("get_Checked" | "get_SelectedIndex" | "get_Interval", [Value::Reference(id)]) => {
                 let control = self.controls.get(id)?;
                 let (property, default) = if method == "get_Checked" {
                     ("Checked", 0)
+                } else if method == "get_Interval" {
+                    ("Interval", 100)
                 } else {
                     ("SelectedIndex", -1)
                 };
@@ -432,6 +580,19 @@ impl Forms {
                 self.controls.get(id)?;
                 Some(Some(Value::ControlCollection(*id)))
             }
+            ("Remove", [Value::ControlCollection(parent), Value::Reference(child)]) => {
+                self.controls
+                    .get_mut(parent)?
+                    .children
+                    .retain(|id| id != child);
+                self.invalidated = true;
+                Some(None)
+            }
+            ("Clear", [Value::ControlCollection(parent)]) => {
+                self.controls.get_mut(parent)?.children.clear();
+                self.invalidated = true;
+                Some(None)
+            }
             ("Add", [Value::ControlCollection(parent), Value::Reference(child)]) => {
                 if parent == child {
                     return None;
@@ -447,6 +608,18 @@ impl Forms {
                 self.controls.get_mut(id)?.scale_dimensions = (*w, *h);
                 Some(None)
             }
+            ("set_Image", [Value::Reference(id), image]) => {
+                self.controls.get_mut(id)?.image = Some(*image);
+                self.invalidated = true;
+                Some(None)
+            }
+            ("get_Image", [Value::Reference(id)]) => {
+                Some(Some(self.controls.get(id)?.image.unwrap_or(Value::Null)))
+            }
+            ("set_Icon", [Value::Reference(id), _]) => {
+                self.controls.get(id)?;
+                Some(None)
+            }
             ("set_Location", [Value::Reference(id), Value::Point(x, y)]) => {
                 self.controls.get_mut(id)?.position = (*x, *y);
                 Some(None)
@@ -456,21 +629,35 @@ impl Forms {
                 Some(None)
             }
             (method, [Value::Reference(id), handler @ Value::Delegate { .. }]) => {
-                let event = match method {
-                    "add_Click" => "Click",
-                    "add_Tick" => "Tick",
-                    "add_CheckedChanged" => "CheckedChanged",
-                    "add_SelectedIndexChanged" => "SelectedIndexChanged",
-                    "add_Load" => "Load",
-                    "add_Closing" => "Closing",
+                let (verb, name) = method.split_once('_')?;
+                let event = match name {
+                    "Click" => "Click",
+                    "Tick" => "Tick",
+                    "CheckedChanged" => "CheckedChanged",
+                    "SelectedIndexChanged" => "SelectedIndexChanged",
+                    "Load" => "Load",
+                    "Deactivate" => "Deactivate",
+                    "Closing" => "Closing",
+                    "MouseUp" => "MouseUp",
                     _ => return None,
                 };
-                self.controls
+                let handlers = self
+                    .controls
                     .get_mut(id)?
                     .handlers
                     .entry(event)
-                    .or_default()
-                    .push(*handler);
+                    .or_default();
+                match verb {
+                    "add" => handlers.push(*handler),
+                    "remove" => {
+                        if let Some(index) =
+                            handlers.iter().rposition(|existing| existing == handler)
+                        {
+                            handlers.remove(index);
+                        }
+                    }
+                    _ => return None,
+                }
                 Some(None)
             }
             (method, [Value::Reference(id), Value::Int(value)]) => {

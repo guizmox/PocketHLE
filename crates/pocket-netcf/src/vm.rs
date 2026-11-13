@@ -22,6 +22,14 @@ pub enum Value {
     HostString(usize),
     ResourceStream(usize),
     EventArgs,
+    MouseEvent(i32, i32),
+    Culture,
+    DefaultEncoding,
+    DataSlot(usize),
+    DrawingSurface(usize),
+    DateTime(u64),
+    Font,
+    Image(usize),
     Sensor,
     Acceleration([u32; 3]),
     Function(u32),
@@ -68,9 +76,9 @@ pub struct Signature {
 }
 
 /// Services outside the interpreter, including method resolution and the CF API.
-pub trait Environment {
+pub trait Environment<'image> {
     fn signature(&self, token: u32) -> Option<Signature>;
-    fn body(&self, token: u32) -> Option<&[u8]>;
+    fn body(&self, token: u32) -> Option<&'image [u8]>;
     fn exception_clauses(&self, _token: u32) -> Vec<ExceptionClause> {
         Vec::new()
     }
@@ -82,6 +90,15 @@ pub trait Environment {
     }
     fn store_value_field(&self, _token: u32, _object: Value, _value: Value) -> Option<Value> {
         None
+    }
+    fn unbox_any(&self, _machine: &Machine, _method: u32, _ty: u32, _value: Value) -> bool {
+        false
+    }
+    fn resolve_type(&self, _method: u32, token: u32) -> u32 {
+        token
+    }
+    fn resolve_field(&self, token: u32) -> u32 {
+        token
     }
     fn field_default(&self, _token: u32) -> Value {
         Value::Null
@@ -111,7 +128,8 @@ enum Object {
 }
 
 pub struct Machine {
-    objects: Vec<Object>,
+    objects: Vec<Option<Object>>,
+    free_objects: Vec<usize>,
     remaining: usize,
     statics: BTreeMap<u32, Value>,
     initialized: BTreeSet<u32>,
@@ -121,9 +139,15 @@ pub struct Machine {
 }
 
 impl Machine {
+    #[cfg(test)]
+    pub fn object_count(&self) -> usize {
+        self.objects.len() - self.free_objects.len()
+    }
+
     pub fn new(instruction_budget: usize) -> Self {
         Self {
             objects: Vec::new(),
+            free_objects: Vec::new(),
             remaining: instruction_budget,
             statics: BTreeMap::new(),
             initialized: BTreeSet::new(),
@@ -133,19 +157,30 @@ impl Machine {
         }
     }
 
-    pub fn run(
+    pub fn run<'image>(
         &mut self,
-        environment: &mut impl Environment,
+        environment: &mut impl Environment<'image>,
         entry: u32,
     ) -> Result<Option<Value>, Fault> {
         self.invoke(environment, entry, &[], 0)
     }
 
-    pub fn event(
+    pub fn event<'image>(
         &mut self,
-        environment: &mut impl Environment,
+        environment: &mut impl Environment<'image>,
         sender: usize,
         handler: Value,
+        budget: usize,
+    ) -> Result<(), Fault> {
+        self.event_with_args(environment, sender, handler, Value::EventArgs, budget)
+    }
+
+    pub fn event_with_args<'image>(
+        &mut self,
+        environment: &mut impl Environment<'image>,
+        sender: usize,
+        handler: Value,
+        event: Value,
         budget: usize,
     ) -> Result<(), Fault> {
         let Value::Delegate { target, method } = handler else {
@@ -155,7 +190,7 @@ impl Machine {
         if let Some(target) = target {
             args.push(Value::Reference(target));
         }
-        args.extend([Value::Reference(sender), Value::EventArgs]);
+        args.extend([Value::Reference(sender), event]);
         self.remaining = budget;
         self.invoke(environment, method, &args, 0)?;
         Ok(())
@@ -165,15 +200,15 @@ impl Machine {
         let Value::Reference(id) = reference else {
             return None;
         };
-        match self.objects.get(id)? {
+        match self.objects.get(id)?.as_ref()? {
             Object::Instance { constructor, .. } => Some(*constructor),
             Object::Array(_) => None,
         }
     }
 
-    pub fn paint(
+    pub fn paint<'image>(
         &mut self,
-        environment: &mut impl Environment,
+        environment: &mut impl Environment<'image>,
         form: usize,
         method: u32,
         budget: usize,
@@ -188,11 +223,24 @@ impl Machine {
         Ok(())
     }
 
+    pub fn byte_array(&mut self, bytes: &[u8]) -> Result<Value, Fault> {
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes.len())
+            .ok_or(Fault::Budget)?;
+        self.allocate(Object::Array(
+            bytes
+                .iter()
+                .map(|&byte| Value::Int(i32::from(byte)))
+                .collect(),
+        ))
+    }
+
     pub fn array(&self, reference: Value) -> Option<&[Value]> {
         let Value::Reference(index) = reference else {
             return None;
         };
-        match self.objects.get(index)? {
+        match self.objects.get(index)?.as_ref()? {
             Object::Array(elements) => Some(elements),
             Object::Instance { .. } => None,
         }
@@ -202,7 +250,7 @@ impl Machine {
         let Value::Reference(index) = reference else {
             return None;
         };
-        match self.objects.get_mut(index)? {
+        match self.objects.get_mut(index)?.as_mut()? {
             Object::Array(elements) => Some(elements),
             Object::Instance { .. } => None,
         }
@@ -260,9 +308,9 @@ impl Machine {
         Ok(self.fields(object)?.get(&token).copied())
     }
 
-    pub fn construct(
+    pub fn construct<'image>(
         &mut self,
-        environment: &mut impl Environment,
+        environment: &mut impl Environment<'image>,
         token: u32,
         depth: usize,
     ) -> Result<Value, Fault> {
@@ -274,10 +322,63 @@ impl Machine {
         Ok(object)
     }
 
+    /// Collect between guest callbacks, when no interpreter frames are active.
+    pub fn collect(
+        &mut self,
+        roots: impl IntoIterator<Item = Value>,
+        mut trace: impl FnMut(Value, &mut Vec<Value>),
+    ) -> Vec<bool> {
+        debug_assert!(self.locals.is_empty() && self.arguments.is_empty());
+        let mut pending: Vec<_> = roots
+            .into_iter()
+            .chain(self.statics.values().copied())
+            .collect();
+        let mut live = vec![false; self.objects.len()];
+        while let Some(value) = pending.pop() {
+            let id = match value {
+                Value::Reference(id)
+                | Value::DrawingSurface(id)
+                | Value::FieldAddress(id, _)
+                | Value::ArrayAddress(id, _)
+                | Value::ControlCollection(id)
+                | Value::ItemCollection(id)
+                | Value::Delegate {
+                    target: Some(id), ..
+                } => id,
+                _ => {
+                    trace(value, &mut pending);
+                    continue;
+                }
+            };
+            let Some(mark) = live.get_mut(id) else {
+                continue;
+            };
+            if std::mem::replace(mark, true) {
+                continue;
+            }
+            trace(Value::Reference(id), &mut pending);
+            match self.objects[id].as_ref() {
+                Some(Object::Instance { fields, .. }) => pending.extend(fields.values().copied()),
+                Some(Object::Array(values)) => pending.extend(values.iter().copied()),
+                None => {}
+            }
+        }
+        for (id, (object, &live)) in self.objects.iter_mut().zip(&live).enumerate() {
+            if !live && object.take().is_some() {
+                self.free_objects.push(id);
+            }
+        }
+        live
+    }
+
     fn allocate(&mut self, object: Object) -> Result<Value, Fault> {
+        if let Some(index) = self.free_objects.pop() {
+            self.objects[index] = Some(object);
+            return Ok(Value::Reference(index));
+        }
         self.objects.try_reserve(1).map_err(|_| Fault::Budget)?;
         let index = self.objects.len();
-        self.objects.push(object);
+        self.objects.push(Some(object));
         Ok(Value::Reference(index))
     }
 
@@ -285,15 +386,15 @@ impl Machine {
         let Value::Reference(index) = value else {
             return Err(Fault::Reference);
         };
-        match self.objects.get_mut(index) {
+        match self.objects.get_mut(index).and_then(Option::as_mut) {
             Some(Object::Instance { fields, .. }) => Ok(fields),
             _ => Err(Fault::Reference),
         }
     }
 
-    fn invoke(
+    fn invoke<'image>(
         &mut self,
-        environment: &mut impl Environment,
+        environment: &mut impl Environment<'image>,
         token: u32,
         args: &[Value],
         depth: usize,
@@ -311,27 +412,35 @@ impl Machine {
         {
             return Err(Fault::InvalidSignature);
         }
-        if environment.body(token).is_none() {
+        let Some(body) = environment.body(token) else {
             let result = environment.call(self, depth, token, args)?;
             return if result.is_some() == signature.returns_value {
                 Ok(result)
             } else {
                 Err(Fault::InvalidSignature)
             };
-        }
+        };
         let frame = self.locals.len();
         self.locals.push([Value::Null; 256]);
         self.arguments.push(args.to_vec());
-        let result = self.execute(environment, token, depth, signature.returns_value, frame);
+        let result = self.execute(
+            environment,
+            token,
+            body,
+            depth,
+            signature.returns_value,
+            frame,
+        );
         self.locals.pop();
         self.arguments.pop();
         result
     }
 
-    fn execute(
+    fn execute<'image>(
         &mut self,
-        environment: &mut impl Environment,
+        environment: &mut impl Environment<'image>,
         token: u32,
+        body: &[u8],
         depth: usize,
         returns_value: bool,
         frame: usize,
@@ -342,7 +451,6 @@ impl Machine {
         let mut finally_resume: Option<usize> = None;
         loop {
             self.remaining = self.remaining.checked_sub(1).ok_or(Fault::Budget)?;
-            let body = environment.body(token).ok_or(Fault::MissingMethod(token))?;
             let instruction_offset = offset;
             let (instruction, next) = il::decode(body, offset).map_err(Fault::Decode)?;
             offset = next;
@@ -377,7 +485,7 @@ impl Machine {
                     offset = finally_resume.take().ok_or(Fault::InvalidBranch)?;
                 }
                 Instruction::CastClass(_) => match stack.last() {
-                    Some(Value::Reference(_) | Value::Null) => {}
+                    Some(Value::Reference(_) | Value::Image(_) | Value::Null) => {}
                     _ => return Err(Fault::ManagedException),
                 },
                 Instruction::Branch(delta) => {
@@ -402,7 +510,11 @@ impl Machine {
                     let truth = match value {
                         Value::Int(value) => value != 0,
                         Value::Null => false,
-                        Value::Reference(_) | Value::ArrayAddress(..) | Value::Sensor => true,
+                        Value::Reference(_)
+                        | Value::ArrayAddress(..)
+                        | Value::Sensor
+                        | Value::HostString(_)
+                        | Value::StringToken(_) => true,
                         _ => return Err(Fault::Stack),
                     };
                     if truth == expected {
@@ -410,6 +522,38 @@ impl Machine {
                             .checked_add_signed(delta as isize)
                             .ok_or(Fault::InvalidBranch)?;
                     }
+                }
+                Instruction::Compare(op) => {
+                    let right = stack.pop().ok_or(Fault::Stack)?;
+                    let left = stack.pop().ok_or(Fault::Stack)?;
+                    let float = |v| match v {
+                        Value::Float(bits) => Some(f64::from(f32::from_bits(bits))),
+                        Value::Double(bits) => Some(f64::from_bits(bits)),
+                        _ => None,
+                    };
+                    let result = match (left, right) {
+                        (Value::Int(a), Value::Int(b)) => match op {
+                            1 => a == b,
+                            2 => a > b,
+                            3 => (a as u32) > (b as u32),
+                            4 => a < b,
+                            _ => (a as u32) < (b as u32),
+                        },
+                        _ if float(left).zip(float(right)).is_some() => {
+                            let (a, b) = float(left).zip(float(right)).unwrap();
+                            match op {
+                                1 => a == b,
+                                2 => a > b,
+                                3 => a > b || a.is_nan() || b.is_nan(),
+                                4 => a < b,
+                                _ => a < b || a.is_nan() || b.is_nan(),
+                            }
+                        }
+                        _ if op == 1 => left == right,
+                        _ if op == 3 && right == Value::Null => left != Value::Null,
+                        _ => return Err(Fault::Stack),
+                    };
+                    stack.push(Value::Int(i32::from(result)));
                 }
                 Instruction::BranchCompare(delta, operation) => {
                     let right = stack.pop().ok_or(Fault::Stack)?;
@@ -505,6 +649,7 @@ impl Machine {
                 }
                 Instruction::Throw => return Err(Fault::ManagedException),
                 Instruction::FieldAddress(field) => {
+                    let field = environment.resolve_field(field);
                     let Some(Value::Reference(object)) = stack.pop() else {
                         return Err(Fault::Reference);
                     };
@@ -561,6 +706,12 @@ impl Machine {
                                 .ok_or(Fault::ManagedException)?
                                 as i32,
                             0x5d => l.checked_rem(r).ok_or(Fault::ManagedException)?,
+                            0xd6 => l.checked_add(r).ok_or(Fault::ManagedException)?,
+                            0xd8 => l.checked_mul(r).ok_or(Fault::ManagedException)?,
+                            0xda => l.checked_sub(r).ok_or(Fault::ManagedException)?,
+                            0x5f => l & r,
+                            0x60 => l | r,
+                            0x61 => l ^ r,
                             0x5e => (l as u32)
                                 .checked_rem(r as u32)
                                 .ok_or(Fault::ManagedException)?
@@ -607,6 +758,7 @@ impl Machine {
                             continue;
                         }
                         Value::Float(value) => f32::from_bits(value) as i32,
+                        Value::Double(value) => f64::from_bits(value) as i32,
                         _ => return Err(Fault::Stack),
                     };
                     stack.push(Value::Int(value));
@@ -634,8 +786,46 @@ impl Machine {
                 Instruction::LoadNull => stack.push(Value::Null),
                 Instruction::LoadString(token) => stack.push(Value::StringToken(token)),
                 Instruction::LoadFunction(token) => stack.push(Value::Function(token)),
-                Instruction::LoadToken(token) => stack.push(Value::MetadataToken(token)),
+                Instruction::LoadVirtualFunction(token) => {
+                    if !matches!(stack.pop(), Some(Value::Reference(_))) {
+                        return Err(Fault::Reference);
+                    }
+                    stack.push(Value::Function(token));
+                }
+                // The interpreter already represents boxed primitives as tagged values.
+                Instruction::UnboxAny(ty) => {
+                    let value = *stack.last().ok_or(Fault::Stack)?;
+                    if !environment.unbox_any(self, token, ty, value) {
+                        return Err(Fault::ManagedException);
+                    }
+                }
+                Instruction::ConvertChecked(op) => {
+                    let value = match stack.pop().ok_or(Fault::Stack)? {
+                        Value::Int(value) if op == 0x86 => f64::from(value as u32),
+                        Value::Int(value) => f64::from(value),
+                        Value::Float(bits) => f64::from(f32::from_bits(bits)).trunc(),
+                        Value::Double(bits) => f64::from_bits(bits).trunc(),
+                        _ => return Err(Fault::Stack),
+                    };
+                    let (min, max) = match op {
+                        0x86 | 0xb4 => (0.0, f64::from(u8::MAX)),
+                        0xb5 => (f64::from(i16::MIN), f64::from(i16::MAX)),
+                        0xb7 => (f64::from(i32::MIN), f64::from(i32::MAX)),
+                        _ => return Err(Fault::Stack),
+                    };
+                    if !(min..=max).contains(&value) {
+                        return Err(Fault::ManagedException);
+                    }
+                    stack.push(Value::Int(value as i32));
+                }
+                Instruction::BoxValue => {
+                    stack.last().ok_or(Fault::Stack)?;
+                }
+                Instruction::LoadToken(operand) => stack.push(Value::MetadataToken(
+                    environment.resolve_type(token, operand),
+                )),
                 Instruction::LoadField(field) => {
+                    let field = environment.resolve_field(field);
                     let object = stack.pop().ok_or(Fault::Stack)?;
                     let object = self.read_address(object).unwrap_or(object);
                     let value = if field >> 24 == 4 {
@@ -651,6 +841,7 @@ impl Machine {
                     stack.push(value);
                 }
                 Instruction::LoadStaticField(field) => {
+                    let field = environment.resolve_field(field);
                     if !self.statics.contains_key(&field) {
                         if let Some(initializer) = environment.static_initializer(field) {
                             if self.initialized.insert(initializer) {
@@ -660,15 +851,18 @@ impl Machine {
                     }
                     let value = match self.statics.get(&field) {
                         Some(value) => *value,
+                        None if field >> 24 == 4 => environment.field_default(field),
                         None => environment.static_field(field)?,
                     };
                     stack.push(value);
                 }
                 Instruction::StoreStaticField(field) => {
+                    let field = environment.resolve_field(field);
                     let value = stack.pop().ok_or(Fault::Stack)?;
                     self.statics.insert(field, value);
                 }
                 Instruction::StoreField(field) => {
+                    let field = environment.resolve_field(field);
                     let value = stack.pop().ok_or(Fault::Stack)?;
                     let object = stack.pop().ok_or(Fault::Stack)?;
                     if field >> 24 == 4 {
@@ -695,7 +889,9 @@ impl Machine {
                     let Some(Value::Reference(array)) = stack.pop() else {
                         return Err(Fault::Reference);
                     };
-                    let Some(Object::Array(elements)) = self.objects.get_mut(array) else {
+                    let Some(Object::Array(elements)) =
+                        self.objects.get_mut(array).and_then(Option::as_mut)
+                    else {
                         return Err(Fault::Reference);
                     };
                     *elements.get_mut(index as usize).ok_or(Fault::ArrayLength)? = value;
@@ -786,5 +982,32 @@ impl Machine {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+
+    #[test]
+    fn collector_follows_host_edges_and_reuses_detached_slots() {
+        let mut machine = Machine::new(100);
+        let mut allocate = || machine.allocate(Object::Array(Vec::new())).unwrap();
+        let root = allocate();
+        let child = allocate();
+        let detached = allocate();
+        machine.collect([root], |value, pending| {
+            if value == root {
+                pending.push(child);
+            }
+        });
+        assert!(machine.array(child).is_some());
+        assert!(machine.array(detached).is_none());
+        assert_eq!(
+            machine.allocate(Object::Array(Vec::new())).unwrap(),
+            detached
+        );
+        machine.collect([root], |_, _| {});
+        assert!(machine.array(child).is_none());
     }
 }

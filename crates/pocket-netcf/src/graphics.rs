@@ -17,6 +17,10 @@ pub struct Graphics {
 }
 
 impl Graphics {
+    pub fn roots(&self, roots: &mut Vec<Value>) {
+        roots.extend(self.bindings.values().map(|&(id, _)| Value::Reference(id)));
+    }
+
     pub fn new(size: (u32, u32), gpu_renderer: bool) -> Self {
         Self {
             size,

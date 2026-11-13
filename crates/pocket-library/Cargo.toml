@@ -11,6 +11,7 @@ description = "Game library / configuration management for PocketHLE GUI fronten
 release-updates = ["dep:ureq", "dep:rustls", "dep:rustls-native-certs", "dep:webpki-roots"]
 
 [dependencies]
+pocket-kernel = { path = "../pocket-kernel", default-features = false }
 pocket-netcf = { path = "../pocket-netcf" }
 anyhow.workspace = true
 log.workspace = true

@@ -1,5 +1,5 @@
 //! Bounded Microsoft ADPCM WAVE decoding, shared by PlaySound and HSS.
-use pocket_kernel::audio::GuestFormat;
+use super::GuestFormat;
 const LIMIT: usize = 64 * 1024 * 1024; // decoded i16 samples
 const ADAPT: [i64; 16] = [
     230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230,

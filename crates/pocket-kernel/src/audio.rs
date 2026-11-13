@@ -2312,3 +2312,6 @@ mod session_drop_tests {
         assert_eq!(tap.drain_into(&mut output), 0);
     }
 }
+
+mod wave;
+pub use wave::decode_pcm_wave;

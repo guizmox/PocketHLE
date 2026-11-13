@@ -326,14 +326,8 @@ impl Runner {
         emu.set_gizmondo_audio_compatibility(is_gizmondo);
         if let Some(process) = emu.process_mut() {
             if !is_gizmondo {
-                use pocket_core::kernel::accelerometer::TiltAxes;
-                use pocket_library::TiltInput;
                 process.state.virtual_tilt_axes =
-                    match game.settings.effective_tilt_input(&launcher_config) {
-                        TiltInput::Accelerometer => None,
-                        TiltInput::LeftRight => Some(TiltAxes::Horizontal),
-                        TiltInput::FourDirections => Some(TiltAxes::Both),
-                    };
+                    game.settings.effective_tilt_axes(&launcher_config);
             }
             process.state.touch_steering.enabled = !is_gizmondo
                 && (game.settings.controls_mode()
@@ -1449,14 +1443,8 @@ fn run_compact_framework(
     config: &pocket_library::LauncherConfig,
     hook: &mut RunHook,
 ) -> (RunOutcome, u32) {
-    use pocket_core::kernel::accelerometer::TiltAxes;
-    use pocket_library::TiltInput;
 
-    let tilt = match game.settings.effective_tilt_input(config) {
-        TiltInput::Accelerometer => None,
-        TiltInput::LeftRight => Some(TiltAxes::Horizontal),
-        TiltInput::FourDirections => Some(TiltAxes::Both),
-    };
+    let tilt = game.settings.effective_tilt_axes(config);
     let mut input = std::collections::VecDeque::new();
     let sender = hook.frame_tx.clone();
     let mut framebuffer = None;
@@ -1465,7 +1453,7 @@ fn run_compact_framework(
         pocket_netcf::host::Options {
             size: game.settings.screen.resolve_image(image),
             save_root: Some(game.save_dir(library_root)),
-            guest_path: game.guest_exe_path(),
+            guest_path: game.guest_launch_paths(library_root).map(|paths| paths.module_path),
             tilt,
             gpu_renderer: config.gpu_renderer,
             frame_rate_limit: game.settings.effective_frame_rate_limit(config),
@@ -1482,6 +1470,7 @@ fn run_compact_framework(
             }
             framebuffer = Some(snapshot);
         },
+        |audio| audio.start(),
     );
     hook.started = framebuffer.is_some();
     hook.runtime_error = result.as_ref().err().cloned();

@@ -3130,6 +3130,7 @@ dependencies = [
  "newtua-nsis",
  "png 0.17.16",
  "pocket-cab",
+ "pocket-kernel",
  "pocket-netcf",
  "pocket-pe",
  "rars",

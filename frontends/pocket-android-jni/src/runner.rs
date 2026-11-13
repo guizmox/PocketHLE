@@ -535,14 +535,7 @@ fn run_process_inner(
     emu.set_gizmondo_audio_compatibility(is_gizmondo);
     if let Some(process) = emu.process_mut() {
         if !is_gizmondo {
-            use pocket_core::kernel::accelerometer::TiltAxes;
-            use pocket_library::TiltInput;
-            process.state.virtual_tilt_axes =
-                match entry.settings.effective_tilt_input(&launcher_config) {
-                    TiltInput::Accelerometer => None,
-                    TiltInput::LeftRight => Some(TiltAxes::Horizontal),
-                    TiltInput::FourDirections => Some(TiltAxes::Both),
-                };
+            process.state.virtual_tilt_axes = entry.settings.effective_tilt_axes(&launcher_config);
         }
         process.state.touch_steering.enabled = !is_gizmondo
             && (entry.settings.controls_mode() == pocket_library::stylus_grid::ControlsMode::Zones);
@@ -972,17 +965,10 @@ fn run_compact_framework(
     hook: &mut SessionHook,
     size: (u32, u32),
 ) -> (String, u32) {
-    use pocket_core::kernel::accelerometer::TiltAxes;
-    use pocket_library::TiltInput;
-
     let config = pocket_library::Library::open(library_root)
         .map(|library| library.config().clone())
         .unwrap_or_default();
-    let tilt = match entry.settings.effective_tilt_input(&config) {
-        TiltInput::Accelerometer => None,
-        TiltInput::LeftRight => Some(TiltAxes::Horizontal),
-        TiltInput::FourDirections => Some(TiltAxes::Both),
-    };
+    let tilt = entry.settings.effective_tilt_axes(&config);
     let rx = hook.take_input_receiver();
     let stop_all = Arc::clone(&hook.stop_all);
     let state = Arc::clone(&hook.state);
@@ -992,7 +978,9 @@ fn run_compact_framework(
         pocket_netcf::host::Options {
             size,
             save_root: Some(entry.save_dir(library_root)),
-            guest_path: entry.guest_exe_path(),
+            guest_path: entry
+                .guest_launch_paths(library_root)
+                .map(|paths| paths.module_path),
             tilt,
             gpu_renderer: config.gpu_renderer,
             frame_rate_limit: entry.settings.effective_frame_rate_limit(&config),
@@ -1014,7 +1002,15 @@ fn run_compact_framework(
             push_frame(&state, FrameSnapshot::from_framebuffer(frame));
             presented = true;
         },
+        |audio| {
+            if let Ok(mut slot) = state.audio.lock() {
+                *slot = Some(audio.tap());
+            }
+        },
     );
+    if let Ok(mut slot) = state.audio.lock() {
+        *slot = None;
+    }
     hook.started = presented;
     hook.runtime_error = result.as_ref().err().cloned();
     match result {

@@ -29,6 +29,12 @@ fn filename(path: &str) -> Option<&str> {
 }
 
 impl Storage {
+    pub fn sweep(&mut self, live: &[bool]) {
+        self.readers.retain(|&id, _| live[id]);
+        self.writers.retain(|&id, _| live[id]);
+        self.serializers.retain(|&id, _| live[id]);
+    }
+
     pub fn open_reader(&mut self, id: usize, path: &str) -> Result<(), Fault> {
         let root = self.root.as_ref().ok_or(Fault::MissingFile)?;
         let path = root.join(filename(path).ok_or(Fault::ManagedException)?);

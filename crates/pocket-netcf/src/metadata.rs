@@ -453,6 +453,18 @@ impl<'a> Assembly<'a> {
         Some((name, fields))
     }
 
+    pub(crate) fn type_owns_method(&self, ty: u32, method: u32) -> bool {
+        if ty >> 24 != 2 || method >> 24 != 6 {
+            return false;
+        }
+        let Some(index) = ((ty & 0xffffff) as usize).checked_sub(1) else {
+            return false;
+        };
+        self.type_method_list(index)
+            .zip(self.type_method_list(index + 1))
+            .is_some_and(|(start, end)| (start..end).contains(&((method & 0xffffff) as usize)))
+    }
+
     pub(crate) fn constructor(&self, token: u32) -> Option<u32> {
         if token >> 24 != 2 {
             return None;
@@ -597,6 +609,10 @@ impl<'a> Assembly<'a> {
             12 + idx(35),
             4 + strings + blob,
             8 + 2 * strings + coded(2, &[38, 35, 39]),
+            8 + strings + coded(2, &[38, 35, 39]),
+            idx(2) * 2,
+            4 + coded(1, &[2, 6]) + strings,
+            coded(1, &[6, 10]) + blob,
         ];
         let mut cursor = self.members;
         for (count, size) in self.rows[10..table]
@@ -606,6 +622,23 @@ impl<'a> Assembly<'a> {
             cursor = cursor.checked_add(count.checked_mul(size)?)?;
         }
         Some(cursor)
+    }
+
+    pub(crate) fn resource_type_name(&self, token: u32) -> Option<String> {
+        if token >> 24 != 2 {
+            return None;
+        }
+        let row = self.type_row(((token & 0xffffff) as usize).checked_sub(1)?)?;
+        let name = string_at(self.strings, read_index(row, 4, self.string_size)?)?;
+        let namespace = string_at(
+            self.strings,
+            read_index(row, 4 + self.string_size, self.string_size)?,
+        )?;
+        Some(if namespace.is_empty() {
+            format!("{name}.resources")
+        } else {
+            format!("{namespace}.{name}.resources")
+        })
     }
 
     pub(crate) fn resource(&self, name: &str) -> Option<&'a [u8]> {
@@ -629,7 +662,66 @@ impl<'a> Assembly<'a> {
         None
     }
 
-    pub(crate) fn signature(&self, token: u32) -> Option<vm::Signature> {
+    pub(crate) fn pinvoke(&self, token: u32) -> Option<(&str, &str)> {
+        self.method_row(token)?;
+        let scope_width = index_width(self.rows[26]);
+        let forwarded = coded_width(&self.rows, 1, &[4, 6]);
+        let size = 2 + forwarded + self.string_size + scope_width;
+        let start = self.table_after_members(28)?;
+        for index in 0..self.rows[28] {
+            let row = range(
+                self.tables,
+                start.checked_add(index.checked_mul(size)?)?,
+                size,
+            )?;
+            if read_index(row, 2, forwarded)? != (((token & 0xffffff) as usize) << 1 | 1) {
+                continue;
+            }
+            let name = string_at(
+                self.strings,
+                read_index(row, 2 + forwarded, self.string_size)?,
+            )?;
+            let scope =
+                read_index(row, 2 + forwarded + self.string_size, scope_width)?.checked_sub(1)?;
+            if scope >= self.rows[26] {
+                return None;
+            }
+            let module = self
+                .table_after_members(26)?
+                .checked_add(scope.checked_mul(self.string_size)?)?;
+            return Some((
+                string_at(
+                    self.strings,
+                    read_index(self.tables, module, self.string_size)?,
+                )?,
+                name,
+            ));
+        }
+        None
+    }
+
+    pub(crate) fn method_spec(&self, token: u32) -> Option<(u32, &[u8])> {
+        let row = (token & 0xffffff) as usize;
+        if token >> 24 != 43 || !(1..=self.rows[43]).contains(&row) {
+            return None;
+        }
+        let width = coded_width(&self.rows, 1, &[6, 10]);
+        let size = width + self.blob_size;
+        let offset = self
+            .table_after_members(43)?
+            .checked_add((row - 1).checked_mul(size)?)?;
+        let row = range(self.tables, offset, size)?;
+        let target = read_index(row, 0, width)?;
+        let blob = read_index(row, width, self.blob_size)?;
+        let (length, bytes) = compressed(self.blobs.get(blob..)?)?;
+        Some((
+            (if target & 1 == 0 { 6 } else { 10 }) << 24 | (target >> 1) as u32,
+            bytes.get(..length)?,
+        ))
+    }
+
+    fn method_signature_blob(&self, token: u32) -> Option<&[u8]> {
+        let token = self.method_spec(token).map_or(token, |(target, _)| target);
         let (row, offset) = if token >> 24 == 6 {
             (self.method_row(token)?, 8 + self.string_size)
         } else {
@@ -638,7 +730,11 @@ impl<'a> Assembly<'a> {
         };
         let index = read_index(row, offset, self.blob_size)?;
         let (length, blob) = compressed(self.blobs.get(index..)?)?;
-        let (&flags, mut signature) = blob.get(..length)?.split_first()?;
+        blob.get(..length)
+    }
+
+    pub(crate) fn signature(&self, token: u32) -> Option<vm::Signature> {
+        let (&flags, mut signature) = self.method_signature_blob(token)?.split_first()?;
         if flags & 0x10 != 0 {
             (_, signature) = compressed(signature)?;
         }
@@ -654,10 +750,153 @@ impl<'a> Assembly<'a> {
         let (row, parent_size) = self.member_row(token)?;
         let parent = read_index(row, 0, parent_size)?;
         let index = parent >> 3;
-        if parent & 7 != 1 || index == 0 || index > self.rows[1] {
+        match parent & 7 {
+            1 => self.type_ref(index),
+            0 | 4 => self.local_member_owner(token).and_then(|index| {
+                let row = self.type_row(index)?;
+                let name = string_at(self.strings, read_index(row, 4, self.string_size)?)?;
+                let namespace = string_at(
+                    self.strings,
+                    read_index(row, 4 + self.string_size, self.string_size)?,
+                )?;
+                Some((namespace, name))
+            }),
+            _ => None,
+        }
+    }
+
+    fn local_member_owner(&self, token: u32) -> Option<usize> {
+        let (row, width) = self.member_row(token)?;
+        let parent = read_index(row, 0, width)?;
+        let index = parent >> 3;
+        match parent & 7 {
+            0 => index.checked_sub(1),
+            4 if (1..=self.rows[27]).contains(&index) => {
+                let offset = self
+                    .table_after_members(27)?
+                    .checked_add((index - 1).checked_mul(self.blob_size)?)?;
+                let blob = read_index(self.tables, offset, self.blob_size)?;
+                let (length, signature) = compressed(self.blobs.get(blob..)?)?;
+                // GENERICINST followed by CLASS or VALUETYPE and a TypeDefOrRef.
+                let [0x15, 0x11 | 0x12, ty @ ..] = signature.get(..length)? else {
+                    return None;
+                };
+                let (owner, _) = compressed(ty)?;
+                if owner & 3 != 0 {
+                    return None;
+                }
+                (owner >> 2).checked_sub(1)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn local_field(&self, token: u32) -> Option<u32> {
+        let owner = self.local_member_owner(token)?;
+        let name = self.member_name(token)?;
+        let signature = self.method_signature_blob(token)?;
+        if signature.first() != Some(&6) {
             return None;
         }
-        self.type_ref(index)
+        let size = 2 + self.string_size + self.blob_size;
+        let end = self
+            .type_field_list(owner + 1)?
+            .min(self.rows[4].checked_add(1)?);
+        for field in self.type_field_list(owner)?..end {
+            let row = range(
+                self.tables,
+                self.fields
+                    .checked_add(field.checked_sub(1)?.checked_mul(size)?)?,
+                size,
+            )?;
+            if string_at(self.strings, read_index(row, 2, self.string_size)?)? != name {
+                continue;
+            }
+            let blob = read_index(row, 2 + self.string_size, self.blob_size)?;
+            let (length, bytes) = compressed(self.blobs.get(blob..)?)?;
+            if bytes.get(..length)? == signature {
+                return Some(0x04000000 | field as u32);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn generic_type(&self, token: u32, args: &[u8], method: bool) -> Option<u32> {
+        let index = (token & 0xffffff) as usize;
+        if token >> 24 != 27 || !(1..=self.rows[27]).contains(&index) {
+            return None;
+        }
+        let offset = self
+            .table_after_members(27)?
+            .checked_add((index - 1).checked_mul(self.blob_size)?)?;
+        let blob = read_index(self.tables, offset, self.blob_size)?;
+        let (length, signature) = compressed(self.blobs.get(blob..)?)?;
+        let [kind, 0] = signature.get(..length)? else {
+            return None;
+        };
+        if *kind != if method { 0x1e } else { 0x13 } {
+            return None;
+        }
+        let [0x11 | 0x12, args @ ..] = args else {
+            return None;
+        };
+        let (ty, _) = compressed(args)?;
+        let table = match ty & 3 {
+            0 => 2,
+            1 => 1,
+            2 => 27,
+            _ => return None,
+        };
+        Some(table << 24 | (ty >> 2) as u32)
+    }
+
+    pub(crate) fn generic_context(&self, token: u32) -> Option<(bool, &[u8])> {
+        if let Some((_, [0x0a, 1, args @ ..])) = self.method_spec(token) {
+            return Some((true, args));
+        }
+        let (row, width) = self.member_row(token)?;
+        let parent = read_index(row, 0, width)?;
+        let index = parent >> 3;
+        if parent & 7 != 4 || !(1..=self.rows[27]).contains(&index) {
+            return None;
+        }
+        let offset = self
+            .table_after_members(27)?
+            .checked_add((index - 1).checked_mul(self.blob_size)?)?;
+        let blob = read_index(self.tables, offset, self.blob_size)?;
+        let (length, signature) = compressed(self.blobs.get(blob..)?)?;
+        let [0x15, 0x11 | 0x12, rest @ ..] = signature.get(..length)? else {
+            return None;
+        };
+        let (_, rest) = compressed(rest)?;
+        let [1, args @ ..] = rest else {
+            return None;
+        };
+        Some((false, args))
+    }
+
+    pub(crate) fn local_method(&self, token: u32) -> Option<u32> {
+        if let Some((target, _)) = self.method_spec(token) {
+            return if target >> 24 == 6 {
+                Some(target)
+            } else {
+                self.local_method(target)
+            };
+        }
+        let index = self.local_member_owner(token)?;
+        let name = self.member_name(token)?;
+        let signature = self.method_signature_blob(token)?;
+        let start = self.type_method_list(index)?.max(1);
+        let end = self
+            .type_method_list(index + 1)?
+            .min(self.rows[6].checked_add(1)?);
+        (start..end)
+            .map(|row| 0x06000000 | row as u32)
+            .find(|&candidate| {
+                self.method(candidate)
+                    .is_some_and(|method| method.method_name == name)
+                    && self.method_signature_blob(candidate) == Some(signature)
+            })
     }
 
     pub(crate) fn type_ref(&self, index: usize) -> Option<(&'a str, &'a str)> {
@@ -722,6 +961,7 @@ pub fn references_accelerometer(bytes: &[u8]) -> bool {
         matches!(
             (assembly.member_type(token), assembly.member_name(token)),
             (Some(("Sensors", "GSensorFactory")), Some("CreateGSensor"))
+                | (Some(("CompassHTC", "HTCCompass")), Some("get_Angle"))
                 | (
                     Some(("Sensors", "IGSensor")),
                     Some("GetGVector" | "get_CurrentValue")

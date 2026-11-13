@@ -35,12 +35,10 @@ fn sample_counts(kernel: &mut pocket_kernel::KernelState) -> Option<[i16; 3]> {
         [-x, y, -z]
     };
     // Undo the presentation rotation before exposing the raw device axes.
-    let axes = match kernel.async_keys.display_turns {
-        1 => [y, -x, z],
-        2 => [-x, -y, z],
-        3 => [-y, x, z],
-        _ => [x, y, z],
-    };
+    let axes = accelerometer::undo_display_rotation(
+        [x, y, z],
+        usize::from(kernel.async_keys.display_turns),
+    );
     Some(axes.map(|value| (value / 0.0098).round() as i16))
 }
 
