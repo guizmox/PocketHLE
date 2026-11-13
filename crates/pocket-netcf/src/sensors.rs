@@ -2,6 +2,8 @@
 
 use crate::vm::Value;
 
+pub(crate) const UPRIGHT_ACCELERATION: [f32; 3] = [0.0, 9.8, 0.0];
+
 pub struct Sensors {
     acceleration: [f32; 3],
 }
@@ -9,14 +11,18 @@ pub struct Sensors {
 impl Default for Sensors {
     fn default() -> Self {
         Self {
-            acceleration: [0.0, 0.0, 9.8],
+            acceleration: UPRIGHT_ACCELERATION,
         }
     }
 }
 
 impl Sensors {
-    pub fn set_acceleration(&mut self, value: [f32; 3]) {
+    pub fn set_acceleration(&mut self, mut value: [f32; 3]) {
         if value.iter().all(|axis| axis.is_finite()) {
+            // Preserve a defined screen-plane angle when both components are zero.
+            if value[0] == 0.0 && value[1] == 0.0 {
+                value[1] = f32::EPSILON;
+            }
             self.acceleration = value;
         }
     }

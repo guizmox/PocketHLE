@@ -695,3 +695,82 @@ impl<'a> Startup<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Session;
+    /// Check the liquid itself, independently of moving bubbles and UI controls.
+    #[test]
+    #[ignore = "requires POCKETHLE_DIAMOND_BEER_EXE"]
+    fn diamond_beer_renders_duvel_and_moves_the_liquid() {
+        let exe = std::env::var_os("POCKETHLE_DIAMOND_BEER_EXE").unwrap();
+        let bytes = std::fs::read(exe).unwrap();
+        const BUDGET: usize = 500_000;
+        let render = |acceleration, show_logo| {
+            let save = tempfile::tempdir().unwrap();
+            let mut session = Session::start_in(
+                &bytes,
+                (240, 320),
+                BUDGET,
+                Some(save.path().to_path_buf()),
+                None,
+            )
+            .unwrap();
+            if show_logo {
+                for (x, y) in [
+                    (3, 310),
+                    (110, 73),
+                    (110, 73),
+                    (110, 73),
+                    (95, 100),
+                    (65, 188),
+                ] {
+                    session.click(x, y, BUDGET).unwrap();
+                }
+            }
+            session.set_acceleration(acceleration);
+            for now in (0..400).step_by(40) {
+                session.tick(now, BUDGET).unwrap();
+            }
+            let frame = session.frame().unwrap().2.to_vec();
+            session.close(BUDGET).unwrap();
+            assert!(save.path().join("Settings.xml").is_file());
+            frame
+        };
+        let upright = render([0.0, 9.8, 0.0], false);
+        let right = render([4.9, 8.487, 0.0], true);
+        let left = render([-4.9, 8.487, 0.0], true);
+        let pixel = |frame: &[u8], x: usize, y: usize| {
+            let offset = (y * 240 + x) * 2;
+            u16::from_le_bytes([frame[offset], frame[offset + 1]])
+        };
+        let red_logo_pixels = (45..175)
+            .flat_map(|y| (30..210).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = pixel(&right, x, y);
+                (p >> 11) > 16 && ((p >> 5) & 63) < 25 && (p & 31) < 16
+            })
+            .count();
+        assert!(
+            red_logo_pixels > 100,
+            "Duvel logo missing: {red_logo_pixels}"
+        );
+        let bright = |frame: &[u8], x| {
+            (5..100)
+                .filter(|&y| {
+                    let p = pixel(frame, x, y);
+                    p >> 11 > 23 && (p >> 5) & 63 > 44
+                })
+                .count() as i32
+        };
+        assert!(pixel(&upright, 120, 160) > 0x8000, "liquid missing at rest");
+        let left_edge = bright(&left, 55) - bright(&right, 55);
+        let right_edge = bright(&left, 185) - bright(&right, 185);
+        assert!(
+            left_edge.abs() > 15
+                && right_edge.abs() > 15
+                && left_edge.signum() != right_edge.signum(),
+            "the liquid surface did not reverse slope: {left_edge}, {right_edge}"
+        );
+    }
+}

@@ -9,6 +9,7 @@ pub enum Instruction {
     StoreLocal(u8),
     LocalAddress(u8),
     Branch(i32),
+    Switch { table: usize, count: usize },
     Leave(i32),
     BranchCompare(i32, u8),
     ArrayLength,
@@ -96,6 +97,21 @@ pub fn decode(code: &[u8], offset: usize) -> Result<(Instruction, usize), Decode
             ),
             2,
         ),
+        0x45 => {
+            let count = token()? as usize;
+            let size = count
+                .checked_mul(4)
+                .and_then(|bytes| bytes.checked_add(5))
+                .filter(|&size| size <= bytes.len())
+                .ok_or(truncated)?;
+            (
+                Switch {
+                    table: offset + 5,
+                    count,
+                },
+                size,
+            )
+        }
         0x3b..=0x44 => (BranchCompare(token()? as i32, opcode - 0x3b), 5),
         0x58..=0x5e => (Arithmetic(opcode), 1),
         0x56 => (StoreIndirectFloat, 1),

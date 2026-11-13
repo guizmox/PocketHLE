@@ -704,8 +704,11 @@ supported `Sensors.GSensorFactory` or `Sensors.IGSensor` methods. This
 indicates that the game uses the interface. Sensor availability depends on
 the host and the selected input mode.
 
-In physical mode, the managed interface supplies a neutral reading (flat,
-screen up) when no fresh sample is available.
+The managed interface uses an upright resting orientation in simulated modes
+and when no fresh physical sample is available. In Diamond Beer V2, tap the
+barrel in the bottom-left corner, select **Duvel**, enable the logo checkbox,
+then confirm. The original CAB selects the Duvel preset on first launch but
+leaves the logo checkbox off.
 
 ### Guest interfaces
 

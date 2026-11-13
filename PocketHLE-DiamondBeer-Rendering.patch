@@ -1,0 +1,217 @@
+--- a/crates/pocket-netcf/src/host.rs
++++ b/crates/pocket-netcf/src/host.rs
+@@ -32,13 +32,15 @@
+ 
+     fn acceleration(&self, tilt: Option<TiltAxes>) -> [f32; 3] {
+         let Some(axes) = tilt else {
+-            return accelerometer::sample().unwrap_or([0.0, 0.0, 9.8]);
++            return accelerometer::sample().unwrap_or(crate::sensors::UPRIGHT_ACCELERATION);
+         };
+         let directions = [1, 2, 3, 0];
+         let held = std::array::from_fn(|direction| {
+             self.directions[directions[(direction + 4 - self.turns) % 4]]
+         });
+-        accelerometer::simulated_axes(axes, held, self.stick)
++        let [x, y, z] = accelerometer::simulated_axes(axes, held, self.stick);
++        // Start upright for managed games that use the screen-plane gravity.
++        [x, z, -y]
+     }
+ }
+ 
+@@ -137,8 +139,8 @@
+         assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[0], 4.9);
+         input.accept(InputEvent::KeyUp { vk: 0x27 });
+         input.accept(InputEvent::TouchSteeringPosition { x: 0, y: -1000 });
+-        assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[1], 0.0);
+-        assert_eq!(input.acceleration(Some(TiltAxes::Both))[1], 4.9);
++        assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[2], 0.0);
++        assert_eq!(input.acceleration(Some(TiltAxes::Both))[2], -4.9);
+         accelerometer::publish(true, Some([1.0, 2.0, 3.0]));
+         assert_eq!(input.acceleration(None), [1.0, 2.0, 3.0]);
+         accelerometer::publish(false, None);
+--- a/crates/pocket-netcf/src/il.rs
++++ b/crates/pocket-netcf/src/il.rs
+@@ -9,6 +9,7 @@
+     StoreLocal(u8),
+     LocalAddress(u8),
+     Branch(i32),
++    Switch { table: usize, count: usize },
+     Leave(i32),
+     BranchCompare(i32, u8),
+     ArrayLength,
+@@ -96,6 +97,21 @@
+             ),
+             2,
+         ),
++        0x45 => {
++            let count = token()? as usize;
++            let size = count
++                .checked_mul(4)
++                .and_then(|bytes| bytes.checked_add(5))
++                .filter(|&size| size <= bytes.len())
++                .ok_or(truncated)?;
++            (
++                Switch {
++                    table: offset + 5,
++                    count,
++                },
++                size,
++            )
++        }
+         0x3b..=0x44 => (BranchCompare(token()? as i32, opcode - 0x3b), 5),
+         0x58..=0x5e => (Arithmetic(opcode), 1),
+         0x56 => (StoreIndirectFloat, 1),
+--- a/crates/pocket-netcf/src/runtime.rs
++++ b/crates/pocket-netcf/src/runtime.rs
+@@ -695,3 +695,82 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::Session;
++    /// Check the liquid itself, independently of moving bubbles and UI controls.
++    #[test]
++    #[ignore = "requires POCKETHLE_DIAMOND_BEER_EXE"]
++    fn diamond_beer_renders_duvel_and_moves_the_liquid() {
++        let exe = std::env::var_os("POCKETHLE_DIAMOND_BEER_EXE").unwrap();
++        let bytes = std::fs::read(exe).unwrap();
++        const BUDGET: usize = 500_000;
++        let render = |acceleration, show_logo| {
++            let save = tempfile::tempdir().unwrap();
++            let mut session = Session::start_in(
++                &bytes,
++                (240, 320),
++                BUDGET,
++                Some(save.path().to_path_buf()),
++                None,
++            )
++            .unwrap();
++            if show_logo {
++                for (x, y) in [
++                    (3, 310),
++                    (110, 73),
++                    (110, 73),
++                    (110, 73),
++                    (95, 100),
++                    (65, 188),
++                ] {
++                    session.click(x, y, BUDGET).unwrap();
++                }
++            }
++            session.set_acceleration(acceleration);
++            for now in (0..400).step_by(40) {
++                session.tick(now, BUDGET).unwrap();
++            }
++            let frame = session.frame().unwrap().2.to_vec();
++            session.close(BUDGET).unwrap();
++            assert!(save.path().join("Settings.xml").is_file());
++            frame
++        };
++        let upright = render([0.0, 9.8, 0.0], false);
++        let right = render([4.9, 8.487, 0.0], true);
++        let left = render([-4.9, 8.487, 0.0], true);
++        let pixel = |frame: &[u8], x: usize, y: usize| {
++            let offset = (y * 240 + x) * 2;
++            u16::from_le_bytes([frame[offset], frame[offset + 1]])
++        };
++        let red_logo_pixels = (45..175)
++            .flat_map(|y| (30..210).map(move |x| (x, y)))
++            .filter(|&(x, y)| {
++                let p = pixel(&right, x, y);
++                (p >> 11) > 16 && ((p >> 5) & 63) < 25 && (p & 31) < 16
++            })
++            .count();
++        assert!(
++            red_logo_pixels > 100,
++            "Duvel logo missing: {red_logo_pixels}"
++        );
++        let bright = |frame: &[u8], x| {
++            (5..100)
++                .filter(|&y| {
++                    let p = pixel(frame, x, y);
++                    p >> 11 > 23 && (p >> 5) & 63 > 44
++                })
++                .count() as i32
++        };
++        assert!(pixel(&upright, 120, 160) > 0x8000, "liquid missing at rest");
++        let left_edge = bright(&left, 55) - bright(&right, 55);
++        let right_edge = bright(&left, 185) - bright(&right, 185);
++        assert!(
++            left_edge.abs() > 15
++                && right_edge.abs() > 15
++                && left_edge.signum() != right_edge.signum(),
++            "the liquid surface did not reverse slope: {left_edge}, {right_edge}"
++        );
++    }
++}
+--- a/crates/pocket-netcf/src/sensors.rs
++++ b/crates/pocket-netcf/src/sensors.rs
+@@ -1,6 +1,8 @@
+ //! Managed sensor compatibility. The sample is supplied by the emulated device.
+ 
+ use crate::vm::Value;
++
++pub(crate) const UPRIGHT_ACCELERATION: [f32; 3] = [0.0, 9.8, 0.0];
+ 
+ pub struct Sensors {
+     acceleration: [f32; 3],
+@@ -9,14 +11,18 @@
+ impl Default for Sensors {
+     fn default() -> Self {
+         Self {
+-            acceleration: [0.0, 0.0, 9.8],
++            acceleration: UPRIGHT_ACCELERATION,
+         }
+     }
+ }
+ 
+ impl Sensors {
+-    pub fn set_acceleration(&mut self, value: [f32; 3]) {
++    pub fn set_acceleration(&mut self, mut value: [f32; 3]) {
+         if value.iter().all(|axis| axis.is_finite()) {
++            // Preserve a defined screen-plane angle when both components are zero.
++            if value[0] == 0.0 && value[1] == 0.0 {
++                value[1] = f32::EPSILON;
++            }
+             self.acceleration = value;
+         }
+     }
+--- a/crates/pocket-netcf/src/vm.rs
++++ b/crates/pocket-netcf/src/vm.rs
+@@ -384,6 +384,18 @@
+                     offset = offset
+                         .checked_add_signed(delta as isize)
+                         .ok_or(Fault::InvalidBranch)?;
++                }
++                Instruction::Switch { table, count } => {
++                    let Value::Int(index) = stack.pop().ok_or(Fault::Stack)? else {
++                        return Err(Fault::Stack);
++                    };
++                    if (index as usize) < count {
++                        let entry = table + index as usize * 4;
++                        let delta = i32::from_le_bytes(body[entry..entry + 4].try_into().unwrap());
++                        offset = offset
++                            .checked_add_signed(delta as isize)
++                            .ok_or(Fault::InvalidBranch)?;
++                    }
+                 }
+                 Instruction::BranchIf(delta, expected) => {
+                     let value = stack.pop().ok_or(Fault::Stack)?;
+--- a/docs/FRONTENDS.md
++++ b/docs/FRONTENDS.md
+@@ -704,8 +704,11 @@
+ indicates that the game uses the interface. Sensor availability depends on
+ the host and the selected input mode.
+ 
+-In physical mode, the managed interface supplies a neutral reading (flat,
+-screen up) when no fresh sample is available.
++The managed interface uses an upright resting orientation in simulated modes
++and when no fresh physical sample is available. In Diamond Beer V2, tap the
++barrel in the bottom-left corner, select **Duvel**, enable the logo checkbox,
++then confirm. The original CAB selects the Duvel preset on first launch but
++leaves the logo checkbox off.
+ 
+ ### Guest interfaces
+ 

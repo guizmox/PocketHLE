@@ -385,6 +385,18 @@ impl Machine {
                         .checked_add_signed(delta as isize)
                         .ok_or(Fault::InvalidBranch)?;
                 }
+                Instruction::Switch { table, count } => {
+                    let Value::Int(index) = stack.pop().ok_or(Fault::Stack)? else {
+                        return Err(Fault::Stack);
+                    };
+                    if (index as usize) < count {
+                        let entry = table + index as usize * 4;
+                        let delta = i32::from_le_bytes(body[entry..entry + 4].try_into().unwrap());
+                        offset = offset
+                            .checked_add_signed(delta as isize)
+                            .ok_or(Fault::InvalidBranch)?;
+                    }
+                }
                 Instruction::BranchIf(delta, expected) => {
                     let value = stack.pop().ok_or(Fault::Stack)?;
                     let truth = match value {

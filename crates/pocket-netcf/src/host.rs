@@ -32,13 +32,15 @@ impl Input {
 
     fn acceleration(&self, tilt: Option<TiltAxes>) -> [f32; 3] {
         let Some(axes) = tilt else {
-            return accelerometer::sample().unwrap_or([0.0, 0.0, 9.8]);
+            return accelerometer::sample().unwrap_or(crate::sensors::UPRIGHT_ACCELERATION);
         };
         let directions = [1, 2, 3, 0];
         let held = std::array::from_fn(|direction| {
             self.directions[directions[(direction + 4 - self.turns) % 4]]
         });
-        accelerometer::simulated_axes(axes, held, self.stick)
+        let [x, y, z] = accelerometer::simulated_axes(axes, held, self.stick);
+        // Start upright for managed games that use the screen-plane gravity.
+        [x, z, -y]
     }
 }
 
@@ -137,8 +139,8 @@ mod tests {
         assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[0], 4.9);
         input.accept(InputEvent::KeyUp { vk: 0x27 });
         input.accept(InputEvent::TouchSteeringPosition { x: 0, y: -1000 });
-        assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[1], 0.0);
-        assert_eq!(input.acceleration(Some(TiltAxes::Both))[1], 4.9);
+        assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[2], 0.0);
+        assert_eq!(input.acceleration(Some(TiltAxes::Both))[2], -4.9);
         accelerometer::publish(true, Some([1.0, 2.0, 3.0]));
         assert_eq!(input.acceleration(None), [1.0, 2.0, 3.0]);
         accelerometer::publish(false, None);
