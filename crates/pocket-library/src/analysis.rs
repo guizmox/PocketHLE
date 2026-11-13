@@ -792,7 +792,10 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             "sen0:",
             "acc1:",
         ];
-        let mut detected = false;
+        let mut detected = pocket_netcf::references_accelerometer(&bytes);
+        if detected {
+            a.evidence.push("Accelerometer: managed Sensors API".into());
+        }
         for marker in sensor {
             if text.contains(marker) {
                 detected = true;

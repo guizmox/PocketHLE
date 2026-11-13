@@ -706,3 +706,26 @@ pub fn referenced_member(bytes: &[u8], token: u32) -> Option<(&str, &str, &str)>
     let (namespace, kind) = assembly.member_type(token)?;
     Some((namespace, kind, assembly.member_name(token)?))
 }
+
+/// Detect references to the managed sensor methods supported by PocketHLE.
+pub fn references_accelerometer(bytes: &[u8]) -> bool {
+    let Some(assembly) = Assembly::read(bytes) else {
+        return false;
+    };
+    let width = coded_width(&assembly.rows, 3, &[2, 1, 26, 6, 27])
+        + assembly.string_size
+        + assembly.blob_size;
+    let count =
+        assembly.rows[10].min(assembly.tables.len().saturating_sub(assembly.members) / width);
+    (1..=count.min(0xffffff)).any(|row| {
+        let token = 0x0a000000 | row as u32;
+        matches!(
+            (assembly.member_type(token), assembly.member_name(token)),
+            (Some(("Sensors", "GSensorFactory")), Some("CreateGSensor"))
+                | (
+                    Some(("Sensors", "IGSensor")),
+                    Some("GetGVector" | "get_CurrentValue")
+                )
+        )
+    })
+}

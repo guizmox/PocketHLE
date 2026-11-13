@@ -695,10 +695,22 @@ The guest receives tilt readings. The game decides what to do with them.
 For example, Ferrari GT uses tilt to steer and its on-screen pedals to
 accelerate and brake.
 
+### .NET Compact Framework games
+
+Games such as Diamond Beer V2 use the same **Tilt input (accelerometer)**
+setting and sources on desktop and Android. **Information** reports
+accelerometer support when the game's managed executable references the
+supported `Sensors.GSensorFactory` or `Sensors.IGSensor` methods. This
+indicates that the game uses the interface. Sensor availability depends on
+the host and the selected input mode.
+
+In physical mode, the managed interface supplies a neutral reading (flat,
+screen up) when no fresh sample is available.
+
 ### Guest interfaces
 
-The guest interfaces share the physical or simulated sample. PocketHLE converts
-it to device coordinates before encoding it for the requested interface.
+The native guest interfaces share the physical or simulated sample. PocketHLE
+converts it to device coordinates before encoding it for the requested interface.
 
 | Interface | Guest access |
 | --- | --- |

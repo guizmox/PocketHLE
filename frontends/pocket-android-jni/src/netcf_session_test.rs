@@ -13,6 +13,11 @@ fn starts_diamond_beer_from_cab_and_presents_game_frames() {
     let games = library.apply_prepared_import(prepared, false).unwrap();
     assert_eq!(games.len(), 1);
     assert!(games[0].executable.ends_with("DiamondBeer.exe"));
+    let information = pocket_library::analyze_game(&games[0], root.path());
+    assert!(information
+        .hardware
+        .iter()
+        .any(|(name, value)| { name == "Accelerometer" && value == "✓ Detected" }));
     let image = pocket_core::pe::load_file(games[0].launch_path(root.path())).unwrap();
     let size = games[0].settings.screen.resolve_image(Some(&image));
     let session = start_with_presentation(root.path().to_path_buf(), games[0].id.clone(), None)

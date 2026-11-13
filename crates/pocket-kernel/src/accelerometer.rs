@@ -52,6 +52,19 @@ pub fn simulated_sample(state: &mut crate::KernelState, axes: TiltAxes) -> [f32;
             .async_keys
             .is_down(directions[(direction + 4 - turns) % 4])
     };
+    simulated_axes(
+        axes,
+        [held(0), held(1), held(2), held(3)],
+        state.async_keys.tilt_stick,
+    )
+}
+
+/// Convert display-relative Up, Right, Down, Left and stick input to m/s².
+pub fn simulated_axes(
+    axes: TiltAxes,
+    [up, right, down, left]: [bool; 4],
+    [stick_x, stick_y]: [i16; 2],
+) -> [f32; 3] {
     let axis = |negative: bool, positive: bool, stick: i16| {
         if negative || positive {
             f32::from(i8::from(positive) - i8::from(negative))
@@ -62,11 +75,10 @@ pub fn simulated_sample(state: &mut crate::KernelState, axes: TiltAxes) -> [f32;
         }
     };
 
-    let [stick_x, stick_y] = state.async_keys.tilt_stick;
-    let x = 0.5 * axis(held(3), held(1), stick_x);
+    let x = 0.5 * axis(left, right, stick_x);
     let y = match axes {
         TiltAxes::Horizontal => 0.0,
-        TiltAxes::Both => 0.5 * axis(held(2), held(0), -stick_y.clamp(-1000, 1000)),
+        TiltAxes::Both => 0.5 * axis(down, up, -stick_y.clamp(-1000, 1000)),
     };
     let z = (1.0 - x * x - y * y).sqrt();
     [x * 9.8, y * 9.8, z * 9.8]

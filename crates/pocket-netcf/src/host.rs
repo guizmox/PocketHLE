@@ -34,22 +34,11 @@ impl Input {
         let Some(axes) = tilt else {
             return accelerometer::sample().unwrap_or([0.0, 0.0, 9.8]);
         };
-        let axis = |negative: bool, positive: bool, stick: i16| {
-            if negative || positive {
-                f32::from(i8::from(positive) - i8::from(negative))
-            } else {
-                let value = f32::from(stick.clamp(-1000, 1000));
-                value.signum() * (value.abs() - 120.0).max(0.0) / 880.0
-            }
-        };
         let directions = [1, 2, 3, 0];
-        let held = |direction: usize| self.directions[directions[(direction + 4 - self.turns) % 4]];
-        let x = 0.5 * axis(held(3), held(1), self.stick[0]);
-        let y = match axes {
-            TiltAxes::Horizontal => 0.0,
-            TiltAxes::Both => 0.5 * axis(held(2), held(0), -self.stick[1].clamp(-1000, 1000)),
-        };
-        [x * 9.8, y * 9.8, (1.0 - x * x - y * y).sqrt() * 9.8]
+        let held = std::array::from_fn(|direction| {
+            self.directions[directions[(direction + 4 - self.turns) % 4]]
+        });
+        accelerometer::simulated_axes(axes, held, self.stick)
     }
 }
 
@@ -135,4 +124,23 @@ pub fn run(
     session
         .close(INSTRUCTIONS_PER_CALLBACK)
         .map_err(|error| format!("Managed shutdown: {error:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_input_uses_the_selected_tilt_axes() {
+        let mut input = Input::default();
+        input.accept(InputEvent::KeyDown { vk: 0x27 });
+        assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[0], 4.9);
+        input.accept(InputEvent::KeyUp { vk: 0x27 });
+        input.accept(InputEvent::TouchSteeringPosition { x: 0, y: -1000 });
+        assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[1], 0.0);
+        assert_eq!(input.acceleration(Some(TiltAxes::Both))[1], 4.9);
+        accelerometer::publish(true, Some([1.0, 2.0, 3.0]));
+        assert_eq!(input.acceleration(None), [1.0, 2.0, 3.0]);
+        accelerometer::publish(false, None);
+    }
 }
