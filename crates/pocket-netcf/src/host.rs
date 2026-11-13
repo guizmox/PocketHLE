@@ -32,7 +32,11 @@ impl Input {
 
     fn acceleration(&self, tilt: Option<TiltAxes>) -> [f32; 3] {
         let Some(axes) = tilt else {
-            return accelerometer::sample().unwrap_or(crate::sensors::UPRIGHT_ACCELERATION);
+            // The host reports the force opposing gravity. Managed GVector
+            // uses the opposite horizontal sign for physical screen tilt.
+            return accelerometer::sample()
+                .map(|[x, y, z]| [-x, y, z])
+                .unwrap_or(crate::sensors::UPRIGHT_ACCELERATION);
         };
         let directions = [1, 2, 3, 0];
         let held = std::array::from_fn(|direction| {
@@ -144,7 +148,7 @@ mod tests {
         assert_eq!(input.acceleration(Some(TiltAxes::Horizontal))[2], 0.0);
         assert_eq!(input.acceleration(Some(TiltAxes::Both))[2], -4.9);
         accelerometer::publish(true, Some([1.0, 2.0, 3.0]));
-        assert_eq!(input.acceleration(None), [1.0, 2.0, 3.0]);
+        assert_eq!(input.acceleration(None), [-1.0, 2.0, 3.0]);
         accelerometer::publish(false, None);
     }
 }
