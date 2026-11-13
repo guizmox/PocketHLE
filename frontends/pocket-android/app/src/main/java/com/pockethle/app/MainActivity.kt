@@ -238,6 +238,7 @@ class MainActivity : HostKeyActivity() {
                 )
             },
             onAddData = { entry -> pickData(entry) },
+            onSwitchExecutable = ::switchLaunchExecutable,
             onRemove = { entry -> confirmRemove(entry) },
             onRename = { entry -> renameGame(entry) },
             onInformation = { entry -> showInformation(entry) },
@@ -264,6 +265,51 @@ class MainActivity : HostKeyActivity() {
                 ReleaseUpdates.check(BuildConfig.UPDATE_VERSION)
             }
             showReleaseUpdate()
+        }
+    }
+
+    private fun switchLaunchExecutable(entry: GameEntry) {
+        if (libraryBusy) return
+        lifecycleScope.launch {
+            val response = withContext(Dispatchers.IO) {
+                runCatching { JSONObject(NativeBridge.launchExecutables(rootDir, entry.id, null)) }
+            }
+            val body = response.getOrNull()
+            val entries = body?.optJSONArray("executables")
+            if (entries == null || entries.length() == 0) {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Switch Launch Executable")
+                    .setMessage(body?.optString("error", "No launchable executables found.")
+                        ?: response.exceptionOrNull()?.localizedMessage
+                        ?: "Could not list executables.")
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+                return@launch
+            }
+            val paths = Array(entries.length()) { entries.getString(it) }
+            val labels = Array(paths.size) { paths[it].removePrefix("extracted/") }
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("Switch Launch Executable")
+                .setSingleChoiceItems(labels, paths.indexOf(body?.optString("current").orEmpty())) { dialog, index ->
+                    dialog.dismiss()
+                    lifecycleScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                val saved = JSONObject(NativeBridge.launchExecutables(rootDir, entry.id, paths[index]))
+                                if (!saved.optBoolean("ok")) error(saved.optString("error"))
+                            }
+                        }
+                        result.onSuccess { refreshLibrary() }.onFailure { error ->
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Could not switch executable")
+                                .setMessage(error.localizedMessage)
+                                .setPositiveButton(android.R.string.ok, null)
+                                .show()
+                        }
+                    }
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
         }
     }
 
@@ -557,7 +603,7 @@ class MainActivity : HostKeyActivity() {
                 setLibraryBusy(null)
             }
             val title = "Choose executable for ${game.getString("display_name")}"
-            val hint = "You can change this later in Game settings → Switch Launch Executable."
+            val hint = "You can change this later in the game’s ⋯ menu → Switch Launch Executable."
             val heading = android.text.SpannableString("$title\n$hint").apply {
                 setSpan(android.text.style.RelativeSizeSpan(0.75f), title.length + 1, length, 0)
             }

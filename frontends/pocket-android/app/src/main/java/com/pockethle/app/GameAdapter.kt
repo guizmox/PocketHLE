@@ -20,6 +20,7 @@ class GameAdapter(
     private val onRun: (GameEntry) -> Unit,
     private val onSettings: (GameEntry) -> Unit,
     private val onAddData: (GameEntry) -> Unit,
+    private val onSwitchExecutable: (GameEntry) -> Unit,
     private val onRemove: (GameEntry) -> Unit,
     private val onRename: (GameEntry) -> Unit,
     private val onInformation: (GameEntry) -> Unit,
@@ -85,8 +86,9 @@ class GameAdapter(
             popup.menu.add(0, 3, 2, "Rename")
             popup.menu.add(0, 0, 3, R.string.action_settings)
             popup.menu.add(0, 6, 4, "Add/Replace Data")
-            popup.menu.add(0, 1, 5, R.string.action_remove)
-            popup.menu.add(0, 5, 6, "Game ID")
+            if (!entry.isGizmondo) popup.menu.add(0, 7, 5, "Switch Launch Executable")
+            popup.menu.add(0, 1, 6, R.string.action_remove)
+            popup.menu.add(0, 5, 7, "Game ID")
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     2 -> onRun(entry)
@@ -94,6 +96,7 @@ class GameAdapter(
                     4 -> onInformation(entry)
                     0 -> onSettings(entry)
                     6 -> onAddData(entry)
+                    7 -> onSwitchExecutable(entry)
                     1 -> onRemove(entry)
                     5 -> {
                         val context = itemView.context

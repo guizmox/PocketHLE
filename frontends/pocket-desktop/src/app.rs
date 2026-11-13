@@ -99,8 +99,9 @@ enum UpscaleFilter {
     Bilinear,
     Nearest,
 }
-const GAME_MENU_LABELS: [&str; 7] = [
-    "Information", "Play", "Rename...", "Settings", "Add/Replace Data", "Remove", "Game ID",
+const GAME_MENU_LABELS: [&str; 8] = [
+    "Information", "Play", "Rename...", "Settings", "Add/Replace Data",
+    "Switch Launch Executable", "Remove", "Game ID",
 ];
 const EXECUTABLE_HEAP_HELP: &str = "Some games need this setting to start or run correctly. It can slow down other games. If a game runs slowly, try turning it off in that game’s settings.";
 
@@ -1859,7 +1860,11 @@ impl PocketLauncher {
                         }
                         direction => {
                             if let Some(next) =
-                                crate::deck_navigation::menu_index(*selection, direction, GAME_MENU_LABELS.len())
+                                crate::deck_navigation::menu_index(
+                                    *selection,
+                                    direction,
+                                    GAME_MENU_LABELS.len() - usize::from(self.library_tab == crate::deck_navigation::LibraryTab::Gizmondo),
+                                )
                             {
                                 *selection = next;
                             }
@@ -2036,13 +2041,19 @@ impl PocketLauncher {
             let mut chosen = None;
             egui::popup_below_widget(ui, popup_id, &menu_response, |ui| {
                 ui.set_min_width(170.0);
-                for (index, label) in GAME_MENU_LABELS.into_iter().enumerate()
+                let gizmondo = self.library_tab == crate::deck_navigation::LibraryTab::Gizmondo;
+                for (index, (action, label)) in GAME_MENU_LABELS
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(action, _)| !gizmondo || *action != 5)
+                    .enumerate()
                 {
-                    let enabled = index != 4 || (self.running_game.is_none() && self.pending_run.is_none());
+                    let enabled = !matches!(action, 4 | 5)
+                        || (self.running_game.is_none() && self.pending_run.is_none());
                     if (ui.add_enabled(enabled, egui::SelectableLabel::new(index == selection, label)).clicked()
                         || (activate && index == selection)) && enabled
                     {
-                        chosen = Some(index);
+                        chosen = Some(action);
                     }
                 }
             });
@@ -2069,14 +2080,23 @@ impl PocketLauncher {
                         self.data_game = Some(game.id.clone());
                         self.open_file_dialog(crate::file_dialog::Purpose::AddData, None, String::new());
                     }
-                    5 => {
+                    5 => match self.library.launch_executables(&game.id) {
+                        Ok(choices) => self.launch_executable_choices = Some((game.id.clone(), choices)),
+                        Err(error) => {
+                            self.add_data = Some(DataPrompt::Notice {
+                                title: "Could not list executables",
+                                message: error.to_string(),
+                            });
+                        }
+                    },
+                    6 => {
                         self.remove_game=Some(crate::remove_game::Prompt {id:game.id.clone(),name:game.display_name.clone()});
                         self.deck_library_actions.clear();
                         self.deck_nav_repeat=None;
                         self.game_menu=None;
                         self.game_menu_parent=None;
                     }
-                    6 => {
+                    7 => {
                         ui.ctx().output_mut(|o| o.copied_text = game.id.clone());
                         self.game_id_popup = Some(game.id.clone());
                     }
@@ -2303,7 +2323,7 @@ impl PocketLauncher {
                 .show(ctx, |ui| {
                     crate::controller_ui::page_scope(ui, "import_executable", |ui| {
                         ui.label(format!("Which executable should PocketHLE launch for {}?", game.display_name));
-                        ui.label("You can change this later in Game settings → Switch Launch Executable.");
+                        ui.label("You can change this later in the game’s ⋯ menu → Switch Launch Executable.");
                         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                             for (index, exe) in game.executables.iter().enumerate() {
                                 let name = exe.strip_prefix("extracted").unwrap_or(exe);
@@ -3045,68 +3065,6 @@ impl PocketLauncher {
         let mut save_clicked = false;
         let mut cancel_clicked = false;
         ui.heading(format!("Settings: {display_name}"));
-        if !is_gizmondo && self.running_game.is_none()
-            && crate::controller_ui::button(ui, "Switch Launch Executable").clicked()
-        {
-            match self.library.launch_executables(&id) {
-                Ok(choices) => self.launch_executable_choices = Some((id.clone(), choices)),
-                Err(error) => self.status = format!("Could not list executables: {error}"),
-            }
-        }
-        if let Some((owner, choices)) = self.launch_executable_choices.take() {
-            if owner == id && !is_gizmondo && self.running_game.is_none() {
-                let current = self.library.get(&id).map(|game| {
-                    let root = self.library.root();
-                    let launch = game.launch_path(root);
-                    launch
-                        .strip_prefix(root.join(game.relative_dir()))
-                        .unwrap_or(&launch)
-                        .to_path_buf()
-                });
-                let mut selected = current.as_ref();
-                let mut chosen = None;
-                if choices.is_empty() {
-                    ui.label("No launchable executables found.");
-                } else {
-                    crate::controller_ui::ComboBox::from_id_source("launch_executable")
-                        .selected_text(current.as_ref().map_or_else(
-                            || "Select executable".into(),
-                            |path| path.display().to_string(),
-                        ))
-                        .show_ui(ui, |ui| {
-                            for path in &choices {
-                                if crate::controller_ui::selectable_value(
-                                    ui,
-                                    &mut selected,
-                                    Some(path),
-                                    path.display().to_string(),
-                                ).clicked() {
-                                    chosen = Some(path);
-                                }
-                            }
-                        });
-                }
-                if let Some(path) = chosen {
-                    let previous_profile = self.library.get(&id)
-                        .map(|game| game.settings.gpu_compatibility_profile);
-                    match self.library.switch_launch_executable(&id, path) {
-                        Ok(()) => {
-                            self.screen_cache.remove(&id);
-                            self.analysis_cache.remove(&id);
-                            if previous_profile == Some(draft.gpu_compatibility_profile) {
-                                if let Some(game) = self.library.get(&id) {
-                                    draft.gpu_compatibility_profile = game.settings.gpu_compatibility_profile;
-                                }
-                            }
-                            self.status = "Launch executable updated.".into();
-                        }
-                        Err(error) => self.status = format!("Could not switch executable: {error}"),
-                    }
-                } else if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-                    self.launch_executable_choices = Some((owner, choices));
-                }
-            }
-        }
         ui.add_space(8.0);
         ui.separator();
         ui.heading("Controls");
@@ -3385,7 +3343,6 @@ impl PocketLauncher {
             }
         });
         if save_clicked {
-            self.launch_executable_choices = None;
             self.stylus_editor = None;
             self.release_all_keys();
             if let Err(e) = self.library.update_settings(&id, draft) {
@@ -3399,7 +3356,6 @@ impl PocketLauncher {
                 Screen::Library
             };
         } else if cancel_clicked {
-            self.launch_executable_choices = None;
             self.stylus_editor = None;
             self.screen = if self.running_game.is_some() {
                 Screen::Run
@@ -5098,6 +5054,14 @@ impl PocketLauncher {
                             ctx.request_repaint();
                             continue;
                         }
+                        if self.launch_executable_choices.is_some() {
+                            if control == "East" {
+                                self.launch_executable_choices = None;
+                            } else {
+                                self.controller_ui.press(&control);
+                            }
+                            continue;
+                        }
                         if self.game_id_popup.is_some() {
                             if control == "East" {
                                 self.game_id_popup = None;
@@ -6274,6 +6238,58 @@ impl eframe::App for PocketLauncher {
             egui::CentralPanel::default().show(ctx, |_| {});
             self.ui_restore_backup(ctx);
             self.controller_ui.show(ctx);
+            return;
+        }
+        if self.launch_executable_choices.is_some() {
+            self.update_gamepad_input(ctx);
+            if let Some((id, choices)) = self.launch_executable_choices.take() {
+                egui::CentralPanel::default().show(ctx, |_| {});
+                let mut close = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+                let mut selected = None;
+                let current = self.library.get(&id).map(|game| game.launch_path(self.library.root()));
+                let directory = self.library.root().join("games").join(&id);
+                egui::Window::new("Switch Launch Executable")
+                    .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                    .collapsible(false)
+                    .show(ctx, |ui| {
+                        crate::controller_ui::page_scope(ui, "switch_launch_executable", |ui| {
+                            if choices.is_empty() {
+                                ui.label("No launchable executables found.");
+                            }
+                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                for path in &choices {
+                                    let label = path.strip_prefix("extracted").unwrap_or(path);
+                                    let label = if current.as_deref() == Some(directory.join(path).as_path()) {
+                                        format!("{} (current)", label.display())
+                                    } else {
+                                        label.display().to_string()
+                                    };
+                                    if crate::controller_ui::button(ui, label).clicked() {
+                                        selected = Some(path);
+                                    }
+                                }
+                            });
+                            close |= crate::controller_ui::button(ui, "Cancel").clicked();
+                        });
+                    });
+                if let Some(path) = selected {
+                    match self.library.switch_launch_executable(&id, path) {
+                        Ok(()) => {
+                            self.screen_cache.remove(&id);
+                            self.analysis_cache.remove(&id);
+                            self.status = "Launch executable updated.".into();
+                        }
+                        Err(error) => {
+                            self.add_data = Some(DataPrompt::Notice {
+                                title: "Could not switch executable",
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                } else if !close {
+                    self.launch_executable_choices = Some((id, choices));
+                }
+            }
             return;
         }
         if let Some(id) = self.game_id_popup.clone() {

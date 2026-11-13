@@ -1,10 +1,8 @@
 package com.pockethle.app
 
 import android.os.Bundle
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.Toolbar
 import androidx.preference.ListPreference
-import androidx.preference.Preference
 import org.json.JSONObject
 
 /** Per-game settings sheet. */
@@ -48,13 +46,6 @@ class GameSettingsActivity : HostKeyActivity() {
             gameId = arguments?.getString(EXTRA_GAME_ID).orEmpty()
             current = readGameSettings() ?: GameSettings.default()
             setPreferencesFromResource(R.xml.preferences_game, rootKey)
-            findPreference<Preference>("launch_executable")?.apply {
-                isVisible = !NativeBridge.isGizmondoGame(rootDir, gameId)
-                setOnPreferenceClickListener {
-                    switchLaunchExecutable()
-                    true
-                }
-            }
             findPreference<ListPreference>("screen")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
             findPreference<androidx.preference.PreferenceCategory>("device_identity_category")?.isVisible =
@@ -242,41 +233,6 @@ class GameSettingsActivity : HostKeyActivity() {
                     true
                 }
             }
-        }
-
-        private fun switchLaunchExecutable() {
-            val response = JSONObject(NativeBridge.launchExecutables(rootDir, gameId, null))
-            val entries = response.optJSONArray("executables")
-            if (entries == null || entries.length() == 0) {
-                AlertDialog.Builder(requireContext())
-                    .setTitle("Switch Launch Executable")
-                    .setMessage(response.optString("error", "No launchable executables found."))
-                    .setPositiveButton(android.R.string.ok, null)
-                    .show()
-                return
-            }
-            val paths = Array(entries.length()) { entries.getString(it) }
-            val active = response.optString("current")
-            AlertDialog.Builder(requireContext())
-                .setTitle("Switch Launch Executable")
-                .setSingleChoiceItems(paths, paths.indexOf(active)) { dialog, index ->
-                    dialog.dismiss()
-                    val result = JSONObject(NativeBridge.launchExecutables(rootDir, gameId, paths[index]))
-                    if (result.optBoolean("ok")) {
-                        readGameSettings()?.let { current = it }
-                        findPreference<ListPreference>("gpu_compatibility_profile")?.value =
-                            current.gpuCompatibilityProfile
-                        findPreference<Preference>("launch_executable")?.summary = paths[index]
-                    } else {
-                        AlertDialog.Builder(requireContext())
-                            .setTitle("Could not switch executable")
-                            .setMessage(result.optString("error"))
-                            .setPositiveButton(android.R.string.ok, null)
-                            .show()
-                    }
-                }
-                .setNegativeButton(android.R.string.cancel, null)
-                .show()
         }
 
         private fun readGameSettings(): GameSettings? {
