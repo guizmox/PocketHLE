@@ -20,6 +20,7 @@ struct Startup<'a> {
     started: std::time::Instant,
     tables: std::collections::BTreeMap<usize, std::collections::BTreeSet<u32>>,
     resource_types: std::collections::BTreeMap<usize, u32>,
+    pen_widths: std::collections::BTreeMap<usize, u32>,
     drawing_colors: std::collections::BTreeMap<usize, u16>,
     audio: pocket_kernel::AudioEngine,
     fmod: crate::fmod::Fmod,
@@ -442,7 +443,12 @@ impl<'image> vm::Environment<'image> for Startup<'image> {
                         let (Value::Point(x, y), Value::Point(u, v)) = (*from, *to) else {
                             return Err(vm::Fault::InvalidSignature);
                         };
-                        surface.line((x, y), (u, v), color, 1);
+                        surface.line(
+                            (x, y),
+                            (u, v),
+                            color,
+                            self.pen_widths.get(pen).copied().unwrap_or(1),
+                        );
                     }
                 }
                 return Ok(None);
@@ -460,8 +466,19 @@ impl<'image> vm::Environment<'image> for Startup<'image> {
             (
                 Some(("System.Drawing", "SolidBrush" | "Pen")),
                 Some(".ctor"),
-                [Value::Reference(id), Value::Int(color)],
-            ) => {
+                [Value::Reference(id), Value::Int(color), width @ ..],
+            ) if width.is_empty()
+                || (kind == Some(("System.Drawing", "Pen"))
+                    && matches!(width, [Value::Float(_)])) =>
+            {
+                if let [Value::Float(bits)] = width {
+                    let width = f32::from_bits(*bits);
+                    if !width.is_finite() || width < 0.0 {
+                        return Err(vm::Fault::ManagedException);
+                    }
+                    self.pen_widths
+                        .insert(*id, width.round().clamp(1.0, 2048.0) as u32);
+                }
                 let color = pocket_kernel::framebuffer::pack_rgb565(
                     (*color >> 16) as u8,
                     (*color >> 8) as u8,
@@ -1087,6 +1104,7 @@ impl<'a> Session<'a> {
             assets,
             data_slots: Vec::new(),
             drawing_colors: Default::default(),
+            pen_widths: Default::default(),
             resource_types: Default::default(),
             tables: Default::default(),
             program_path,
@@ -1252,6 +1270,7 @@ impl<'a> Session<'a> {
         self.startup.system.sweep(&live);
         self.startup.tables.retain(|&id, _| live[id]);
         self.startup.resource_types.retain(|&id, _| live[id]);
+        self.startup.pen_widths.retain(|&id, _| live[id]);
         self.startup.drawing_colors.retain(|&id, _| live[id]);
     }
 

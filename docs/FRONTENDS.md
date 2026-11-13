@@ -675,7 +675,14 @@ post-delay or renderer-specific workaround is used. R3's controller row explicit
 shows its fixed mode gesture even though it is a reserved input without a normal
 host tap/hold action. This is frontend view-state handling, not a GLES game fix.
 
+Pocket PC aspect ratios other than 4:3 and 3:4 use proportional fitting within
+the available Android game viewport. Standard QVGA integer steps still apply
+to 4:3 and 3:4 games.
+
 ## .NET Compact Framework games
+
+The library can identify managed `System.Drawing` and OpenGL ES references
+when present in executable metadata.
 
 Detector Veles opens in the standard emulation view. Its managed Windows Forms
 screen and embedded bitmap resources are rendered by PocketHLE-Reborn. FMOD CE

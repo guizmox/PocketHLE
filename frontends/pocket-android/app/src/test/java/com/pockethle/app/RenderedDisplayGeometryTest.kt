@@ -4,6 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RenderedDisplayGeometryTest {
+    @Test fun widePortraitUsesTheAvailableWidthAndKeepsTouchAligned() {
+        val rect = renderedDisplayRect(900, 1500, 800, 480, 800, 480, 90, true)
+        assertEquals(DisplayRect(0, 0, 900, 1500), rect)
+        assertEquals(400 to 239, displayPointToGuest(450f, 750f, 900, 1500, 800, 480, 90, true))
+    }
+
     @Test fun allInternalDensitiesUseTheSameLogicalIntegerStepsAndTouchCoordinates() {
         for(native in listOf(320 to 240,640 to 480,240 to 320)) {
             for(turn in listOf(0,90,180,270)) {

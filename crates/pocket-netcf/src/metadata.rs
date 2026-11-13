@@ -969,3 +969,18 @@ pub fn references_accelerometer(bytes: &[u8]) -> bool {
         )
     })
 }
+
+/// Graphics APIs referenced in managed metadata.
+pub fn graphics_api(bytes: &[u8]) -> Option<&'static str> {
+    let assembly = Assembly::read(bytes)?;
+    let mut drawing = false;
+    for row in 1..=assembly.rows[10] {
+        let token = 0x0a000000 | row as u32;
+        match assembly.member_type(token) {
+            Some(("OpenGLES", "gl" | "egl")) => return Some("OpenGL ES"),
+            Some(("System.Drawing", "Graphics" | "Bitmap")) => drawing = true,
+            _ => {}
+        }
+    }
+    drawing.then_some("System.Drawing")
+}

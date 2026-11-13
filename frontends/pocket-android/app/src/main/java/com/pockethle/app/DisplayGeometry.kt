@@ -26,6 +26,9 @@ internal fun renderedDisplayRect(viewW:Int,viewH:Int,nativeW:Int,nativeH:Int,ren
     val standardPortrait=logicalW.toLong()*4==logicalH.toLong()*3
     val stepW=if(standardLandscape)320 else if(standardPortrait)240 else logicalW
     val stepH=if(standardLandscape)240 else if(standardPortrait)320 else logicalH
+    if (pocketPc && !standardLandscape && !standardPortrait) {
+        return aspectDisplayRect(viewW,viewH,logicalW,logicalH)
+    }
     return if(pocketPc) displayRect(viewW,viewH,stepW,stepH)
         else displayRect(viewW,viewH,w,h)
 }

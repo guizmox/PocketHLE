@@ -61,11 +61,13 @@ const GRAPHICS_PRIORITY: &[&str] = &[
     "GapiDraw",
     "SDL",
     "GDI",
+    "System.Drawing",
 ];
 
 fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
     let bytes = std::fs::read(path).ok()?;
     let image = pocket_pe::load_bytes(&bytes).ok()?;
+    let managed = pocket_netcf::graphics_api(&bytes);
     let mut imports = image.imports;
     // Use the same bundled COREDLL ordinal maps as the runtime, not game names.
     static ARM: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
@@ -123,6 +125,7 @@ fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
                 .iter()
                 .any(|dll| gles_driver_label(dll) == Some(*candidate))
     });
+    let label = managed.or(label);
     Some(ModuleGraphics {
         label,
         dependencies,
