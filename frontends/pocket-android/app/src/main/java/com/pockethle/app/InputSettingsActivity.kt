@@ -116,7 +116,7 @@ class InputSettingsActivity : HostKeyActivity() {
                 KeyEvent.KEYCODE_META_RIGHT -> "Super"
                 KeyEvent.KEYCODE_CAPS_LOCK -> "CapsLock"
                 KeyEvent.KEYCODE_MENU -> "ContextMenu"
-                KeyEvent.KEYCODE_GRAVE -> "Backtick"
+                KeyEvent.KEYCODE_GRAVE -> "`"
                 KeyEvent.KEYCODE_APOSTROPHE -> "Quote"
                 else -> InputBindings.keyName(event)
             }
@@ -587,7 +587,9 @@ class InputSettingsActivity : HostKeyActivity() {
         summary(summaryPanel, pad)
         val inputs = (diagram.controls.mapNotNull { it.input } + state.savedInputs(pad)).distinct()
         val missing =
-            state.visibleButtons(gizmondo).filter { !pad || it!="stylus_click" }.filter { target ->
+            state.visibleButtons(gizmondo).filter {
+                if (pad) it != "stylus_click" else it != "rotate_screen"
+            }.filter { target ->
                 !state.assigned(target, pad, gizmondo, inputs)
             }
         if (missing.isNotEmpty())

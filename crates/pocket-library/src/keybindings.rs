@@ -827,7 +827,9 @@ pub fn keyboard_button_for_profile(
     }
     match (key, button) {
         (_, None | Some(StylusClick)) if key.eq_ignore_ascii_case("p") => Some(StylusClick),
-        ("Tab", None | Some(CenterTap)) => Some(CenterTap),
+        ("Tab", None | Some(CenterTap)) => Some(Soft1),
+        ("Escape", None) => Some(Soft2),
+        ("`" | "Backtick" | "²", None) => Some(CenterTap),
         ("1", None | Some(Soft1 | PocketPcApp1)) => Some(PocketPcApp1),
         ("2", None | Some(Soft2 | PocketPcApp2)) => Some(PocketPcApp2),
         ("3", None | Some(PocketPcApp3)) => Some(PocketPcApp3),
@@ -847,6 +849,10 @@ mod keyboard_profile_tests {
             ("2", GuestButton::PocketPcApp2),
             ("3", GuestButton::PocketPcApp3),
             ("4", GuestButton::PocketPcApp4),
+            ("Tab", GuestButton::Soft1),
+            ("Escape", GuestButton::Soft2),
+            ("`", GuestButton::CenterTap),
+            ("²", GuestButton::CenterTap),
         ] {
             assert_eq!(keyboard_button_for_profile(&keys, key, false), Some(button));
         }

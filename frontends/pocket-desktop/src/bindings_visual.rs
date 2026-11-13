@@ -1094,12 +1094,12 @@ impl Editor {
             );
             if !self.gizmondo {
                 inputs.extend((1..=4).map(|n| n.to_string()));
-                inputs.push("Tab".into());
+                inputs.extend(["Tab", "Escape", "`", "P"].map(str::to_owned));
             }
         }
         let prefix = pocket_library::input_gestures::binding_key(self.gizmondo, controller, "");
         let missing: Vec<_> = visible_buttons(self.gizmondo)
-            .filter(|b| !controller || *b != GuestButton::StylusClick)
+            .filter(|b| if controller { *b != GuestButton::StylusClick } else { !matches!(b, GuestButton::Screenshot | GuestButton::RotateScreen) })
             .filter(|button| {
                 if config.long_press_bindings.iter().any(|(key, b)| {
                     key.starts_with(&prefix)

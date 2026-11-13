@@ -67,7 +67,9 @@ internal object DeckInputPolicy {
         if (current?.startsWith("giz_piano") == true) return null
         return when {
             name.equals("P",true) && current in listOf(null,"stylus_click") -> "stylus_click"
-            name == "Tab" && current in listOf(null, "center_tap") -> "center_tap"
+            name == "Tab" && current in listOf(null, "center_tap") -> "soft1"
+            name == "Escape" && current == null -> "soft2"
+            name in listOf("`", "Backtick", "²") && current == null -> "center_tap"
             name == "1" && current in listOf(null, "soft1", "pocket_pc_app1") -> "pocket_pc_app1"
             name == "2" && current in listOf(null, "soft2", "pocket_pc_app2") -> "pocket_pc_app2"
             name == "3" && current in listOf(null, "pocket_pc_app3") -> "pocket_pc_app3"

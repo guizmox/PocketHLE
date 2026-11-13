@@ -440,7 +440,9 @@ consumed by the frontend before any guest-key dispatch.
 | Input | PocketPC default | Gizmondo default |
 | --- | --- | --- |
 | Keyboard 1 / 2 / 3 / 4 | P1 / P2 / P3 / P4 | L1 / R1 / unassigned / unassigned |
-| Keyboard Tab | Center tap | Unassigned |
+| Keyboard Tab | Tab | Unassigned |
+| Keyboard Escape | Escape | Unassigned |
+| Keyboard ² / grave | Center tap | Unassigned |
 | Keyboard T | TURBO | Unassigned |
 | Keyboard F1–F5 | Unassigned | Home / Volume / Brightness / Geofence / Power |
 | Keyboard P | Stylus click / mode (customizable) | Unassigned |
@@ -840,7 +842,7 @@ Android use the same precedence.
 ## Center tap
 
 Center tap is an assignable PocketPC-only host stylus command. Factory bindings
-use keyboard Tab. Guide now defaults to the guest Tab command; it no longer
+use the key above Tab (² on AZERTY, grave on QWERTY). Guide now defaults to the guest Tab command; it no longer
 performs Center tap. It emits PointerDown at
 (width/2, height/2) of the logical guest framebuffer, then PointerUp after
 60 ms; display zoom, GPU resolution and rotation do not change that point.

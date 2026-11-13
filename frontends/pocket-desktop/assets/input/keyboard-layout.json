@@ -130,8 +130,8 @@
     ]
   },
   {
-    "input": null,
-    "label": "`",
+    "input": "`",
+    "label": "²",
     "rect": [
       20,
       75,
