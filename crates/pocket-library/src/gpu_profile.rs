@@ -55,10 +55,12 @@ impl ImportAdvice {
         }
         let path = game.launch_path(root);
         let label = crate::analysis::detect_graphics_api_cached(&path);
-        let choose_gpu_profile = matches!(label, Some("OpenGL ES" | "OpenGL ES CM" | "OpenGL ES 1.1 CM"))
-            && !pocket_pe::load_file(&path)
-                .ok()
-                .is_some_and(|image| crate::uses_programmable_gles(&image));
+        let choose_gpu_profile = matches!(
+            label,
+            Some("OpenGL ES" | "OpenGL ES CM" | "OpenGL ES 1.1 CM")
+        ) && !pocket_pe::load_file(&path)
+            .ok()
+            .is_some_and(|image| crate::uses_programmable_gles(&image));
         (show_display_advice || choose_gpu_profile).then(|| Self {
             may_run_fast: show_display_advice && crate::frame_pacing::may_run_fast(&path),
             choose_gpu_profile,

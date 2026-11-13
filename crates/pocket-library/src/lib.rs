@@ -3317,9 +3317,13 @@ impl Library {
     }
 
     pub fn launch_executables(&self, id: &str) -> Result<Vec<PathBuf>, LibraryError> {
-        let game = self.get(id).ok_or_else(|| LibraryError::NotFound(id.into()))?;
+        let game = self
+            .get(id)
+            .ok_or_else(|| LibraryError::NotFound(id.into()))?;
         if is_gizmondo_game(game, &self.root) {
-            return Err(LibraryError::InvalidSettings("This option is for Pocket PC games.".into()));
+            return Err(LibraryError::InvalidSettings(
+                "This option is for Pocket PC games.".into(),
+            ));
         }
         Ok(launch_executables_in(&self.root.join(game.relative_dir()))?)
     }
@@ -3327,18 +3331,26 @@ impl Library {
     pub fn switch_launch_executable(&mut self, id: &str, path: &Path) -> Result<(), LibraryError> {
         use gpu_profile::GpuCompatibilityProfile::Generic;
 
-        let original = self.get(id).ok_or_else(|| LibraryError::NotFound(id.into()))?;
+        let original = self
+            .get(id)
+            .ok_or_else(|| LibraryError::NotFound(id.into()))?;
         if is_gizmondo_game(original, &self.root) {
-            return Err(LibraryError::InvalidSettings("This option is for Pocket PC games.".into()));
+            return Err(LibraryError::InvalidSettings(
+                "This option is for Pocket PC games.".into(),
+            ));
         }
         let directory = self.root.join(original.relative_dir());
         let absolute = directory.join(path);
         if !absolute.starts_with(directory.join("extracted"))
             || !pocket_cab::plain_path_below(&self.root, &absolute, false)
-            || !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+            || !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
             || !is_guest_exe(&absolute)
         {
-            return Err(LibraryError::InvalidSettings("Invalid launch executable.".into()));
+            return Err(LibraryError::InvalidSettings(
+                "Invalid launch executable.".into(),
+            ));
         }
         let mut game = original.clone();
         game.settings.gpu_compatibility_profile = Generic;
@@ -6875,7 +6887,10 @@ mod tests {
         library.commit_entry(&entry.id, entry.clone()).unwrap();
 
         let game = library.get(&entry.id).unwrap();
-        assert_eq!(analysis::game_graphics_api(game, root), Some("OpenGL ES CM"));
+        assert_eq!(
+            analysis::game_graphics_api(game, root),
+            Some("OpenGL ES CM")
+        );
         let intel = Path::new("extracted/cod2_gles.exe");
         assert!(library
             .launch_executables(&entry.id)
@@ -6887,7 +6902,10 @@ mod tests {
         let reopened = Library::open(root).unwrap();
         let game = reopened.get(&entry.id).unwrap();
         assert_eq!(game.launch_path(root), directory.join(intel));
-        assert_eq!(analysis::game_graphics_api(game, root), Some("OpenGL ES 1.0 CL"));
+        assert_eq!(
+            analysis::game_graphics_api(game, root),
+            Some("OpenGL ES 1.0 CL")
+        );
         assert_eq!(
             game.settings.gpu_compatibility_profile,
             gpu_profile::GpuCompatibilityProfile::Intel2700g
@@ -6897,7 +6915,9 @@ mod tests {
         assert_eq!(manifest.executable.as_path(), intel);
 
         let software = Path::new("extracted/cod2.exe");
-        library.switch_launch_executable(&entry.id, software).unwrap();
+        library
+            .switch_launch_executable(&entry.id, software)
+            .unwrap();
         assert_eq!(
             library.get(&entry.id).unwrap().launch_path(root),
             directory.join(software)

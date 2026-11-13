@@ -959,7 +959,10 @@ mod hardware_detection_tests {
         sensor.extend("SEN0:\0ACC1:\0".encode_utf16().flat_map(u16::to_le_bytes));
         std::fs::write(&path, sensor).unwrap();
         let a = analyze_game(&game, root.path());
-        assert_eq!(a.hardware, vec![("Accelerometer".into(), "✓ Detected".into())]);
+        assert_eq!(
+            a.hardware,
+            vec![("Accelerometer".into(), "✓ Detected".into())]
+        );
         assert!(a.evidence.iter().any(|line| line == "Accelerometer: sen0:"));
         assert!(a.evidence.iter().any(|line| line == "Accelerometer: acc1:"));
     }

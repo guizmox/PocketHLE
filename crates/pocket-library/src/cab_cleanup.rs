@@ -61,7 +61,12 @@ mod tests {
         let backup = fs::read_dir(root)
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .find(|path| path.file_name().unwrap().to_string_lossy().starts_with("cab-alias-backup-"))
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("cab-alias-backup-")
+            })
             .unwrap();
         assert_eq!(
             fs::read(backup.join("sample").join("extracted").join("asset.001")).unwrap(),
@@ -79,7 +84,9 @@ mod tests {
 pub fn run(root: &Path) -> io::Result<String> {
     let games = root.join("games");
     if !plain_path_below(root, &games, true) {
-        return Err(io::Error::other("The games directory is missing or is a link."));
+        return Err(io::Error::other(
+            "The games directory is missing or is a link.",
+        ));
     }
     let mut aliases = Vec::new();
     let mut skipped = 0;
@@ -90,7 +97,8 @@ pub fn run(root: &Path) -> io::Result<String> {
         }
         let extracted = game.join("extracted");
         let manifest = game.join("game.json");
-        if !plain_path_below(&game, &extracted, true) || !plain_path_below(&game, &manifest, false) {
+        if !plain_path_below(&game, &extracted, true) || !plain_path_below(&game, &manifest, false)
+        {
             continue;
         }
         let executable = fs::File::open(manifest)

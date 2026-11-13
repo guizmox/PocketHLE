@@ -1513,7 +1513,9 @@ pub fn installed_cab_aliases(root: &Path, executable: &Path) -> io::Result<Vec<P
     let setup =
         read_manifest(&root.join("_setup.xml")).map(|bytes| WinCeSetupScript::parse_bytes(&bytes));
     let header = match headers.as_slice() {
-        [path] => read_manifest(path).and_then(|bytes| WinCeInstallHeader::parse_bytes(&bytes).ok()),
+        [path] => {
+            read_manifest(path).and_then(|bytes| WinCeInstallHeader::parse_bytes(&bytes).ok())
+        }
         _ => None,
     };
     let (mut by_source, destinations) =
@@ -1890,7 +1892,8 @@ mod tests {
 
     #[test]
     fn cleanup_preserves_overwritten_members_with_different_bytes() {
-        let root = std::env::temp_dir().join(format!("pocket-cab-collision-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("pocket-cab-collision-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let installed = root.join("level.dat");
         fs::write(&installed, b"final").unwrap();

@@ -344,7 +344,8 @@ fn prepare_cab(path: &Path) -> Result<Launcher> {
     let mut header_names = Vec::new();
     if structured {
         if let Some(h) = header.as_ref() {
-            header_names = pocket_core::cab::materialise_install_header_names(tmp.path(), &files, h);
+            header_names =
+                pocket_core::cab::materialise_install_header_names(tmp.path(), &files, h);
         }
     } else {
         materialise_legacy_names(tmp.path(), &files, header.as_ref());

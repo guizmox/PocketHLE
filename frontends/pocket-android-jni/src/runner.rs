@@ -322,7 +322,8 @@ fn run_game_to_completion(
         && !card_root.is_dir()
     {
         let reason = format!("SD Card folder does not exist: {}", card_root.display());
-        let diagnostic = pocket_library::session_diagnostic::startup_failure(reason.clone(), Vec::new());
+        let diagnostic =
+            pocket_library::session_diagnostic::startup_failure(reason.clone(), Vec::new());
         return serde_json::json!({"summary": reason, "diagnostic": diagnostic}).to_string();
     }
     let mut hook = SessionHook::new(Arc::clone(state), input_rx);
@@ -898,8 +899,8 @@ fn run_process_inner(
     hook.started = true;
     let started_at = std::time::Instant::now();
     let run_result = emu.run_with_hook(hook);
-    hook.startup_exit = started_at.elapsed()
-        < pocket_library::session_diagnostic::STARTUP_DIAGNOSTIC_WINDOW;
+    hook.startup_exit =
+        started_at.elapsed() < pocket_library::session_diagnostic::STARTUP_DIAGNOSTIC_WINDOW;
     if let Err(error) = &run_result {
         hook.runtime_error = Some(format!("{error:#}"));
     }
@@ -1592,7 +1593,10 @@ mod child_card_tests {
                 rx,
             );
             let body: serde_json::Value = serde_json::from_str(&summary).unwrap();
-            assert!(body["summary"].as_str().unwrap().starts_with("SD Card folder does not exist:"));
+            assert!(body["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with("SD Card folder does not exist:"));
             assert_eq!(body["diagnostic"]["title"], "Could not start the game");
         });
     }

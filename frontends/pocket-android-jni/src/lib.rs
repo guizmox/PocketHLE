@@ -355,8 +355,11 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitPreparedImport<
         let pending = take_prepared_import(&root, token as u64)?;
         let mut library = Library::open(&root)?;
         let before = pocket_library::import_setup::Presence::read(library.games(), &root);
-        let existing_ids: std::collections::HashSet<_> =
-            library.games().iter().map(|entry| entry.id.clone()).collect();
+        let existing_ids: std::collections::HashSet<_> = library
+            .games()
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
         let entries = library.apply_prepared_import(pending, allow_updates != 0)?;
         let setup_requests = library.config().first_import_setup.requests(
             before,
@@ -488,7 +491,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitGameData<'local
             Some(game) => pocketpc_launch_options(game, &root, false)?,
             None => None,
         };
-        Ok(serde_json::json!({"ok": true, "destination": destination, "launch_options": options}).to_string())
+        Ok(
+            serde_json::json!({"ok": true, "destination": destination, "launch_options": options})
+                .to_string(),
+        )
     })();
     new_jstring(
         &env,
@@ -667,7 +673,9 @@ fn pocketpc_launch_options(
     root: &std::path::Path,
     display_advice: bool,
 ) -> anyhow::Result<Option<serde_json::Value>> {
-    let Some(advice) = pocket_library::gpu_profile::ImportAdvice::for_game(game, root, display_advice) else {
+    let Some(advice) =
+        pocket_library::gpu_profile::ImportAdvice::for_game(game, root, display_advice)
+    else {
         return Ok(None);
     };
     let profiles = if advice.choose_gpu_profile {
@@ -702,19 +710,26 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_launchExecutables<'lo
         let mut library = Library::open(&root)?;
         if let Some(path) = jstring_to_path(&mut env, selected) {
             library.switch_launch_executable(&id, &path)?;
-            let options = pocketpc_launch_options(library.get(&id).context("Unknown game")?, &root, false)?;
+            let options =
+                pocketpc_launch_options(library.get(&id).context("Unknown game")?, &root, false)?;
             return Ok(serde_json::json!({"ok": true, "launch_options": options}).to_string());
         }
         let game = library.get(&id).context("unknown game")?;
         let launch = game.launch_path(&root);
-        let current = launch.strip_prefix(root.join(game.relative_dir())).unwrap_or(&launch);
+        let current = launch
+            .strip_prefix(root.join(game.relative_dir()))
+            .unwrap_or(&launch);
         Ok(serde_json::json!({
             "ok": true,
             "current": current,
             "executables": library.launch_executables(&id)?,
-        }).to_string())
+        })
+        .to_string())
     })();
-    new_jstring(&env, result.unwrap_or_else(|error| error_json(&format!("{error:#}"))))
+    new_jstring(
+        &env,
+        result.unwrap_or_else(|error| error_json(&format!("{error:#}"))),
+    )
 }
 
 #[no_mangle]
