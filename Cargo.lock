@@ -3150,6 +3150,7 @@ name = "pocket-netcf"
 version = "0.4.8"
 dependencies = [
  "image 0.24.9",
+ "log",
  "pocket-cab",
  "pocket-gles",
  "pocket-kernel",

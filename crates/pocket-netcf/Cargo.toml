@@ -5,6 +5,7 @@ edition = "2021"
 license = "Apache-2.0 OR MIT"
 
 [dependencies]
+log.workspace = true
 pocket-kernel = { path = "../pocket-kernel", default-features = false }
 pocket-gles = { path = "../pocket-gles" }
 image = { version = "0.24", default-features = false, features = ["png", "bmp", "jpeg"] }

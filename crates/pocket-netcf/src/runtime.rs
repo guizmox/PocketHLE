@@ -578,7 +578,7 @@ impl<'a> Session<'a> {
         size: (u32, u32),
         budget: usize,
     ) -> Result<Self, StartupError<'a>> {
-        Self::start_in(bytes, size, budget, None, None)
+        Self::start_in(bytes, size, budget, None, None, false)
     }
 
     pub(crate) fn start_in(
@@ -587,6 +587,7 @@ impl<'a> Session<'a> {
         budget: usize,
         save_root: Option<std::path::PathBuf>,
         guest_path: Option<String>,
+        gpu_renderer: bool,
     ) -> Result<Self, StartupError<'a>> {
         if !(1..=2048).contains(&size.0) || !(1..=2048).contains(&size.1) {
             return Err(StartupError::InvalidScreen);
@@ -600,7 +601,7 @@ impl<'a> Session<'a> {
             unresolved_type: None,
             system: system::Services::default(),
             forms: forms::Forms::default(),
-            graphics: graphics::Graphics::new(size),
+            graphics: graphics::Graphics::new(size, gpu_renderer),
             sensors: sensors::Sensors::default(),
             strings: Vec::new(),
             started: std::time::Instant::now(),
@@ -706,6 +707,7 @@ mod tests {
         let exe = std::env::var_os("POCKETHLE_DIAMOND_BEER_EXE").unwrap();
         let bytes = std::fs::read(exe).unwrap();
         const BUDGET: usize = 500_000;
+        let gpu = std::env::var_os("POCKETHLE_NETCF_TEST_GPU").is_some();
         let render = |acceleration, show_logo| {
             let save = tempfile::tempdir().unwrap();
             let mut session = Session::start_in(
@@ -714,6 +716,7 @@ mod tests {
                 BUDGET,
                 Some(save.path().to_path_buf()),
                 None,
+                gpu,
             )
             .unwrap();
             if show_logo {
@@ -732,6 +735,7 @@ mod tests {
             for now in (0..400).step_by(40) {
                 session.tick(now, BUDGET).unwrap();
             }
+            assert_eq!(session.startup.graphics.gpu_active(), gpu);
             let frame = session.frame().unwrap().2.to_vec();
             session.close(BUDGET).unwrap();
             assert!(save.path().join("Settings.xml").is_file());

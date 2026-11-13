@@ -994,6 +994,7 @@ fn run_compact_framework(
             save_root: Some(entry.save_dir(library_root)),
             guest_path: entry.guest_exe_path(),
             tilt,
+            gpu_renderer: config.gpu_renderer,
             frame_rate_limit: entry.settings.effective_frame_rate_limit(&config),
         },
         |events| {

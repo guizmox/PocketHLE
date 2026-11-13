@@ -13,6 +13,7 @@ fn main() -> Result<(), String> {
             save_root: None,
             guest_path: None,
             tilt: None,
+            gpu_renderer: false,
             frame_rate_limit: Some(60),
         },
         |_| frames.get() < 30,

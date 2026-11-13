@@ -697,6 +697,11 @@ accelerate and brake.
 
 ### .NET Compact Framework games
 
+Managed OpenGL ES games use the global GPU renderer setting on desktop and
+Android. If the GPU backend cannot initialize, they fall back to software.
+The managed Forms overlay is still composited into the CPU framebuffer, so
+desktop presentation can report `CPU_UPLOAD` even with GPU rendering.
+
 Games such as Diamond Beer V2 use the same **Tilt input (accelerometer)**
 setting and sources on desktop and Android. **Information** reports
 accelerometer support when the game's managed executable references the

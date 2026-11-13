@@ -49,6 +49,7 @@ pub struct Options {
     pub save_root: Option<std::path::PathBuf>,
     pub guest_path: Option<String>,
     pub tilt: Option<TiltAxes>,
+    pub gpu_renderer: bool,
     pub frame_rate_limit: Option<u32>,
 }
 
@@ -75,6 +76,7 @@ pub fn run(
         INSTRUCTIONS_PER_CALLBACK,
         options.save_root,
         options.guest_path,
+        options.gpu_renderer,
     )
     .map_err(|error| format!("Managed startup: {error:?}"))?;
     let mut framebuffer = Framebuffer::new(options.size.0, options.size.1);

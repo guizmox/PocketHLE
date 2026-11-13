@@ -98,42 +98,40 @@ PocketHLE is not a full Windows CE emulator. Some games still stop during CRT in
 
 ## Architecture
 
-```
-+----------------+    +----------------+    +----------------+
-| pocket-cli     |    | pocket-desktop |    | pocket-android |
-| CLI / captures |    | egui launcher  |    | Kotlin + JNI   |
-+--------+-------+    +--------+-------+    +--------+-------+
-         \                     |                     /
-          \                    |                    /
-           +-------------------+--------------------+
-                               |
-                      +--------v--------+
-                      |   pocket-core   |
-                      | Emulator / VFS  |
-                      +--------+--------+
-                               |
-          +--------------------+--------------------+
-          |                    |                    |
-  +-------v-------+    +-------v--------+   +-------v--------+
-  | pocket-cab    |    | pocket-pe      |   | pocket-library |
-  | CAB installer |    | ARM/MIPS PE    |   | game database  |
-  +---------------+    +----------------+   +----------------+
-                               |
-                      +--------v--------+
-                      | pocket-kernel   |
-                      | process / GDI   |
-                      | HLE dispatch    |
-                      +--------+--------+
-                               |
-                  +------------+------------+
-                  |                         |
-          +-------v-------+         +-------v--------+
-          | pocket-cpu    |         | pocket-winceapi |
-          | stub/Unicorn  |         | coredll/gx/hss  |
-          +---------------+         +----------------+
+```mermaid
+flowchart TD
+    CLI["pocket-cli"]
+    Desktop["pocket-desktop"]
+    Android["pocket-android · Kotlin and JNI"]
+    Core["pocket-core · native emulation"]
+    Net["pocket-netcf · Compact Framework"]
+    Library["pocket-library · import and metadata"]
+    Kernel["pocket-kernel · process, GDI and input"]
+    CPU["pocket-cpu · ARM and MIPS"]
+    WinCE["pocket-winceapi · native WinCE APIs"]
+    GLES["pocket-gles · software and GPU rendering"]
+    CLI --> Core
+    Desktop --> Core
+    Android --> Core
+    Desktop --> Net
+    Android --> Net
+    Desktop --> Library
+    Android --> Library
+    Core --> Kernel
+    Core --> CPU
+    Core --> WinCE
+    WinCE --> GLES
+    Net --> Kernel
+    Net --> GLES
 ```
 
-When a game starts:
+Pocket PC applications with a supported managed entry point launch through
+`pocket-netcf` on desktop and Android. It runs managed IL and implements a subset
+of Compact Framework services, including Windows Forms and sensors. Managed games
+use the same emulation view and OpenGL ES renderer as native games.
+See [Compact Framework accelerometer support](docs/FRONTENDS.md#net-compact-framework-games).
+
+When a native game starts:
 
 1. `pocket-cab` extracts the archive and reconstructs its installed files and registry values.
 2. `pocket-pe` parses the PE image, sections and imported symbols.

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 pub struct Graphics {
     size: (u32, u32),
+    gpu_renderer: bool,
     initialized: bool,
     window: bool,
     current: bool,
@@ -16,9 +17,10 @@ pub struct Graphics {
 }
 
 impl Graphics {
-    pub fn new(size: (u32, u32)) -> Self {
+    pub fn new(size: (u32, u32), gpu_renderer: bool) -> Self {
         Self {
             size,
+            gpu_renderer,
             initialized: false,
             window: false,
             current: false,
@@ -84,7 +86,19 @@ impl Graphics {
                 1
             }
             ("CreateContext", [Int(1), Int(1), Int(0), Null]) if self.initialized => {
-                self.context = Some(Context::new_rgb565(self.size.0, self.size.1));
+                let mut context = Context::new_rgb565(self.size.0, self.size.1);
+                if self.gpu_renderer {
+                    match context.enable_gpu() {
+                        Ok(()) => log::info!("Compact Framework GLES renderer: GPU"),
+                        Err(error) => {
+                            context.disable_gpu();
+                            log::warn!(
+                                "Compact Framework GLES renderer: software fallback ({error})"
+                            );
+                        }
+                    }
+                }
+                self.context = Some(context);
                 1
             }
             ("MakeCurrent", [Int(1), Int(1), Int(1), Int(1)])
@@ -125,6 +139,11 @@ impl Graphics {
             _ => return None,
         };
         Some(Ok(Some(Int(result))))
+    }
+
+    #[cfg(test)]
+    pub fn gpu_active(&self) -> bool {
+        self.context.as_ref().is_some_and(Context::gpu_active)
     }
 
     pub fn frame(&self) -> Option<(u64, (u32, u32), &[u8])> {
