@@ -84,7 +84,7 @@ emulator-side captures, not photographs of a device.
 ```sh
 cargo build --release -p pocket-cli --features unicorn
 KEYS="--key 100:enter --key 160:enter --key 220:enter --key 300:enter --key 400:enter"
-POCKETHLE_PROFILE=1 ./target/release/pockethle run Games/Zuma_v1.50.cab \
+./target/release/pockethle run Games/Zuma_v1.50.cab \
     --cpu unicorn --screen 800x480 --message-budget 0 --max-slices 0 \
     --max-frames 4000 $KEYS
 ```

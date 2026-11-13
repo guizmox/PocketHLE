@@ -27,14 +27,6 @@
     <string name="pref_rotation_title">Rotate display</string>
     <string name="pref_rotation_summary">Turns the picture without changing the screen size reported to the game. Use this if the picture is sideways. Touch and direction controls follow the rotation.</string>
 
-    <string-array name="cpu_backend_entries">
-        <item>Stub (safe)</item>
-        <item>Unicorn (real ARM)</item>
-    </string-array>
-    <string-array name="cpu_backend_values">
-        <item>stub</item>
-        <item>unicorn</item>
-    </string-array>
     <string-array name="screen_entries">
         <item>Automatic (Pocket PC)</item>
         <item>240x320 (QVGA portrait)</item>
@@ -70,24 +62,6 @@
         <item>cw90</item>
         <item>half</item>
         <item>ccw90</item>
-    </string-array>
-    <string-array name="fullscreen_mode_entries">
-        <item>Fullscreen with controls</item>
-        <item>Fullscreen without controls</item>
-    </string-array>
-    <string-array name="fullscreen_mode_values">
-        <item>with_controls</item>
-        <item>without_controls</item>
-    </string-array>
-    <string-array name="orientation_entries">
-        <item>Automatic</item>
-        <item>Portrait</item>
-        <item>Landscape</item>
-    </string-array>
-    <string-array name="orientation_values">
-        <item>auto</item>
-        <item>portrait</item>
-        <item>landscape</item>
     </string-array>
     <string name="action_play">Play</string>
     <string name="action_information">Information</string>
