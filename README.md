@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 # PocketHLE-Reborn
 
 <p align="center">
-  <img src="./frontends/pocket-desktop/assets/pockethle_logo.png" width="25%" alt="PocketHLE-Reborn logo" />
+  <img src="./frontends/pocket-desktop/assets/pockethle_logo.png" width="25%" alt="PocketHLE-Reborn logo with diagonal Reborn lettering" />
 </p>
 
 <p align="center">
