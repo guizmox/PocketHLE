@@ -699,13 +699,14 @@ accelerate and brake.
 
 Detector Veles opens in the standard emulation view. Its managed Windows Forms
 screen and embedded bitmap resources are rendered by PocketHLE-Reborn. FMOD CE
-WAV effects use the shared PocketHLE-Reborn audio mixer. Detector Veles reads an HTC compass heading. The managed bridge derives it from
+WAV effects use the shared PocketHLE-Reborn audio mixer and read assets through
+the guest VFS. Managed XML settings use VFS reads and atomic writes. Detector Veles reads an HTC compass heading. The managed bridge derives it from
 the selected Pocket PC tilt source (physical accelerometer or simulated input),
 so it represents tilt rather than magnetic north. **Information** detects this
 managed sensor reference.
 
-Managed OpenGL ES games use the global GPU renderer setting on desktop and
-Android. If the GPU backend cannot initialize, they fall back to software.
+Managed OpenGL ES games use the global GPU renderer and internal resolution
+settings on desktop and Android. If the GPU backend cannot initialize, they fall back to software.
 The managed Forms overlay is still composited into the CPU framebuffer, so
 desktop presentation can report `CPU_UPLOAD` even with GPU rendering.
 

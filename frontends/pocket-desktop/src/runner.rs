@@ -1456,6 +1456,7 @@ fn run_compact_framework(
             guest_path: game.guest_launch_paths(library_root).map(|paths| paths.module_path),
             tilt,
             gpu_renderer: config.gpu_renderer,
+            gles_internal_resolution: config.gles_internal_resolution,
             frame_rate_limit: game.settings.effective_frame_rate_limit(config),
         },
         |events| {

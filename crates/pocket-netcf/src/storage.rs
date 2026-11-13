@@ -3,8 +3,8 @@
 
 use crate::metadata::Assembly;
 use crate::vm::{Fault, Machine, Value};
+use pocket_kernel::vfs::{Access, Vfs};
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const XML_LIMIT: u64 = 64 * 1024;
@@ -37,18 +37,15 @@ impl Storage {
 
     pub fn open_reader(&mut self, id: usize, path: &str) -> Result<(), Fault> {
         let root = self.root.as_ref().ok_or(Fault::MissingFile)?;
-        let path = root.join(filename(path).ok_or(Fault::ManagedException)?);
-        if !pocket_cab::plain_path_below(root, &path, false) {
+        let name = filename(path).ok_or(Fault::ManagedException)?;
+        if !pocket_cab::plain_path_below(root, &root.join(name), false) {
             return Err(Fault::MissingFile);
         }
-        let file = std::fs::File::open(path).map_err(|_| Fault::MissingFile)?;
-        let mut text = String::new();
-        file.take(XML_LIMIT + 1)
-            .read_to_string(&mut text)
-            .map_err(|_| Fault::ManagedException)?;
-        if text.len() as u64 > XML_LIMIT {
-            return Err(Fault::ManagedException);
-        }
+        let mut vfs = Vfs::new();
+        vfs.mount_read_only("\\", root);
+        let guest = format!("\\{name}");
+        let bytes = read_bounded(&mut vfs, &guest, XML_LIMIT).ok_or(Fault::MissingFile)?;
+        let text = String::from_utf8(bytes).map_err(|_| Fault::ManagedException)?;
         self.readers.insert(id, text);
         Ok(())
     }
@@ -214,4 +211,26 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     temp.as_file().sync_all()?;
     temp.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+pub fn read_bounded(vfs: &mut Vfs, path: &str, limit: u64) -> Option<Vec<u8>> {
+    let handle = vfs.open(path, Access::Read, false)?;
+    let result = (|| {
+        let size = vfs.size(handle)?.min(limit.checked_add(1)?);
+        if size > limit {
+            return None;
+        }
+        let mut bytes = vec![0; usize::try_from(size).ok()?];
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let n = vfs.read(handle, &mut bytes[offset..])?;
+            if n == 0 {
+                return None;
+            }
+            offset += n;
+        }
+        Some(bytes)
+    })();
+    vfs.close(handle);
+    result
 }

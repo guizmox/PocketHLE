@@ -14,6 +14,7 @@ fn main() -> Result<(), String> {
             guest_path: None,
             tilt: None,
             gpu_renderer: false,
+            gles_internal_resolution: 1,
             frame_rate_limit: Some(60),
         },
         |_| frames.get() < 30,

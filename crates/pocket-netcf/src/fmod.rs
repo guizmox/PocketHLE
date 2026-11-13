@@ -1,7 +1,7 @@
 //! FMOD CE sample playback through the shared PocketHLE mixer.
 
 use pocket_kernel::{audio::decode_pcm_wave, AudioEngine, GuestFormat, VoiceParams};
-use std::{collections::BTreeMap, io::Read, path::Path};
+use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub struct Fmod {
@@ -26,28 +26,11 @@ impl Fmod {
         true
     }
 
-    pub fn load(&mut self, root: &Path, name: &str) -> Option<i32> {
-        const MAX_BYTES: u64 = 4 * 1024 * 1024;
-        if self.channels == 0
-            || self.samples.len() >= 32
-            || !name.to_ascii_lowercase().ends_with(".wav")
-        {
+    pub fn load(&mut self, bytes: &[u8]) -> Option<i32> {
+        if self.channels == 0 || self.samples.len() >= 32 {
             return None;
         }
-        let path = root.join(name);
-        if !pocket_cab::plain_path_below(root, &path, false) {
-            return None;
-        }
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)
-            .ok()?
-            .take(MAX_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() as u64 > MAX_BYTES {
-            return None;
-        }
-        let (format, samples) = decode_pcm_wave(&bytes)?;
+        let (format, samples) = decode_pcm_wave(bytes)?;
         if samples.is_empty()
             || samples.len() > 2 * 1024 * 1024
             || !(1..=2).contains(&format.channels)

@@ -55,6 +55,7 @@ pub struct Options {
     pub guest_path: Option<String>,
     pub tilt: Option<TiltAxes>,
     pub gpu_renderer: bool,
+    pub gles_internal_resolution: u8,
     pub frame_rate_limit: Option<u32>,
 }
 
@@ -82,7 +83,7 @@ pub fn run(
         INSTRUCTIONS_PER_CALLBACK,
         options.save_root,
         options.guest_path,
-        options.gpu_renderer,
+        (options.gpu_renderer, options.gles_internal_resolution),
         executable.parent().map(Path::to_path_buf),
     )
     .map_err(|error| format!("Managed startup: {error:?}"))?;

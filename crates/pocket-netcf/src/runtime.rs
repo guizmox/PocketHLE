@@ -23,7 +23,7 @@ struct Startup<'a> {
     drawing_colors: std::collections::BTreeMap<usize, u16>,
     audio: pocket_kernel::AudioEngine,
     fmod: crate::fmod::Fmod,
-    asset_root: Option<std::path::PathBuf>,
+    assets: pocket_kernel::vfs::Vfs,
     data_slots: Vec<(String, vm::Value)>,
 }
 
@@ -276,17 +276,11 @@ impl<'image> vm::Environment<'image> for Startup<'image> {
                             .and_then(|bytes| String::from_utf8(bytes).ok());
                         let sample = path
                             .as_deref()
-                            .and_then(|path| path.rsplit_once(['\\', '/']))
-                            .filter(|(parent, _)| {
-                                self.program_path
-                                    .rsplit_once(['\\', '/'])
-                                    .is_some_and(|(dir, _)| dir.eq_ignore_ascii_case(parent))
+                            .filter(|path| path.to_ascii_lowercase().ends_with(".wav"))
+                            .and_then(|path| {
+                                storage::read_bounded(&mut self.assets, path, 4 * 1024 * 1024)
                             })
-                            .and_then(|(_, name)| {
-                                self.asset_root
-                                    .as_deref()
-                                    .and_then(|root| self.fmod.load(root, name))
-                            });
+                            .and_then(|bytes| self.fmod.load(&bytes));
                         Some(sample.unwrap_or(0))
                     }
                     ("FSOUND_PlaySound", [Int(channel), Int(sample)]) => {
@@ -1051,7 +1045,7 @@ impl<'a> Session<'a> {
         size: (u32, u32),
         budget: usize,
     ) -> Result<Self, StartupError<'a>> {
-        Self::start_in(bytes, size, budget, None, None, false, None)
+        Self::start_in(bytes, size, budget, None, None, (false, 1), None)
     }
 
     pub(crate) fn start_in(
@@ -1060,7 +1054,7 @@ impl<'a> Session<'a> {
         budget: usize,
         save_root: Option<std::path::PathBuf>,
         guest_path: Option<String>,
-        gpu_renderer: bool,
+        gpu: (bool, u8),
         asset_root: Option<std::path::PathBuf>,
     ) -> Result<Self, StartupError<'a>> {
         if !(1..=2048).contains(&size.0) || !(1..=2048).contains(&size.1) {
@@ -1068,6 +1062,13 @@ impl<'a> Session<'a> {
         }
         let assembly = Assembly::read(bytes).ok_or(StartupError::Assembly)?;
         let entry = assembly.entry_point().ok_or(StartupError::Assembly)?.token;
+        let program_path =
+            guest_path.unwrap_or_else(|| r"\Program Files\Application\application.exe".into());
+        let mut assets = pocket_kernel::vfs::Vfs::new();
+        if let Some((root, (directory, _))) = asset_root.zip(program_path.rsplit_once(['\\', '/']))
+        {
+            assets.mount_read_only(directory, root);
+        }
         let mut startup = Startup {
             assembly,
             unresolved: None,
@@ -1075,7 +1076,7 @@ impl<'a> Session<'a> {
             unresolved_type: None,
             system: system::Services::default(),
             forms: forms::Forms::default(),
-            graphics: graphics::Graphics::new(size, gpu_renderer),
+            graphics: graphics::Graphics::new(size, gpu),
             sensors: sensors::Sensors::default(),
             strings: Vec::new(),
             string_ids: Default::default(),
@@ -1083,13 +1084,12 @@ impl<'a> Session<'a> {
             started: std::time::Instant::now(),
             audio: pocket_kernel::AudioEngine::new(),
             fmod: Default::default(),
-            asset_root,
+            assets,
             data_slots: Vec::new(),
             drawing_colors: Default::default(),
             resource_types: Default::default(),
             tables: Default::default(),
-            program_path: guest_path
-                .unwrap_or_else(|| r"\Program Files\Application\application.exe".into()),
+            program_path,
             storage: storage::Storage::default(),
         };
         startup.storage.root = save_root;
@@ -1302,10 +1302,16 @@ mod tests {
             std::env::var_os("POCKETHLE_DETECTOR_VELES_ASSETS").map(std::path::PathBuf::from);
         let verify_audio = assets.is_some();
         let mut session =
-            Session::start_in(&bytes, (480, 640), 500_000, None, None, false, assets).unwrap();
+            Session::start_in(&bytes, (480, 640), 500_000, None, None, (false, 1), assets).unwrap();
         let tap = session.audio().tap();
-        if let Some(root) = &session.startup.asset_root {
-            let sample = session.startup.fmod.load(root, "anomaly.wav").unwrap();
+        if verify_audio {
+            let bytes = super::storage::read_bounded(
+                &mut session.startup.assets,
+                r"\Program Files\Application\anomaly.wav",
+                4 * 1024 * 1024,
+            )
+            .unwrap();
+            let sample = session.startup.fmod.load(&bytes).unwrap();
             assert!(session
                 .startup
                 .fmod
@@ -1361,7 +1367,7 @@ mod tests {
                 BUDGET,
                 Some(save.path().to_path_buf()),
                 None,
-                gpu,
+                (gpu, 1),
                 None,
             )
             .unwrap();
