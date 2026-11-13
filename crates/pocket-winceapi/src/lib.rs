@@ -1113,3 +1113,5 @@ impl Drop for SuspendedSession {
         coredll::resume_tokenizer(self.tokenizer);
     }
 }
+
+pub mod unimplemented_log;

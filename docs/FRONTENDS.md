@@ -8,6 +8,7 @@ to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
 - [Library data](#adding-data-to-an-installed-game), [removal](#removing-library-games) and [captures](#desktop-capture-gallery)
 - [Image fitting](#image-geometry-and-input) and [Android touch controls](#android-controls)
 - [Factory bindings](#factory-input-profiles) and [assignment editor](#visual-input-editor--desktop-and-android)
+- [.NET Compact Framework games](#net-compact-framework-games)
 - [PocketPC accelerometer](#pocketpc-accelerometer)
 - [Stylus modes](#pocketpc-right-stick-stylus-modes) and [Center tap](#center-tap)
 - [Focus and dialogs](#desktop-focus-and-import-launch-settings-prompt)
@@ -674,28 +675,7 @@ post-delay or renderer-specific workaround is used. R3's controller row explicit
 shows its fixed mode gesture even though it is a reserved input without a normal
 host tap/hold action. This is frontend view-state handling, not a GLES game fix.
 
-## PocketPC accelerometer
-
-On desktop and Android, **Tilt input (accelerometer)** is available in the
-global PocketPC options and in each PocketPC game's controls settings.
-**Emulator Default** in a game's settings inherits the global choice.
-Source changes apply on the next launch.
-
-| Mode | Source and behavior |
-| --- | --- |
-| **Use physical accelerometer** | Default. Android uses the device's accelerometer. Desktop uses an SDL host accelerometer when available, then tries the selected controller's accelerometer. |
-| **Simulate left/right tilt** | The configured directional buttons or the left stick simulate horizontal tilt relative to the displayed game. Vertical tilt stays neutral. |
-| **Simulate tilt in four directions** | The directional buttons or the left stick simulate horizontal and vertical tilt relative to the displayed game. |
-
-In simulated modes, a held direction overrides the stick on its axis.
-Opposite buttons on one axis cancel each other. The stick uses a 12% dead zone
-and supplies proportional tilt beyond it. Full input supplies up to 0.5 g on
-each enabled axis. With no input, the virtual device rests flat, screen up.
-The guest receives tilt readings. The game decides what to do with them.
-For example, Ferrari GT uses tilt to steer and its on-screen pedals to
-accelerate and brake.
-
-### .NET Compact Framework games
+## .NET Compact Framework games
 
 Detector Veles opens in the standard emulation view. Its managed Windows Forms
 screen and embedded bitmap resources are rendered by PocketHLE-Reborn. FMOD CE
@@ -722,6 +702,27 @@ and when no fresh physical sample is available. In Diamond Beer V2, tap the
 barrel in the bottom-left corner, select **Duvel**, enable the logo checkbox,
 then confirm. The original CAB selects the Duvel preset on first launch but
 leaves the logo checkbox off.
+
+## PocketPC accelerometer
+
+On desktop and Android, **Tilt input (accelerometer)** is available in the
+global PocketPC options and in each PocketPC game's controls settings.
+**Emulator Default** in a game's settings inherits the global choice.
+Source changes apply on the next launch.
+
+| Mode | Source and behavior |
+| --- | --- |
+| **Use physical accelerometer** | Default. Android uses the device's accelerometer. Desktop uses an SDL host accelerometer when available, then tries the selected controller's accelerometer. |
+| **Simulate left/right tilt** | The configured directional buttons or the left stick simulate horizontal tilt relative to the displayed game. Vertical tilt stays neutral. |
+| **Simulate tilt in four directions** | The directional buttons or the left stick simulate horizontal and vertical tilt relative to the displayed game. |
+
+In simulated modes, a held direction overrides the stick on its axis.
+Opposite buttons on one axis cancel each other. The stick uses a 12% dead zone
+and supplies proportional tilt beyond it. Full input supplies up to 0.5 g on
+each enabled axis. With no input, the virtual device rests flat, screen up.
+The guest receives tilt readings. The game decides what to do with them.
+For example, Ferrari GT uses tilt to steer and its on-screen pedals to
+accelerate and brake.
 
 ### Guest interfaces
 

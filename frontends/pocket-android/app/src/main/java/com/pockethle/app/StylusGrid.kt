@@ -52,8 +52,8 @@ internal class StylusGridConfig(var columns:Int=5,var rows:Int=4,val bindings:Mu
     }
     fun point(cell:Int)=( ((cell%columns)*2+1)*10000/(columns*2) ) to ( ((cell/columns)*2+1)*10000/(rows*2) )
     fun bind(cell:Int,input:GridInput,fullscreen:String?):String? {
-        input.conflict(fullscreen)?.let{return it}
         if((columns to rows) !in sizes || cell !in 0 until columns*rows) return "Invalid grid cell."
+        input.conflict(fullscreen)?.let{return it}
         val canonical=input.canonical()
         bindings.removeAll {it.cell==cell || it.input.canonical()==canonical}
         bindings.add(GridBinding(cell,canonical));return null

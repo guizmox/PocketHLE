@@ -27,6 +27,7 @@
 //! exits, which lets the polling loop on the UI thread notice the
 //! session ended and stop calling back in).
 
+use pocket_core::child_jobs::{self, ChildJob};
 use pocket_core::kernel::{
     handles::HandleTable, memory_division::MemoryDivision, ProcessHandleContext,
 };
@@ -397,10 +398,6 @@ impl Drop for ProcessStartup {
         }
     }
 }
-struct ChildJob {
-    table: HandleTable,
-    thread: JoinHandle<(String, u32)>,
-}
 
 fn run_process(
     library_root: &std::path::Path,
@@ -601,14 +598,16 @@ fn run_process_inner(
     emu.set_nv_combiner_allowed(is_gizmondo || profile.nvidia_combiners());
     emu.set_intel2700g_depth_bias(!is_gizmondo && profile.intel_depth_bias());
     emu.set_gles_internal_resolution(launcher_config.gles_internal_resolution);
-    emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
-        library_root.join("pockethle-unimplemented.log"),
-        entry.display_name.clone(),
-        exe.display().to_string(),
-        Arc::new(std::sync::atomic::AtomicBool::new(
-            launcher_config.log_unimplemented_apis,
-        )),
-    )));
+    emu.set_unimplemented_api_sink(Box::new(
+        pocket_core::winceapi::unimplemented_log::UnimplementedLog::new(
+            library_root.join("pockethle-unimplemented.log"),
+            entry.display_name.clone(),
+            exe.display().to_string(),
+            Arc::new(std::sync::atomic::AtomicBool::new(
+                launcher_config.log_unimplemented_apis,
+            )),
+        ),
+    ));
     log::set_max_level(match launcher_config.verbosity {
         0 => log::LevelFilter::Warn,
         1 => log::LevelFilter::Info,
@@ -1044,7 +1043,7 @@ struct SessionHook {
     stop_all: Arc<AtomicBool>,
     foreground: Arc<AtomicU32>,
     pid: u32,
-    children: Vec<ChildJob>,
+    children: Vec<ChildJob<(String, u32)>>,
     launch_context: Option<LaunchContext>,
     last_frame: u64,
     input_disconnected: bool,
@@ -1259,31 +1258,11 @@ impl SessionHook {
     }
 
     fn finish_children(&mut self) {
-        for job in self.children.drain(..) {
-            if !job.table.start_allowed() {
-                job.table
-                    .terminate_remote_process(job.table.process_id(), 0xc0000001);
-                job.table.allow_start();
-            }
-            if let Err(_) = job.thread.join() {
-                self.stop_all.store(true, Ordering::Release);
-            }
-        }
+        child_jobs::finish(&mut self.children, &self.stop_all);
     }
+
     fn reap_children(&mut self) {
-        let mut index = 0;
-        while index < self.children.len() {
-            if self.children[index].thread.is_finished() {
-                let job = self.children.swap_remove(index);
-                if job.thread.join().is_err() {
-                    job.table.complete_process_exit(0xc0000005);
-                    job.table.set_exit(Some(0), 0xc0000005);
-                    job.table.mark_inactive();
-                }
-            } else {
-                index += 1;
-            }
-        }
+        child_jobs::reap(&mut self.children);
     }
 
     fn child_hook(&self) -> Self {

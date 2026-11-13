@@ -29,7 +29,6 @@ mod internet;
 mod managed_game;
 mod power;
 mod runner;
-mod unimplemented_log;
 mod vibration;
 
 use anyhow::Context;

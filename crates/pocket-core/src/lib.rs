@@ -782,6 +782,7 @@ pub fn suspend_host_session() -> pocket_winceapi::SuspendedSession {
     pocket_winceapi::suspend_session()
 }
 
+pub mod child_jobs;
 pub mod dependencies;
 mod pocketpc_storage;
 

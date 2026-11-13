@@ -1,6 +1,7 @@
 //! Background runner that drives [`pocket_core::Emulator`] for the
 //! desktop GUI.
 
+use pocket_core::child_jobs::{self, ChildJob};
 use pocket_core::winceapi::{self, SystemMediaCommand, SystemMediaInput, SystemMediaStatus};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -286,7 +287,7 @@ impl Runner {
         hook.frame_interval = frame_interval(fps_limit);
         log::info!("PRESENTATION_LIMIT={} (completed frames; unbounded intermediate GDI updates remain coalesced)",
             fps_limit.filter(|fps| *fps != 0).map(|fps| format!("{fps} FPS")).unwrap_or_else(|| if fps_limit == Some(0) { "UNLIMITED".into() } else { "NATIVE".into() }));
-        emu.set_unimplemented_api_sink(Box::new(crate::unimplemented_log::UnimplementedLog::new(
+        emu.set_unimplemented_api_sink(Box::new(pocket_core::winceapi::unimplemented_log::UnimplementedLog::new(
             library_root.join("pockethle-unimplemented-apis.log"),
             game.display_name.clone(),
             guest_path
@@ -1071,10 +1072,7 @@ impl Drop for ProcessStartup {
         }
     }
 }
-struct ChildJob {
-    table: pocket_core::kernel::handles::HandleTable,
-    thread: std::thread::JoinHandle<(RunOutcome, u32)>,
-}
+
 
 struct RunHook {
     system_media: SystemMediaView,
@@ -1094,7 +1092,7 @@ struct RunHook {
     stop_all: Arc<AtomicBool>,
     foreground: Arc<AtomicU32>,
     pid: u32,
-    children: Vec<ChildJob>,
+    children: Vec<ChildJob<(RunOutcome, u32)>>,
     last_frame: u64,
     frame_send_failed: bool,
     input_disconnected: bool,
@@ -1361,31 +1359,11 @@ impl RunHook {
         hook
     }
     fn finish_children(&mut self) {
-        for job in self.children.drain(..) {
-            if !job.table.start_allowed() {
-                job.table
-                    .terminate_remote_process(job.table.process_id(), 0xc0000001);
-                job.table.allow_start();
-            }
-            if let Err(_) = job.thread.join() {
-                self.stop_all.store(true, Ordering::Release);
-            }
-        }
+        child_jobs::finish(&mut self.children, &self.stop_all);
     }
+
     fn reap_children(&mut self) {
-        let mut index = 0;
-        while index < self.children.len() {
-            if self.children[index].thread.is_finished() {
-                let job = self.children.swap_remove(index);
-                if job.thread.join().is_err() {
-                    job.table.complete_process_exit(0xc0000005);
-                    job.table.set_exit(Some(0), 0xc0000005);
-                    job.table.mark_inactive();
-                }
-            } else {
-                index += 1;
-            }
-        }
+        child_jobs::reap(&mut self.children);
     }
 
     fn reset_process(&mut self) {

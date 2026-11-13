@@ -23,7 +23,7 @@ license = "Apache-2.0 OR MIT"
 repository = "https://github.com/guizmox/PocketHLE-Reborn"
 homepage = "https://github.com/guizmox/PocketHLE-Reborn"
 authors = ["PocketHLE Contributors"]
-rust-version = "1.75"
+rust-version = "1.90"
 
 [workspace.dependencies]
 anyhow = "1"

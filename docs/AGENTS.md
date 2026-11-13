@@ -145,6 +145,7 @@ frontends/  pocket-cli      pocket-desktop (egui)   pocket-android-jni
 | `pocket-winceapi` | The guest-facing API surface. One module per emulated DLL; registers handlers into `WinCeDispatcher`. |
 | `pocket-gles` | OpenGL ES 1.x emulation with software and native GPU backends: geometry, rasterization, textures, fixed-point and matrix math. Host-side only — knows nothing about guest memory. |
 | `pocket-core` | Wires loader + CPU + kernel + dispatcher into an `Emulator` the frontends drive. |
+| `pocket-netcf` | Executes supported Compact Framework IL and adapts managed APIs to shared host services. |
 | `pocket-library` | Game catalog: identifies titles, tracks install state and per-game metadata. |
 
 Frontends: `pocket-cli` (headless, scriptable — the one to use for

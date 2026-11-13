@@ -1,5 +1,5 @@
 //! Targeted missing-API reports, appended beside the main log without verbose tracing.
-use pocket_core::winceapi::{UnimplementedApiCall, UnimplementedApiSink};
+use crate::{UnimplementedApiCall, UnimplementedApiSink};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},

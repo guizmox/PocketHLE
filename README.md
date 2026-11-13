@@ -28,13 +28,18 @@ project. We chose the name together with PocketHLE's original author,
 j92580498-max, to make the two projects easy to distinguish.
 [Original PocketHLE project](https://github.com/j92580498-max/PocketHLE).
 
-Documentation is maintained in English. See the [documentation index](docs/README.md),
-[GPU guide](docs/GPU.md) and [Gizmondo guide](docs/GIZMONDO.md).
+| If you want to… | Start here |
+| --- | --- |
+| Install and import a game | [Using PocketHLE-Reborn](#using) |
+| Set up a Steam Deck | [Steam Deck guide](docs/STEAMDECK.md) |
+| Configure controls or run a .NET game | [Frontend guide](docs/FRONTENDS.md) |
+| Build or contribute | [Build and release](docs/BUILD.md) · [Architecture](docs/AGENTS.md) |
+| Find another guide | [Documentation index](docs/README.md) |
 
 ---
 
 > [!NOTE]
-> PocketHLE-Reborn runs native Windows CE software for Pocket PC, Windows Mobile and Gizmondo. It supports Pocket PC CAB imports and user-provided Gizmondo game and shell profiles. It is experimental software: compatibility, performance and input behavior vary by game and host platform.
+> PocketHLE-Reborn runs native and selected .NET Compact Framework Windows CE software for Pocket PC, Windows Mobile and Gizmondo. It supports Pocket PC CAB imports and user-provided Gizmondo game and shell profiles. It is experimental software: compatibility, performance and input behavior vary by game and host platform.
 
 > [!WARNING]
 > PocketHLE-Reborn is developed for research and educational purposes. It does not include Microsoft system files, firmware or game data. Use only legally obtained game copies and archives.

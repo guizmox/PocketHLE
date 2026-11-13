@@ -6,6 +6,9 @@ but every call into a Windows CE DLL is intercepted at the import boundary and
 serviced by clean-room Rust. There is no emulated `coredll.dll`, no emulated
 kernel, no emulated drivers.
 
+Desktop and Android route supported .NET Compact Framework games through
+`pocket-netcf`, which shares graphics, audio and input services with native games.
+
 **The full architecture reference is [`docs/AGENTS.md`](docs/AGENTS.md). Read it
 before changing anything.** It is the architecture entry point; GPU implementation contracts are consolidated
 in [`docs/GPU.md`](docs/GPU.md). Read both before changing rendering. It documents the

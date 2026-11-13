@@ -135,11 +135,12 @@ impl StylusGrid {
         if !self.valid_size() || input.conflict(fullscreen).is_some() {
             return None;
         }
+        let input = input.clone().canonical();
+        let count = usize::from(self.columns) * usize::from(self.rows);
         self.bindings
             .iter()
-            .find(|b| b.input.clone().canonical() == input.clone().canonical())
-            .map(|b| b.cell)
-            .filter(|c| *c < usize::from(self.columns) * usize::from(self.rows))
+            .find(|binding| binding.cell < count && binding.input.clone().canonical() == input)
+            .map(|binding| binding.cell)
     }
     pub fn point(&self, cell: usize) -> (u16, u16) {
         let cols = usize::from(self.columns.max(1));
@@ -369,5 +370,20 @@ mod tests {
         assert!(!r.active());
         assert!(r.cancel().is_none());
         assert_eq!(r.input(&g, a, false, None), (true, None));
+    }
+}
+
+#[test]
+fn shared_android_grid_cases() {
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("../tests/data/stylus-grid.json")).unwrap();
+    for case in cases {
+        let grid: StylusGrid = serde_json::from_value(case["grid"].clone()).unwrap();
+        let input: HostInput = serde_json::from_value(case["input"].clone()).unwrap();
+        let cell = grid.cell_for(&input, case["fullscreen"].as_str());
+        assert_eq!(serde_json::json!(cell), case["cell"], "{}", case["name"]);
+        if let Some(cell) = cell {
+            assert_eq!(serde_json::json!(grid.point(cell)), case["point"]);
+        }
     }
 }

@@ -3791,18 +3791,38 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), LibraryError> 
         fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(value)?;
-    let temp = path.with_file_name(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("manifest.json")
-    ));
-    fs::write(&temp, bytes)?;
-    if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(&temp);
-        return Err(error.into());
-    }
+    use std::io::Write;
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(directory)?;
+    temp.write_all(&bytes)?;
+    temp.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+#[test]
+fn concurrent_json_publication_uses_independent_temporary_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalogue.json");
+    let barrier = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        for index in 0..4 {
+            let (path, barrier) = (&path, &barrier);
+            scope.spawn(move || {
+                let value = vec![index; 4096];
+                barrier.wait();
+                for _ in 0..12 {
+                    write_json(path, &value).unwrap();
+                }
+            });
+        }
+    });
+    let value: Vec<u32> = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(value.len(), 4096);
+    assert!(value.iter().all(|&number| number == value[0]));
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
 fn safe_archive_path(raw: &[u8]) -> Option<PathBuf> {

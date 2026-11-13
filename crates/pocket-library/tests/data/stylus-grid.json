@@ -1,0 +1,6 @@
+[
+  {"name":"legacy direction", "grid":{"columns":4,"rows":3,"bindings":[{"cell":5,"input":{"source":"keyboard","name":"ArrowUp"}}]}, "input":{"source":"keyboard","name":"UP"}, "cell":5,"point":[3750,5000]},
+  {"name":"reserved function key", "grid":{"columns":4,"rows":3,"bindings":[{"cell":0,"input":{"source":"keyboard","name":"F9"}}]}, "input":{"source":"keyboard","name":"F9"}, "cell":null},
+  {"name":"fullscreen override", "grid":{"columns":4,"rows":3,"bindings":[{"cell":0,"input":{"source":"controller","name":"South"}}]}, "input":{"source":"controller","name":"South"}, "fullscreen":"South","cell":null},
+  {"name":"invalid entry before valid entry", "grid":{"columns":4,"rows":3,"bindings":[{"cell":99,"input":{"source":"keyboard","name":"A"}},{"cell":11,"input":{"source":"keyboard","name":"A"}}]}, "input":{"source":"keyboard","name":"A"}, "cell":11,"point":[8750,8333]}
+]
