@@ -131,7 +131,6 @@ pub(crate) struct SessionState {
     /// Final summary string. Populated by the worker right before
     /// it exits; read by [`finish`] after the join.
     summary: Mutex<Option<String>>,
-    produced_frame: AtomicBool,
     /// Pull handle on the guest's mixed PCM, published by the worker
     /// once the emulator exists. Android has no cpal device, so the
     /// Kotlin side drains this from an `AudioTrack` feeder thread
@@ -151,7 +150,6 @@ impl SessionState {
             dependency_notices: Mutex::new(Default::default()),
             running: Mutex::new(true),
             summary: Mutex::new(None),
-            produced_frame: AtomicBool::new(false),
             audio: Mutex::new(None),
         }
     }
@@ -341,9 +339,8 @@ fn run_game_to_completion(
         )
     });
     let diagnostic = pocket_library::session_diagnostic::classify(
-        state.stop_all.load(Ordering::Acquire),
+        false,
         hook.started,
-        state.produced_frame.load(Ordering::Acquire),
         code,
         hook.runtime_error.as_deref(),
         &summary,
@@ -921,7 +918,6 @@ fn run_process_inner(
             Ok(frame)
                 if !frame.is_all_black() && hook.foreground.load(Ordering::Acquire) == hook.pid =>
             {
-                state.produced_frame.store(true, Ordering::Release);
                 push_frame(&state, FrameSnapshot::from_framebuffer(&frame));
             }
             Err(error) => log::error!("final presentation failed: {error}"),
@@ -1383,9 +1379,6 @@ impl FrameHook for SessionHook {
                     self.last_shared = Some(is_shared);
                 }
                 if let Some(shared) = shared {
-                    if kernel.framebuffer.presentation_stats.completed() != 0 {
-                        self.state.produced_frame.store(true, Ordering::Release);
-                    }
                     let size = shared.size();
                     self.saw_non_black = true;
                     self.last_frame = counter;
@@ -1429,10 +1422,8 @@ impl FrameHook for SessionHook {
                             FrameAction::Continue
                         };
                     }
+
                     self.saw_non_black = !black;
-                    if !black {
-                        self.state.produced_frame.store(true, Ordering::Release);
-                    }
 
                     self.last_frame = counter;
                     self.last_emit_at = Some(phase);

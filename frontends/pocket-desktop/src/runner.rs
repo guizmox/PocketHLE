@@ -156,7 +156,6 @@ impl Runner {
         let diagnostic = pocket_library::session_diagnostic::classify(
             hook.stopped_by_user,
             hook.started,
-            hook.produced_frame || outcome.framebuffer.is_some(),
             code,
             hook.runtime_error.as_deref(),
             &outcome.summary,
@@ -1098,7 +1097,6 @@ struct RunHook {
     scratch: Vec<u8>,
     saw_non_black: bool,
     started: bool,
-    produced_frame: bool,
     runtime_error: Option<String>,
     stopped_by_user: bool,
     launch_context: Option<LaunchContext>,
@@ -1247,7 +1245,6 @@ impl RunHook {
             self.foreground.store(self.pid, Ordering::Release);
             self.input_disconnected = child_hook.input_disconnected;
             self.stopped_by_user |= child_hook.stopped_by_user;
-            self.produced_frame |= child_hook.produced_frame;
             // run_process has dropped its child Emulator and its media first.
             drop(saved);
             state.audio.resume_output();
@@ -1417,7 +1414,6 @@ impl RunHook {
             scratch: Vec::new(),
             saw_non_black: false,
             started: false,
-            produced_frame: false,
             runtime_error: None,
             stopped_by_user: false,
             launch_context: None,
@@ -1510,8 +1506,6 @@ impl FrameHook for RunHook {
                             }
                             None
                         };
-                        let has_shared_image = shared.is_some();
-                        let mut non_black = false;
                         let mut snapshot = if let Some(shared) = shared {
                             match FrameSnapshot::from_shared(&state.framebuffer, shared) {
                                 Ok(frame) => frame,
@@ -1532,7 +1526,6 @@ impl FrameHook for RunHook {
                                     return FrameAction::Stop;
                                 }
                             };
-                            non_black = !black;
                             if black && self.saw_non_black && !state.framebuffer.has_system_video()
                             {
                                 return if stop_requested {
@@ -1577,7 +1570,6 @@ impl FrameHook for RunHook {
                                         && c.enabled
                                         && c.style & 0x800 == 0
                                 });
-                        self.produced_frame |= non_black || (has_shared_image && explicit);
                         if tx.send(snapshot).is_err() {
                             // GUI thread dropped the receiver — the user
                             // closed the run screen / quit the launcher.

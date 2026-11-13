@@ -47,7 +47,6 @@ pub fn startup_failure(reason: String, log: Vec<String>) -> Diagnostic {
 pub fn classify(
     stopped: bool,
     started: bool,
-    produced_frame: bool,
     exit_code: u32,
     runtime_error: Option<&str>,
     summary: &str,
@@ -66,13 +65,11 @@ pub fn classify(
         ("Emulation stopped", error.to_owned())
     } else if exit_code != 0 {
         ("The game exited with an error", code.clone())
-    } else if !produced_frame {
-        (
-            "The game exited during startup",
-            format!("{code} The reason is unknown."),
-        )
     } else {
-        return None;
+        (
+            "The emulation session ended",
+            format!("{code} The guest exited or emulation stopped without reporting an error."),
+        )
     };
     Some(Diagnostic {
         title,
@@ -86,10 +83,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_startup_exit_and_runtime_errors_but_allows_normal_return() {
-        assert!(classify(false, true, false, 0, None, "", vec![]).is_some());
-        assert!(classify(false, true, true, 0, None, "", vec![]).is_none());
-        assert!(classify(true, true, false, 0, None, "", vec![]).is_none());
-        assert!(classify(false, true, true, 0, Some("ARM fault"), "", vec![]).is_some());
+    fn reports_every_unsolicited_end_including_exit_code_zero() {
+        assert!(classify(false, true, 0, None, "", vec![]).is_some());
+        assert!(classify(false, false, 1, None, "", vec![]).is_some());
+        assert!(classify(true, true, 0, None, "", vec![]).is_none());
+        let fault = classify(false, true, 0, Some("ARM fault"), "", vec![]).unwrap();
+        assert_eq!(fault.reason, "ARM fault");
     }
 }
