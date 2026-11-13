@@ -47,7 +47,8 @@ impl ImportAdvice {
     pub fn analyze(path: &std::path::Path) -> Self {
         Self {
             may_run_fast: crate::frame_pacing::may_run_fast(path),
-            uses_opengl_es: crate::analysis::detect_graphics_api_cached(path) == Some("OpenGL ES"),
+            uses_opengl_es: crate::analysis::detect_graphics_api_cached(path)
+                .is_some_and(|label| label.starts_with("OpenGL ES")),
         }
     }
     pub fn message(self) -> String {

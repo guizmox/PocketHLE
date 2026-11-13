@@ -2170,9 +2170,7 @@ impl PocketLauncher {
             Some((pref, size, api)) if *pref == game.settings.screen => (*size, *api),
             _ => {
                 let size = game.resolved_screen_size(self.library.root());
-                let api = pocket_library::analysis::detect_graphics_api(
-                    &game.executable_path(self.library.root()),
-                );
+                let api = pocket_library::analysis::game_graphics_api(game, self.library.root());
                 self.screen_cache
                     .insert(game.id.clone(), (game.settings.screen, size, api));
                 (size, api)
@@ -2594,7 +2592,7 @@ impl PocketLauncher {
                 detail_section(ui, "EXECUTABLE", &analysis.executable);
                 detail_section(ui, "DEPENDENCIES", &analysis.dependencies);
                 detail_section(ui, "DISPLAY & GRAPHICS", &analysis.graphics);
-                if is_gizmondo_game(game, &root) && !analysis.hardware.is_empty() {
+                if !analysis.hardware.is_empty() {
                     detail_section(ui, "HARDWARE", &analysis.hardware);
                 }
                 if !analysis.game_data.is_empty() {

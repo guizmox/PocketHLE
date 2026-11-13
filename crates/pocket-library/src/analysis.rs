@@ -29,6 +29,40 @@ struct ModuleGraphics {
     dependencies: std::collections::BTreeSet<String>,
 }
 
+const GLES_2: &str = "OpenGL ES 2.0 CM";
+const GLES_CM: &str = "OpenGL ES 1.1 CM";
+const GLES_LEGACY_CM: &str = "OpenGL ES CM";
+const GLES_CL: &str = "OpenGL ES 1.0 CL";
+const GLES_V1_CL: &str = "OpenGL ES 1.1 CL";
+const GLES_GENERIC: &str = "OpenGL ES";
+
+fn gles_driver_label(dll: &str) -> Option<&'static str> {
+    match dll {
+        "libglesv2.dll" => Some(GLES_2),
+        "libgles_cm.dll" => Some(GLES_LEGACY_CM),
+        "libglesv1_cm.dll" => Some(GLES_CM),
+        "libgles_cl.dll" => Some(GLES_CL),
+        "libglesv1_cl.dll" => Some(GLES_V1_CL),
+        "gles.dll" | "libgles.dll" => Some(GLES_GENERIC),
+        _ => None,
+    }
+}
+
+const GRAPHICS_PRIORITY: &[&str] = &[
+    GLES_2,
+    GLES_CM,
+    GLES_V1_CL,
+    GLES_CL,
+    GLES_LEGACY_CM,
+    GLES_GENERIC,
+    "Direct3D Mobile",
+    "DirectDraw",
+    "GAPI",
+    "GapiDraw",
+    "SDL",
+    "GDI",
+];
+
 fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
     let bytes = std::fs::read(path).ok()?;
     let image = pocket_pe::load_bytes(&bytes).ok()?;
@@ -69,7 +103,6 @@ fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
         }
     }
     let strings = binary_strings(&bytes);
-    let label = graphics_api_from_evidence(&imports, &strings);
     let mut dependencies: std::collections::BTreeSet<_> = imports
         .iter()
         .filter_map(|import| dll_basename(&import.dll))
@@ -83,6 +116,13 @@ fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
     }) {
         dependencies.extend(strings.iter().filter_map(|name| dll_basename(name)));
     }
+    let label = graphics_api_from_evidence(&imports, &strings);
+    let label = GRAPHICS_PRIORITY.iter().copied().find(|candidate| {
+        Some(*candidate) == label
+            || dependencies
+                .iter()
+                .any(|dll| gles_driver_label(dll) == Some(*candidate))
+    });
     Some(ModuleGraphics {
         label,
         dependencies,
@@ -108,7 +148,11 @@ fn detect_from_modules(
     mut inspect: impl FnMut(&std::path::Path) -> Option<ModuleGraphics>,
 ) -> Option<&'static str> {
     let main = inspect(path)?;
-    if main.label.is_some_and(|label| label != "GDI") || main.dependencies.is_empty() {
+    if main
+        .label
+        .is_some_and(|label| label != "GDI" && label != GLES_GENERIC)
+        || main.dependencies.is_empty()
+    {
         return main.label;
     }
     let Some(files) = path.parent().and_then(|dir| std::fs::read_dir(dir).ok()) else {
@@ -146,17 +190,10 @@ fn detect_from_modules(
             labels.extend(inspect(candidate).and_then(|module| module.label));
         }
     }
-    [
-        "OpenGL ES",
-        "Direct3D Mobile",
-        "DirectDraw",
-        "GAPI",
-        "GapiDraw",
-        "SDL",
-        "GDI",
-    ]
-    .into_iter()
-    .find(|label| labels.contains(label))
+    GRAPHICS_PRIORITY
+        .iter()
+        .copied()
+        .find(|label| labels.contains(label))
 }
 
 /// Process-local cache for catalogue refreshes. File metadata, not game names,
@@ -195,6 +232,14 @@ pub fn detect_graphics_api_cached(path: &std::path::Path) -> Option<&'static str
     detect_from_modules(path, |module| cache.get(module, read_graphics_module))
 }
 
+pub fn game_graphics_api(game: &GameEntry, root: &std::path::Path) -> Option<&'static str> {
+    // The original Gizmondo NVIDIA driver reports ES-CM 1.0 via GL_VERSION.
+    match detect_graphics_api_cached(&game.executable_path(root))? {
+        GLES_LEGACY_CM if crate::is_gizmondo_game(game, root) => Some("OpenGL ES 1.0 CM"),
+        label => Some(label),
+    }
+}
+
 fn graphics_api_from_evidence(
     imports: &[pocket_pe::ImportSymbol],
     strings: &[String],
@@ -228,7 +273,7 @@ fn graphics_api_from_evidence(
 }
 
 fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'static str> {
-    let mut gles = false;
+    let mut gles = None;
     let mut d3dm = false;
     let mut ddraw = false;
     let mut gapi = false;
@@ -237,23 +282,22 @@ fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'st
     let mut gapidraw = false;
     for import in imports {
         let dll = import.dll.to_ascii_lowercase();
-        gles |= matches!(
-            dll.as_str(),
-            "libgles_cm.dll"
-                | "libgles_cl.dll"
-                | "libglesv1_cm.dll"
-                | "libglesv2.dll"
-                | "gles.dll"
-                | "libgles.dll"
-        );
+        if let Some(label) = gles_driver_label(&dll) {
+            gles = GRAPHICS_PRIORITY
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == label || Some(*candidate) == gles);
+        }
         d3dm |= dll == "d3dm.dll";
         ddraw |= dll == "ddraw.dll";
         if let pocket_pe::ImportBinding::Name(name) = &import.binding {
             let name = name.to_ascii_lowercase();
-            gles |= matches!(
+            if matches!(
                 name.as_str(),
                 "eglswapbuffers" | "glclear" | "gldrawarrays" | "gldrawelements"
-            );
+            ) {
+                gles.get_or_insert(GLES_GENERIC);
+            }
             gapidraw |= name.contains("@cgapidisplay@@")
                 && (name.starts_with("?opendisplay@") || name.starts_with("?flip@"));
             sdl |= matches!(
@@ -278,8 +322,8 @@ fn graphics_api_from_imports(imports: &[pocket_pe::ImportSymbol]) -> Option<&'st
             );
         }
     }
-    if gles {
-        Some("OpenGL ES")
+    if gles.is_some() {
+        gles
     } else if d3dm {
         Some("Direct3D Mobile")
     } else if ddraw {
@@ -589,10 +633,9 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             .map(|i| i.dll.to_ascii_lowercase())
             .collect();
         if dlls.iter().any(|d| d.contains("gles")) {
-            a.graphics
-                .push(("Renderer".into(), "OpenGL ES / EGL".into()));
-            a.evidence
-                .push("Import: libGLES_CM.dll (OpenGL ES / EGL)".into());
+            for dll in dlls.iter().filter(|dll| gles_driver_label(dll).is_some()) {
+                a.evidence.push(format!("OpenGL ES import: {dll}"));
+            }
         }
         if dlls.iter().any(|d| d.contains("fmod")) || text.contains("fmodce.dll") {
             a.game_data
@@ -616,10 +659,6 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             .push(("Native display".into(), "320 × 240 • Landscape".into()));
     }
     if text.contains("eglcreatewindowsurface") || text.contains("eglinitialize") {
-        if !a.graphics.iter().any(|(k, _)| k == "Renderer") {
-            a.graphics
-                .push(("Renderer".into(), "OpenGL ES / EGL".into()));
-        }
         for api in [
             "eglInitialize",
             "eglCreateWindowSurface",
@@ -632,10 +671,11 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
             }
         }
     }
-    if !a.graphics.iter().any(|(key, _)| key == "Renderer") {
-        if let Some(api) = detect_graphics_api_cached(&path) {
-            a.graphics.push(("Renderer".into(), api.into()));
-        }
+    if let Some(api) = game_graphics_api(game, root).or_else(|| {
+        (text.contains("eglcreatewindowsurface") || text.contains("eglinitialize"))
+            .then_some("OpenGL ES / EGL")
+    }) {
+        a.graphics.push(("Renderer".into(), api.into()));
     }
     // Device names and transport APIs are evidence; scene-camera names are not.
     // Imports referenced by ordinal have no readable name, so absence is not proof.
@@ -743,6 +783,30 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
     if giz {
         a.hardware
             .insert(0, ("Controls".into(), "Gizmondo front panel".into()));
+    } else {
+        a.hardware.clear();
+        let sensor = [
+            "htcsensorsdk",
+            "htcsensoropen",
+            "htcsensorgetdataoutput",
+            "sen0:",
+            "acc1:",
+        ];
+        let mut detected = false;
+        for marker in sensor {
+            if text.contains(marker) {
+                detected = true;
+                a.evidence.push(format!("Accelerometer: {marker}"));
+            }
+        }
+        a.hardware.push((
+            "Accelerometer".into(),
+            if detected {
+                "✓ Detected".into()
+            } else {
+                "No static evidence (dynamic or ordinal calls may be present)".into()
+            },
+        ));
     }
 
     if let Some(save) = first_matching_string(&strings, |s| s.contains("\\flash disk\\mygames")) {
@@ -862,11 +926,12 @@ mod hardware_detection_tests {
     fn device_strings_detect_features_without_confusing_scene_cameras() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
-        let game: GameEntry = serde_json::from_value(serde_json::json!({
+        let mut game: GameEntry = serde_json::from_value(serde_json::json!({
             "id":"fixture", "display_name":"Fixture", "source_cab":"fixture.zip",
             "executable":"extracted/Autorun.exe", "imported_at":0,
         }))
         .unwrap();
+        game.platform = Some(crate::GamePlatform::Gizmondo);
         let path = game.executable_path(root.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -888,6 +953,15 @@ mod hardware_detection_tests {
         std::fs::write(&path, b"FREECAMERA\0CHASECAMERA\0").unwrap();
         let a = analyze_game(&game, root.path());
         assert!(!a.hardware.contains(&("Camera".into(), "✓ Detected".into())));
+
+        game.platform = Some(crate::GamePlatform::PocketPc);
+        let mut sensor = b"HTCSensorSDK.dll\0HTCSensorGetDataOutput\0".to_vec();
+        sensor.extend("SEN0:\0ACC1:\0".encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&path, sensor).unwrap();
+        let a = analyze_game(&game, root.path());
+        assert_eq!(a.hardware, vec![("Accelerometer".into(), "✓ Detected".into())]);
+        assert!(a.evidence.iter().any(|line| line == "Accelerometer: sen0:"));
+        assert!(a.evidence.iter().any(|line| line == "Accelerometer: acc1:"));
     }
 }
 
@@ -989,7 +1063,7 @@ mod graphics_api_tests {
         };
         assert_eq!(
             graphics_api_from_imports(&[gdi, gapi, gles]),
-            Some("OpenGL ES")
+            Some("OpenGL ES CM")
         );
     }
     #[test]
