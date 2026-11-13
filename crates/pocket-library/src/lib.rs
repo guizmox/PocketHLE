@@ -1578,20 +1578,10 @@ fn import_executable_choices(
                 return None;
             }
             let directory = root.join(entry.relative_dir());
-            let mut executables: Vec<_> = import_tree_files(&directory.join("extracted"))
-                .ok()?
-                .into_iter()
-                .filter(|path| {
-                    path.extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-                        && is_guest_exe(path)
-                })
-                .filter_map(|path| path.strip_prefix(&directory).ok().map(Path::to_path_buf))
-                .collect();
+            let mut executables = launch_executables_in(&directory).ok()?;
             if executables.len() < 2 {
                 return None;
             }
-            executables.sort();
             if let Some(index) = executables
                 .iter()
                 .position(|path| *path == entry.executable)
@@ -1605,6 +1595,22 @@ fn import_executable_choices(
             })
         })
         .collect()
+}
+
+fn launch_executables_in(directory: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let extracted = directory.join("extracted");
+    if !pocket_cab::plain_path_below(directory, &extracted, true) {
+        return Ok(Vec::new());
+    }
+    Ok(import_tree_files(&extracted)?
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                && is_guest_exe(path)
+        })
+        .filter_map(|path| path.strip_prefix(directory).ok().map(Path::to_path_buf))
+        .collect())
 }
 
 /// A CPU cabinet offered by an installer, with matching CPU-neutral resources.
@@ -3307,6 +3313,54 @@ impl Library {
         let game_dir = self.root.join("games").join(id);
         write_json(&game_dir.join("game.json"), &cloned)?;
         self.save()
+    }
+
+    pub fn launch_executables(&self, id: &str) -> Result<Vec<PathBuf>, LibraryError> {
+        let game = self.get(id).ok_or_else(|| LibraryError::NotFound(id.into()))?;
+        if is_gizmondo_game(game, &self.root) {
+            return Err(LibraryError::InvalidSettings("This option is for Pocket PC games.".into()));
+        }
+        Ok(launch_executables_in(&self.root.join(game.relative_dir()))?)
+    }
+
+    pub fn switch_launch_executable(&mut self, id: &str, path: &Path) -> Result<(), LibraryError> {
+        use gpu_profile::GpuCompatibilityProfile::Generic;
+
+        let original = self.get(id).ok_or_else(|| LibraryError::NotFound(id.into()))?;
+        if is_gizmondo_game(original, &self.root) {
+            return Err(LibraryError::InvalidSettings("This option is for Pocket PC games.".into()));
+        }
+        let directory = self.root.join(original.relative_dir());
+        let absolute = directory.join(path);
+        if !absolute.starts_with(directory.join("extracted"))
+            || !pocket_cab::plain_path_below(&self.root, &absolute, false)
+            || !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+            || !is_guest_exe(&absolute)
+        {
+            return Err(LibraryError::InvalidSettings("Invalid launch executable.".into()));
+        }
+        let mut game = original.clone();
+        game.settings.gpu_compatibility_profile = Generic;
+        apply_import_gpu_default(&mut game, &directory);
+        let previous_default = game.settings.gpu_compatibility_profile;
+        game.executable = path.to_path_buf();
+        game.settings.import_executable_selected = true;
+        game.settings.gpu_compatibility_profile = original.settings.gpu_compatibility_profile;
+        if game.settings.gpu_compatibility_profile == previous_default {
+            game.settings.gpu_compatibility_profile = Generic;
+        }
+        apply_import_gpu_default(&mut game, &directory);
+
+        let mut next = self.library.clone();
+        *next.games.iter_mut().find(|entry| entry.id == id).unwrap() = game.clone();
+        let manifest = directory.join("game.json");
+        write_json(&manifest, &game)?;
+        if let Err(error) = write_json(&self.root.join("library.json"), &next) {
+            let _ = write_json(&manifest, original);
+            return Err(error);
+        }
+        self.library = next;
+        Ok(())
     }
 }
 
@@ -6804,6 +6858,48 @@ mod tests {
         assert_eq!(
             entry.guest_exe_path().as_deref(),
             Some("\\Program Files\\COD2\\cod2.exe"),
+        );
+    }
+
+    #[test]
+    fn switching_launch_executable_persists_the_choice_and_graphics_label() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut library = Library::open(root).unwrap();
+        let mut entry = entry_with_install_dir(Some("\\Program Files\\COD2"));
+        entry.id = "switch-executable".into();
+        entry.executable = "extracted/cod2.exe".into();
+        let directory = root.join(entry.relative_dir());
+        write_cod2_install(&directory.join("extracted"));
+        library.commit_entry(&entry.id, entry.clone()).unwrap();
+
+        let game = library.get(&entry.id).unwrap();
+        assert_eq!(analysis::game_graphics_api(game, root), Some("OpenGL ES CM"));
+        let intel = Path::new("extracted/cod2_gles.exe");
+        assert!(library
+            .launch_executables(&entry.id)
+            .unwrap()
+            .iter()
+            .any(|path| path.as_path() == intel));
+        library.switch_launch_executable(&entry.id, intel).unwrap();
+
+        let reopened = Library::open(root).unwrap();
+        let game = reopened.get(&entry.id).unwrap();
+        assert_eq!(game.launch_path(root), directory.join(intel));
+        assert_eq!(analysis::game_graphics_api(game, root), Some("OpenGL ES 1.0 CL"));
+        assert_eq!(
+            game.settings.gpu_compatibility_profile,
+            gpu_profile::GpuCompatibilityProfile::Intel2700g
+        );
+        let manifest: GameEntry =
+            serde_json::from_slice(&fs::read(directory.join("game.json")).unwrap()).unwrap();
+        assert_eq!(manifest.executable.as_path(), intel);
+
+        let software = Path::new("extracted/cod2.exe");
+        library.switch_launch_executable(&entry.id, software).unwrap();
+        assert_eq!(
+            library.get(&entry.id).unwrap().launch_path(root),
+            directory.join(software)
         );
     }
 

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto">
+    <Preference android:key="launch_executable" android:title="Switch Launch Executable" android:persistent="false" />
     <PreferenceCategory android:key="controls_category" android:title="Controls">
         <ListPreference android:key="dpad_deadzone" android:title="D-pad dead zone" android:entries="@array/dpad_deadzone_entries" android:entryValues="@array/dpad_deadzone_values" android:defaultValue="large" app:useSimpleSummaryProvider="true" />
     </PreferenceCategory>

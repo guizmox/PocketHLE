@@ -358,6 +358,7 @@ pub struct PocketLauncher {
     game_id_popup: Option<String>,
     config_draft: Option<LauncherConfig>,
     game_settings_draft: Option<(String, GameSettings)>,
+    launch_executable_choices: Option<(String, Vec<std::path::PathBuf>)>,
     last_frame_texture: Option<egui::TextureHandle>,
     loading_logo: Option<egui::TextureHandle>,
     uploaded_image_id: Option<u64>,
@@ -986,6 +987,7 @@ impl PocketLauncher {
             game_id_popup: None,
             config_draft: None,
             game_settings_draft: None,
+            launch_executable_choices: None,
             last_frame_texture: None,
             loading_logo: None,
             uploaded_image_id: None,
@@ -3042,6 +3044,68 @@ impl PocketLauncher {
         let mut save_clicked = false;
         let mut cancel_clicked = false;
         ui.heading(format!("Settings: {display_name}"));
+        if !is_gizmondo && self.running_game.is_none()
+            && crate::controller_ui::button(ui, "Switch Launch Executable").clicked()
+        {
+            match self.library.launch_executables(&id) {
+                Ok(choices) => self.launch_executable_choices = Some((id.clone(), choices)),
+                Err(error) => self.status = format!("Could not list executables: {error}"),
+            }
+        }
+        if let Some((owner, choices)) = self.launch_executable_choices.take() {
+            if owner == id && !is_gizmondo && self.running_game.is_none() {
+                let current = self.library.get(&id).map(|game| {
+                    let root = self.library.root();
+                    let launch = game.launch_path(root);
+                    launch
+                        .strip_prefix(root.join(game.relative_dir()))
+                        .unwrap_or(&launch)
+                        .to_path_buf()
+                });
+                let mut selected = current.as_ref();
+                let mut chosen = None;
+                if choices.is_empty() {
+                    ui.label("No launchable executables found.");
+                } else {
+                    crate::controller_ui::ComboBox::from_id_source("launch_executable")
+                        .selected_text(current.as_ref().map_or_else(
+                            || "Select executable".into(),
+                            |path| path.display().to_string(),
+                        ))
+                        .show_ui(ui, |ui| {
+                            for path in &choices {
+                                if crate::controller_ui::selectable_value(
+                                    ui,
+                                    &mut selected,
+                                    Some(path),
+                                    path.display().to_string(),
+                                ).clicked() {
+                                    chosen = Some(path);
+                                }
+                            }
+                        });
+                }
+                if let Some(path) = chosen {
+                    let previous_profile = self.library.get(&id)
+                        .map(|game| game.settings.gpu_compatibility_profile);
+                    match self.library.switch_launch_executable(&id, path) {
+                        Ok(()) => {
+                            self.screen_cache.remove(&id);
+                            self.analysis_cache.remove(&id);
+                            if previous_profile == Some(draft.gpu_compatibility_profile) {
+                                if let Some(game) = self.library.get(&id) {
+                                    draft.gpu_compatibility_profile = game.settings.gpu_compatibility_profile;
+                                }
+                            }
+                            self.status = "Launch executable updated.".into();
+                        }
+                        Err(error) => self.status = format!("Could not switch executable: {error}"),
+                    }
+                } else if !ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    self.launch_executable_choices = Some((owner, choices));
+                }
+            }
+        }
         ui.add_space(8.0);
         ui.separator();
         ui.heading("Controls");
@@ -3320,6 +3384,7 @@ impl PocketLauncher {
             }
         });
         if save_clicked {
+            self.launch_executable_choices = None;
             self.stylus_editor = None;
             self.release_all_keys();
             if let Err(e) = self.library.update_settings(&id, draft) {
@@ -3333,6 +3398,7 @@ impl PocketLauncher {
                 Screen::Library
             };
         } else if cancel_clicked {
+            self.launch_executable_choices = None;
             self.stylus_editor = None;
             self.screen = if self.running_game.is_some() {
                 Screen::Run

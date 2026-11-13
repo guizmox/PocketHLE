@@ -661,6 +661,34 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_writeConfig<'local>(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_launchExecutables<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    library_root: JString<'local>,
+    id: JString<'local>,
+    selected: JString<'local>,
+) -> jstring {
+    let result = (|| -> anyhow::Result<String> {
+        let root = jstring_to_path(&mut env, library_root).context("missing library root")?;
+        let id = jstring_to_string(&mut env, id).context("missing game id")?;
+        let mut library = Library::open(&root)?;
+        if let Some(path) = jstring_to_path(&mut env, selected) {
+            library.switch_launch_executable(&id, &path)?;
+            return Ok(serde_json::json!({"ok": true}).to_string());
+        }
+        let game = library.get(&id).context("unknown game")?;
+        let launch = game.launch_path(&root);
+        let current = launch.strip_prefix(root.join(game.relative_dir())).unwrap_or(&launch);
+        Ok(serde_json::json!({
+            "ok": true,
+            "current": current,
+            "executables": library.launch_executables(&id)?,
+        }).to_string())
+    })();
+    new_jstring(&env, result.unwrap_or_else(|error| error_json(&format!("{error:#}"))))
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_readGameSettings<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,

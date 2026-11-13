@@ -97,6 +97,7 @@ object NativeBridge {
 
     /** Returns the per-game settings as JSON. */
     @JvmStatic external fun readGameSettings(libraryRoot: String, id: String): String
+    @JvmStatic external fun launchExecutables(libraryRoot: String, id: String, selected: String?): String
 
     /** Persists the per-game settings from a JSON blob. */
     @JvmStatic external fun writeGameSettings(

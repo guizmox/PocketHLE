@@ -234,7 +234,7 @@ pub fn detect_graphics_api_cached(path: &std::path::Path) -> Option<&'static str
 
 pub fn game_graphics_api(game: &GameEntry, root: &std::path::Path) -> Option<&'static str> {
     // The original Gizmondo NVIDIA driver reports ES-CM 1.0 via GL_VERSION.
-    match detect_graphics_api_cached(&game.executable_path(root))? {
+    match detect_graphics_api_cached(&game.launch_path(root))? {
         GLES_LEGACY_CM if crate::is_gizmondo_game(game, root) => Some("OpenGL ES 1.0 CM"),
         label => Some(label),
     }
