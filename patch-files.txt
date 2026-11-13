@@ -1,9 +1,1 @@
-README.md
-frontends/pocket-android/app/src/main/res/mipmap-hdpi/ic_launcher.png
-frontends/pocket-android/app/src/main/res/mipmap-mdpi/ic_launcher.png
-frontends/pocket-android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
-frontends/pocket-android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-frontends/pocket-android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-frontends/pocket-desktop/assets/pockethle-256.png
-frontends/pocket-desktop/assets/pockethle.ico
-frontends/pocket-desktop/assets/pockethle_logo.png
+frontends/pocket-android/app/src/test/java/com/pockethle/app/CenterTapPulseTest.kt
