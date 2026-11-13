@@ -1,7 +1,2 @@
-crates/pocket-library/src/analysis.rs
-crates/pocket-library/src/lib.rs
 frontends/pocket-desktop/src/app.rs
-frontends/pocket-android-jni/src/lib.rs
-frontends/pocket-android/app/src/main/java/com/pockethle/app/GameSettingsActivity.kt
-frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
-frontends/pocket-android/app/src/main/res/xml/preferences_game.xml
+frontends/pocket-android/app/src/main/java/com/pockethle/app/MainActivity.kt

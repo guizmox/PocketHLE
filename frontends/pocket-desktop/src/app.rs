@@ -2303,6 +2303,7 @@ impl PocketLauncher {
                 .show(ctx, |ui| {
                     crate::controller_ui::page_scope(ui, "import_executable", |ui| {
                         ui.label(format!("Which executable should PocketHLE launch for {}?", game.display_name));
+                        ui.label("You can change this later in Game settings → Switch Launch Executable.");
                         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                             for (index, exe) in game.executables.iter().enumerate() {
                                 let name = exe.strip_prefix("extracted").unwrap_or(exe);

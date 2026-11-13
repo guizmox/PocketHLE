@@ -556,8 +556,13 @@ class MainActivity : HostKeyActivity() {
                 pendingImportToken = null
                 setLibraryBusy(null)
             }
+            val title = "Choose executable for ${game.getString("display_name")}"
+            val hint = "You can change this later in Game settings → Switch Launch Executable."
+            val heading = android.text.SpannableString("$title\n$hint").apply {
+                setSpan(android.text.style.RelativeSizeSpan(0.75f), title.length + 1, length, 0)
+            }
             AlertDialog.Builder(this)
-                .setTitle("Choose executable for ${game.getString("display_name")}")
+                .setTitle(heading)
                 .setCancelable(false)
                 .setItems(labels) { _, index ->
                     runCatching {
