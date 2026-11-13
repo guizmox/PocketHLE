@@ -355,6 +355,8 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitPreparedImport<
         let pending = take_prepared_import(&root, token as u64)?;
         let mut library = Library::open(&root)?;
         let before = pocket_library::import_setup::Presence::read(library.games(), &root);
+        let existing_ids: std::collections::HashSet<_> =
+            library.games().iter().map(|entry| entry.id.clone()).collect();
         let entries = library.apply_prepared_import(pending, allow_updates != 0)?;
         let setup_requests = library.config().first_import_setup.requests(
             before,
@@ -365,16 +367,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitPreparedImport<
             .map(|entry| -> anyhow::Result<serde_json::Value> {
                 let mut value = serde_json::to_value(entry)?;
                 value["is_gizmondo"] = pocket_library::is_gizmondo_game(entry, &root).into();
-                if allow_updates == 0
-                    && !pocket_library::is_gizmondo_game(entry, &root)
-                    && !library.is_demo_card(&entry.id)
-                {
-                    value["import_settings_message"] =
-                        pocket_library::gpu_profile::ImportAdvice::analyze(
-                            &entry.executable_path(&root),
-                        )
-                        .message()
-                        .into();
+                if !existing_ids.contains(&entry.id) && !library.is_demo_card(&entry.id) {
+                    if let Some(options) = pocketpc_launch_options(entry, &root, true)? {
+                        value["launch_options"] = options;
+                    }
                 }
                 Ok(value)
             })
@@ -485,8 +481,14 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_commitGameData<'local
             .map_err(|_| anyhow::anyhow!("Library lock unavailable"))?;
         anyhow::ensure!(*sessions == 0, "Stop the running game before adding data");
         let destination = pending.destination().display().to_string();
-        pending.apply(&mut Library::open(&root)?, overwrite != 0)?;
-        Ok(serde_json::json!({"ok": true, "destination": destination}).to_string())
+        let selected_game = pending.selected_game_id().map(str::to_owned);
+        let mut library = Library::open(&root)?;
+        pending.apply(&mut library, overwrite != 0)?;
+        let options = match selected_game.as_deref().and_then(|id| library.get(id)) {
+            Some(game) => pocketpc_launch_options(game, &root, false)?,
+            None => None,
+        };
+        Ok(serde_json::json!({"ok": true, "destination": destination, "launch_options": options}).to_string())
     })();
     new_jstring(
         &env,
@@ -660,6 +662,32 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_writeConfig<'local>(
     }
 }
 
+fn pocketpc_launch_options(
+    game: &pocket_library::GameEntry,
+    root: &std::path::Path,
+    display_advice: bool,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let Some(advice) = pocket_library::gpu_profile::ImportAdvice::for_game(game, root, display_advice) else {
+        return Ok(None);
+    };
+    let profiles = if advice.choose_gpu_profile {
+        pocket_library::gpu_profile::GpuCompatibilityProfile::ALL
+            .into_iter()
+            .map(|profile| serde_json::json!({"id": profile, "label": profile.label()}))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(Some(serde_json::json!({
+        "id": game.id,
+        "display_name": game.display_name,
+        "import_settings_message": advice.message(),
+        "show_display_advice": advice.show_display_advice,
+        "profiles": profiles,
+        "current_profile": game.settings.gpu_compatibility_profile,
+    })))
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_pockethle_app_NativeBridge_launchExecutables<'local>(
     mut env: JNIEnv<'local>,
@@ -674,7 +702,8 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_launchExecutables<'lo
         let mut library = Library::open(&root)?;
         if let Some(path) = jstring_to_path(&mut env, selected) {
             library.switch_launch_executable(&id, &path)?;
-            return Ok(serde_json::json!({"ok": true}).to_string());
+            let options = pocketpc_launch_options(library.get(&id).context("Unknown game")?, &root, false)?;
+            return Ok(serde_json::json!({"ok": true, "launch_options": options}).to_string());
         }
         let game = library.get(&id).context("unknown game")?;
         let launch = game.launch_path(&root);

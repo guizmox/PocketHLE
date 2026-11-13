@@ -21,7 +21,7 @@ class AddDataModel(application: Application) : AndroidViewModel(application) {
         data class Zip(val uri: Uri, val name: String, val gameId: String) : Step()
         data class Executable(val paths: List<String>) : Step()
         data class Overwrite(val paths: List<String>) : Step()
-        data class Notice(val success: Boolean, val message: String) : Step()
+        data class Notice(val success: Boolean, val message: String, val launchOptions: JSONObject? = null) : Step()
     }
 
     val step = MutableLiveData<Step>(Step.Idle)
@@ -114,10 +114,15 @@ class AddDataModel(application: Application) : AndroidViewModel(application) {
         step.value = Step.Busy
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO + NonCancellable) {
-                runCatching { checked(NativeBridge.commitGameData(root, prepared, overwrite, executable)).getString("destination") }
+                runCatching { checked(NativeBridge.commitGameData(root, prepared, overwrite, executable)) }
             }
-            result.fold(onSuccess = { destination ->
-                step.value = Step.Notice(true, "Data added successfully.\n\nFiles were placed in:\n$destination")
+            result.fold(onSuccess = { data ->
+                val destination = data.getString("destination")
+                step.value = Step.Notice(
+                    true,
+                    "Data added successfully.\n\nFiles were placed in:\n$destination",
+                    data.optJSONObject("launch_options")
+                )
             }, onFailure = { notice(it) })
         }
     }

@@ -755,7 +755,7 @@ impl HeldButtons {
 #[derive(Debug)]
 pub enum UiEvent {
     DataPrepared(Result<pocket_library::add_data::PreparedData, String>),
-    DataFinished(Result<String, String>),
+    DataFinished(Result<(String, Option<String>), String>),
     BackupFinished(Result<String, String>),
     CabCleanupFinished(Result<String, String>),
     ColorsUnlocked(Result<String, String>),
@@ -781,9 +781,9 @@ impl ImportedGames {
             .iter()
             .filter(|game| !existing_ids.contains(&game.id) && !library.is_demo_card(&game.id))
             .filter(|game| !is_gizmondo_game(game, library.root()))
-            .map(|game| {
-                let advice = pocket_library::gpu_profile::ImportAdvice::analyze(&game.executable_path(library.root()));
-                (game.id.clone(), advice)
+            .filter_map(|game| {
+                pocket_library::gpu_profile::ImportAdvice::for_game(game, library.root(), true)
+                    .map(|advice| (game.id.clone(), advice))
             })
             .collect();
         Self {
@@ -1115,12 +1115,16 @@ impl PocketLauncher {
                     self.deck_library_actions.clear();
                     self.library_busy = false;
                     let (title, message) = match result {
-                        Ok(message) => {
+                        Ok((message, selected_game)) => {
                             self.analysis_cache.clear();
                             self.game_card_metadata.clear();
                             self.screen_cache.clear();
                             self.icon_cache.clear();
                             self.reload_library();
+                            self.status = "Game data updated.".into();
+                            if selected_game.as_deref().is_some_and(|id| self.queue_executable_gpu_options(id)) {
+                                continue;
+                            }
                             ("Add/Replace Data complete", message)
                         }
                         Err(message) => ("Add/Replace Data failed", message),
@@ -1204,6 +1208,7 @@ impl PocketLauncher {
                             self.demo_import = Some((id, name));
                         } else if !updated
                             && entries.len() == 1
+                            && is_gizmondo_game(game, self.library.root())
                             && !game.source_cab.starts_with("gzga-collection:")
                         {
                             self.rename_draft = Some((id, name, true));
@@ -2440,6 +2445,17 @@ impl PocketLauncher {
         }
     }
 
+    fn queue_executable_gpu_options(&mut self, id: &str) -> bool {
+        if let Some(advice) = self.library.get(id).and_then(|game| {
+            pocket_library::gpu_profile::ImportAdvice::for_game(game, self.library.root(), false)
+        }) {
+            self.pocketpc_import_options.push_back((id.to_owned(), advice));
+            true
+        } else {
+            false
+        }
+    }
+
     fn ui_pocketpc_import_options(&mut self, ctx: &egui::Context) -> bool {
         if self.screen != Screen::Library || self.rename_draft.is_some() {
             return false;
@@ -2453,34 +2469,66 @@ impl PocketLauncher {
             return false;
         };
         self.deck_nav_repeat = None;
-        let mut open_settings = self.deck_library_actions.iter().any(|c| c == "East")
-            || ctx.input(|i| i.key_pressed(egui::Key::B));
-        let mut dismiss = self.deck_library_actions.iter().any(|c| c == "South")
-            || ctx.input(|i| i.key_pressed(egui::Key::A));
+        let id = id.clone();
+        let advice = *advice;
+        let name = game.display_name.clone();
+        let current = game.settings.gpu_compatibility_profile;
+        let profile_id = egui::Id::new(("launch_gpu_profile_draft", &id));
+        let mut profile = ctx.data(|data| data.get_temp(profile_id)).unwrap_or(current);
+        let mut open_settings = false;
+        let mut dismiss = false;
         self.deck_library_actions.clear();
-        self.controller_ui.stop_repeat();
-        crate::controller_ui::claim_modal_input(ctx);
         egui::CentralPanel::default().show(ctx, |_| {});
-        egui::Window::new("PocketPC launch settings")
+        let title = if advice.show_display_advice { "Pocket PC launch settings" } else { "GPU compatibility profile" };
+        egui::Window::new(title)
             .collapsible(false)
-            .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.set_max_width(380.0);
-                ui.strong(&game.display_name);
-                ui.label(advice.message());
-                ui.horizontal(|ui| {
-                    dismiss |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx, "Not Now ({South})")).clicked();
-                    open_settings |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx, "Settings ({East})")).clicked();
+                crate::controller_ui::page_scope(ui, "pocketpc_launch_options", |ui| {
+                    ui.set_max_width(480.0);
+                    ui.strong(name);
+                    ui.label(advice.message());
+                    if advice.choose_gpu_profile {
+                        crate::controller_ui::ComboBox::from_id_source("launch_gpu_profile")
+                            .selected_text(profile.label())
+                            .show_ui(ui, |ui| {
+                                for choice in pocket_library::gpu_profile::GpuCompatibilityProfile::ALL {
+                                    crate::controller_ui::selectable_value(ui, &mut profile, choice, choice.label());
+                                }
+                            });
+                    }
+                    let accept = if profile != current { "Save profile" } else { "Continue" };
+                    if crate::controller_ui::button(ui, accept).clicked() {
+                        dismiss = true;
+                    }
+                    if advice.show_display_advice && crate::controller_ui::button(ui, "Open game settings").clicked() {
+                        open_settings = true;
+                    }
                 });
-                ui.weak("Keyboard: A = Not Now · B = Settings");
             });
-        if open_settings {
-            self.selected_game = Some(game.id.clone());
-            self.game_settings_draft = Some((game.id.clone(), game.settings.clone()));
-            self.screen = Screen::GameSettings;
-        }
-        if open_settings || dismiss {
+        ctx.data_mut(|data| data.insert_temp(profile_id, profile));
+        if dismiss || open_settings {
+            if profile != current {
+                if let Some(game) = self.library.get(&id) {
+                    let mut settings = game.settings.clone();
+                    settings.gpu_compatibility_profile = profile;
+                    if let Err(error) = self.library.update_settings(&id, settings) {
+                        self.add_data = Some(DataPrompt::Notice {
+                            title: "Could not save GPU profile",
+                            message: error.to_string(),
+                        });
+                        return true;
+                    }
+                }
+            }
+            if open_settings {
+                if let Some(game) = self.library.get(&id) {
+                    self.selected_game = Some(id.clone());
+                    self.game_settings_draft = Some((id.clone(), game.settings.clone()));
+                    self.screen = Screen::GameSettings;
+                }
+            }
+            ctx.data_mut(|data| data.remove::<pocket_library::gpu_profile::GpuCompatibilityProfile>(profile_id));
             self.pocketpc_import_options.pop_front();
             ctx.request_repaint();
         }
@@ -4908,8 +4956,10 @@ impl PocketLauncher {
                         continue;
                     }
                     if self.screen==Screen::Library && !self.library_busy && !self.pocketpc_import_options.is_empty() && self.rename_draft.is_none()
-                        && self.file_dialog.is_none() && Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) {
-                        if down && matches!(control.as_str(),"South"|"East") {self.deck_library_actions.push(control.clone());ctx.request_repaint();}
+                        && self.file_dialog.is_none() && self.add_data.is_none()
+                        && self.launch_executable_choices.is_none() && Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) {
+                        if down { self.controller_ui.press(&control); } else { self.controller_ui.release(&control); }
+                        ctx.request_repaint();
                         continue;
                     }
                     if Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) && self.route_long_press(true,device,&control,down) {continue;}
@@ -6331,6 +6381,7 @@ impl eframe::App for PocketLauncher {
                         Ok(()) => {
                             self.screen_cache.remove(&id);
                             self.analysis_cache.remove(&id);
+                            self.queue_executable_gpu_options(&id);
                             self.status = "Launch executable updated.".into();
                         }
                         Err(error) => {

@@ -57,7 +57,13 @@ class MainActivity : HostKeyActivity() {
         dataDialog = null
         if (step == AddDataModel.Step.Idle) {
             refreshLibrary()
+            showNextImportOptions()
             showReleaseUpdate()
+            return
+        }
+        if (step is AddDataModel.Step.Notice && step.success && step.launchOptions != null) {
+            importOptionsQueue.addLast(step.launchOptions)
+            addDataModel.cancel()
             return
         }
         val dialog = AddDataDialog(this, ::handleHostKeyEvent)
@@ -297,9 +303,16 @@ class MainActivity : HostKeyActivity() {
                             runCatching {
                                 val saved = JSONObject(NativeBridge.launchExecutables(rootDir, entry.id, paths[index]))
                                 if (!saved.optBoolean("ok")) error(saved.optString("error"))
+                                saved
                             }
                         }
-                        result.onSuccess { refreshLibrary() }.onFailure { error ->
+                        result.onSuccess { saved ->
+                            refreshLibrary()
+                            saved.optJSONObject("launch_options")?.let {
+                                importOptionsQueue.addLast(it)
+                                showNextImportOptions()
+                            }
+                        }.onFailure { error ->
                             AlertDialog.Builder(this@MainActivity)
                                 .setTitle("Could not switch executable")
                                 .setMessage(error.localizedMessage)
@@ -678,11 +691,10 @@ class MainActivity : HostKeyActivity() {
                     if (platform in listOf("gizmondo", "pocket_pc") && !firstImportQueue.contains(platform)) firstImportQueue.addLast(platform)
                 }
             }
-            if (entry.optString("import_settings_message").isNotBlank()
-                && importOptionsQueue.none { it.optString("id") == entry.optString("id") }) {
-                importOptionsQueue.addLast(JSONObject().put("id", entry.optString("id"))
-                    .put("display_name", entry.optString("display_name"))
-                    .put("import_settings_message", entry.optString("import_settings_message")))
+            entry.optJSONObject("launch_options")?.let { options ->
+                if (importOptionsQueue.none { it.optString("id") == options.optString("id") }) {
+                    importOptionsQueue.addLast(options.put("display_name", entry.optString("display_name")))
+                }
             }
         }
         showNextImportOptions()
@@ -737,17 +749,80 @@ class MainActivity : HostKeyActivity() {
 
     private fun showNextImportOptions() {
         if (firstImportActive) { showNextFirstImportSetup(); return }
-        if (isFinishing || isDestroyed || libraryBusy || waitingForImportSettings || importOptionsDialog != null) return
+        if (isFinishing || isDestroyed || libraryBusy || waitingForImportSettings ||
+            importOptionsDialog != null || dataDialog?.isShowing == true) return
         val entry = importOptionsQueue.peekFirst() ?: return
-        val dialog = AlertDialog.Builder(this).setTitle("PocketPC launch settings")
-            .setMessage("${entry.optString("display_name")}\n\n${entry.optString("import_settings_message")}")
-            .setNegativeButton("Not now", null)
-            .setPositiveButton("Settings") { _, _ ->
-                waitingForImportSettings = true
-                importSettings.launch(Intent(this, GameSettingsActivity::class.java)
-                    .putExtra(GameSettingsActivity.EXTRA_GAME_ID, entry.getString("id"))
-                    .putExtra(GameSettingsActivity.EXTRA_GAME_NAME, entry.optString("display_name")))
-            }.create()
+        val id = entry.getString("id")
+        val currentProfile = entry.optString("current_profile")
+        val profiles = entry.optJSONArray("profiles")
+        val message = "${entry.optString("display_name")}\n\n${entry.optString("import_settings_message")}"
+        val displayAdvice = entry.optBoolean("show_display_advice")
+        val title = if (displayAdvice) "Pocket PC launch settings" else "GPU compatibility profile"
+        val builder = AlertDialog.Builder(this).setTitle(title)
+        val choices = android.widget.RadioGroup(this)
+        if (profiles != null && profiles.length() > 0) {
+            val padding = (24 * resources.displayMetrics.density).toInt()
+            choices.setPadding(padding, 0, padding, 0)
+            choices.addView(android.widget.TextView(this).apply { text = message })
+            for (index in 0 until profiles.length()) {
+                val profile = profiles.getJSONObject(index)
+                choices.addView(android.widget.RadioButton(this).apply {
+                    this.id = android.view.View.generateViewId()
+                    text = profile.getString("label")
+                    tag = profile.getString("id")
+                    isChecked = tag == currentProfile
+                })
+            }
+            builder.setView(android.widget.ScrollView(this).apply { addView(choices) })
+        } else {
+            builder.setMessage(message)
+        }
+
+        fun openSettings() {
+            waitingForImportSettings = true
+            importSettings.launch(Intent(this, GameSettingsActivity::class.java)
+                .putExtra(GameSettingsActivity.EXTRA_GAME_ID, id)
+                .putExtra(GameSettingsActivity.EXTRA_GAME_NAME, entry.optString("display_name")))
+        }
+
+        fun applyChoice(settings: Boolean) {
+            val selected = choices.findViewById<android.view.View>(choices.checkedRadioButtonId)?.tag as? String
+            if (selected == null || selected == currentProfile) {
+                if (settings) openSettings()
+                return
+            }
+            waitingForImportSettings = true
+            lifecycleScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val config = JSONObject(NativeBridge.readGameSettings(rootDir, id))
+                        check(!config.has("error")) { config.optString("error") }
+                        config.put("gpu_compatibility_profile", selected)
+                        val saved = JSONObject(NativeBridge.writeGameSettings(rootDir, id, config.toString()))
+                        check(saved.optBoolean("ok")) { saved.optString("error") }
+                    }
+                }
+                waitingForImportSettings = false
+                result.onSuccess {
+                    refreshLibrary()
+                    if (settings) openSettings() else showNextImportOptions()
+                }.onFailure { error ->
+                    importOptionsQueue.addFirst(entry)
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Could not save GPU profile")
+                        .setMessage(error.localizedMessage)
+                        .setPositiveButton(android.R.string.ok, null)
+                        .setOnDismissListener { showNextImportOptions() }
+                        .show()
+                }
+            }
+        }
+
+        builder.setPositiveButton("Continue") { _, _ -> applyChoice(false) }
+        if (displayAdvice) {
+            builder.setNegativeButton("Open game settings") { _, _ -> applyChoice(true) }
+        }
+        val dialog = builder.create()
         importOptionsDialog = dialog
         dialog.setOnDismissListener {
             importOptionsQueue.pollFirst()
@@ -755,6 +830,13 @@ class MainActivity : HostKeyActivity() {
             recycler.post { showNextImportOptions() }
         }
         dialog.show()
+        val continueButton = dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+        choices.setOnCheckedChangeListener { group, checkedId ->
+            val profile = group.findViewById<android.view.View>(checkedId)?.tag
+            continueButton.text = if (profile != null && profile != currentProfile) "Save profile" else "Continue"
+        }
+        choices.findViewById<android.view.View>(choices.checkedRadioButtonId)?.requestFocus()
+            ?: dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).requestFocus()
     }
 
     private fun handleImportResult(raw: String, confirmName: Boolean = true) {
@@ -800,7 +882,7 @@ class MainActivity : HostKeyActivity() {
                             })
                         }
                     }.show()
-            } else if (confirmName) editGameName(id, name, "Confirm game name") {
+            } else if (confirmName && obj.optBoolean("is_gizmondo")) editGameName(id, name, "Confirm game name") {
                 enqueueImportOptions(listOf(obj))
             } else enqueueImportOptions(listOf(obj))
             Snackbar.make(

@@ -44,10 +44,14 @@ pub fn startup_failure(reason: String, log: Vec<String>) -> Diagnostic {
     }
 }
 
+/// Bound the stderr-based heuristic to startup, excluding frontend teardown.
+pub const STARTUP_DIAGNOSTIC_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub fn classify(
     stopped: bool,
     started: bool,
     exit_code: u32,
+    startup_exit: bool,
     runtime_error: Option<&str>,
     summary: &str,
     log: Vec<String>,
@@ -66,10 +70,14 @@ pub fn classify(
     } else if exit_code != 0 {
         ("The game exited with an error", code.clone())
     } else {
-        (
-            "The emulation session ended",
-            format!("{code} The guest exited or emulation stopped without reporting an error."),
-        )
+        let reason = startup_exit
+            .then(|| {
+                log.iter()
+                    .rev()
+                    .find_map(|line| line.strip_prefix("[INFO pockethle_guest_stderr] "))
+            })
+            .flatten()?;
+        ("The game exited during startup", reason.to_owned())
     };
     Some(Diagnostic {
         title,
@@ -83,11 +91,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_every_unsolicited_end_including_exit_code_zero() {
-        assert!(classify(false, true, 0, None, "", vec![]).is_some());
-        assert!(classify(false, false, 1, None, "", vec![]).is_some());
-        assert!(classify(true, true, 0, None, "", vec![]).is_none());
-        let fault = classify(false, true, 0, Some("ARM fault"), "", vec![]).unwrap();
-        assert_eq!(fault.reason, "ARM fault");
+    fn startup_stderr_explains_a_clean_exit_without_reporting_normal_quits() {
+        let stderr = || vec!["[INFO pockethle_guest_stderr] Initialization failed".into()];
+        let diagnostic = classify(false, true, 0, true, None, "", stderr()).unwrap();
+        assert_eq!(diagnostic.reason, "Initialization failed");
+        assert!(diagnostic.details.contains("Exit code 0x00000000."));
+        assert!(classify(false, true, 0, false, None, "", stderr()).is_none());
+        assert!(classify(false, true, 0, true, None, "", vec![]).is_none());
+        assert!(classify(true, true, 0, true, None, "", stderr()).is_none());
+        assert!(classify(false, true, 1, false, None, "", vec![]).is_some());
     }
 }

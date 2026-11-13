@@ -45,12 +45,13 @@ impl PocketLauncher {
         let profile = self.library.profile();
         let tx = self.events_tx.clone();
         std::thread::spawn(move || {
-            let result = (|| -> anyhow::Result<String> {
+            let result = (|| -> anyhow::Result<(String, Option<String>)> {
                 let destination = pending.destination().display().to_string();
+                let selected_game = pending.selected_game_id().map(str::to_owned);
                 pending.apply(&mut Library::open_with_profile(root, profile)?, overwrite)?;
-                Ok(format!(
+                Ok((format!(
                     "Data added successfully.\n\nFiles were placed in:\n{destination}"
-                ))
+                ), selected_game))
             })()
             .map_err(|e| format!("{e:#}"));
             let _ = tx.send(UiEvent::DataFinished(result));

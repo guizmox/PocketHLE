@@ -36,6 +36,10 @@ impl PreparedData {
         Ok(())
     }
 
+    pub fn selected_game_id(&self) -> Option<&str> {
+        self.executable.as_ref().map(|_| self.game_id.as_str())
+    }
+
     pub fn destination(&self) -> &Path {
         &self.target
     }
@@ -83,6 +87,8 @@ impl PreparedData {
                 .find(|game| game.id == self.game_id)
                 .context("Game not found")?;
             game.executable = relative;
+            game.settings.import_executable_selected = true;
+            crate::apply_import_gpu_default(game, game_directory);
             let game_json = self.staging.path().join("game.json");
             fs::write(&game_json, serde_json::to_vec_pretty(&game)?)?;
             let library_json = self.staging.path().join("library.json");

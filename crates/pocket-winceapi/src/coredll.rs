@@ -8174,7 +8174,12 @@ fn crt_vfprintf(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// emulator log (std streams) or into the backing VFS file.
 fn emit_stream_text(ctx: &mut CallCtx<'_>, stream: u32, text: &str) -> Result<(), KernelError> {
     if let Some(label) = std_file_label(stream) {
-        log::debug!("guest {label}: {}", text.trim_end_matches(['\r', '\n']));
+        let text = text.trim_end_matches(['\r', '\n']);
+        if label == "stderr" && !text.trim().is_empty() {
+            log::info!(target: "pockethle_guest_stderr", "{text}");
+        } else {
+            log::debug!("guest {label}: {text}");
+        }
         return Ok(());
     }
     if ctx.kernel.vfs.is_open(stream) {

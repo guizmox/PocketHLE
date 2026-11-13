@@ -157,6 +157,7 @@ impl Runner {
             hook.stopped_by_user,
             hook.started,
             code,
+            hook.startup_exit,
             hook.runtime_error.as_deref(),
             &outcome.summary,
             log,
@@ -757,7 +758,10 @@ impl Runner {
         }
         emu.start_audio();
         hook.started = true;
+        let started_at = std::time::Instant::now();
         let run_result = emu.run_with_hook(hook);
+        hook.startup_exit = started_at.elapsed()
+            < pocket_library::session_diagnostic::STARTUP_DIAGNOSTIC_WINDOW;
         if let Err(error) = &run_result {
             hook.runtime_error = Some(format!("{error:#}"));
         }
@@ -1097,6 +1101,7 @@ struct RunHook {
     scratch: Vec<u8>,
     saw_non_black: bool,
     started: bool,
+    startup_exit: bool,
     runtime_error: Option<String>,
     stopped_by_user: bool,
     launch_context: Option<LaunchContext>,
@@ -1414,6 +1419,7 @@ impl RunHook {
             scratch: Vec::new(),
             saw_non_black: false,
             started: false,
+            startup_exit: false,
             runtime_error: None,
             stopped_by_user: false,
             launch_context: None,

@@ -41,26 +41,42 @@ impl GpuCompatibilityProfile {
 #[derive(Debug, Clone, Copy)]
 pub struct ImportAdvice {
     pub may_run_fast: bool,
-    pub uses_opengl_es: bool,
+    pub choose_gpu_profile: bool,
+    pub show_display_advice: bool,
 }
 impl ImportAdvice {
-    pub fn analyze(path: &std::path::Path) -> Self {
-        Self {
-            may_run_fast: crate::frame_pacing::may_run_fast(path),
-            uses_opengl_es: crate::analysis::detect_graphics_api_cached(path)
-                .is_some_and(|label| label.starts_with("OpenGL ES")),
+    pub fn for_game(
+        game: &crate::GameEntry,
+        root: &std::path::Path,
+        show_display_advice: bool,
+    ) -> Option<Self> {
+        if crate::is_gizmondo_game(game, root) {
+            return None;
         }
+        let path = game.launch_path(root);
+        let label = crate::analysis::detect_graphics_api_cached(&path);
+        let choose_gpu_profile = matches!(label, Some("OpenGL ES" | "OpenGL ES CM" | "OpenGL ES 1.1 CM"))
+            && !pocket_pe::load_file(&path)
+                .ok()
+                .is_some_and(|image| crate::uses_programmable_gles(&image));
+        (show_display_advice || choose_gpu_profile).then(|| Self {
+            may_run_fast: show_display_advice && crate::frame_pacing::may_run_fast(&path),
+            choose_gpu_profile,
+            show_display_advice,
+        })
     }
     pub fn message(self) -> String {
-        let mut text = "PocketPC games were designed for different screen sizes and orientations. If the game appears sideways, stretched, or cut off, you can adjust Screen and Rotate display in its launch settings.".to_owned();
-        if self.uses_opengl_es {
-            text.push_str("\n\nThis game uses OpenGL ES and may require a specific GPU compatibility profile. Check the GPU compatibility profile selection in the game's graphics settings.");
+        let mut paragraphs = Vec::new();
+        if self.show_display_advice {
+            paragraphs.push("If the image is sideways, stretched, or cut off, adjust Screen and Rotate display in the game settings.");
+        }
+        if self.choose_gpu_profile {
+            paragraphs.push("This executable uses OpenGL ES. Keep the current GPU compatibility profile if you are unsure which one the game needs.");
         }
         if self.may_run_fast {
-            text.push_str("\n\nThis game may run too fast at higher frame rates. If that happens, try setting an FPS limit in the same settings.");
+            paragraphs.push("This game may run too fast at higher frame rates. If that happens, try setting an FPS limit in the game settings.");
         }
-        text.push_str("\n\nWould you like to open the launch settings now?");
-        text
+        paragraphs.join("\n\n")
     }
 }
 
@@ -118,17 +134,18 @@ mod tests {
     }
 
     #[test]
-    fn import_message_combines_advice_without_a_second_question() {
+    fn import_message_keeps_display_advice_and_adds_gpu_choice_when_needed() {
         for may_run_fast in [false, true] {
             for uses_opengl_es in [false, true] {
                 let text = ImportAdvice {
                     may_run_fast,
-                    uses_opengl_es,
+                    choose_gpu_profile: uses_opengl_es,
+                    show_display_advice: true,
                 }
                 .message();
                 assert_eq!(text.contains("GPU compatibility profile"), uses_opengl_es);
                 assert_eq!(text.contains("FPS limit"), may_run_fast);
-                assert_eq!(text.matches("Would you like").count(), 1);
+                assert!(text.contains("Rotate display"));
             }
         }
     }
