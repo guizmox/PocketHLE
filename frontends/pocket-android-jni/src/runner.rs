@@ -131,6 +131,7 @@ pub(crate) struct SessionState {
     /// Final summary string. Populated by the worker right before
     /// it exits; read by [`finish`] after the join.
     summary: Mutex<Option<String>>,
+    produced_frame: AtomicBool,
     /// Pull handle on the guest's mixed PCM, published by the worker
     /// once the emulator exists. Android has no cpal device, so the
     /// Kotlin side drains this from an `AudioTrack` feeder thread
@@ -150,6 +151,7 @@ impl SessionState {
             dependency_notices: Mutex::new(Default::default()),
             running: Mutex::new(true),
             summary: Mutex::new(None),
+            produced_frame: AtomicBool::new(false),
             audio: Mutex::new(None),
         }
     }
@@ -321,20 +323,33 @@ fn run_game_to_completion(
         && entry.settings.storage_card_dir.is_some()
         && !card_root.is_dir()
     {
-        return format!("SD Card folder does not exist: {}", card_root.display());
+        let reason = format!("SD Card folder does not exist: {}", card_root.display());
+        let diagnostic = pocket_library::session_diagnostic::startup_failure(reason.clone(), Vec::new());
+        return serde_json::json!({"summary": reason, "diagnostic": diagnostic}).to_string();
     }
     let mut hook = SessionHook::new(Arc::clone(state), input_rx);
-    run_process(
-        library_root,
-        entry,
-        &card_root,
-        None,
-        None,
-        None,
-        None,
-        &mut hook,
-    )
-    .0
+    let ((summary, code), log) = pocket_library::session_diagnostic::capture(|| {
+        run_process(
+            library_root,
+            entry,
+            &card_root,
+            None,
+            None,
+            None,
+            None,
+            &mut hook,
+        )
+    });
+    let diagnostic = pocket_library::session_diagnostic::classify(
+        state.stop_all.load(Ordering::Acquire),
+        hook.started,
+        state.produced_frame.load(Ordering::Acquire),
+        code,
+        hook.runtime_error.as_deref(),
+        &summary,
+        log,
+    );
+    serde_json::json!({"summary": summary, "diagnostic": diagnostic}).to_string()
 }
 
 #[derive(Clone)]
@@ -882,7 +897,11 @@ fn run_process_inner(
             emu.process_mut().unwrap().state.should_stop = true;
         }
     }
+    hook.started = true;
     let run_result = emu.run_with_hook(hook);
+    if let Err(error) = &run_result {
+        hook.runtime_error = Some(format!("{error:#}"));
+    }
     match &run_result {
         Ok(()) => summary_lines.push("Emulator exited cleanly.".to_string()),
         Err(e) => summary_lines.push(format!("Emulator stopped: {e:#}")),
@@ -902,6 +921,7 @@ fn run_process_inner(
             Ok(frame)
                 if !frame.is_all_black() && hook.foreground.load(Ordering::Acquire) == hook.pid =>
             {
+                state.produced_frame.store(true, Ordering::Release);
                 push_frame(&state, FrameSnapshot::from_framebuffer(&frame));
             }
             Err(error) => log::error!("final presentation failed: {error}"),
@@ -979,6 +999,8 @@ struct SessionHook {
     last_shared: Option<bool>,
     scratch: Vec<u8>,
     saw_non_black: bool,
+    started: bool,
+    runtime_error: Option<String>,
 }
 
 impl SessionHook {
@@ -1249,6 +1271,8 @@ impl SessionHook {
             last_shared: None,
             scratch: Vec::new(),
             saw_non_black: false,
+            started: false,
+            runtime_error: None,
         }
     }
 }
@@ -1359,6 +1383,9 @@ impl FrameHook for SessionHook {
                     self.last_shared = Some(is_shared);
                 }
                 if let Some(shared) = shared {
+                    if kernel.framebuffer.presentation_stats.completed() != 0 {
+                        self.state.produced_frame.store(true, Ordering::Release);
+                    }
                     let size = shared.size();
                     self.saw_non_black = true;
                     self.last_frame = counter;
@@ -1385,6 +1412,7 @@ impl FrameHook for SessionHook {
                         Ok(frame) => frame.is_all_black(),
                         Err(error) => {
                             log::error!("framebuffer read failed: {error}");
+                            self.runtime_error = Some(format!("framebuffer read failed: {error}"));
                             kernel.should_stop = true;
                             return FrameAction::Stop;
                         }
@@ -1402,6 +1430,9 @@ impl FrameHook for SessionHook {
                         };
                     }
                     self.saw_non_black = !black;
+                    if !black {
+                        self.state.produced_frame.store(true, Ordering::Release);
+                    }
 
                     self.last_frame = counter;
                     self.last_emit_at = Some(phase);
@@ -1412,6 +1443,7 @@ impl FrameHook for SessionHook {
                         Ok(frame) => frame,
                         Err(error) => {
                             log::error!("presentation read failed: {error}");
+                            self.runtime_error = Some(format!("presentation read failed: {error}"));
                             kernel.should_stop = true;
                             return FrameAction::Stop;
                         }
@@ -1562,10 +1594,9 @@ mod child_card_tests {
                 &Arc::new(SessionState::new()),
                 rx,
             );
-            assert!(
-                summary.starts_with("SD Card folder does not exist:"),
-                "{summary}"
-            );
+            let body: serde_json::Value = serde_json::from_str(&summary).unwrap();
+            assert!(body["summary"].as_str().unwrap().starts_with("SD Card folder does not exist:"));
+            assert_eq!(body["diagnostic"]["title"], "Could not start the game");
         });
     }
 }

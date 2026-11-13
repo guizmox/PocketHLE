@@ -1,1 +1,12 @@
-crates/pocket-winceapi/src/coredll.rs
+Cargo.lock
+Cargo.toml
+crates/pocket-library/src/lib.rs
+crates/pocket-library/src/session_diagnostic.rs
+frontends/pocket-android-jni/src/lib.rs
+frontends/pocket-android-jni/src/runner.rs
+frontends/pocket-android/app/build.gradle.kts
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
+frontends/pocket-desktop/src/app.rs
+frontends/pocket-desktop/src/desktop_main.rs
+frontends/pocket-desktop/src/runner.rs

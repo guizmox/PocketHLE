@@ -275,6 +275,8 @@ pub struct PocketLauncher {
     library_viewport: LibraryViewport,
     library_restore_pending: Option<LibraryViewport>,
     game_viewport_active: bool,
+    run_repaint_context: egui::Context,
+    run_diagnostic: Option<(pocket_library::session_diagnostic::Diagnostic, bool)>,
     menu_host_press: std::collections::HashMap<(usize, String), Instant>,
     display_fullscreen: bool,
     startup_window: Option<bool>,
@@ -761,7 +763,7 @@ pub enum UiEvent {
     ImportFinished(Result<ImportedGames, String>),
     ImportPrepared(PreparedImport),
     DemoSplitFinished(String, Result<Vec<GameEntry>, String>),
-    RunFinished(RunOutcome),
+    RunFinished(RunOutcome, Option<pocket_library::session_diagnostic::Diagnostic>),
 }
 
 #[derive(Debug)]
@@ -915,6 +917,8 @@ impl PocketLauncher {
             library_viewport: LibraryViewport::capture(&cc.egui_ctx),
             library_restore_pending: None,
             game_viewport_active: false,
+            run_repaint_context: cc.egui_ctx.clone(),
+            run_diagnostic: None,
             menu_host_press: Default::default(),
             display_fullscreen: false,
             startup_window: None,
@@ -1234,7 +1238,7 @@ impl PocketLauncher {
                         }
                     }
                 }
-                UiEvent::RunFinished(outcome) => {
+                UiEvent::RunFinished(outcome, diagnostic) => {
                     if let Some(worker) = self.run_thread.take() {
                         let _ = worker.join();
                     }
@@ -1259,7 +1263,13 @@ impl PocketLauncher {
                     self.pointer_down_at = None;
                     self.running_game = None;
                     if self.game_viewport_active && self.pending_run.is_none() {
-                        self.return_to_library(ctx);
+                        if let Some(diagnostic) = diagnostic {
+                            self.screen = Screen::Run;
+                            self.run_diagnostic = Some((diagnostic, false));
+                            ctx.request_repaint();
+                        } else {
+                            self.return_to_library(ctx);
+                        }
                     }
                 }
             }
@@ -1712,6 +1722,7 @@ impl PocketLauncher {
     }
 
     fn return_to_library(&mut self, ctx: &egui::Context) {
+        self.run_diagnostic = None;
         self.remove_game = None;
         self.add_data = None;
         self.data_game = None;
@@ -5054,6 +5065,10 @@ impl PocketLauncher {
                             ctx.request_repaint();
                             continue;
                         }
+                        if self.run_diagnostic.is_some() {
+                            self.controller_ui.press(&control);
+                            continue;
+                        }
                         if self.launch_executable_choices.is_some() {
                             if control == "East" {
                                 self.launch_executable_choices = None;
@@ -5989,8 +6004,9 @@ impl PocketLauncher {
         let game = game.clone();
         let tx = self.events_tx.clone();
         let runner = self.runner.clone();
+        let repaint = self.run_repaint_context.clone();
         self.run_thread = Some(std::thread::spawn(move || {
-            let outcome = runner.run_game(
+            let (outcome, diagnostic) = runner.run_game(
                 library_root,
                 game,
                 Some(frame_tx),
@@ -5999,7 +6015,8 @@ impl PocketLauncher {
                 Some(dependency_notice_tx),
                 system_media,
             );
-            let _ = tx.send(UiEvent::RunFinished(outcome));
+            let _ = tx.send(UiEvent::RunFinished(outcome, diagnostic));
+            repaint.request_repaint();
         }));
         self.status = "Starting emulator...".to_string();
     }
@@ -6221,6 +6238,43 @@ impl eframe::App for PocketLauncher {
                         )),
                     });
             }
+        }
+        if self.run_diagnostic.is_some() {
+            self.update_gamepad_input(ctx);
+            egui::CentralPanel::default().show(ctx, |_| {});
+            let mut back = false;
+            if let Some((diagnostic, expanded)) = &mut self.run_diagnostic {
+                egui::Window::new(diagnostic.title)
+                    .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                    .max_width((ctx.screen_rect().width() - 32.0).clamp(120.0, 640.0))
+                    .collapsible(false)
+                    .show(ctx, |ui| {
+                        crate::controller_ui::page_scope(ui, "run_diagnostic", |ui| {
+                            ui.label(diagnostic.reason.lines().next().unwrap_or_default());
+                            if crate::controller_ui::button(ui, if *expanded { "Hide details" } else { "Show details" }).clicked() {
+                                *expanded = !*expanded;
+                            }
+                            if *expanded {
+                                egui::ScrollArea::vertical()
+                                    .max_height((ctx.screen_rect().height() / 2.0).min(320.0))
+                                    .show(ui, |ui| {
+                                        ui.add(egui::Label::new(egui::RichText::new(&diagnostic.details).monospace()).wrap(true));
+                                    });
+                            }
+                            if crate::controller_ui::button(ui, "Copy diagnostic").clicked() {
+                                ctx.output_mut(|output| output.copied_text = format!(
+                                    "{}\n{}\n\n{}", diagnostic.title, diagnostic.reason, diagnostic.details
+                                ));
+                            }
+                            back = crate::controller_ui::button(ui, "Return to library").clicked();
+                        });
+                    });
+            }
+            if back {
+                self.return_to_library(ctx);
+            }
+            self.controller_ui.show(ctx);
+            return;
         }
         if self.file_dialog.is_some() {
             self.update_gamepad_input(ctx);

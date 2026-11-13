@@ -125,7 +125,26 @@ fn init_logging(library_root: &std::path::Path) -> Option<std::path::PathBuf> {
         *LOG_FILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
         builder.target(env_logger::Target::Pipe(Box::new(Tee)));
     }
-    builder.init();
+    struct SessionLogger(env_logger::Logger);
+    impl log::Log for SessionLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            self.0.enabled(metadata)
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            pocket_library::session_diagnostic::record(record);
+            self.0.log(record);
+        }
+
+        fn flush(&self) {
+            self.0.flush();
+        }
+    }
+    let logger = builder.build();
+    let level = logger.filter();
+    if log::set_boxed_logger(Box::new(SessionLogger(logger))).is_ok() {
+        log::set_max_level(level);
+    }
     result
 }
 

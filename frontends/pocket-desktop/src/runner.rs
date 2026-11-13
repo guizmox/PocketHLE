@@ -126,7 +126,7 @@ impl Runner {
         gps_notice_tx: Option<Sender<(f64, f64)>>,
         dependency_notice_tx: Option<Sender<String>>,
         system_media: SystemMediaView,
-    ) -> RunOutcome {
+    ) -> (RunOutcome, Option<pocket_library::session_diagnostic::Diagnostic>) {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
         hook.system_media = system_media;
@@ -137,22 +137,32 @@ impl Runner {
             && game.settings.storage_card_dir.is_some()
             && !card_root.is_dir()
         {
-            return RunOutcome {
-                summary: format!("SD Card folder does not exist: {}", card_root.display()),
-                framebuffer: None,
-            };
+            let summary = format!("SD Card folder does not exist: {}", card_root.display());
+            let diagnostic = pocket_library::session_diagnostic::startup_failure(summary.clone(), Vec::new());
+            return (RunOutcome { summary, framebuffer: None }, Some(diagnostic));
         }
-        self.run_process(
-            &library_root,
-            &game,
-            &card_root,
-            None,
-            None,
-            None,
-            None,
-            &mut hook,
-        )
-        .0
+        let ((outcome, code), log) = pocket_library::session_diagnostic::capture(|| {
+            self.run_process(
+                &library_root,
+                &game,
+                &card_root,
+                None,
+                None,
+                None,
+                None,
+                &mut hook,
+            )
+        });
+        let diagnostic = pocket_library::session_diagnostic::classify(
+            hook.stopped_by_user,
+            hook.started,
+            hook.produced_frame || outcome.framebuffer.is_some(),
+            code,
+            hook.runtime_error.as_deref(),
+            &outcome.summary,
+            log,
+        );
+        (outcome, diagnostic)
     }
 
     fn run_process(
@@ -747,7 +757,11 @@ impl Runner {
             }
         }
         emu.start_audio();
+        hook.started = true;
         let run_result = emu.run_with_hook(hook);
+        if let Err(error) = &run_result {
+            hook.runtime_error = Some(format!("{error:#}"));
+        }
         match &run_result {
             Ok(()) => summary_lines.push("Emulator exited cleanly.".to_string()),
             Err(e) => summary_lines.push(format!("Emulator stopped: {e:#}")),
@@ -1083,6 +1097,9 @@ struct RunHook {
     /// for the entire run instead of growing one per delivered frame.
     scratch: Vec<u8>,
     saw_non_black: bool,
+    started: bool,
+    produced_frame: bool,
+    runtime_error: Option<String>,
     stopped_by_user: bool,
     launch_context: Option<LaunchContext>,
 }
@@ -1230,6 +1247,7 @@ impl RunHook {
             self.foreground.store(self.pid, Ordering::Release);
             self.input_disconnected = child_hook.input_disconnected;
             self.stopped_by_user |= child_hook.stopped_by_user;
+            self.produced_frame |= child_hook.produced_frame;
             // run_process has dropped its child Emulator and its media first.
             drop(saved);
             state.audio.resume_output();
@@ -1398,6 +1416,9 @@ impl RunHook {
             last_completed: 0,
             scratch: Vec::new(),
             saw_non_black: false,
+            started: false,
+            produced_frame: false,
+            runtime_error: None,
             stopped_by_user: false,
             launch_context: None,
         }
@@ -1489,11 +1510,14 @@ impl FrameHook for RunHook {
                             }
                             None
                         };
+                        let has_shared_image = shared.is_some();
+                        let mut non_black = false;
                         let mut snapshot = if let Some(shared) = shared {
                             match FrameSnapshot::from_shared(&state.framebuffer, shared) {
                                 Ok(frame) => frame,
                                 Err(error) => {
                                     log::error!("GPU snapshot failed: {error}");
+                                    self.runtime_error = Some(format!("GPU snapshot failed: {error}"));
                                     state.should_stop = true;
                                     return FrameAction::Stop;
                                 }
@@ -1503,10 +1527,12 @@ impl FrameHook for RunHook {
                                 Ok(frame) => frame.is_all_black(),
                                 Err(error) => {
                                     log::error!("framebuffer read failed: {error}");
+                                    self.runtime_error = Some(format!("framebuffer read failed: {error}"));
                                     state.should_stop = true;
                                     return FrameAction::Stop;
                                 }
                             };
+                            non_black = !black;
                             if black && self.saw_non_black && !state.framebuffer.has_system_video()
                             {
                                 return if stop_requested {
@@ -1523,6 +1549,7 @@ impl FrameHook for RunHook {
                                 Ok(frame) => frame,
                                 Err(error) => {
                                     log::error!("presentation read failed: {error}");
+                                    self.runtime_error = Some(format!("presentation read failed: {error}"));
                                     state.should_stop = true;
                                     return FrameAction::Stop;
                                 }
@@ -1550,6 +1577,7 @@ impl FrameHook for RunHook {
                                         && c.enabled
                                         && c.style & 0x800 == 0
                                 });
+                        self.produced_frame |= non_black || (has_shared_image && explicit);
                         if tx.send(snapshot).is_err() {
                             // GUI thread dropped the receiver — the user
                             // closed the run screen / quit the launcher.

@@ -60,7 +60,7 @@ class GameActivity : AppCompatActivity() {
     private lateinit var glRenderer: AndroidFrameRenderer
     private lateinit var bindings: InputBindings
 
-    /** Cached handle from `nativeStartGame` (`0` once we've finished). */
+    /** Cached handle from `nativeStartGameWithDiagnostic` (`0` once we've finished). */
     @Volatile private var session: Long = 0
     private var joiningSession = false
 
@@ -252,7 +252,7 @@ class GameActivity : AppCompatActivity() {
                 // Worker exited on its own (game called ExitProcess
                 // / hit max_slices / errored out). Reap it so we
                 // surface the summary in the status panel.
-                finishSession()
+                finishSession(reportFailure = true)
                 return
             }
             mainHandler.postDelayed(this, POLL_INTERVAL_MS)
@@ -408,12 +408,19 @@ class GameActivity : AppCompatActivity() {
         if (!presentationReady) { presentationStart = rootDir to id; return }
         if (isFinishing || isDestroyed) return
         if (!simulateAccelerometerTilt) accelerometer.start()
-        val handle = NativeBridge.nativeStartGame(rootDir, id, presentationHandle)
+        val startup = runCatching {
+            org.json.JSONObject(NativeBridge.nativeStartGameWithDiagnostic(rootDir, id, presentationHandle))
+        }.getOrNull()
+        val handle = startup?.optLong("handle") ?: 0L
         if (handle == 0L) {
             accelerometer.stop()
             loadingOverlay.visibility = View.GONE
-            android.widget.Toast.makeText(this, "Could not start the game: see logcat", android.widget.Toast.LENGTH_LONG).show()
-            finish()
+            val diagnostic = startup?.optJSONObject("diagnostic")
+            showSessionDiagnostic(
+                diagnostic?.optString("title") ?: "Could not start the game",
+                diagnostic?.optString("reason") ?: "The native session could not be created.",
+                diagnostic?.optString("details").orEmpty()
+            )
             return
         }
         session = handle
@@ -555,7 +562,7 @@ class GameActivity : AppCompatActivity() {
      * Stop the emulator if it is still running, free the native
      * session, and surface the textual summary in the status panel.
      */
-    private fun finishSession() {
+    private fun finishSession(reportFailure: Boolean = false) {
         val handle = session
         if (handle == 0L) return
         joiningSession = true
@@ -584,11 +591,59 @@ class GameActivity : AppCompatActivity() {
                 joiningSession = false
                 android.util.Log.i("PocketHLE", summary)
                 if (!isFinishing && !isDestroyed) {
-                    android.widget.Toast.makeText(this, "Emulation finished. See the logs for details.", android.widget.Toast.LENGTH_SHORT).show()
-                    finish()
+                    val diagnostic = runCatching {
+                        org.json.JSONObject(summary).optJSONObject("diagnostic")
+                    }.getOrNull()
+                    if (reportFailure && diagnostic != null) {
+                        showSessionDiagnostic(
+                            diagnostic.getString("title"),
+                            diagnostic.getString("reason"),
+                            diagnostic.getString("details")
+                        )
+                    } else if (reportFailure && !summary.startsWith("{")) {
+                        showSessionDiagnostic("Emulation stopped", summary, summary)
+                    } else {
+                        finish()
+                    }
                 }
             }
         }.start()
+    }
+
+    private fun showSessionDiagnostic(title: String, reason: String, details: String) {
+        val message = android.widget.TextView(this).apply {
+            text = reason
+            val padding = (24 * resources.displayMetrics.density).toInt()
+            setPadding(padding, padding / 2, padding, padding / 2)
+        }
+        val scroll = android.widget.ScrollView(this).apply {
+            addView(message)
+            isFocusable = false
+        }
+        var expanded = false
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(scroll)
+            .setNeutralButton("Show details", null)
+            .setNegativeButton("Copy diagnostic", null)
+            .setPositiveButton("Return to library") { _, _ -> finish() }
+            .setCancelable(false)
+            .create()
+        dialog.setOnShowListener {
+            val showDetails = dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)
+            showDetails.setOnClickListener {
+                expanded = !expanded
+                message.text = if (expanded) "$reason\n\n$details" else reason
+                scroll.isFocusable = expanded
+                showDetails.text = if (expanded) "Hide details" else "Show details"
+            }
+            dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setOnClickListener {
+                val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("PocketHLE diagnostic", "$title\n$reason\n\n$details"))
+            }
+            showDetails.requestFocus()
+        }
+        dialog.show()
     }
 
     private fun startAudio(handle: Long) {

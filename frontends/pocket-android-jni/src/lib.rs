@@ -13,7 +13,7 @@
 //! * `writeConfig(libraryRoot, json)` — overwrite config with a JSON blob.
 //! * `readGameSettings(libraryRoot, id)` — JSON of per-game settings.
 //! * `writeGameSettings(libraryRoot, id, json)` — persist per-game settings.
-//! * `nativeStartGame` / `nativePollFrame` / `nativeSendInput` /
+//! * `nativeStartGameWithDiagnostic` / `nativePollFrame` / `nativeSendInput` /
 //!   `nativeRequestStop` / `nativeFinishGame` — session-based
 //!   replacement that streams framebuffers to the UI as the guest
 //!   draws them, forwards touches and D-pad presses to the kernel,
@@ -792,7 +792,11 @@ fn init_logger() {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Trace)
-                .with_tag("PocketHLE"),
+                .with_tag("PocketHLE")
+                .format(|buffer, record| {
+                    pocket_library::session_diagnostic::record(record);
+                    write!(buffer, "{}", record.args())
+                }),
         );
     });
 }
@@ -802,8 +806,8 @@ fn init_logger() {
 //
 // A worker streams images and accepts input while the guest is running.
 //
-//  * `nativeStartGame` returns an opaque `jlong` handle (a pointer to a
-//    boxed [`Session`]).
+//  * `nativeStartGameWithDiagnostic` returns JSON with an opaque session handle
+//    on success or a startup diagnostic on failure.
 //  * `nativePollFrame` returns the latest framebuffer that the worker has
 //    produced since the last poll, as a flat `byte[]` with an 8-byte
 //    little-endian header `(width: u32, height: u32)` followed by RGBA
@@ -814,7 +818,7 @@ fn init_logger() {
 //  * `nativeRequestStop` asks the worker to stop at the next slice
 //    boundary.
 //  * `nativeFinishGame` joins the worker and frees the session, returning
-//    a textual summary that the activity shows in its status panel.
+//    a JSON session summary and optional diagnostic.
 //
 // The pointer is opaque to Kotlin and is consumed exactly once by
 // `nativeFinishGame`. After that call the handle is invalid and Kotlin must
@@ -830,63 +834,63 @@ const INPUT_KIND_POINTER_MOVE: jint = 4;
 const INPUT_KIND_KEYBOARD_ROTATION: jint = 5;
 
 #[no_mangle]
-pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGame<'local>(
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeStartGameWithDiagnostic<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     library_root: JString<'local>,
     id: JString<'local>,
     presentation: jlong,
-) -> jlong {
+) -> jstring {
     init_logger();
-    if let Err(e) = bluetooth::install(&mut env, &_class) {
-        log::error!("Cannot initialize Android Bluetooth bridge: {e}");
-        return 0;
-    }
-    if let Err(e) = internet::install(&mut env, &_class) {
-        log::error!("Cannot initialize Android HTTP bridge: {e}");
-        return 0;
-    }
-    if let Err(e) = vibration::install(&mut env, &_class) {
-        log::error!("Cannot initialize Android vibration bridge: {e}");
-        return 0;
-    }
-    if let Err(e) = power::install(&mut env, &_class) {
-        log::error!("Cannot initialize Android battery bridge: {e}");
-        return 0;
-    }
-    if let Err(e) = gps::install(&mut env, &_class) {
-        log::error!("Cannot initialize Android GPS bridge: {e}");
-        return 0;
-    }
-    if let Err(e) = camera::install(&mut env, &_class) {
-        log::error!("Cannot initialize Android camera bridge: {e}");
-        return 0;
-    }
-    let root = match jstring_to_path(&mut env, library_root) {
-        Some(p) => p,
-        None => {
-            log::error!("nativeStartGame: missing library root");
-            return 0;
+    let (result, log) = pocket_library::session_diagnostic::capture(|| -> Result<jlong, String> {
+        if let Err(e) = bluetooth::install(&mut env, &_class) {
+            return Err(format!("Cannot initialize Android Bluetooth bridge: {e}"));
+        }
+        if let Err(e) = internet::install(&mut env, &_class) {
+            return Err(format!("Cannot initialize Android HTTP bridge: {e}"));
+        }
+        if let Err(e) = vibration::install(&mut env, &_class) {
+            return Err(format!("Cannot initialize Android vibration bridge: {e}"));
+        }
+        if let Err(e) = power::install(&mut env, &_class) {
+            return Err(format!("Cannot initialize Android battery bridge: {e}"));
+        }
+        if let Err(e) = gps::install(&mut env, &_class) {
+            return Err(format!("Cannot initialize Android GPS bridge: {e}"));
+        }
+        if let Err(e) = camera::install(&mut env, &_class) {
+            return Err(format!("Cannot initialize Android camera bridge: {e}"));
+        }
+        let root = match jstring_to_path(&mut env, library_root) {
+            Some(p) => p,
+            None => {
+                return Err("missing library root".into());
+            }
+        };
+        let id = match jstring_to_string(&mut env, id) {
+            Some(s) => s,
+            None => {
+                return Err("missing game id".into());
+            }
+        };
+        let mut sessions = LIBRARY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        match runner::start_with_presentation(root, id, graphics::get(presentation)) {
+            Ok(session) => {
+                *sessions += 1;
+                Ok(Box::into_raw(Box::new(session)) as jlong)
+            }
+            Err(error) => Err(format!("{error:#}")),
+        }
+    });
+    let body = match result {
+        Ok(handle) => serde_json::json!({"handle": handle}),
+        Err(reason) => {
+            log::error!("nativeStartGameWithDiagnostic: {reason}");
+            let diagnostic = pocket_library::session_diagnostic::startup_failure(reason, log);
+            serde_json::json!({"diagnostic": diagnostic})
         }
     };
-    let id = match jstring_to_string(&mut env, id) {
-        Some(s) => s,
-        None => {
-            log::error!("nativeStartGame: missing game id");
-            return 0;
-        }
-    };
-    let mut sessions = LIBRARY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    match runner::start_with_presentation(root, id, graphics::get(presentation)) {
-        Ok(session) => {
-            *sessions += 1;
-            Box::into_raw(Box::new(session)) as jlong
-        }
-        Err(e) => {
-            log::error!("nativeStartGame: {e:#}");
-            0
-        }
-    }
+    new_jstring(&env, body.to_string())
 }
 
 #[no_mangle]
@@ -1197,7 +1201,7 @@ fn session_from_handle<'a>(handle: jlong) -> Option<&'a Session> {
         return None;
     }
     // SAFETY: the handle was produced by `Box::into_raw` in
-    // `nativeStartGame` and is freed exactly once by
+    // `nativeStartGameWithDiagnostic` and is freed exactly once by
     // `nativeFinishGame`. Kotlin guarantees the lifetime by treating
     // the handle as opaque and never passing a freed value back in.
     Some(unsafe { &*(handle as *const Session) })

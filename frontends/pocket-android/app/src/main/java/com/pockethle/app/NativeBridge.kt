@@ -8,7 +8,7 @@ package com.pockethle.app
  * used as the lingua franca to keep the FFI surface minimal — no
  * shared data classes between Rust and Kotlin.
  *
- * The session-based methods (`nativeStartGame`, `nativePollFrame`,
+ * The session-based methods (`nativeStartGameWithDiagnostic`, `nativePollFrame`,
  * `nativeSendInput`, `nativeRequestStop`, `nativeFinishGame`) are
  * the ones [GameActivity] uses to drive the real-time emulator.
  * They do *not* round-trip JSON; they exchange a `long` opaque
@@ -112,12 +112,12 @@ object NativeBridge {
 
     /**
      * Spawn a worker thread that drives the emulator for [id].
-     * Returns an opaque handle (>0 on success, 0 on failure). Pass
-     * the same handle into every other `native…` call below until
+     * Returns JSON with an opaque handle or a startup diagnostic. Pass
+     * the handle into every other `native…` call below until
      * [nativeFinishGame] is called, after which the handle is
      * invalid and **must not** be passed back in.
      */
-    @JvmStatic external fun nativeStartGame(libraryRoot: String, id: String, presentation: Long = 0): Long
+    @JvmStatic external fun nativeStartGameWithDiagnostic(libraryRoot: String, id: String, presentation: Long = 0): String
 
     /** Changed images per second, or -1 before the first change. */
     @JvmStatic external fun nativePublishedImageIps(handle: Long): Float
@@ -189,7 +189,7 @@ object NativeBridge {
 
     /**
      * Join the worker thread, free the session, and return the
-     * textual summary it produced. After this call the handle is
+     * JSON summary and optional diagnostic. After this call the handle is
      * invalid and **must not** be passed back in.
      */
     @JvmStatic external fun nativeFinishGame(handle: Long): String
