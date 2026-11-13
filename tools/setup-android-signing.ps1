@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 try {
     Write-Host @'
-PocketHLE - Set up permanent Android release signing
+PocketHLE-Reborn - Set up permanent Android release signing
 ===================================================
 Run this ONCE, on your own Windows computer. No Python or Android SDK required.
 Your personal WSL debug key is NOT touched.
@@ -59,7 +59,7 @@ Never commit the key or the secret text files to Git, or share them publicly.
         try {
             Write-Host 'Creating your permanent release key...'
             if ($keytool) {
-                & $keytool -genkeypair -noprompt -keystore $keystore -storetype JKS -alias $alias -keyalg RSA -keysize 3072 -validity 10000 -dname 'CN=PocketHLE Release' -storepass:env POCKETHLE_SETUP_PASSWORD -keypass:env POCKETHLE_SETUP_PASSWORD
+                & $keytool -genkeypair -noprompt -keystore $keystore -storetype JKS -alias $alias -keyalg RSA -keysize 3072 -validity 10000 -dname 'CN=PocketHLE-Reborn Release' -storepass:env POCKETHLE_SETUP_PASSWORD -keypass:env POCKETHLE_SETUP_PASSWORD
                 if ($LASTEXITCODE -ne 0) { throw 'keytool failed. Keep the signing folder for inspection; no existing key was replaced.' }
                 & $keytool -list -keystore $keystore -alias $alias -storepass:env POCKETHLE_SETUP_PASSWORD
                 if ($LASTEXITCODE -ne 0) { throw 'Created key could not be verified.' }
@@ -77,7 +77,7 @@ if [[ -e "$keystore" ]]; then
     echo 'Refusing to overwrite an existing release key.' >&2
     exit 1
 fi
-keytool -genkeypair -noprompt -keystore "$keystore" -storetype JKS -alias pockethle-release -keyalg RSA -keysize 3072 -validity 10000 -dname 'CN=PocketHLE Release' -storepass:env POCKETHLE_SETUP_PASSWORD -keypass:env POCKETHLE_SETUP_PASSWORD
+keytool -genkeypair -noprompt -keystore "$keystore" -storetype JKS -alias pockethle-release -keyalg RSA -keysize 3072 -validity 10000 -dname 'CN=PocketHLE-Reborn Release' -storepass:env POCKETHLE_SETUP_PASSWORD -keypass:env POCKETHLE_SETUP_PASSWORD
 keytool -list -keystore "$keystore" -alias pockethle-release -storepass:env POCKETHLE_SETUP_PASSWORD
 '@
                 $bash = $bash.Replace('__PATH_BASE64__', $pathBase64).Replace('__PASSWORD__', $password)
@@ -109,7 +109,7 @@ keytool -list -keystore "$keystore" -alias pockethle-release -storepass:env POCK
     Write-Host "PRIVATE BACKUP FOLDER: $folder"
     Write-Host 'Copy this folder to a safe private backup location before publishing.'
     Write-Host ''
-    Write-Host 'Open: https://github.com/guizmox/PocketHLE/settings/secrets/actions'
+    Write-Host 'Open: https://github.com/guizmox/PocketHLE-Reborn/settings/secrets/actions'
     Write-Host 'For each item below, click New repository secret (or update the existing secret).'
     Write-Host 'Paste the displayed NAME into Name and the clipboard content into Secret, then save.'
     foreach ($name in $names) {

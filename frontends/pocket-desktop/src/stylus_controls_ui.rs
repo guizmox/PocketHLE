@@ -29,7 +29,7 @@ pub(super) struct StylusEditor {
 }
 impl StylusEditor {
     pub fn reserved_input_attempt(&mut self) {
-        self.message = "This input is reserved by PocketHLE. Choose another input.".into();
+        self.message = "This input is reserved by PocketHLE-Reborn. Choose another input.".into();
     }
     pub fn new(testing: bool, portrait: bool) -> Self {
         Self {
@@ -361,7 +361,7 @@ impl PocketLauncher {
                 self.stylus_editor = None;
             } else if matches!(control, "Start" | "Select" | "Mode" | "Misc1") {
                 if let Some(e) = self.stylus_editor.as_mut() {
-                    e.message = "Reserved PocketHLE input.".into();
+                    e.message = "Reserved PocketHLE-Reborn input.".into();
                 }
             } else {
                 self.controller_ui.press(control);
@@ -492,7 +492,7 @@ mod tests {
                                             egui::Button::new("Cancel assignment"),
                                         );
                                         ui.label(if assigned {
-                                "This input is reserved by PocketHLE. Choose another input."
+                                "This input is reserved by PocketHLE-Reborn. Choose another input."
                             } else { "Waiting for input." });
                                         let _ = ui.button("Done");
                                     });

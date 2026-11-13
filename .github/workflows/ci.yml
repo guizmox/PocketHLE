@@ -165,20 +165,20 @@ jobs:
           cargo build --release --locked -p pocket-desktop
       - name: stage artifacts
         run: |
-          mkdir -p dist/PocketHLE-linux
-          cp -R frontends/pocket-desktop/licenses dist/PocketHLE-linux/
-          cp LICENSE LICENSE-APACHE LICENSE-MIT dist/PocketHLE-linux/
-          cp target/cargo/release/pockethle dist/PocketHLE-linux/
-          cp target/cargo/release/pockethle-gui dist/PocketHLE-linux/
-          cp tools/install-desktop-entry.sh dist/PocketHLE-linux/
-          cp frontends/pocket-desktop/assets/pockethle-256.png dist/PocketHLE-linux/pockethle.png
-          cp README.md dist/PocketHLE-linux/
-          cp -f README.ru.md dist/PocketHLE-linux/ 2>/dev/null || true
-          tar -C dist -czf PocketHLE-linux-x86_64.tar.gz PocketHLE-linux
+          mkdir -p dist/PocketHLE-Reborn-linux
+          cp -R frontends/pocket-desktop/licenses dist/PocketHLE-Reborn-linux/
+          cp LICENSE LICENSE-APACHE LICENSE-MIT dist/PocketHLE-Reborn-linux/
+          cp target/cargo/release/pockethle dist/PocketHLE-Reborn-linux/
+          cp target/cargo/release/pockethle-gui dist/PocketHLE-Reborn-linux/
+          cp tools/install-desktop-entry.sh dist/PocketHLE-Reborn-linux/
+          cp frontends/pocket-desktop/assets/pockethle-256.png dist/PocketHLE-Reborn-linux/pockethle.png
+          cp README.md dist/PocketHLE-Reborn-linux/
+          cp -f README.ru.md dist/PocketHLE-Reborn-linux/ 2>/dev/null || true
+          tar -C dist -czf PocketHLE-Reborn-linux-x86_64.tar.gz PocketHLE-Reborn-linux
       - uses: actions/upload-artifact@v4
         with:
-          name: PocketHLE-linux-x86_64
-          path: PocketHLE-linux-x86_64.tar.gz
+          name: PocketHLE-Reborn-linux-x86_64
+          path: PocketHLE-Reborn-linux-x86_64.tar.gz
 
   build-windows:
     name: build windows release artifacts
@@ -223,22 +223,22 @@ jobs:
       - name: stage artifacts
         shell: bash
         run: |
-          mkdir -p dist/PocketHLE-windows
-          cp -R frontends/pocket-desktop/licenses dist/PocketHLE-windows/
-          cp LICENSE LICENSE-APACHE LICENSE-MIT dist/PocketHLE-windows/
-          cp target/cargo/release/pockethle.exe dist/PocketHLE-windows/
-          cp target/cargo/release/pockethle-gui.exe dist/PocketHLE-windows/
-          cp README.md dist/PocketHLE-windows/
-          cp docs/STEAMDECK.md dist/PocketHLE-windows/README-SteamDeck.md
-          cp -f README.ru.md dist/PocketHLE-windows/ 2>/dev/null || true
+          mkdir -p dist/PocketHLE-Reborn-windows
+          cp -R frontends/pocket-desktop/licenses dist/PocketHLE-Reborn-windows/
+          cp LICENSE LICENSE-APACHE LICENSE-MIT dist/PocketHLE-Reborn-windows/
+          cp target/cargo/release/pockethle.exe dist/PocketHLE-Reborn-windows/
+          cp target/cargo/release/pockethle-gui.exe dist/PocketHLE-Reborn-windows/
+          cp README.md dist/PocketHLE-Reborn-windows/
+          cp docs/STEAMDECK.md dist/PocketHLE-Reborn-windows/README-SteamDeck.md
+          cp -f README.ru.md dist/PocketHLE-Reborn-windows/ 2>/dev/null || true
       - name: zip artifacts
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/PocketHLE-windows/* -DestinationPath PocketHLE-windows-x86_64.zip
+          Compress-Archive -Path dist/PocketHLE-Reborn-windows/* -DestinationPath PocketHLE-Reborn-windows-x86_64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: PocketHLE-windows-x86_64
-          path: PocketHLE-windows-x86_64.zip
+          name: PocketHLE-Reborn-windows-x86_64
+          path: PocketHLE-Reborn-windows-x86_64.zip
   build-android:
     name: build android APK
     runs-on: ubuntu-24.04
@@ -290,6 +290,6 @@ jobs:
           POCKETHLE_KEY_PASSWORD: ${{ secrets.POCKETHLE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
-          name: PocketHLE-android
-          path: dist/android/PocketHLE-*.apk
+          name: PocketHLE-Reborn-android
+          path: dist/android/PocketHLE-Reborn-*.apk
           if-no-files-found: error

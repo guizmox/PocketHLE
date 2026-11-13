@@ -173,7 +173,7 @@ pub fn show(ui: &mut Ui, state: &State<'_>) -> Output {
     use Action::*;
     let mut action = None;
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("PocketHLE {}", state.version)).size(17.0));
+        ui.label(RichText::new(format!("PocketHLE-Reborn {}", state.version)).size(17.0));
         if state.resume && button(ui, Resume, state, 120.0) {
             action = Some(Resume);
         }

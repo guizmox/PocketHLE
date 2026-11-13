@@ -28,14 +28,14 @@ not silently hidden by continuing with stale software depth or color state.
 
 For GLES 1.x, guest `glGetString(GL_RENDERER)` returns the active host OpenGL
 renderer name when a native renderer exists, or `PocketHLE Software Rasterizer`
-in PocketHLE's software mode. The host name is captured once during renderer initialization
+in PocketHLE-Reborn's software mode. The host name is captured once during renderer initialization
 and follows the current EGL surface's renderer; querying it does not bind a
 context or synchronize GPU work. Guest strings retain the existing process-owned
 allocation cache, so earlier returned pointers survive a backend change.
 
 This identifies the host OpenGL implementation, including ANGLE or a host
 software renderer such as llvmpipe when present; it is not a host GPU inventory.
-Guest `GL_VENDOR`, `GL_VERSION` and extensions still describe PocketHLE's emulated
+Guest `GL_VENDOR`, `GL_VERSION` and extensions still describe PocketHLE-Reborn's emulated
 API. The shared implementation applies to desktop and Android. Games which
 branch on renderer-name substrings can consequently select different paths.
 
@@ -441,7 +441,7 @@ or simulates more slowly. Internal resolution does not bypass the game limit.
 Host VSync, explicit guest vertical-blank waits and the modeled display clock
 remain distinct; Unlimited is not a promise of unlimited physical refresh.
 Desktop general settings expose VSync (enabled by default, applied after restarting
-PocketHLE). Disabling it can allow tearing. The desktop publisher follows the
+PocketHLE-Reborn). Disabling it can allow tearing. The desktop publisher follows the
 selected game limit for completed presentations, including 120 and Unlimited;
 there is no fixed 16 ms ceiling on explicit EGL/GX/DirectDraw presents. Without
 an explicit presentation boundary, Unlimited coalesces intermediate dirty GDI
@@ -659,7 +659,7 @@ Device-specific presentation and later gameplay still need separate validation.
 
 ## Paired color capture (desktop diagnostics)
 
-Set `POCKETHLE_COLOR_CAPTURE` to an output directory before launching PocketHLE.
+Set `POCKETHLE_COLOR_CAPTURE` to an output directory before launching PocketHLE-Reborn.
 At a completed onscreen EGL swap, an enabled session checks once per second for
 `capture.request` in that directory. Creating the empty file requests one pair;
 the emulator consumes the file. Recreate it to capture again. Offscreen swaps

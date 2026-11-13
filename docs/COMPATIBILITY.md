@@ -17,7 +17,7 @@ legacy Gizmondo title IDs and collection markers for older entries.
 ## PocketPC / Windows Mobile
 
 **87 entries reported working** by the maintainer on 2026-11-12. The report
-does not specify the PocketHLE revision, host platform, test duration or
+does not specify the PocketHLE-Reborn revision, host platform, test duration or
 coverage for each title.
 
 * Age of Empires

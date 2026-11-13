@@ -59,20 +59,22 @@ impl HostInput {
                     "ESCAPE" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
                 ) =>
             {
-                Some("This input is reserved by PocketHLE (Escape / F7–F12).")
+                Some("This input is reserved by PocketHLE-Reborn (Escape / F7–F12).")
             }
             Self::Controller(n)
                 if matches!(n.as_str(), "Select" | "Start")
                     || crate::stylus::controller_reserved(&n, false) =>
             {
-                Some("This input is reserved by PocketHLE.")
+                Some("This input is reserved by PocketHLE-Reborn.")
             }
             Self::Controller(n)
                 if fullscreen.is_some_and(|f| {
                     Self::Controller(f.into()).canonical() == Self::Controller(n.clone())
                 }) =>
             {
-                Some("This controller input is assigned to fullscreen in PocketHLE settings.")
+                Some(
+                    "This controller input is assigned to fullscreen in PocketHLE-Reborn settings.",
+                )
             }
             _ => None,
         }

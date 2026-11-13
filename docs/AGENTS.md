@@ -61,7 +61,7 @@ refactor.
    answer into the guest's IAT. A handler that needs to observe mutable
    state cannot be a constant.
 3. **The guest entry point is entered with `WinMain` arguments already in
-   registers.** The CE loader does this, so PocketHLE does too:
+   registers.** The CE loader does this, so PocketHLE-Reborn does too:
    `r0 = hInstance` (`PROCESS_INSTANCE_HANDLE`), `r1 = 0`,
    `r2 = lpCmdLine`, `r3 = nCmdShow` (`SW_SHOWNORMAL`). `lpCmdLine` is
    **always a valid pointer** — empty `L""` when there are no arguments,
@@ -301,7 +301,7 @@ One module per emulated DLL in `crates/pocket-winceapi/src/`: `aygshell`,
 
 ## 7. Two guest toolchains
 
-PocketHLE loads images from both the MSVC-era official toolchains and the
+PocketHLE-Reborn loads images from both the MSVC-era official toolchains and the
 open-source CeGCC / mingw32ce one. They differ in ways that reach the
 loader:
 
@@ -1295,7 +1295,7 @@ The old private Unicorn optimization control, conservative RAM flag, legacy jump
 execution/helper routines and message-pump specialization have been removed.
 
 MIPS uses the virtual TLB for flat process mappings when Unicorn accepts
-PocketHLE's private mapping-only callback contract. The callback resolves page
+PocketHLE-Reborn's private mapping-only callback contract. The callback resolves page
 permissions without restoring guest branch state during a successful refill.
 Faults still restore the faulting instruction state, and MIPS page permissions
 remain explicit. Kernel segments, including the cached and uncached aliases
@@ -1404,7 +1404,7 @@ these optimizations do not add game-specific overrides or change frame limits.
 ## Reference resources
 
 This document collects external resources that are useful when working on
-PocketHLE — Windows Mobile / Pocket PC emulators, SDKs, and the relevant ARM
+PocketHLE-Reborn — Windows Mobile / Pocket PC emulators, SDKs, and the relevant ARM
 and PE/COFF specifications.
 
 The links here are **for reference only**. Nothing in this repository
@@ -1414,7 +1414,7 @@ their own legally obtained copies.
 ### Microsoft emulators and SDKs
 
 These images / installers contain official Microsoft device emulators and
-Pocket PC / Windows Mobile SDKs that are useful for cross-checking PocketHLE's
+Pocket PC / Windows Mobile SDKs that are useful for cross-checking PocketHLE-Reborn's
 behaviour against the real platform (e.g. running the same `.cab` inside the
 official Microsoft Device Emulator and comparing API behaviour).
 
@@ -1435,7 +1435,7 @@ official Microsoft Device Emulator and comparing API behaviour).
 
 ### ARM architecture
 
-PocketHLE runs ARMv4T / ARMv5TE code (the variants supported by Pocket PC
+PocketHLE-Reborn runs ARMv4T / ARMv5TE code (the variants supported by Pocket PC
 2002, 2003 and Windows Mobile 5/6 devices). Pocket PC 2003 binaries make
 heavy use of the Thumb instruction set, so both manuals matter.
 
@@ -1449,7 +1449,7 @@ heavy use of the Thumb instruction set, so both manuals matter.
 
 ### PE / COFF on ARM WinCE
 
-PocketHLE distinguishes ARM (`0x01C0`), THUMB (`0x01C2`) and ARMNT (`0x01C4`)
+PocketHLE-Reborn distinguishes ARM (`0x01C0`), THUMB (`0x01C2`) and ARMNT (`0x01C4`)
 PE machine tags. A machine tag alone does not determine the instruction mode
 of every function; preserve entry-point and interworking handling.
 

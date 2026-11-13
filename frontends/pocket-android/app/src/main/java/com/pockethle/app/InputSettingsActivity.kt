@@ -15,7 +15,7 @@ class InputSettingsActivity : HostKeyActivity() {
     private val shortcuts = AssignmentShortcuts()
     private val liveInput = InputLiveState()
     override fun reservedInputAttempt() {
-        if(assignmentDialog!=null && !shortcuts.awaitingRelease) android.widget.Toast.makeText(this,"This input is reserved by PocketHLE. Choose another input.",android.widget.Toast.LENGTH_SHORT).show()
+        if(assignmentDialog!=null && !shortcuts.awaitingRelease) android.widget.Toast.makeText(this,"This input is reserved by PocketHLE-Reborn. Choose another input.",android.widget.Toast.LENGTH_SHORT).show()
     }
     private val livePictures = mutableListOf<InputSkinView>()
     private val liveRows = mutableMapOf<String, Button>()
@@ -697,7 +697,7 @@ class InputSettingsActivity : HostKeyActivity() {
                         state.fixed(input!!, pad, gizmondo) || (!pad && long && input == "Escape")
                     ) {
                         notice =
-                            "This input is reserved by PocketHLE. Choose another input."
+                            "This input is reserved by PocketHLE-Reborn. Choose another input."
                         begin()
                         return
                     }

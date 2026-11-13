@@ -300,7 +300,7 @@ class GameActivity : AppCompatActivity() {
             updatePocketPcLayout()
         }
 
-        val name = intent.getStringExtra(EXTRA_GAME_NAME) ?: "PocketHLE"
+        val name = intent.getStringExtra(EXTRA_GAME_NAME) ?: "PocketHLE-Reborn"
         title = name
 
         surface = findViewById(R.id.surface)
@@ -639,7 +639,7 @@ class GameActivity : AppCompatActivity() {
             }
             dialog.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setOnClickListener {
                 val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("PocketHLE diagnostic", "$title\n$reason\n\n$details"))
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("PocketHLE-Reborn diagnostic", "$title\n$reason\n\n$details"))
             }
             showDetails.requestFocus()
         }

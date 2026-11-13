@@ -697,7 +697,7 @@ impl Dispatcher for WinCeDispatcher {
                     .insert(thunk.dll.to_ascii_lowercase())
                 {
                     let detail = if coredll::runtime_hle_dll(&thunk.dll) {
-                        "This system API needs an implementation in PocketHLE; do not install a system DLL.".to_owned()
+                        "This system API needs an implementation in PocketHLE-Reborn; do not install a system DLL.".to_owned()
                     } else {
                         let folder = kernel
                             .module_search_dirs

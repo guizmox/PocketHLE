@@ -20,8 +20,8 @@ members = [
 version = "0.4.8"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/j92580498-max/PocketHLE"
-homepage = "https://github.com/j92580498-max/PocketHLE"
+repository = "https://github.com/guizmox/PocketHLE-Reborn"
+homepage = "https://github.com/guizmox/PocketHLE-Reborn"
 authors = ["PocketHLE Contributors"]
 rust-version = "1.75"
 

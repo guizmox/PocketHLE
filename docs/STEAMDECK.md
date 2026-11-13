@@ -1,11 +1,11 @@
-# PocketHLE — Steam Deck profile
+# PocketHLE-Reborn — Steam Deck profile
 
 The desktop uses one executable. The Steam Deck profile is selected at launch
 with `--steam-deck`; it is not a separate Cargo feature or executable.
 
 ## CI artifact and startup
 
-Download **PocketHLE-windows-x86_64** and extract its ZIP. The Deck uses the
+Download **PocketHLE-Reborn-windows-x86_64** and extract its ZIP. The Deck uses the
 standard `pockethle-gui.exe`; there is no separate Deck archive.
 Point the existing Steam shortcut at that executable, select **Proton** or **Proton Experimental** and
 a Gamepad Steam Input layout, and put this in Steam's launch options:
@@ -46,7 +46,7 @@ PocketPC and Gizmondo guest tables, and [host shortcuts](FRONTENDS.md#colors-phy
 for View/Menu tap/hold actions and reserved keys. Those tables are maintained in
 one place rather than copied into a second Deck preset. View and Menu are the
 small upper-left and upper-right buttons, not L1/R1. SteamOS may consume Guide or
-Extra before PocketHLE receives them.
+Extra before PocketHLE-Reborn receives them.
 
 PocketPC's right stick is fixed to the stylus; double-click R3 changes its mode.
 See [stylus modes](FRONTENDS.md#pocketpc-right-stick-stylus-modes) for click timing,
@@ -78,9 +78,10 @@ explicit unlock action uses X; see [the Colors reference](GIZMONDO.md#colors).
 The runtime Deck profile uses config-steamdeck.json; standard desktop uses config.json.
 The game catalogue and per-game data remain shared within the same library root. Old Deck factory-binding
 migrations have been removed; saved settings are read without those rewrites.
-Under Proton, the default Documents/PocketHLE location may be inside the shortcut's
+Under Proton, the default Documents/PocketHLE-Reborn location may be inside the shortcut's
 Windows prefix. Another shortcut/prefix can therefore resolve to another library.
-For updates, keep the existing shortcut and back up the entire PocketHLE library
+An existing default Documents/PocketHLE folder is renamed on first use when the destination is absent.
+For updates, keep the existing shortcut and back up the entire PocketHLE-Reborn library
 outside the Proton prefix before replacing program files.
 
 Desktop exposes separate **Keyboard** and **Controller** toolbar buttons.
@@ -100,7 +101,7 @@ A = Not Now and B = Settings, independently of old widget focus. See
 
 ## Physical keyboard host keys
 
-F7–F12 are reserved for PocketHLE, independent of guest VKs. The
+F7–F12 are reserved for PocketHLE-Reborn, independent of guest VKs. The
 [shared host-key table](FRONTENDS.md#colors-physical-feedback-and-host-shortcuts)
 owns their actions and platform differences; keyboard defaults are in
 [factory profiles](FRONTENDS.md#factory-input-profiles). F8 is shown on Library

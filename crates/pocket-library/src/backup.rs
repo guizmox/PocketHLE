@@ -24,7 +24,7 @@ pub fn suggested_filename() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format!("PocketHLE-backup-{timestamp}.zip")
+    format!("PocketHLE-Reborn-backup-{timestamp}.zip")
 }
 
 /// Write atomically; a failed export never leaves a truncated destination ZIP.
@@ -37,7 +37,7 @@ pub fn save(root: &Path, destination: &Path) -> Result<()> {
         .unwrap_or(Path::new("."));
     let parent = parent.canonicalize()?;
     if parent.starts_with(&root) {
-        bail!("Save the backup outside the PocketHLE library");
+        bail!("Save the backup outside the PocketHLE-Reborn library");
     }
     let mut output = tempfile::NamedTempFile::new_in(&parent)?;
     {
@@ -178,7 +178,7 @@ fn unpack(archive: &Path, target: &Path) -> Result<()> {
 fn validate_library(root: &Path) -> Result<()> {
     let library: super::LibraryFile =
         serde_json::from_reader(File::open(root.join("library.json"))?)
-            .context("Not a PocketHLE library backup")?;
+            .context("Not a PocketHLE-Reborn library backup")?;
     // LibraryFile derives Default: a library created through Library::open
     // therefore uses schema 0 until explicitly versioned. Serde's missing-field
     // default uses schema 1. Both are existing PocketHLE catalogue formats.

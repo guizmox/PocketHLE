@@ -68,7 +68,7 @@ pub fn information(executable: &Path, library_root: &Path) -> Vec<(String, Strin
         let local = executable.parent().and_then(|dir| find_file(dir, &dll));
         let native = local.or_else(|| find_file(&shared, &dll));
         let mut status = format!(
-            "{}/{} imports registered in PocketHLE",
+            "{}/{} imports registered in PocketHLE-Reborn",
             bindings.len() - missing.len(),
             bindings.len()
         );

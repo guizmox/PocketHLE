@@ -85,14 +85,14 @@ pub fn unavailable_reason() -> String {
             "available".into()
         } else {
             format!(
-                "{} missing from linked FFmpeg; rebuild FFmpeg, then PocketHLE",
+                "{} missing from linked FFmpeg; rebuild FFmpeg, then PocketHLE-Reborn",
                 names.join(", ")
             )
         }
     }
     #[cfg(not(feature = "video-static"))]
     {
-        "PocketHLE was compiled without video-static".into()
+        "PocketHLE-Reborn was compiled without video-static".into()
     }
 }
 pub struct Mp4Encoder {

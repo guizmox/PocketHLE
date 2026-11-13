@@ -110,7 +110,7 @@ pub fn find_game<'a>(
         .collect();
     match matches.as_slice() {
         [(id, _)] => Ok((*id).into()),
-        [] => Err(format!("Game not found in the PocketHLE library: {query}")),
+        [] => Err(format!("Game not found in the PocketHLE-Reborn library: {query}")),
         _ => Err(format!(
             "Several games are named {query}. Use an ID: {}",
             matches

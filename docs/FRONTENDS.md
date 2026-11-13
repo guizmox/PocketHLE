@@ -22,7 +22,7 @@ next launch unless an individual live control explicitly says otherwise.
 Host optimizations are permanently active; no user optimization switches remain.
 See [always-on execution optimizations](AGENTS.md#always-on-execution-optimizations).
 In the global graphics settings, **GPU rendering** selects host OpenGL or the
-PocketHLE software rasterizer for GLES 1.x. For host OpenGL on GLES 1.x and 2.0,
+PocketHLE-Reborn software rasterizer for GLES 1.x. For host OpenGL on GLES 1.x and 2.0,
 **OpenGL ES internal resolution (host OpenGL)** offers **Native**, **2×**, **3×**
 and **4×**. Enable **Apply to all resolutions, including sizes other than
 320×240** to extend the chosen multiplier beyond 320×240 and 240×320 surfaces.
@@ -397,7 +397,7 @@ Desktop controller input uses bundled, statically linked SDL3 (sdl3 crate 0.22.0
 Input IDs and saved bindings stay positional (South/East/West/North); guest
 commands on the mapping diagram remain guest commands. UI prompts and physical
 input rows obtain their face-button markings from SDL_GetGamepadButtonLabel on
-the opened gamepad. There is no PocketHLE name/vendor lookup or Nintendo/Xbox/
+the opened gamepad. There is no PocketHLE-Reborn name/vendor lookup or Nintendo/Xbox/
 PlayStation translation table. The selected controller supplies the labels;
 accepted button input activates that device. Device removal and SDL mapping
 changes refresh the metadata. Unknown markings use explicit position names
@@ -717,30 +717,30 @@ leaves the logo checkbox off.
 
 ### Guest interfaces
 
-The native guest interfaces share the physical or simulated sample. PocketHLE
+The native guest interfaces share the physical or simulated sample. PocketHLE-Reborn
 converts it to device coordinates before encoding it for the requested interface.
 
 | Interface | Guest access |
 | --- | --- |
-| PocketHLE implementation of `HTCSensorSDK.dll` | Open with `HTCSensorOpen(1)`, read with `HTCSensorGetDataOutput`, and release with `HTCSensorClose`. A successful read returns zero. The 20-byte result starts with signed X, Y and Z values. PocketHLE fills the remaining fields with zeros. |
+| PocketHLE-Reborn implementation of `HTCSensorSDK.dll` | Open with `HTCSensorOpen(1)`, read with `HTCSensorGetDataOutput`, and release with `HTCSensorClose`. A successful read returns zero. The 20-byte result starts with signed X, Y and Z values. PocketHLE-Reborn fills the remaining fields with zeros. |
 | `SEN0:` stream device | Open with `CreateFileW` and `OPEN_EXISTING`. Read via `DeviceIoControl` with control code `0x01000001`. The reply is three little-endian signed 16-bit values in X, Y, Z order. The legacy zero output-length form is supported and still requires a writable six-byte buffer. Release with `CloseHandle`. |
 | `ACC1:` stream device | Open with `CreateFileW` and `OPEN_EXISTING`. Read with `DeviceIoControl` code `0x80122ef0`. The reply is three little-endian 16-bit words with unsigned values in the range 0–4095. Release with `CloseHandle`. |
 
 One g is approximately 1,000 counts. In device coordinates, positive X
 points right, positive Y points down, and positive Z points out through the
 screen. The readings follow the direction of gravity, so a device resting
-flat with the screen up reports approximately `(0, 0, -1000)`. PocketHLE
+flat with the screen up reports approximately `(0, 0, -1000)`. PocketHLE-Reborn
 converts host acceleration into that convention and undoes the presentation
 rotation before encoding the sample. A newly launched guest process inherits
 its parent's display rotation.
 
-When an application supplies its own `HTCSensorSDK.dll`, PocketHLE loads that
+When an application supplies its own `HTCSensorSDK.dll`, PocketHLE-Reborn loads that
 DLL so it can retain its own handles and return codes. The SDK bundled with
 HTC Teeter reads `ACC1:` and returns 1 on a successful SDK read.
 
 The device-coordinate conversion happens once. For the same sample, the SDK
 bundled with HTC Teeter decodes the three `ACC1:` words as
-`(raw_x - 2048, raw_y - 2048, 2048 - raw_z)`. PocketHLE therefore encodes
+`(raw_x - 2048, raw_y - 2048, 2048 - raw_z)`. PocketHLE-Reborn therefore encodes
 signed device counts `(x, y, z)` as `(2048 + x, 2048 + y, 2048 - z)`, clamping
 each word to the driver's range. The resulting SDK readings match `SEN0:`
 whenever none of the values saturate.
@@ -809,7 +809,7 @@ reserved inputs cannot override the fixed controls.
 
 All immutable keyboard inputs (F7–F12) and controller inputs (View/Menu plus the
 PocketPC right stick/R3) are refused by per-game grid capture as well as the global
-assistant. A reserved-input attempt reports **This input is reserved by PocketHLE**.
+assistant. A reserved-input attempt reports **This input is reserved by PocketHLE-Reborn**.
 Existing saved grid entries for these inputs are ignored at runtime.
 
 Per-game grids also refuse the **current effective PocketPC stylus keyboard

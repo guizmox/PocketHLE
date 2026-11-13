@@ -1,4 +1,4 @@
-# PocketHLE documentation
+# PocketHLE-Reborn documentation
 
 Documentation is maintained in English. This compatibility entry point is retained
 for existing links. See the [project README](README.md) and

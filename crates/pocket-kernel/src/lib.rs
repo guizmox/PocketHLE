@@ -4098,7 +4098,7 @@ impl Process {
     ) -> Result<Self, KernelError> {
         if let Some(runtime) = image.managed_runtime.as_deref() {
             return Err(KernelError::Loader(format!(
-                "managed PE requires a .NET Compact Framework runtime ({runtime}); PocketHLE currently executes native ARM/MIPS WinCE images only"
+                "managed PE requires a .NET Compact Framework runtime ({runtime}); the native PocketHLE-Reborn loader accepts ARM/MIPS WinCE images"
             )));
         }
         if !matches!(
@@ -4110,7 +4110,7 @@ impl Process {
                 | pocket_pe::machine::MIPS_R4000
         ) {
             return Err(KernelError::Loader(format!(
-                "unsupported executable machine 0x{:04x}; PocketHLE's CPU backend executes ARM and MIPS WinCE images only",
+                "unsupported executable machine 0x{:04x}; PocketHLE-Reborn's CPU backend executes ARM and MIPS WinCE images only",
                 image.machine
             )));
         }

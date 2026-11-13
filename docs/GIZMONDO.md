@@ -236,7 +236,7 @@ and other executable bytes are unchanged. This camera is used by Journal and
 may also be used by gameplay, so this is a game-executable correction, not a
 Journal-only renderer exception. The separate camera instruction at 0x25340
 is unchanged. Journal was checked in both rendering modes; full-game coverage
-is not implied. PocketHLE's clipping implementation is unchanged.
+is not implied. PocketHLE-Reborn's clipping implementation is unchanged.
 
 Usage: `python3 tools/patch-supernaturals-skybox.py Supernaturals.exe fixed.exe`.
 The output must not already exist. Unknown builds are rejected before writing.
@@ -295,7 +295,7 @@ Named SDL.dll imports now cover video/timer initialization, software 16/24/32-bi
 surfaces, RGB(A) mapping, clipping/fills, blits with color key/alpha, lock/unlock,
 presentation, keyboard/pointer events, key-state queries, delay/ticks and error/
 version queries. Surfaces use the 32-bit SDL 1.2 ABI in guest-owned heap memory;
-presentation converts to PocketHLE's RGB565 framebuffer. Delay uses the existing
+presentation converts to PocketHLE-Reborn's RGB565 framebuffer. Delay uses the existing
 guest scheduler. Offscreen surfaces and static query pointers survive SDL_Quit
 until the caller frees them or the process ends. State is process-owned.
 
@@ -374,7 +374,7 @@ Catalogue cross-check (names only): https://en.wikipedia.org/wiki/Gizmondo#Game_
 
 ## GTShell profiles
 
-GTShell support is integrated into the normal PocketHLE desktop and Android
+GTShell support is integrated into the normal PocketHLE-Reborn desktop and Android
 applications. Use the standard build and update channels; no separate application
 ID or fork release endpoint is required. See [Android build](BUILD.md#android)
 and the root [README](../README.md).
@@ -383,7 +383,7 @@ and the root [README](../README.md).
 
 The shell requires its original Flash Disk and Flash Disk2 contents, including
 its executable, native MFC/PMS DLLs, skins and language data. An SD card is optional.
-These files are supplied by the user and are not distributed with PocketHLE.
+These files are supplied by the user and are not distributed with PocketHLE-Reborn.
 Create a version-1 backup profile with:
 
 ```sh
@@ -407,14 +407,14 @@ Synchronous children preserve the existing host-session suspend/resume guard.
 
 ### Bluetooth file transfer
 
-Enable Classic Bluetooth in PocketHLE on both hosts before launching GTShell.
+Enable Classic Bluetooth in PocketHLE-Reborn on both hosts before launching GTShell.
 In the receiving shell, open **Bluetooth → Receive files** and leave it waiting.
 On the sender, select an image and choose **Send → Bluetooth**, then select the
 receiving host and accept the transfer there. Use the platform Bluetooth
 permissions, discoverability and pairing steps in [GIZMONDO.md](#bluetooth).
 Check received images in the gallery or in `MyPictures` on the profile's Flash Disk.
 
-GTShell uses BTDRT discovery and Winsock RFCOMM. PocketHLE translates discovery
+GTShell uses BTDRT discovery and Winsock RFCOMM. PocketHLE-Reborn translates discovery
 addresses for the guest and resolves them back to host addresses when connecting.
 The receiving host advertises the logical Gizmondo service UUID through SDP.
 On Windows the OS allocates the physical RFCOMM channel.
@@ -423,7 +423,7 @@ The Windows-to-Android image transfer and failure on an interrupted transfer
 have been verified. Android-to-Windows transfer still needs validation with
 the Windows listener change. A host appearing in discovery only confirms that
 its radio was found. Android can report the same read exception for a completed
-transfer and an interrupted link. PocketHLE preserves the socket error in this
+transfer and an interrupted link. PocketHLE-Reborn preserves the socket error in this
 case so a real interruption still reaches the guest.
 
 ### Implementation and limits
@@ -569,7 +569,7 @@ The client requires positive turf IDs. The companion server's wire-coordinate
 bias converts between those IDs and signed storage coordinates without changing
 GPS degrees, projection or ownership. A server still returning incompatible
 coordinates can cause a transfer error even when image download succeeds;
-updating PocketHLE alone does not fix that server response. See the
+updating PocketHLE-Reborn alone does not fix that server response. See the
 [original protocol investigation](history/VALIDATION.md#colors-startup-presentation-and-turf-wars-transfer-error)
 for ARM observations and the limits of its local HTTP/SQLite validation.
 

@@ -654,7 +654,7 @@ impl Editor {
                 keyboard_shortcut(input).is_some() || (*long && input == "Escape")
             };
             if fixed {
-                q.message = "This input is reserved by PocketHLE. Choose another input.".into();
+                q.message = "This input is reserved by PocketHLE-Reborn. Choose another input.".into();
                 q.choice = None;
                 q.pressed = None;
                 accept = false;
@@ -877,7 +877,7 @@ impl Editor {
     }
     pub fn reserved_input_attempt(&mut self) -> bool {
         if let Some(quick) = self.quick.as_mut().filter(|q| !q.wait_launch_release) {
-            quick.message = "This input is reserved by PocketHLE. Choose another input.".into();
+            quick.message = "This input is reserved by PocketHLE-Reborn. Choose another input.".into();
             return true;
         }
         false

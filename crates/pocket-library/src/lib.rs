@@ -1755,8 +1755,8 @@ impl LauncherProfile {
 /// launcher has always used:
 ///
 /// 1. the `POCKETHLE_LIBRARY` environment variable,
-/// 2. `<documents>/PocketHLE` (e.g. `~/Documents/PocketHLE`),
-/// 3. `<data_dir>/PocketHLE/library` (XDG / `%APPDATA%`),
+/// 2. `<documents>/PocketHLE-Reborn`,
+/// 3. the PocketHLE-Reborn project data directory (XDG / `%APPDATA%`),
 /// 4. `./pockethle-library` as a last resort.
 ///
 /// Lives here rather than in a frontend so the CLI's `import` command
@@ -1767,13 +1767,55 @@ pub fn default_library_root() -> PathBuf {
     }
     if let Some(dirs) = directories::UserDirs::new() {
         if let Some(docs) = dirs.document_dir() {
-            return docs.join("PocketHLE");
+            return migrate_default_root(docs.join("PocketHLE"), docs.join("PocketHLE-Reborn"));
         }
     }
-    if let Some(dirs) = directories::ProjectDirs::from("ai", "PocketHLE", "PocketHLE") {
-        return dirs.data_dir().join("library");
+    if let (Some(old), Some(new)) = (
+        directories::ProjectDirs::from("ai", "PocketHLE", "PocketHLE"),
+        directories::ProjectDirs::from("ai", "PocketHLE", "PocketHLE-Reborn"),
+    ) {
+        return migrate_default_root(old.data_dir().to_owned(), new.data_dir().to_owned())
+            .join("library");
     }
     PathBuf::from("./pockethle-library")
+}
+
+fn migrate_default_root(old: PathBuf, new: PathBuf) -> PathBuf {
+    use std::io::ErrorKind;
+
+    match fs::symlink_metadata(&new) {
+        Ok(_) => return new,
+        Err(error) if error.kind() != ErrorKind::NotFound => return old,
+        Err(_) => {}
+    }
+    match fs::symlink_metadata(&old) {
+        Err(error) if error.kind() == ErrorKind::NotFound => new,
+        Ok(metadata) if metadata.is_dir() => match fs::rename(&old, &new) {
+            Ok(()) => new,
+            // Another process may have moved the same library first.
+            Err(_) if !old.exists() && new.is_dir() => new,
+            Err(_) => old,
+        },
+        _ => old,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn migrates_default_library_once_without_merging_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = temp.path().join("PocketHLE");
+    let new = temp.path().join("PocketHLE-Reborn");
+    assert_eq!(migrate_default_root(old.clone(), new.clone()), new);
+    fs::create_dir_all(old.join("games")).unwrap();
+    fs::write(old.join("games").join("save"), b"save").unwrap();
+    assert_eq!(migrate_default_root(old.clone(), new.clone()), new);
+    assert!(!old.exists());
+    assert_eq!(fs::read(new.join("games").join("save")).unwrap(), b"save");
+    fs::create_dir(&old).unwrap();
+    fs::write(old.join("library.json"), b"legacy").unwrap();
+    assert_eq!(migrate_default_root(old.clone(), new.clone()), new);
+    assert_eq!(fs::read(old.join("library.json")).unwrap(), b"legacy");
 }
 
 impl Library {

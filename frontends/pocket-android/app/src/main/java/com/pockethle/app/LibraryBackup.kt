@@ -18,7 +18,7 @@ object LibraryBackup {
 
     fun save(context: Context, root: String): String {
         val zip = File.createTempFile("pockethle-backup-", ".zip", context.cacheDir)
-        val name = "PocketHLE-backup-${System.currentTimeMillis()}.zip"
+        val name = "PocketHLE-Reborn-backup-${System.currentTimeMillis()}.zip"
         try {
             native(root, zip, -1)
             if (Build.VERSION.SDK_INT >= 29) {

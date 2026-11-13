@@ -38,5 +38,5 @@ jobs:
           ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/28.2.13676358
       - uses: actions/upload-artifact@v4
         with:
-          name: PocketHLE-Android
-          path: dist/android/PocketHLE-*.apk
+          name: PocketHLE-Reborn-Android
+          path: dist/android/PocketHLE-Reborn-*.apk

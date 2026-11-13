@@ -53,16 +53,16 @@ PYVERSION
 mkdir -p "$android_root/dist/android"
 if [[ "$android_build_type" == debug ]]; then
     android_apk="$android_apk_dir/app-debug.apk"
-    android_output="$android_root/dist/android/PocketHLE-$android_version-android-debug.apk"
+    android_output="$android_root/dist/android/PocketHLE-Reborn-$android_version-android-debug.apk"
     "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$android_apk"
     echo 'Local debug APK: signed with the persistent Android SDK debug key.'
 elif [[ -n "${POCKETHLE_KEYSTORE:-}" ]]; then
     android_apk="$android_apk_dir/app-release.apk"
-    android_output="$android_root/dist/android/PocketHLE-$android_version-android-universal.apk"
+    android_output="$android_root/dist/android/PocketHLE-Reborn-$android_version-android-universal.apk"
     "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$android_apk"
 else
     android_apk="$android_apk_dir/app-release-unsigned.apk"
-    android_output="$android_root/dist/android/PocketHLE-$android_version-android-universal-unsigned.apk"
+    android_output="$android_root/dist/android/PocketHLE-Reborn-$android_version-android-universal-unsigned.apk"
     echo "No signing secrets: producing an explicitly unsigned APK. No temporary debug key is used."
 fi
 LD_LIBRARY_PATH="$ANDROID_HOME/build-tools/35.0.0/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \

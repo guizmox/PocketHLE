@@ -1,4 +1,4 @@
-//! JNI bridge between the PocketHLE core/library and the Android
+//! JNI bridge between the PocketHLE-Reborn core/library and the Android
 //! frontend. The Java side talks to this crate exclusively through
 //! UTF-8 JSON strings — that keeps the FFI surface small and removes
 //! any need for shared Kotlin/Rust data classes.
@@ -86,7 +86,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_libraryBackup<'local>
 }
 
 fn about_banner() -> String {
-    format!("PocketHLE v{} (Android)\nFork: https://github.com/guizmox/PocketHLE\nOriginal project — j92580498-max\nhttps://github.com/j92580498-max/PocketHLE\n\nGTShell support — Katamaran21\nhttps://github.com/Katamaran21/PocketHLE-GTShell\n\nThanks\nNekomo\nOLego\nTimofeyLednev\nBenoît (FX-man)\nJérôme (SoldatGG)\nTim (Firefly)\nMarat\ntorrenia", env!("CARGO_PKG_VERSION"))
+    format!("PocketHLE-Reborn v{} (Android)\nFork: https://github.com/guizmox/PocketHLE-Reborn\nRepository before the rename: https://github.com/guizmox/PocketHLE\nOriginal project — j92580498-max\nhttps://github.com/j92580498-max/PocketHLE\n\nGTShell support — Katamaran21\nhttps://github.com/Katamaran21/PocketHLE-GTShell\n\nThanks\nNekomo\nOLego\nTimofeyLednev\nBenoît (FX-man)\nJérôme (SoldatGG)\nTim (Firefly)\nMarat\ntorrenia", env!("CARGO_PKG_VERSION"))
 }
 
 #[no_mangle]
@@ -836,7 +836,7 @@ fn init_logger() {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Trace)
-                .with_tag("PocketHLE")
+                .with_tag("PocketHLE-Reborn")
                 .format(|buffer, record| {
                     pocket_library::session_diagnostic::record(record);
                     write!(buffer, "{}", record.args())

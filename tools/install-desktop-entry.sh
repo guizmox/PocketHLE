@@ -24,7 +24,7 @@ escaped="${escaped//%/%%}"
 cat > "$data_root/applications/PocketHLE.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=PocketHLE
+Name=PocketHLE-Reborn
 Comment=Gizmondo and PocketPC emulator
 Exec="$escaped"
 Icon=pockethle

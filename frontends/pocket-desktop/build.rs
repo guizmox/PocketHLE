@@ -3,9 +3,9 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         winres::WindowsResource::new()
             .set_icon("assets/pockethle.ico")
-            .set("ProductName", "PocketHLE")
-            .set("FileDescription", "PocketHLE")
+            .set("ProductName", "PocketHLE-Reborn")
+            .set("FileDescription", "PocketHLE-Reborn")
             .compile()
-            .expect("embedding the PocketHLE Windows icon");
+            .expect("embedding the PocketHLE-Reborn Windows icon");
     }
 }

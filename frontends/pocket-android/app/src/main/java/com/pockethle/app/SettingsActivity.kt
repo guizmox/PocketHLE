@@ -400,7 +400,7 @@ class SettingsActivity : HostKeyActivity() {
             val result=runCatching { JSONObject(NativeBridge.writeConfig(rootDir,current.toJson().toString())) }.getOrNull()
             val saved = runCatching { JSONObject(NativeBridge.readConfig(rootDir)) }.getOrNull()
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_pocketpc_touch_layout", "") != current.pocketpcTouchLayout) {
-                android.widget.Toast.makeText(context, "Touch layout could not be saved. Please update PocketHLE and try again.", android.widget.Toast.LENGTH_LONG).show()
+                android.widget.Toast.makeText(context, "Touch layout could not be saved. Please update PocketHLE-Reborn and try again.", android.widget.Toast.LENGTH_LONG).show()
             }
             if (result?.optBoolean("ok", false) == true &&
                 (saved == null || !saved.has("android_gizmondo_maximize_screen") ||
@@ -409,7 +409,7 @@ class SettingsActivity : HostKeyActivity() {
             }
             val gpuSaved = saved != null && saved.optString("frame_rate_limit", "") == current.frameRateLimit && saved.has("gpu_renderer") && saved.optBoolean("gpu_renderer") == current.gpuRenderer && saved.has("gles_internal_resolution") && saved.optInt("gles_internal_resolution") == current.glesInternalResolution
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_gizmondo_controls_size", "") != current.gizmondoControlsSize) {
-                android.widget.Toast.makeText(context, "Control size could not be saved. Please update PocketHLE and try again.", android.widget.Toast.LENGTH_LONG).show()
+                android.widget.Toast.makeText(context, "Control size could not be saved. Please update PocketHLE-Reborn and try again.", android.widget.Toast.LENGTH_LONG).show()
             }
             if (result?.optBoolean("ok", false) == true && saved?.optString("android_pocketpc_controls_size", "") != current.pocketpcControlsSize) {
                 android.widget.Toast.makeText(context, "Control size was not saved. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()

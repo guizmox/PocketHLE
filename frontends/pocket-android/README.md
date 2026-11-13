@@ -1,4 +1,4 @@
-# PocketHLE Android frontend
+# PocketHLE-Reborn Android frontend
 
 The app and Rust JNI bridge are built together for arm64-v8a and armeabi-v7a,
 using Unicorn and static FFmpeg. This directory is the app source, not a second

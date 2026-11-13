@@ -228,7 +228,7 @@ not a certification of the current checkout.
 
 The desktop launcher (Windows/Linux and the runtime Steam Deck profile) and
 Android catalogue check the latest published stable release of
-`guizmox/PocketHLE` once at startup. They use the public GitHub Releases API,
+`guizmox/PocketHLE-Reborn` at startup, falling back to `guizmox/PocketHLE` if the renamed repository does not provide a release. They use the public GitHub Releases API,
 not Actions artifacts or commits. No GitHub account/token is required.
 
 Checks run off the UI thread, with network timeouts and a 1 MiB response cap.

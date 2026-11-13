@@ -3,10 +3,10 @@ Copyright (C) 2026 PocketHLE Emulator Project
 SPDX-License-Identifier: Apache-2.0 OR MIT
 -->
 
-# PocketHLE
+# PocketHLE-Reborn
 
 <p align="center">
-  <img src="./frontends/pocket-desktop/assets/pockethle_logo.png" width="25%" alt="PocketHLE logo" />
+  <img src="./frontends/pocket-desktop/assets/pockethle_logo.png" width="25%" alt="PocketHLE-Reborn logo" />
 </p>
 
 <p align="center">
@@ -15,7 +15,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 
 <p align="center">
   <a href="https://discord.gg/jDvzctQdFu">
-    <img src="https://img.shields.io/badge/Discord-Join%20our%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the PocketHLE Discord community" />
+    <img src="https://img.shields.io/badge/Discord-Join%20our%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the PocketHLE-Reborn Discord community" />
   </a>
 </p>
 
@@ -23,20 +23,25 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
   <strong>Join our Discord for development updates, compatibility discussions, support and community chat.</strong>
 </p>
 
+PocketHLE-Reborn is an actively developed fork of the original PocketHLE
+project. We chose the name together with PocketHLE's original author,
+j92580498-max, to make the two projects easy to distinguish.
+[Original PocketHLE project](https://github.com/j92580498-max/PocketHLE).
+
 Documentation is maintained in English. See the [documentation index](docs/README.md),
 [GPU guide](docs/GPU.md) and [Gizmondo guide](docs/GIZMONDO.md).
 
 ---
 
 > [!NOTE]
-> PocketHLE runs native Windows CE software for Pocket PC, Windows Mobile and Gizmondo. It supports Pocket PC CAB imports and user-provided Gizmondo game and shell profiles. It is experimental software: compatibility, performance and input behavior vary by game and host platform.
+> PocketHLE-Reborn runs native Windows CE software for Pocket PC, Windows Mobile and Gizmondo. It supports Pocket PC CAB imports and user-provided Gizmondo game and shell profiles. It is experimental software: compatibility, performance and input behavior vary by game and host platform.
 
 > [!WARNING]
-> PocketHLE is developed for research and educational purposes. It does not include Microsoft system files, firmware or game data. Use only legally obtained game copies and archives.
+> PocketHLE-Reborn is developed for research and educational purposes. It does not include Microsoft system files, firmware or game data. Use only legally obtained game copies and archives.
 
 ## Info
 
-PocketHLE is a high-level emulator for Pocket PC 2002/2003, Windows Mobile 5/6 and Gizmondo software. Instead of emulating a complete Windows CE device, it loads the original game executable, runs its ARM code through a CPU backend, and provides clean-room host-side implementations of the Windows CE APIs the game expects.
+PocketHLE-Reborn is a high-level emulator for Pocket PC 2002/2003, Windows Mobile 5/6 and Gizmondo software. Instead of emulating a complete Windows CE device, it loads the original game executable, runs its ARM code through a CPU backend, and provides clean-room host-side implementations of the Windows CE APIs the game expects.
 
 The project is inspired by [touchHLE](https://github.com/touchHLE/touchHLE) and [EKA2L1](https://github.com/EKA2L1/EKA2L1), with a launcher and library workflow influenced by [j2me-loader](https://github.com/nikita36078/j2me-loader).
 
@@ -63,7 +68,7 @@ and **57 Gizmondo entries**. It includes games, demos, benchmarks and utilities.
 
 ## Status
 
-PocketHLE can currently:
+PocketHLE-Reborn can currently:
 
 * import and unpack Windows Mobile `.CAB` archives;
 * restore long filenames and installation paths from `_setup.xml`, or
@@ -74,7 +79,7 @@ PocketHLE can currently:
 * intercept imported Windows CE DLL calls through HLE thunks;
 * provide ordinal-to-name resolution for `coredll.dll` and `aygshell.dll`;
 * emulate core windowing, GDI, GAPI, registry, filesystem, timing, input and audio paths;
-* present GDI and GAPI software framebuffers, use host OpenGL by default for GLES 1.x with a PocketHLE software fallback, and use host OpenGL for GLES 2.0;
+* present GDI and GAPI software framebuffers, use host OpenGL by default for GLES 1.x with a PocketHLE-Reborn software fallback, and use host OpenGL for GLES 2.0;
 * keep supported OpenGL ES frames on the GPU from rendering through desktop presentation, avoiding CPU pixel readback and re-upload;
 * run a shared game library with per-game settings on desktop and Android;
 * build Linux, Windows and Android artifacts through GitHub Actions.
@@ -94,7 +99,7 @@ GPU-only presentation applies to compatible GLES frames. GDI composition,
 software rendering, capture readback and unsupported sharing configurations
 can use CPU pixels. The guest CPU still executes the game logic.
 
-PocketHLE is not a full Windows CE emulator. Some games still stop during CRT initialization, dynamic imports, worker-thread setup or unimplemented APIs. A successful boot or first frame does not automatically mean that an entire game is playable from start to finish.
+PocketHLE-Reborn is not a full Windows CE emulator. Some games still stop during CRT initialization, dynamic imports, worker-thread setup or unimplemented APIs. A successful boot or first frame does not automatically mean that an entire game is playable from start to finish.
 
 ## Architecture
 
@@ -144,7 +149,7 @@ When a native game starts:
 
 Download a release archive for your platform, import a legally obtained Pocket PC
 CAB or supported Windows installer, and choose the game in the desktop or Android
-launcher. PocketHLE extracts the Windows CE payload without running the Windows
+launcher. PocketHLE-Reborn extracts the Windows CE payload without running the Windows
 setup program.
 
 The Pocket PC importer supports these installer and archive families:
@@ -185,7 +190,7 @@ The CLI also supports `.exe` and `.zip` inputs. Use `--cpu stub` for trace-only 
 
 ### Steam Deck (Proton)
 
-Use the **Windows archive** (`PocketHLE-windows-x86_64.zip`) on Steam Deck.
+Use the **Windows archive** (`PocketHLE-Reborn-windows-x86_64.zip`) on Steam Deck.
 Add `pockethle-gui.exe` as a non-Steam game, choose **Proton** or
 **Proton Experimental** in the shortcut's Compatibility settings, and add this
 to its **Launch Options**:
@@ -231,7 +236,13 @@ Desktop and Android share the `pocket-library` model:
             └── ... game files ...
 ```
 
-On Linux and Windows, the default location is `~/.local/share/PocketHLE/library` or the platform equivalent. Android stores it under the app's external files directory.
+On Linux and Windows, the default library uses `Documents/PocketHLE-Reborn`
+when available, or the platform data directory. On first use, PocketHLE-Reborn
+renames an existing default `PocketHLE` folder if the new folder is absent.
+If the rename fails, it keeps using the old path. If both folders already
+exist, it opens `PocketHLE-Reborn` and leaves both folders intact.
+`POCKETHLE_LIBRARY` still selects a custom path. Android keeps its existing
+app-specific `library` directory.
 
 ## Roadmap
 
@@ -245,17 +256,17 @@ On Linux and Windows, the default location is `~/.local/share/PocketHLE/library`
 
 ## Legal notice
 
-PocketHLE does not contain or distribute copyrighted Microsoft system DLLs, firmware or game assets. The Windows CE API layer is a clean-room reimplementation based on public API behavior and ordinal data. Users are responsible for the games and archives they provide.
+PocketHLE-Reborn does not contain or distribute copyrighted Microsoft system DLLs, firmware or game assets. The Windows CE API layer is a clean-room reimplementation based on public API behavior and ordinal data. Users are responsible for the games and archives they provide.
 
 ## License
 
-PocketHLE is dual-licensed under [Apache-2.0](LICENSE-APACHE) **OR** [MIT](LICENSE-MIT), at your option.
+PocketHLE-Reborn is dual-licensed under [Apache-2.0](LICENSE-APACHE) **OR** [MIT](LICENSE-MIT), at your option.
 
 ## Contributing
 
 Bug reports, compatibility results, API traces and pull requests are welcome. Please include the game version, target screen size, frontend, CPU backend, command line and relevant logs or frame captures when reporting a problem.
 
-Join the [PocketHLE Discord community](https://discord.gg/jDvzctQdFu) for development updates, compatibility discussions and support.
+Join the [PocketHLE-Reborn Discord community](https://discord.gg/jDvzctQdFu) for development updates, compatibility discussions and support.
 
 ## Special Thanks
 
@@ -264,4 +275,4 @@ Join the [PocketHLE Discord community](https://discord.gg/jDvzctQdFu) for develo
 * [j2me-loader](https://github.com/nikita36078/j2me-loader) for launcher and library UX inspiration;
 * [Katamaran21](https://github.com/Katamaran21/PocketHLE-GTShell) for GTShell support;
 * Nekomo, OLego, TimofeyLednev, Benoît (FX-man), Jérôme (SoldatGG), Tim (Firefly), Marat, and torrenia;
-* the PocketHLE contributors and testers who provide legally obtained software, traces and compatibility reports.
+* the PocketHLE-Reborn contributors and testers who provide legally obtained software, traces and compatibility reports.

@@ -203,7 +203,7 @@ class MainActivity : HostKeyActivity() {
             } finally { setLibraryBusy(null) }
             result.onSuccess {
                 refreshLibrary()
-                AlertDialog.Builder(this@MainActivity).setTitle("PocketHLE backup").setMessage(it)
+                AlertDialog.Builder(this@MainActivity).setTitle("PocketHLE-Reborn backup").setMessage(it)
                     .setPositiveButton(android.R.string.ok, null).show()
             }.onFailure {
                 AlertDialog.Builder(this@MainActivity).setTitle("Backup/restore failed").setMessage(it.message ?: "Unknown error")
@@ -339,7 +339,7 @@ class MainActivity : HostKeyActivity() {
             !lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         ReleaseUpdates.announced = true
         pendingReleaseUpdate = null
-        Snackbar.make(recycler, "PocketHLE ${update.version} is available", Snackbar.LENGTH_INDEFINITE)
+        Snackbar.make(recycler, "PocketHLE-Reborn ${update.version} is available", Snackbar.LENGTH_INDEFINITE)
             .setAction("Download") {
                 runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(update.url))) }
                     .onFailure { android.widget.Toast.makeText(this, "No browser available", android.widget.Toast.LENGTH_LONG).show() }

@@ -69,7 +69,7 @@ object BluetoothHost {
     internal fun adapter() = (context?.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
         ?: throw IllegalStateException("No Bluetooth adapter")
     @JvmStatic fun ready(): Int = if (active && adapter().isEnabled) 0 else 10091
-    @JvmStatic fun hostname(): String = adapter().name ?: "PocketHLE Android"
+    @JvmStatic fun hostname(): String = adapter().name ?: "PocketHLE-Reborn Android"
 
     @JvmStatic fun scan(): String = synchronized(scanGate) {
         val ctx = context ?: throw IllegalStateException("Bluetooth not initialized")

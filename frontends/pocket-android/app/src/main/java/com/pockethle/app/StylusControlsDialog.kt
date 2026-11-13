@@ -48,7 +48,7 @@ internal class StylusControlsDialog(
         val content=LinearLayout(context).apply {orientation=LinearLayout.VERTICAL;setPadding(pad,pad,pad,pad)}
         val scroll=ScrollView(context).apply{addView(content)}
         setContentView(scroll)
-        status=TextView(context).apply {text=if(testing) "Try arrows / D-pad and the left stick. Release returns to the centre." else "Select a zone, then press a key, button or stick direction. Reserved PocketHLE inputs are refused."}
+        status=TextView(context).apply {text=if(testing) "Try arrows / D-pad and the left stick. Release returns to the centre." else "Select a zone, then press a key, button or stick direction. Reserved PocketHLE-Reborn inputs are refused."}
         content.addView(status)
         if(!testing) {
             val spinner=Spinner(context).apply {

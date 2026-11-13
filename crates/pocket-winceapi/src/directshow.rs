@@ -261,7 +261,7 @@ type Decoded = (
 );
 #[cfg(not(feature = "video-static"))]
 fn decode(_path: std::path::PathBuf, _start: f64, _stop: f64) -> Result<Decoded, String> {
-    Err("PocketHLE was compiled without the video-static feature".into())
+    Err("PocketHLE-Reborn was compiled without the video-static feature".into())
 }
 #[cfg(feature = "video-static")]
 fn decode(path: std::path::PathBuf, start: f64, stop: f64) -> Result<Decoded, String> {

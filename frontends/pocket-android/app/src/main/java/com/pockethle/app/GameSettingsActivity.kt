@@ -77,7 +77,7 @@ class GameSettingsActivity : HostKeyActivity() {
                 fun updateEditor() {
                     editor.isVisible=current.controlsMode()!="normal"
                     editor.title=if(current.controlsMode()=="zones") "Test controls…" else "Configure grid…"
-                    editor.summary=if(current.controlsMode()=="zones") "Test arrows / D-pad and progressive left-stick movement without starting a game." else "Choose 4 × 3, 5 × 4 or 6 × 5. Select a zone and press an input. Reserved PocketHLE shortcuts cannot be assigned."
+                    editor.summary=if(current.controlsMode()=="zones") "Test arrows / D-pad and progressive left-stick movement without starting a game." else "Choose 4 × 3, 5 × 4 or 6 × 5. Select a zone and press an input. Reserved PocketHLE-Reborn shortcuts cannot be assigned."
                 }
                 controlsCategory.addPreference(ListPreference(requireContext()).apply {
                     key="pocketpc_controls";title="Control mode";isPersistent=false

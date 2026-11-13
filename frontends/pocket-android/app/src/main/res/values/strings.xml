@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">PocketHLE</string>
+    <string name="app_name">PocketHLE-Reborn</string>
     <string name="game_loading">Loading...</string>
     <string name="settings_title">Settings</string>
     <string name="game_settings_title">Game settings</string>

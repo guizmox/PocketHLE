@@ -51,7 +51,7 @@ enum Command {
         /// Archive or executable to import.
         path: PathBuf,
         /// Library root. Defaults to `POCKETHLE_LIBRARY`, else
-        /// `<documents>/PocketHLE`.
+        /// `<documents>/PocketHLE-Reborn`.
         #[arg(long)]
         library: Option<PathBuf>,
     },
@@ -1683,7 +1683,7 @@ mod display_window {
             let w = width as usize;
             let h = height as usize;
             let window = Window::new(
-                "PocketHLE",
+                "PocketHLE-Reborn",
                 w,
                 h,
                 WindowOptions {

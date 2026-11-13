@@ -1048,7 +1048,7 @@ impl PocketLauncher {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(50.0);
-                ui.heading("PocketHLE update available");
+                ui.heading("PocketHLE-Reborn update available");
                 ui.label(format!(
                     "Installed: {}   Available: {}",
                     env!("CARGO_PKG_VERSION"),
@@ -1436,7 +1436,7 @@ impl PocketLauncher {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
 
-        let game = self.running_game.as_deref().unwrap_or("PocketHLE");
+        let game = self.running_game.as_deref().unwrap_or("PocketHLE-Reborn");
         let safe_name: String = game
             .chars()
             .map(|c| {
@@ -1477,7 +1477,7 @@ impl PocketLauncher {
                 let game: String = self
                     .running_game
                     .as_deref()
-                    .unwrap_or("PocketHLE")
+                    .unwrap_or("PocketHLE-Reborn")
                     .chars()
                     .map(|c| {
                         if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -1684,10 +1684,15 @@ impl PocketLauncher {
     fn ui_about(&mut self, ui: &mut egui::Ui) {
         crate::controller_ui::page_scope(ui, "about_page", |ui| {
             ScrollArea::vertical().show(ui, |ui| {
-                ui.heading(format!("PocketHLE v{}", env!("CARGO_PKG_VERSION")));
+                ui.heading(format!("PocketHLE-Reborn v{}", env!("CARGO_PKG_VERSION")));
                 crate::controller_ui::hyperlink_to(
                     ui,
-                    "PocketHLE fork — guizmox",
+                    "PocketHLE-Reborn fork — guizmox",
+                    pocket_library::updates::REPOSITORY_URL,
+                );
+                crate::controller_ui::hyperlink_to(
+                    ui,
+                    "Repository before the rename",
                     "https://github.com/guizmox/PocketHLE",
                 );
                 crate::controller_ui::hyperlink_to(
@@ -2338,7 +2343,7 @@ impl PocketLauncher {
                 .collapsible(false)
                 .show(ctx, |ui| {
                     crate::controller_ui::page_scope(ui, "import_executable", |ui| {
-                        ui.label(format!("Which executable should PocketHLE launch for {}?", game.display_name));
+                        ui.label(format!("Which executable should PocketHLE-Reborn launch for {}?", game.display_name));
                         ui.label("You can change this later in the game’s ⋯ menu → Switch Launch Executable.");
                         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                             for (index, exe) in game.executables.iter().enumerate() {
@@ -2769,7 +2774,7 @@ impl PocketLauncher {
                         if crate::controller_ui::button(ui, "Choose GPU in Windows…").clicked() {
                             crate::host_gpu::open_settings();
                         }
-                        ui.add(egui::Label::new("Select this PocketHLE executable in Windows Graphics settings, choose a GPU, then restart PocketHLE. By default, PocketHLE lets the system choose the GPU.").wrap(true));
+                        ui.add(egui::Label::new("Select this PocketHLE-Reborn executable in Windows Graphics settings, choose a GPU, then restart PocketHLE-Reborn. By default, PocketHLE-Reborn lets the system choose the GPU.").wrap(true));
                     });
                     ui.end_row();
                 }
@@ -2797,7 +2802,7 @@ impl PocketLauncher {
                 crate::controller_ui::checkbox(ui, &mut draft.desktop_vsync, "Synchronize with the display");
                 ui.end_row();
                 ui.label("");
-                ui.add(egui::Label::new("Limits window presentation to the display refresh rate and prevents tearing. Restart PocketHLE after changing this setting.").wrap(true));
+                ui.add(egui::Label::new("Limits window presentation to the display refresh rate and prevents tearing. Restart PocketHLE-Reborn after changing this setting.").wrap(true));
                 ui.end_row();
                 ui.label("Frame rate limit");
                 crate::controller_ui::ComboBox::from_id_source("global_frame_rate_limit")
@@ -3345,7 +3350,7 @@ impl PocketLauncher {
                 .spacing(Vec2::new(12.0, 8.0))
                 .show(ui, |ui| {
                     ui.label("OEM model (readable text)");
-                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_oem_info, "PocketHLE");
+                    crate::controller_ui::text_edit(ui, &mut draft.pocketpc_oem_info, "Default device identity");
                     ui.end_row();
                     ui.label("Platform type (readable text)");
                     crate::controller_ui::text_edit(ui, &mut draft.pocketpc_platform_type, "PocketPC");
@@ -3693,7 +3698,7 @@ impl PocketLauncher {
         painter.rect_filled(screen, 0.0, Color32::BLACK);
         let logo = self.loading_logo.get_or_insert_with(|| {
             let image = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
-                .expect("embedded PocketHLE logo is valid")
+                .expect("embedded PocketHLE-Reborn logo is valid")
                 .into_rgba8();
             let size = [image.width() as usize, image.height() as usize];
             ui.ctx().load_texture(
@@ -4037,7 +4042,7 @@ impl PocketLauncher {
         ui.painter().text(
             bounds.min + Vec2::new(12., 12.),
             egui::Align2::LEFT_CENTER,
-            "PocketHLE · Gizmondo",
+            "PocketHLE-Reborn · Gizmondo",
             egui::FontId::proportional(13.),
             Color32::from_gray(220),
         );
@@ -4883,7 +4888,7 @@ impl PocketLauncher {
                             continue;
                         }
                         if down && self.screen==Screen::InputSettings && self.bindings_visual.reserved_input_attempt() {
-                            self.control_notice=Some(("This input is reserved by PocketHLE.".into(),Instant::now()+Duration::from_secs(3)));
+                            self.control_notice=Some(("This input is reserved by PocketHLE-Reborn.".into(),Instant::now()+Duration::from_secs(3)));
                         }
                         self.handle_menu_host_control(ctx, device, &control, down);
                         continue;
@@ -5372,7 +5377,7 @@ impl PocketLauncher {
             if self.screen == Screen::InputSettings && self.bindings_visual.reserved_input_attempt()
             {
                 self.control_notice = Some((
-                    "This input is reserved by PocketHLE.".into(),
+                    "This input is reserved by PocketHLE-Reborn.".into(),
                     Instant::now() + Duration::from_secs(3),
                 ));
             }
@@ -5590,7 +5595,7 @@ impl PocketLauncher {
         }
         self.library_busy = true;
         self.status = if restore {
-            "Choose a PocketHLE backup…"
+            "Choose a PocketHLE-Reborn backup…"
         } else {
             "Saving library backup…"
         }

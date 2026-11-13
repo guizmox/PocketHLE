@@ -1,4 +1,4 @@
-// Cross-platform desktop launcher GUI for PocketHLE.
+// Cross-platform desktop launcher GUI for PocketHLE-Reborn.
 //
 // Targets Linux and Windows. The interface is deliberately modeled
 // after [`j2me-loader`](https://github.com/nikita36078/j2me-loader): a
@@ -153,7 +153,7 @@ fn main() -> Result<()> {
     if let Err(error) = &result {
         log::error!("{error:#}");
         rfd::MessageDialog::new()
-            .set_title("PocketHLE startup error")
+            .set_title("PocketHLE-Reborn startup error")
             .set_description(format!("{error:#}"))
             .set_level(rfd::MessageLevel::Error)
             .show();
@@ -168,7 +168,7 @@ fn run_launcher() -> Result<()> {
         println!("{}", launch_args::HELP);
         #[cfg(windows)]
         rfd::MessageDialog::new()
-            .set_title("PocketHLE command line")
+            .set_title("PocketHLE-Reborn command line")
             .set_description(launch_args::HELP)
             .show();
         return Ok(());
@@ -177,9 +177,9 @@ fn run_launcher() -> Result<()> {
     let steam_deck = profile == pocket_library::LauncherProfile::SteamDeck;
     let launch = startup.launch;
     let title = if steam_deck {
-        "PocketHLE — Steam Deck"
+        "PocketHLE-Reborn — Steam Deck"
     } else {
-        "PocketHLE"
+        "PocketHLE-Reborn"
     };
     let library_root = default_library_root();
     let log_path = init_logging(&library_root);
@@ -187,7 +187,7 @@ fn run_launcher() -> Result<()> {
     if let Some(path) = log_path {
         log::info!("Logging to {}", path.display());
     }
-    let library = Library::open_with_profile(&library_root, profile).context("opening PocketHLE library")?;
+    let library = Library::open_with_profile(&library_root, profile).context("opening PocketHLE-Reborn library")?;
 
     let launch_game = launch
         .as_ref()
@@ -207,7 +207,7 @@ fn run_launcher() -> Result<()> {
     let fullscreen = launch_args::startup_fullscreen(explicit_fullscreen);
 
     let icon = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
-        .context("decoding PocketHLE logo")?
+        .context("decoding PocketHLE-Reborn logo")?
         .to_rgba8();
     let ui_vsync = library.config().desktop_vsync;
     log::info!(

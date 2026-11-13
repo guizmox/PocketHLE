@@ -19,8 +19,8 @@ impl Purpose {
         match self {
             Self::Import => "Import a game",
             Self::AddData => "Add/Replace Data — select a file",
-            Self::RestoreBackup => "Open PocketHLE backup",
-            Self::SaveBackup => "Save PocketHLE backup",
+            Self::RestoreBackup => "Open PocketHLE-Reborn backup",
+            Self::SaveBackup => "Save PocketHLE-Reborn backup",
         }
     }
     fn accepts(self, path: &Path) -> bool {
@@ -328,7 +328,7 @@ fn backup_filename(name: &str) -> Result<String, String> {
         return Ok(format!("{name}.zip"));
     }
     if !Purpose::SaveBackup.accepts(Path::new(name)) {
-        return Err("A PocketHLE backup must use the .zip extension.".into());
+        return Err("A PocketHLE-Reborn backup must use the .zip extension.".into());
     }
     Ok(name.to_owned())
 }
@@ -515,7 +515,7 @@ impl FileDialog {
                 return;
             }
             pad::page_scope(ui, ("file_dialog", self.purpose as u8, self.generation), |ui| {
-                ui.horizontal(|ui| { ui.heading(self.purpose.title()); ui.weak("PocketHLE"); });
+                ui.horizontal(|ui| { ui.heading(self.purpose.title()); ui.weak("PocketHLE-Reborn"); });
                 ui.horizontal(|ui| {
                     if track(&mut zones, 0, pad::add_enabled(ui, self.directory.parent().is_some(), egui::Button::new("Up (LB)"))).clicked() { self.parent(); }
                     if track(&mut zones, 0, pad::button(ui, "Refresh")).clicked() { self.refresh(); }
