@@ -378,7 +378,9 @@ impl Runner {
                 || metadata
                     .as_ref()
                     .is_some_and(pocket_library::uses_programmable_gles));
-        emu.set_gpu_renderer(!programmable && launcher_config.gpu_renderer);
+        // A process can expose GLES2 entry points and still use GLES1 through
+        // libGLES_CM/CL. Keep the GLES1 backend tied to the global setting.
+        emu.set_gpu_renderer(launcher_config.gpu_renderer);
         emu.set_gizmondo_goforce_driver(is_gizmondo);
         emu.set_programmable_gles(programmable);
         emu.set_goforce_5500_profile(!is_gizmondo && profile.nvidia_combiners());

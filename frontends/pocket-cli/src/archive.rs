@@ -319,7 +319,7 @@ fn prepare_installshield_sfx(path: &Path) -> Result<Launcher> {
 fn prepare_cab(path: &Path) -> Result<Launcher> {
     let tmp = TempDir::with_prefix("pockethle-cab-")
         .with_context(|| format!("creating temp dir for {}", path.display()))?;
-    let (files, header) = pocket_core::cab::extract_with_header(path, tmp.path())
+    let (files, header) = pocket_core::cab::extract_for_install(path, tmp.path())
         .with_context(|| format!("extracting {}", path.display()))?;
 
     if files.is_empty() {
@@ -341,9 +341,10 @@ fn prepare_cab(path: &Path) -> Result<Launcher> {
     // payload exactly, so the reconstruct-by-guesswork paths below only
     // add wrong names. They stay for headers we could not parse.
     let structured = header.as_ref().is_some_and(|h| h.structured);
+    let mut header_names = Vec::new();
     if structured {
         if let Some(h) = header.as_ref() {
-            pocket_core::cab::materialise_install_header_names(tmp.path(), &files, h);
+            header_names = pocket_core::cab::materialise_install_header_names(tmp.path(), &files, h);
         }
     } else {
         materialise_legacy_names(tmp.path(), &files, header.as_ref());
@@ -364,14 +365,15 @@ fn prepare_cab(path: &Path) -> Result<Launcher> {
         .find(|(source, destination)| *source == exe_path && is_entrypoint_candidate(destination))
         .map(|(_, destination)| destination.clone())
         .unwrap_or(exe_path);
-    if let Some(setup) = setup.as_ref().filter(|_| !structured) {
-        pocket_core::cab::remove_materialised_setup_sources(
-            tmp.path(),
-            setup,
-            &long_names,
-            &exe_path,
-        )?;
-    }
+    let mut installed_names = long_names;
+    installed_names.extend(header_names);
+    pocket_core::cab::remove_materialised_cab_sources(
+        tmp.path(),
+        setup.as_ref(),
+        header.as_ref(),
+        &installed_names,
+        &exe_path,
+    )?;
 
     // Chopper Fight's `.000` gives GUI and scene ZIPs their install paths;
     // expand them after preserving that tree so startup enumeration finds

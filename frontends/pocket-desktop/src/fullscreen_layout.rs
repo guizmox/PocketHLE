@@ -36,26 +36,19 @@ pub fn presentation_fit_capped(available: [u32; 2], rendered: [u32; 2], maximum:
     }
 }
 
-/// Fullscreen zoom uses whole QVGA steps for QVGA-family images, including
-/// internally doubled/tripled renders. Other aspect ratios keep native steps.
-pub fn qvga_fullscreen_fit(available: [u32; 2], rendered: [u32; 2]) -> IntegerFit {
-    let base = if rendered[0] != 0
-        && rendered[1] != 0
-        && rendered[0] % 320 == 0
-        && rendered[1] % 240 == 0
-        && rendered[0] / 320 == rendered[1] / 240
-    {
-        [320, 240]
-    } else if rendered[0] != 0
-        && rendered[1] != 0
-        && rendered[0] % 240 == 0
-        && rendered[1] % 320 == 0
-        && rendered[0] / 240 == rendered[1] / 320
-    {
-        [240, 320]
-    } else {
-        rendered
-    };
+/// Fullscreen zoom uses whole steps of the QVGA or WQVGA panel in either
+/// orientation, even when the rendered texture is an internal multiple.
+pub fn panel_fullscreen_fit(available: [u32; 2], rendered: [u32; 2]) -> IntegerFit {
+    let base = [[320, 240], [240, 320], [400, 240], [240, 400]]
+        .into_iter()
+        .find(|&[w, h]| {
+            rendered[0] >= w
+                && rendered[1] >= h
+                && rendered[0] % w == 0
+                && rendered[1] % h == 0
+                && rendered[0] / w == rendered[1] / h
+        })
+        .unwrap_or(rendered);
     integer_fit(available, base)
 }
 /// Largest aspect-preserving rectangle, including fractional up/downscaling.
@@ -82,7 +75,7 @@ mod tests {
     #[test]
     fn deck_fullscreen_uses_whole_qvga_steps_at_every_render_resolution() {
         for rendered in [[320, 240], [640, 480], [960, 720], [1280, 960]] {
-            let fit = qvga_fullscreen_fit([1280, 800], rendered);
+            let fit = panel_fullscreen_fit([1280, 800], rendered);
             assert_eq!(
                 [fit.left, fit.top, fit.width, fit.height],
                 [160, 40, 960, 720]
@@ -90,20 +83,40 @@ mod tests {
             assert_eq!(fit.factor, 3);
         }
         for rendered in [[240, 320], [480, 640], [720, 960]] {
-            let fit = qvga_fullscreen_fit([1280, 800], rendered);
+            let fit = panel_fullscreen_fit([1280, 800], rendered);
             assert_eq!(
                 [fit.left, fit.top, fit.width, fit.height],
                 [400, 80, 480, 640]
             );
         }
-        let fit = qvga_fullscreen_fit([1920, 1080], [640, 480]);
+        let fit = panel_fullscreen_fit([1920, 1080], [640, 480]);
         assert_eq!([fit.width, fit.height], [1280, 960]);
         assert_eq!(
-            qvga_fullscreen_fit([1280, 800], [400, 240]),
+            panel_fullscreen_fit([1280, 800], [400, 240]),
             integer_fit([1280, 800], [400, 240])
         );
         assert_eq!(aspect_fit([200, 150], [640, 480]), [0, 0, 200, 150]);
         assert_eq!(aspect_fit([0, 0], [320, 240]), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn deck_fullscreen_uses_wqvga_steps_in_both_orientations() {
+        for rendered in [[240, 400], [480, 800], [960, 1600]] {
+            let fit = panel_fullscreen_fit([1280, 800], rendered);
+            assert_eq!(
+                [fit.left, fit.top, fit.width, fit.height],
+                [400, 0, 480, 800]
+            );
+            let fit = panel_fullscreen_fit([1280, 799], rendered);
+            assert_eq!([fit.width, fit.height], [240, 400]);
+        }
+        for rendered in [[400, 240], [800, 480], [1600, 960]] {
+            let fit = panel_fullscreen_fit([1280, 800], rendered);
+            assert_eq!(
+                [fit.left, fit.top, fit.width, fit.height],
+                [40, 40, 1200, 720]
+            );
+        }
     }
 
     #[test]

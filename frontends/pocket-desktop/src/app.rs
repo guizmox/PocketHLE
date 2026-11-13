@@ -3643,7 +3643,7 @@ impl PocketLauncher {
             (available.width() * dpi).floor() as u32,
             (available.height() * dpi).floor() as u32,
         ];
-        let fit = crate::fullscreen_layout::qvga_fullscreen_fit(physical, native);
+        let fit = crate::fullscreen_layout::panel_fullscreen_fit(physical, native);
         let [left, top, width, height] = if fit.width > physical[0] || fit.height > physical[1] {
             crate::fullscreen_layout::aspect_fit(physical, native)
         } else {

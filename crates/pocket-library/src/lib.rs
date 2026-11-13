@@ -2157,8 +2157,9 @@ impl Library {
         // import that skips this step ends up with a directory of
         // `00000RAY.004`-style names the game cannot open.
         let structured_header = header.as_ref().filter(|h| h.structured);
+        let mut header_names = Vec::new();
         if let Some(h) = structured_header {
-            pocket_cab::materialise_install_header_names(&extracted_dir, &files, h);
+            header_names = pocket_cab::materialise_install_header_names(&extracted_dir, &files, h);
         } else {
             materialise_legacy_assets(
                 &extracted_dir,
@@ -2293,14 +2294,15 @@ impl Library {
             &files,
             header.as_ref().and_then(|h| h.app_name.as_deref()),
         );
-        if let Some(setup) = setup.as_ref().filter(|_| structured_header.is_none()) {
-            pocket_cab::remove_materialised_setup_sources(
-                &extracted_dir,
-                setup,
-                &long_names,
-                &exe_abs,
-            )?;
-        }
+        let mut installed_names = long_names;
+        installed_names.extend(header_names);
+        pocket_cab::remove_materialised_cab_sources(
+            &extracted_dir,
+            setup.as_ref(),
+            structured_header,
+            &installed_names,
+            &exe_abs,
+        )?;
         let entry = GameEntry {
             platform: None,
             id: id.clone(),
