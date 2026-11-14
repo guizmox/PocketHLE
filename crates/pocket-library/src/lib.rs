@@ -583,6 +583,36 @@ impl GameEntry {
         })
     }
 
+    /// CAB application-data directories need writable per-game storage
+    /// over the original files, even when the CAB has no SaveDir value.
+    pub fn application_data_mounts(&self, library_root: &Path) -> Vec<(String, PathBuf)> {
+        let save_prefix = self
+            .guest_launch_paths(library_root)
+            .map(|paths| paths.save_prefix);
+        self.install_dirs
+            .iter()
+            .filter_map(|prefix| {
+                if save_prefix.as_ref().is_some_and(|save| {
+                    save.trim_end_matches('\\')
+                        .eq_ignore_ascii_case(prefix.trim_end_matches('\\'))
+                }) {
+                    return None;
+                }
+                let prefix = prefix.trim_matches('\\');
+                let (root, suffix) = prefix.split_once('\\')?;
+                if !root.eq_ignore_ascii_case("Application Data") {
+                    return None;
+                }
+                let relative = backup::safe_path(&suffix.replace('\\', "/")).ok()?;
+                let path = self
+                    .save_dir(library_root)
+                    .join("application-data")
+                    .join(relative);
+                Some((format!("\\{prefix}\\"), path))
+            })
+            .collect()
+    }
+
     pub fn my_documents_uses_separate_directory(&self, library_root: &Path) -> bool {
         self.guest_launch_paths(library_root).is_none_or(|paths| {
             !paths

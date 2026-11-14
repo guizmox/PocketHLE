@@ -123,7 +123,7 @@ impl PocketLauncher {
             return false;
         }
 
-        let Some(grid) = self.grid_settings().cloned() else {
+        let Some(mut grid) = self.grid_settings().cloned() else {
             return false;
         };
         // A physical touch owns the stylus until it is released. Assigned buttons
@@ -132,6 +132,10 @@ impl PocketLauncher {
             return grid
                 .cell_for(&input, self.library.config().gamepad_fullscreen.as_deref())
                 .is_some();
+        }
+        if let Some(frame) = &self.last_frame_snapshot {
+            let quarter_turn = rotation_turns(self.game_rotation) % 2 != 0;
+            grid.orient((frame.height > frame.width) ^ quarter_turn);
         }
         let (consumed, action) = self.stylus_grid_router.input(
             &grid,
@@ -379,6 +383,7 @@ impl PocketLauncher {
         if !draft.pocketpc_stylus_grid.valid_size() {
             draft.pocketpc_stylus_grid = Default::default();
         }
+        draft.pocketpc_stylus_grid.orient(editor.portrait);
         let mut open = true;
         let mut done = false;
         let title = if editor.testing {
@@ -396,6 +401,7 @@ impl PocketLauncher {
                             .selected_text(format!("{} × {}",draft.pocketpc_stylus_grid.columns,draft.pocketpc_stylus_grid.rows))
                             .show_ui(ui,|ui|{
                                 for (c,r) in pocket_library::stylus_grid::StylusGrid::SIZES {
+                                    let (c,r)=if editor.portrait {(r,c)}else{(c,r)};
                                     if crate::controller_ui::button(ui,format!("{c} × {r}")).clicked(){
                                         draft.pocketpc_stylus_grid.resize(c,r);editor.waiting=None;editor.selected=None;
                                         editor.message="Grid size changed; assignments cleared.".into();
@@ -419,6 +425,7 @@ impl PocketLauncher {
                     }else{
                         let cols=draft.pocketpc_stylus_grid.columns.max(1) as usize;
                         let rows=draft.pocketpc_stylus_grid.rows.max(1) as usize;
+                        let side=(width/cols as f32).min(max_h/rows as f32)-2.0;
                         egui::Grid::new("stylus_binding_cells").spacing(Vec2::splat(2.0)).show(ui,|ui|{
                             for row in 0..rows {
                                 for col in 0..cols {
@@ -427,7 +434,7 @@ impl PocketLauncher {
                                         draft.pocketpc_stylus_grid.bindings.iter().find(|b|b.cell==cell).map(|b|crate::controller_labels::grid(ui.ctx(),&b.input)).unwrap_or_else(||format!("{}",cell+1))
                                     };
                                     let text=RichText::new(label).size(11.0).color(if editor.waiting==Some(cell){Color32::from_rgb(255,175,70)}else if draft.pocketpc_stylus_grid.bindings.iter().any(|b|b.cell==cell){Color32::from_rgb(100,220,180)}else{Color32::GRAY});
-                                    let response=crate::controller_ui::sized_button(ui,Vec2::new(width/cols as f32-2.0,width/ratio/rows as f32-2.0),text);
+                                    let response=crate::controller_ui::sized_button(ui,Vec2::splat(side),text);
                                     if response.clicked(){self.controller_ui.stop_repeat();editor.selected=Some(cell);editor.waiting=Some(cell);editor.message="Waiting for input. Escape cancels.".into();}
                                 }
                                 ui.end_row();

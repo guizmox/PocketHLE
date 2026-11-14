@@ -1244,7 +1244,13 @@ class GameActivity : AppCompatActivity() {
         if(input.source=="keyboard" && bindings.stylusKeyboardReserved(input.name)) return false
         val router=gridRouter ?: return false
         if(!router.assigned(input)) return false
-        if(!surfacePointerDown && activityResumed && hasWindowFocus()) router.input(input,down)?.let{sendGrid(it)}
+        if (!surfacePointerDown && activityResumed && hasWindowFocus()) {
+            lastFrame?.let { frame ->
+                val quarterTurn = rotationDegrees == 90 || rotationDegrees == 270
+                router.config.orient((frame.height > frame.width) xor quarterTurn)
+            }
+            router.input(input, down)?.let { sendGrid(it) }
+        }
         return true
     }
 

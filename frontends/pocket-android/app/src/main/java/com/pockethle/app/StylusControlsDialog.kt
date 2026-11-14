@@ -51,15 +51,19 @@ internal class StylusControlsDialog(
         status=TextView(context).apply {text=if(testing) "Try arrows / D-pad and the left stick. Release returns to the centre." else "Select a zone, then press a key, button or stick direction. Reserved PocketHLE-Reborn inputs are refused."}
         content.addView(status)
         if(!testing) {
+            grid.orient(portrait)
+            val sizes = StylusGridConfig.sizes.map { (columns, rows) ->
+                if (portrait) rows to columns else columns to rows
+            }
             val spinner=Spinner(context).apply {
-                adapter=ArrayAdapter(context,android.R.layout.simple_spinner_dropdown_item,StylusGridConfig.sizes.map{"${it.first} × ${it.second}"})
-                setSelection(StylusGridConfig.sizes.indexOf(grid.columns to grid.rows).coerceAtLeast(0))
+                adapter=ArrayAdapter(context,android.R.layout.simple_spinner_dropdown_item,sizes.map{"${it.first} × ${it.second}"})
+                setSelection(sizes.indexOf(grid.columns to grid.rows).coerceAtLeast(0))
             }
             content.addView(spinner)
             spinner.onItemSelectedListener=object:AdapterView.OnItemSelectedListener {
                 override fun onNothingSelected(parent:AdapterView<*>?) {}
                 override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long) {
-                    val (c,r)=StylusGridConfig.sizes[position]
+                    val (c,r)=sizes[position]
                     if(c!=grid.columns || r!=grid.rows){grid.columns=c;grid.rows=r;grid.bindings.clear();waiting=null;selected=null;refreshCells();status.text="Grid resized; assignments cleared."}
                 }
             }
@@ -89,8 +93,8 @@ internal class StylusControlsDialog(
         val focused=(currentFocus?.tag as? Int)
         cells.removeAllViews();cells.columnCount=grid.columns;cells.rowCount=grid.rows
         val available=(cells.width.takeIf{it>0} ?: (context.resources.displayMetrics.widthPixels*.8f).toInt())
-        val ratio=if(portrait) .75f else 4f/3f
-        val width=minOf(available,(context.resources.displayMetrics.heightPixels*.5f*ratio).toInt())
+        val maxHeight = (context.resources.displayMetrics.heightPixels * .5f).toInt()
+        val side = (minOf(available / grid.columns, maxHeight / grid.rows) - 2).coerceAtLeast(1)
         for(cell in 0 until grid.columns*grid.rows) {
             val label=if(waiting==cell) "Press input…" else grid.bindings.firstOrNull{it.cell==cell}?.input?.let { ControllerLabels.grid(it) } ?: "${cell+1}"
             val button=Button(context).apply {
@@ -100,7 +104,7 @@ internal class StylusControlsDialog(
                 if(waiting==cell)setBackgroundColor(Color.rgb(40,110,180))
                 setOnClickListener{selected=cell;waiting=cell;status.text="Press an input. Back cancels assignment.";refreshCells();showVirtualControls()}
             }
-            cells.addView(button,GridLayout.LayoutParams().apply{this.width=width/grid.columns;this.height=(width/ratio/grid.rows).toInt();setMargins(1,1,1,1)})
+            cells.addView(button,GridLayout.LayoutParams().apply{this.width=side;this.height=side;setMargins(1,1,1,1)})
             if(focused==cell)button.requestFocus()
         }
     }

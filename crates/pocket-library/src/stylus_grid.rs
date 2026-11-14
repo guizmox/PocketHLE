@@ -102,12 +102,30 @@ impl Default for StylusGrid {
     }
 }
 impl StylusGrid {
-    pub const SIZES: [(u8, u8); 3] = [(4, 3), (5, 4), (6, 5)];
+    pub const SIZES: [(u8, u8); 4] = [(4, 3), (5, 4), (6, 5), (7, 6)];
+    fn supports(columns: u8, rows: u8) -> bool {
+        Self::SIZES.contains(&(columns.max(rows), columns.min(rows)))
+    }
+
+    pub fn orient(&mut self, portrait: bool) {
+        if !self.valid_size() || (self.columns < self.rows) == portrait {
+            return;
+        }
+        let columns = usize::from(self.columns);
+        let rows = usize::from(self.rows);
+        self.bindings
+            .retain(|binding| binding.cell < columns * rows);
+        for binding in &mut self.bindings {
+            binding.cell = (binding.cell % columns) * rows + binding.cell / columns;
+        }
+        std::mem::swap(&mut self.columns, &mut self.rows);
+    }
+
     pub fn valid_size(&self) -> bool {
-        Self::SIZES.contains(&(self.columns, self.rows))
+        Self::supports(self.columns, self.rows)
     }
     pub fn resize(&mut self, columns: u8, rows: u8) {
-        if Self::SIZES.contains(&(columns, rows)) && (columns, rows) != (self.columns, self.rows) {
+        if Self::supports(columns, rows) && (columns, rows) != (self.columns, self.rows) {
             self.columns = columns;
             self.rows = rows;
             self.bindings.clear();
@@ -305,6 +323,21 @@ mod tests {
             ControlsMode::Normal
         );
     }
+    #[test]
+    fn orientation_transposes_saved_bindings_without_clearing_them() {
+        let mut grid = StylusGrid::default();
+        grid.resize(7, 6);
+        let input = HostInput::Controller("South".into());
+        grid.bind(6, input.clone(), None).unwrap();
+        let landscape = grid.clone();
+        grid.orient(true);
+        assert_eq!((grid.columns, grid.rows), (6, 7));
+        assert_eq!(grid.cell_for(&input, None), Some(36));
+        assert_eq!(grid.point(36), (833, 9285));
+        grid.orient(false);
+        assert_eq!(grid, landscape);
+    }
+
     #[test]
     fn centers_and_rotation_are_bounded_at_qvga_and_vga() {
         for (columns, rows) in StylusGrid::SIZES {

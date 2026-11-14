@@ -2,6 +2,7 @@ crates/pocket-kernel/src/framebuffer.rs
 crates/pocket-kernel/src/lib.rs
 crates/pocket-library/src/add_data.rs
 crates/pocket-library/src/lib.rs
+crates/pocket-library/src/stylus_grid.rs
 crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/ddraw.rs
 docs/FRONTENDS.md
@@ -11,7 +12,10 @@ frontends/pocket-android/app/src/main/java/com/pockethle/app/AddDataModel.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/MainActivity.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/StylusControlsDialog.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/StylusGrid.kt
 frontends/pocket-desktop/src/add_data_prompt.rs
 frontends/pocket-desktop/src/add_data_ui.rs
 frontends/pocket-desktop/src/app.rs
 frontends/pocket-desktop/src/runner.rs
+frontends/pocket-desktop/src/stylus_controls_ui.rs

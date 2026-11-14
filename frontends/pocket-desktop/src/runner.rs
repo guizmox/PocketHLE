@@ -679,6 +679,11 @@ impl Runner {
                 paths.save_prefix
             ));
         }
+        if !is_gizmondo {
+            for (prefix, directory) in game.application_data_mounts(&library_root) {
+                emu.mount_isolated_save_dir(&prefix, directory);
+            }
+        }
         if game.my_documents_uses_separate_directory(&library_root) {
             emu.mount_isolated_save_dir(
                 r"\My Documents",

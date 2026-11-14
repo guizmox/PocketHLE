@@ -814,6 +814,11 @@ fn run_process_inner(
             paths.save_prefix
         ));
     }
+    if !is_gizmondo {
+        for (prefix, directory) in entry.application_data_mounts(library_root) {
+            emu.mount_isolated_save_dir(&prefix, directory);
+        }
+    }
     if entry.my_documents_uses_separate_directory(library_root) {
         emu.mount_isolated_save_dir(
             r"\My Documents",
