@@ -866,13 +866,15 @@ Native touch Start/Move/End/Cancel events and held pointer gestures also suspend
 navigation focus repair, including when no mouse-button edge accompanies the
 touch event. Each swipe continues from the existing scroll offset.
 
-The **Touch zone mapping** and **Test touch steering** windows use centred,
-viewport-bounded fixed dimensions and an internal scroll area. Assignment labels
-and feedback do not resize or reposition the window. Cancel assignment retains
-its place while disabled outside capture, keeping the controls stationary.
-Touch zone mapping uses square cells. Landscape offers 4 × 3 through 7 × 6;
-portrait swaps rows and columns. Changing orientation transposes existing
-assignments so the editor and the in-game touch points use the same grid.
+**Configure Grid** starts a game with the grid over its live display.
+The size selector and **Configure Grid** button remain below the image.
+During this session, **L1 + R1** cycles sizes, **L2 + R2** toggles editing,
+and **L3 + R3** clears the selected assignment. Editing releases held game
+input and captures new actions while emulation continues. Select a cell and
+press a keyboard key, controller input, or Android virtual control to assign
+it. Assignments are saved as they change. Resizing clears the current grid.
+Landscape offers 4 × 3 through 7 × 6. Portrait transposes the grid and its
+assignments. **Test touch steering** remains available without starting the game.
 
 On desktop and Android, a new Pocket PC import keeps the detected name.
 Use **Rename** in the library tile menu to change it. When the import contains

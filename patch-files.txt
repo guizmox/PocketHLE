@@ -10,6 +10,8 @@ frontends/pocket-android-jni/src/lib.rs
 frontends/pocket-android-jni/src/runner.rs
 frontends/pocket-android/app/src/main/java/com/pockethle/app/AddDataModel.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/GameActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/GameSettingsActivity.kt
+frontends/pocket-android/app/src/main/java/com/pockethle/app/LiveTouchGrid.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/MainActivity.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/NativeBridge.kt
 frontends/pocket-android/app/src/main/java/com/pockethle/app/StylusControlsDialog.kt

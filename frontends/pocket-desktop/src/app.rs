@@ -396,6 +396,10 @@ pub struct PocketLauncher {
     stylus_tick: Instant,
     steering_axes: (i16, i16),
     stylus_editor: Option<StylusEditor>,
+    grid_launch_confirmation: bool,
+    live_grid: bool,
+    live_grid_launch_id: Option<String>,
+    grid_chords: [bool; 6],
     stylus_grid_router: GridRouter,
     grid_modifiers: [bool; 4],
     running_controls_mode: ControlsMode,
@@ -1016,6 +1020,10 @@ impl PocketLauncher {
             stylus_tick: Instant::now(),
             steering_axes: (0, 0),
             stylus_editor: None,
+            grid_launch_confirmation: false,
+            live_grid: false,
+            live_grid_launch_id: None,
+            grid_chords: [false; 6],
             stylus_grid_router: Default::default(),
             grid_modifiers: [false; 4],
             running_controls_mode: ControlsMode::Normal,
@@ -1733,6 +1741,10 @@ impl PocketLauncher {
 
     fn return_to_library(&mut self, ctx: &egui::Context) {
         self.run_diagnostic = None;
+        self.live_grid = false;
+        self.live_grid_launch_id = None;
+        self.stylus_editor = None;
+        self.grid_chords = [false; 6];
         self.remove_game = None;
         self.add_data = None;
         self.data_game = None;
@@ -3178,7 +3190,11 @@ impl PocketLauncher {
                             let (w,h)=draft.screen.size();
                             let portrait=if rotation_turns(draft.rotation)%2==0 {h>w}else{w>h};
                             self.controller_ui.stop_repeat();
-                            self.stylus_editor=Some(StylusEditor::new(mode==ControlsMode::Zones,portrait));
+                            if mode == ControlsMode::Grid {
+                                self.grid_launch_confirmation = true;
+                            } else {
+                                self.stylus_editor = Some(StylusEditor::new(true, portrait));
+                            }
                         }
                     });
                     ui.end_row();
@@ -3405,6 +3421,36 @@ impl PocketLauncher {
                 cancel_clicked = true;
             }
         });
+        if self.grid_launch_confirmation {
+            let mut open = true;
+            let mut start = false;
+            egui::Window::new("Configure Grid").open(&mut open).collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ui.ctx(), |ui| {
+                    crate::controller_ui::page_scope(ui, "grid_launch", |ui| {
+                        ui.label("L1 + R1 cycles grid sizes. L2 + R2 toggles editing. L3 + R3 clears the selected assignment. You can also use the controls below the game screen.");
+                        if crate::controller_ui::button(ui, "Start the game and configure the touch grid").clicked() {
+                            start = true;
+                        }
+                        if crate::controller_ui::button(ui, "Cancel").clicked() {
+                            self.grid_launch_confirmation = false;
+                        }
+                    });
+                });
+            self.grid_launch_confirmation &= open;
+            if start {
+                self.grid_launch_confirmation = false;
+                match self.library.update_settings(&id, draft.clone()) {
+                    Ok(()) => {
+                        if let Some(game) = self.library.get(&id).cloned() {
+                            self.live_grid_launch_id = Some(game.id.clone());
+                            self.spawn_run(&game);
+                        }
+                    }
+                    Err(error) => self.status = format!("Could not save game settings: {error}"),
+                }
+                return;
+            }
+        }
         if save_clicked {
             self.stylus_editor = None;
             self.release_all_keys();
@@ -3743,7 +3789,8 @@ impl PocketLauncher {
         } else {
             [frame.texture_width, frame.texture_height]
         };
-        let available = ui.available_rect_before_wrap();
+        let mut available = ui.available_rect_before_wrap();
+        if self.live_grid { available.max.y -= 60.0; }
         self.stylus_touch = [0.0; 4];
         let dpi = ui.ctx().pixels_per_point();
         let physical = [
@@ -3761,6 +3808,7 @@ impl PocketLauncher {
             Vec2::new(width as f32, height as f32) / dpi,
         );
         self.paint_guest_frame(ui, rect);
+        if self.live_grid { self.ui_live_grid(ui, rect, available.bottom()); }
         self.handle_pointer(ui.ctx(), &rect, guest_size);
     }
 
@@ -3774,7 +3822,8 @@ impl PocketLauncher {
 
     /// Host presentation only: fixed controls, native pixels and the existing inverse input transform.
     fn ui_pocketpc(&mut self, ui: &mut egui::Ui) {
-        let bounds = ui.available_rect_before_wrap();
+        let mut bounds = ui.available_rect_before_wrap();
+        if self.live_grid { bounds.max.y -= 60.0; }
         ui.painter()
             .rect_filled(bounds, 0.0, Color32::from_rgb(8, 13, 21));
         let gap = crate::fullscreen_layout::POCKET_PC_GAP;
@@ -3927,6 +3976,9 @@ impl PocketLauncher {
                 self.paint_guest_frame(ui, rect);
                 self.handle_pointer_clipped(ui.ctx(), &rect, guest, room);
             });
+            if self.live_grid {
+                self.ui_live_grid(ui, rect, bounds.bottom());
+            }
         } else {
             self.paint_game_loading(ui, room);
         }
@@ -3997,7 +4049,8 @@ impl PocketLauncher {
         } else {
             response.on_hover_text(format!("{} — {keys}", guest.label()))
         };
-        let now_pressed = pointer_held_in(ui.ctx(), &response.rect.intersect(ui.clip_rect()));
+        let now_pressed = !(self.live_grid && self.stylus_editor.is_some())
+            && pointer_held_in(ui.ctx(), &response.rect.intersect(ui.clip_rect()));
         // Only the edges matter, and `HeldButtons` has the last word on
         // whether the guest hears about them: the keyboard may be
         // holding this same button.
@@ -4258,6 +4311,9 @@ impl PocketLauncher {
     }
 
     fn handle_pointer_clipped(&mut self, ctx: &egui::Context, rect: &Rect, size: Vec2, clip: Rect) {
+        if self.live_grid && self.stylus_editor.is_some() {
+            return;
+        }
         let events = ctx.input(|input| input.events.clone());
         let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
         let rotation = self.game_rotation;
@@ -4488,6 +4544,7 @@ impl PocketLauncher {
     }
 
     fn send_input(&self, ev: InputEvent) {
+        if self.live_grid && self.stylus_editor.is_some() { return; }
         match ev {
             InputEvent::KeyDown {
                 vk: pocket_library::keybindings::STYLUS_CLICK_COMMAND,
@@ -4559,6 +4616,7 @@ impl PocketLauncher {
     }
 
     fn dispatch_input(&self, ev: InputEvent) {
+        if self.live_grid && self.stylus_editor.is_some() { return; }
         {
             let mut recording = self.recording.lock().unwrap_or_else(|e| e.into_inner());
             recording.set_gizmondo(self.running_is_gizmondo);
@@ -4876,6 +4934,19 @@ impl PocketLauncher {
                 } => {
                     if down && Some(device) == self.gamepad_selected {
                         crate::controller_labels::activate(ctx, device);
+                    }
+                    if self.live_grid && self.screen == Screen::Run
+                        && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if self.live_grid_chord(&control, down) {
+                            ctx.request_repaint();
+                            continue;
+                        }
+                        if self.stylus_editor.is_some() {
+                            self.stylus_editor_pad(ctx, &control, down);
+                            continue;
+                        }
                     }
                     if self.run_diagnostic.is_some() {
                         if Some(device) == self.gamepad_selected
@@ -5792,6 +5863,9 @@ impl PocketLauncher {
     }
 
     fn spawn_run(&mut self, game: &GameEntry) {
+        self.live_grid = false;
+        self.grid_chords = [false; 6];
+        self.stylus_editor = None;
         let languages = pocket_library::colors_languages(game, self.library.root());
         if pocket_library::is_colors_game(game, self.library.root()) {
             let mut draft = self.library.config().clone();
@@ -6004,6 +6078,8 @@ impl PocketLauncher {
             );
             return;
         }
+        self.live_grid = self.live_grid_launch_id.as_deref() == Some(game.id.as_str());
+        self.live_grid_launch_id = None;
         self.last_frame_texture = None;
         self.uploaded_image_id = None;
         self.last_frame_snapshot = None;
@@ -6190,6 +6266,7 @@ impl eframe::App for PocketLauncher {
             ctx,
             raw,
             self.screen != Screen::Run
+                || (self.live_grid && self.stylus_editor.is_some())
                 || self.run_diagnostic.is_some()
                 || self.file_dialog.is_some()
                 || self.restore_archive.is_some(),

@@ -67,17 +67,30 @@ class GameSettingsActivity : HostKeyActivity() {
                 val editor=androidx.preference.Preference(requireContext()).apply {
                     key="ppc_stylus_editor";isPersistent=false
                     setOnPreferenceClickListener {
-                        val config=LauncherConfig.fromJson(JSONObject(NativeBridge.readConfig(rootDir)))
-                        StylusControlsDialog(requireContext(),current,config){grid->
-                            current=current.copy(pocketpcStylusGridJson=grid.json().toString());writeGameSettings()
-                        }.show()
+                        if (current.controlsMode() == "grid") {
+                            val dialog = AddDataDialog(requireContext()) { false }
+                            dialog.setTitle("Configure Grid")
+                            dialog.setMessage("L1 + R1 cycles grid sizes. L2 + R2 toggles editing. L3 + R3 clears the selected assignment. You can also use the controls below the game screen.")
+                            dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Start the game and configure the touch grid") { _, _ ->
+                                startActivity(android.content.Intent(requireContext(), GameActivity::class.java)
+                                    .putExtra(GameActivity.EXTRA_GAME_ID, gameId)
+                                    .putExtra(GameActivity.EXTRA_CONFIGURE_GRID, true))
+                                requireActivity().finish()
+                            }
+                            dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> }
+                            dialog.show()
+                            dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).requestFocus()
+                        } else {
+                            val config = LauncherConfig.fromJson(JSONObject(NativeBridge.readConfig(rootDir)))
+                            StylusControlsDialog(requireContext(), current, config) { }.show()
+                        }
                         true
                     }
                 }
                 fun updateEditor() {
                     editor.isVisible=current.controlsMode()!="normal"
                     editor.title=if(current.controlsMode()=="zones") "Test controls…" else "Configure grid…"
-                    editor.summary=if(current.controlsMode()=="zones") "Test arrows / D-pad and progressive left-stick movement without starting a game." else "Choose 4 × 3, 5 × 4 or 6 × 5. Select a zone and press an input. Reserved PocketHLE-Reborn shortcuts cannot be assigned."
+                    editor.summary=if(current.controlsMode()=="zones") "Test arrows / D-pad and progressive left-stick movement without starting a game." else "Start the game and configure the touch grid over the live game screen."
                 }
                 controlsCategory.addPreference(ListPreference(requireContext()).apply {
                     key="pocketpc_controls";title="Control mode";isPersistent=false

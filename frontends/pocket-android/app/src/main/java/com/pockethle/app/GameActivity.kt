@@ -134,6 +134,7 @@ class GameActivity : AppCompatActivity() {
     /** Prevent multiple dependency prompts during asynchronous session polling. */
     private var dependencyDialogVisible = false
 
+    private var liveGrid: LiveTouchGrid? = null
     private var gridRouter: StylusGridRouter? = null
     private val gridAxes = mutableSetOf<String>()
     private var touchSteeringEnabled = false
@@ -370,6 +371,22 @@ class GameActivity : AppCompatActivity() {
         (gameControls as? GizmondoControls)?.dpad?.deadZoneRadius = dpadDeadzone.radius
         val fixedGps = config.gpsFixedEnabled && NativeBridge.isColorsGame(rootDir, id)
         rotationDegrees = readRotationDegrees(rootDir, id)
+        if (!gizmondoGame && intent.getBooleanExtra(EXTRA_CONFIGURE_GRID, false)) {
+            gridRouter?.let { router ->
+                liveGrid = LiveTouchGrid(
+                    this, findViewById(R.id.content_column), findViewById(R.id.game_area),
+                    router.config, bindings,
+                    JSONObject(config.originalJson).optString("gamepad_fullscreen")
+                        .takeIf { it.isNotEmpty() && it != "null" },
+                    ::releaseHeldInput,
+                ) {
+                    val raw = JSONObject(NativeBridge.readGameSettings(gameRoot, gameId))
+                    raw.put("pocketpc_stylus_grid", router.config.json())
+                    val result = JSONObject(NativeBridge.writeGameSettings(gameRoot, gameId, raw.toString()))
+                    if (!result.optBoolean("ok")) Toast.makeText(this, "Could not save touch grid.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
         glRenderer.setRotationDegrees(rotationDegrees)
         if (!gizmondoGame) {
             findViewById<View>(R.id.btn_rotate_game).setOnClickListener { cycleRotation() }
@@ -381,7 +398,7 @@ class GameActivity : AppCompatActivity() {
         BatteryHost.initialize(this)
         DeviceStatusHost.initialize(this)
         VibrationHost.initialize(this)
-        if (!gizmondoGame && pocketPcFullscreen && pocketPcFullscreenMode=="without_controls") {
+        if (!gizmondoGame && liveGrid == null && pocketPcFullscreen && pocketPcFullscreenMode=="without_controls") {
             controllerFullscreenHost.setDisplaySize(240,320)
             setControllerFullscreen(true)
         }
@@ -816,7 +833,7 @@ class GameActivity : AppCompatActivity() {
     private fun updatePocketPcLayout() {
         if (gizmondoGame) return
         findViewById<View>(R.id.toolbar).visibility=View.GONE
-        gameControls.visibility=if (pocketPcFullscreen && pocketPcFullscreenMode=="without_controls") View.GONE else View.VISIBLE
+        gameControls.visibility=if (liveGrid == null && pocketPcFullscreen && pocketPcFullscreenMode=="without_controls") View.GONE else View.VISIBLE
         // Both PPC layouts are immersive game screens. The fullscreen preference
         // only changes the controls policy; it must not reserve a status bar.
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window,false)
@@ -825,6 +842,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun setControllerFullscreen(enabled: Boolean) {
+        if (enabled && liveGrid != null) return
         releaseHeldInput()
         glRenderer.controllerFullscreen=enabled
         if(enabled) {
@@ -857,6 +875,11 @@ class GameActivity : AppCompatActivity() {
 
     private fun paintFrame(frame: FrameSnapshot) {
         updatePocketPcDisplayGeometry(frame)
+        liveGrid?.let { grid ->
+            val rect = renderedDisplayRect(surface.width, surface.height, frame.width, frame.height,
+                frame.textureWidth, frame.textureHeight, rotationDegrees, true, controllerFullscreenHost.active)
+            grid.updateDisplay(rect, rect.height > rect.width)
+        }
         glRenderer.submit(frame)
         surface.requestRender()
 
@@ -987,6 +1010,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (liveGrid?.key(event) == true) return true
         val keyAction=InputBindings.keyName(event)?.let {DeckInputPolicy.key(it)}
         if(keyAction!=null) {
             if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0 && ::glRenderer.isInitialized) performHostShortcut(keyAction)
@@ -1088,6 +1112,7 @@ class GameActivity : AppCompatActivity() {
      * button can be held at once without one release cancelling both.
      */
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (liveGrid?.motion(event) == true) return true
         val joystick =
             event.source and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK ||
                 event.source and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD
@@ -1118,8 +1143,8 @@ class GameActivity : AppCompatActivity() {
         gesturePair(MotionEvent.AXIS_Y, "LeftStickUp", "LeftStickDown")
         gesturePair(MotionEvent.AXIS_Z, "RightStickLeft", "RightStickRight")
         gesturePair(MotionEvent.AXIS_RZ, "RightStickUp", "RightStickDown")
-        gestureAxis("LeftTrigger2", event.getAxisValue(MotionEvent.AXIS_LTRIGGER))
-        gestureAxis("RightTrigger2", event.getAxisValue(MotionEvent.AXIS_RTRIGGER))
+        if (liveGrid == null) gestureAxis("LeftTrigger2", event.getAxisValue(MotionEvent.AXIS_LTRIGGER))
+        if (liveGrid == null) gestureAxis("RightTrigger2", event.getAxisValue(MotionEvent.AXIS_RTRIGGER))
         val desired = linkedMapOf<String, Int>()
         val aimDesired = linkedMapOf<String, Pair<Int, Float>>()
         fun axis(name: String, value: Float, negative: String, positive: String) {
@@ -1192,7 +1217,7 @@ class GameActivity : AppCompatActivity() {
         }
         axis("RightStick", event.getAxisValue(MotionEvent.AXIS_Z), "Left", "Right")
         axis("RightStick", event.getAxisValue(MotionEvent.AXIS_RZ), "Up", "Down")
-        listOf(
+        if (liveGrid == null) listOf(
                 "LeftTrigger2" to MotionEvent.AXIS_LTRIGGER,
                 "RightTrigger2" to MotionEvent.AXIS_RTRIGGER,
             )
@@ -1241,6 +1266,7 @@ class GameActivity : AppCompatActivity() {
     }
     private fun cancelGrid(){gridRouter?.cancel()?.let{sendGrid(it)}}
     private fun routeGrid(input:GridInput,down:Boolean):Boolean {
+        if (liveGrid?.virtualInput(input, down) == true) return true
         if(input.source=="keyboard" && bindings.stylusKeyboardReserved(input.name)) return false
         val router=gridRouter ?: return false
         if(!router.assigned(input)) return false
@@ -1305,6 +1331,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun acquireGuestKey(handle: Long, requestedVk: Int) {
+        if (liveGrid?.editing == true) return
         if(requestedVk==DeckInputPolicy.STYLUS_CLICK_COMMAND) {if(handle==session) stylusButton(true);return}
         if (requestedVk == DeckInputPolicy.ROTATION_COMMAND) { if (handle == session) cycleRotation(); return }
         if (requestedVk == DeckInputPolicy.SCREENSHOT_COMMAND) return
@@ -1360,6 +1387,7 @@ class GameActivity : AppCompatActivity() {
     }
 
     private fun updateStylusAim() {
+        if (liveGrid?.editing == true) return
         if(gizmondoGame || session==0L || !::stylusBindings.isInitialized) return
         val strengths=stylusTouch.copyOf()
         stylusKeys.values.forEach { strengths[it]=1f }
@@ -1457,6 +1485,7 @@ class GameActivity : AppCompatActivity() {
     @SuppressLint("ClickableViewAccessibility")
     private fun wireSurfaceTouchInput() {
         surface.setOnTouchListener { v, event ->
+            if (liveGrid?.editing == true) return@setOnTouchListener true
             val handle = session
             if (handle == 0L) return@setOnTouchListener false
             val frame = lastFrame
@@ -1644,6 +1673,7 @@ class GameActivity : AppCompatActivity() {
     )
 
     companion object {
+        const val EXTRA_CONFIGURE_GRID = "configure_grid"
         const val EXTRA_GAME_ID = "com.pockethle.app.EXTRA_GAME_ID"
         const val EXTRA_GAME_NAME = "com.pockethle.app.EXTRA_GAME_NAME"
 
