@@ -33,7 +33,7 @@ internal class LiveTouchGrid(
     private var portrait = grid.columns < grid.rows
     private var navigationDirection = 0
     private var nextNavigation = 0L
-    private var display = DisplayRect(0, 0, 0, 0)
+    private var gameDisplayRect = DisplayRect(0, 0, 0, 0)
     private var sizes = StylusGridConfig.sizes
     private val held = BooleanArray(6)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -46,21 +46,21 @@ internal class LiveTouchGrid(
     }
     private val overlay = object : View(context) {
         override fun onDraw(canvas: Canvas) {
-            if (display.width <= 0 || display.height <= 0) return
+            if (gameDisplayRect.width <= 0 || gameDisplayRect.height <= 0) return
             if (editing) {
                 paint.style = Paint.Style.FILL
                 paint.color = 0x99000000.toInt()
                 canvas.drawRect(
-                    display.left.toFloat(), display.top.toFloat(),
-                    (display.left + display.width).toFloat(),
-                    (display.top + display.height).toFloat(), paint,
+                    gameDisplayRect.left.toFloat(), gameDisplayRect.top.toFloat(),
+                    (gameDisplayRect.left + gameDisplayRect.width).toFloat(),
+                    (gameDisplayRect.top + gameDisplayRect.height).toFloat(), paint,
                 )
             }
-            val width = display.width.toFloat() / grid.columns
-            val height = display.height.toFloat() / grid.rows
+            val width = gameDisplayRect.width.toFloat() / grid.columns
+            val height = gameDisplayRect.height.toFloat() / grid.rows
             for (cell in 0 until grid.columns * grid.rows) {
-                val x = display.left + cell % grid.columns * width
-                val y = display.top + cell / grid.columns * height
+                val x = gameDisplayRect.left + cell % grid.columns * width
+                val y = gameDisplayRect.top + cell / grid.columns * height
                 paint.color = if (editing && cell == selected) Color.CYAN else 0x99ffffff.toInt()
                 paint.style = Paint.Style.STROKE
                 paint.strokeWidth = if (editing && cell == selected) 3f else 1f
@@ -79,9 +79,9 @@ internal class LiveTouchGrid(
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
             if (!editing) return false
-            if (event.actionMasked == MotionEvent.ACTION_UP && display.width > 0 && display.height > 0) {
-                val x = (event.x - display.left) / display.width
-                val y = (event.y - display.top) / display.height
+            if (event.actionMasked == MotionEvent.ACTION_UP && gameDisplayRect.width > 0 && gameDisplayRect.height > 0) {
+                val x = (event.x - gameDisplayRect.left) / gameDisplayRect.width
+                val y = (event.y - gameDisplayRect.top) / gameDisplayRect.height
                 if (x >= 0f && x < 1f && y >= 0f && y < 1f) {
                     toggle.clearFocus()
                     clear.clearFocus()
@@ -131,8 +131,8 @@ internal class LiveTouchGrid(
             waiting = false
             refreshSizes()
         }
-        if (display != rect) {
-            display = rect
+        if (gameDisplayRect != rect) {
+            gameDisplayRect = rect
             overlay.invalidate()
         }
     }
