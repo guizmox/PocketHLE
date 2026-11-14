@@ -108,8 +108,7 @@ mod tests {
         let startup = classify(false, true, 13, true, None, "", vec![]).unwrap();
         assert_eq!(startup.reason, "Exit code 0x0000000D.");
 
-        let crash =
-            classify(false, true, 13, false, Some("CPU exception"), "", vec![]).unwrap();
+        let crash = classify(false, true, 13, false, Some("CPU exception"), "", vec![]).unwrap();
         assert_eq!(crash.reason, "CPU exception");
     }
 }
