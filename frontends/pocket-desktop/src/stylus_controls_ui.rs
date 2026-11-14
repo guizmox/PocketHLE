@@ -473,9 +473,12 @@ impl PocketLauncher {
         }
         let (columns, rows) = (self.running_stylus_grid.columns, self.running_stylus_grid.rows);
         let editing = self.stylus_editor.is_some();
-        let controls = Rect::from_min_size(
-            Pos2::new(ui.clip_rect().left() + 8.0, controls_top + 4.0),
-            Vec2::new((ui.clip_rect().width() - 16.0).max(1.0), 52.0),
+        let clip = ui.clip_rect();
+        let center = rect.center().x.clamp(clip.left(), clip.right());
+        let half_width = (center - clip.left()).min(clip.right() - center);
+        let controls = Rect::from_center_size(
+            Pos2::new(center, controls_top + 30.0),
+            Vec2::new((2.0 * half_width - 16.0).max(1.0), 52.0),
         );
         crate::controller_ui::page_scope(ui, "live_grid", |ui| {
             for row in 0..rows {
@@ -507,26 +510,37 @@ impl PocketLauncher {
                 }
             }
             ui.allocate_ui_at_rect(controls, |ui| {
+                let row_width_id = ui.id().with("live_grid_controls_width");
+                let row_width = ui.data_mut(|data| data.get_temp::<f32>(row_width_id)).unwrap_or(202.0);
                 ui.horizontal(|ui| {
-                    crate::controller_ui::ComboBox::from_id_source("live_grid_size")
-                        .selected_text(format!("{columns} × {rows}"))
-                        .show_ui(ui, |ui| {
-                            for (c, r) in pocket_library::stylus_grid::StylusGrid::SIZES {
-                                let (c, r) = if portrait { (r, c) } else { (c, r) };
-                                if crate::controller_ui::button(ui, format!("{c} × {r}")).clicked() {
-                                    self.resize_live_grid(c, r);
+                    let padding = ((ui.available_width() - row_width) / 2.0).max(0.0);
+                    if padding > 0.0 {
+                        ui.add_space(padding);
+                    }
+                    let row = ui.horizontal(|ui| {
+                        crate::controller_ui::ComboBox::from_id_source("live_grid_size")
+                            .selected_text(format!("{columns} × {rows}"))
+                            .show_ui(ui, |ui| {
+                                for (c, r) in pocket_library::stylus_grid::StylusGrid::SIZES {
+                                    let (c, r) = if portrait { (r, c) } else { (c, r) };
+                                    if crate::controller_ui::button(ui, format!("{c} × {r}")).clicked() {
+                                        self.resize_live_grid(c, r);
+                                    }
                                 }
-                            }
-                        });
-                    let label = if editing { "Resume Game" } else { "Configure Grid" };
-                    if crate::controller_ui::button(ui, label).clicked() {
-                        self.toggle_live_grid();
+                            });
+                        let label = if editing { "Resume Game" } else { "Configure Grid" };
+                        if crate::controller_ui::button(ui, label).clicked() {
+                            self.toggle_live_grid();
+                        }
+                    });
+                    ui.data_mut(|data| data.insert_temp(row_width_id, row.response.rect.width()));
+                });
+                ui.vertical_centered(|ui| {
+                    ui.small("L1 + R1  Grid size  ·  L2 + R2  Edit  ·  L3 + R3  Clear selected");
+                    if let Some(editor) = self.stylus_editor.as_ref() {
+                        ui.label(&editor.message);
                     }
                 });
-                ui.small("L1 + R1  Grid size  ·  L2 + R2  Edit  ·  L3 + R3  Clear selected");
-                if let Some(editor) = self.stylus_editor.as_ref() {
-                    ui.label(&editor.message);
-                }
             });
         });
     }

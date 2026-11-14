@@ -36,7 +36,7 @@ internal class LiveTouchGrid(
     private var sizes = StylusGridConfig.sizes
     private val held = BooleanArray(6)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val status = TextView(context)
+    private val status = TextView(context).apply { gravity = android.view.Gravity.CENTER }
     private val toggle = Button(context)
     private val sizePicker = Spinner(context)
     private val overlay = object : View(context) {
@@ -81,11 +81,13 @@ internal class LiveTouchGrid(
         area.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         val controls = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
             addView(sizePicker)
             addView(toggle)
         }
         column.addView(controls)
         column.addView(TextView(context).apply {
+            gravity = android.view.Gravity.CENTER
             text = "L1 + R1  Grid size  ·  L2 + R2  Edit  ·  L3 + R3  Clear selected"
         })
         column.addView(status)
