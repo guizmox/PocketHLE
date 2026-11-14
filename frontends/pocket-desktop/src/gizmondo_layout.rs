@@ -27,6 +27,7 @@ impl BoxRect {
 }
 pub const HEADER: f32 = 40.0 + 64.0 * (2.0 / 3.0) + 12.0;
 pub const GAP: f32 = 12.0;
+pub const MAX_SIDE: f32 = 280.0;
 #[derive(Debug)]
 pub struct Layout {
     pub screen: BoxRect,
@@ -49,7 +50,7 @@ pub fn calculate(
     let unit = (w / 640.0).min(h / 360.0).clamp(0.1, 1.0);
     let gap = GAP * unit;
     let top = HEADER * unit;
-    let side = (w * 0.21).clamp(140.0 * unit, 280.0 * unit);
+    let side = (w * 0.21).clamp(140.0 * unit, MAX_SIDE * unit);
     let room = BoxRect::new(
         side + gap,
         top,

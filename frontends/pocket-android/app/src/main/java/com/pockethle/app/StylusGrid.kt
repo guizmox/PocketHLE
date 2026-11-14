@@ -70,7 +70,7 @@ internal class StylusGridConfig(var columns:Int=5,var rows:Int=4,val bindings:Mu
         bindings.add(GridBinding(cell,canonical));return null
     }
     companion object {
-        val sizes=listOf(4 to 3,5 to 4,6 to 5,7 to 6)
+        val sizes = listOf(4 to 3, 5 to 4, 6 to 5, 7 to 6, 8 to 7)
         private fun supports(columns: Int, rows: Int) = (maxOf(columns, rows) to minOf(columns, rows)) in sizes
         fun parse(raw:String):StylusGridConfig {
             val obj=runCatching{JSONObject(raw)}.getOrDefault(JSONObject())

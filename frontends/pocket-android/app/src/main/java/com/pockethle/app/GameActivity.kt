@@ -380,10 +380,13 @@ class GameActivity : AppCompatActivity() {
                         .takeIf { it.isNotEmpty() && it != "null" },
                     ::releaseHeldInput,
                 ) {
-                    val raw = JSONObject(NativeBridge.readGameSettings(gameRoot, gameId))
-                    raw.put("pocketpc_stylus_grid", router.config.json())
-                    val result = JSONObject(NativeBridge.writeGameSettings(gameRoot, gameId, raw.toString()))
-                    if (!result.optBoolean("ok")) Toast.makeText(this, "Could not save touch grid.", Toast.LENGTH_SHORT).show()
+                    runCatching {
+                        val raw = JSONObject(NativeBridge.readGameSettings(gameRoot, gameId))
+                        check(!raw.has("error"))
+                        raw.put("pocketpc_stylus_grid", router.config.json())
+                        JSONObject(NativeBridge.writeGameSettings(gameRoot, gameId, raw.toString()))
+                            .optBoolean("ok")
+                    }.getOrDefault(false)
                 }
             }
         }
@@ -1010,7 +1013,10 @@ class GameActivity : AppCompatActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (liveGrid?.key(event) == true) return true
+        liveGrid?.let { grid ->
+            if (grid.key(event)) return true
+            if (grid.editing) return super.dispatchKeyEvent(event)
+        }
         val keyAction=InputBindings.keyName(event)?.let {DeckInputPolicy.key(it)}
         if(keyAction!=null) {
             if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0 && ::glRenderer.isInitialized) performHostShortcut(keyAction)

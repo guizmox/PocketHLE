@@ -267,6 +267,7 @@ pub struct PocketLauncher {
     screen_cache: std::collections::HashMap<String, (ScreenPref, (u32, u32), Option<&'static str>)>,
     analysis_cache: std::collections::HashMap<String, GameAnalysis>,
     upscale_x2: bool,
+    upscale_window_pending: bool,
     upscale_filter: UpscaleFilter,
     control_notice: Option<(String, Instant)>,
     deck_menu_press: Option<(usize, Instant)>,
@@ -397,6 +398,8 @@ pub struct PocketLauncher {
     steering_axes: (i16, i16),
     stylus_editor: Option<StylusEditor>,
     grid_launch_confirmation: bool,
+    grid_preview: bool,
+    live_grid_dirty: bool,
     live_grid: bool,
     live_grid_launch_id: Option<String>,
     grid_chords: [bool; 6],
@@ -914,6 +917,7 @@ impl PocketLauncher {
             screen_cache: std::collections::HashMap::new(),
             analysis_cache: std::collections::HashMap::new(),
             upscale_x2: false,
+            upscale_window_pending: false,
             upscale_filter,
             control_notice: None,
             deck_menu_press: None,
@@ -1021,6 +1025,8 @@ impl PocketLauncher {
             steering_axes: (0, 0),
             stylus_editor: None,
             grid_launch_confirmation: false,
+            grid_preview: false,
+            live_grid_dirty: false,
             live_grid: false,
             live_grid_launch_id: None,
             grid_chords: [false; 6],
@@ -1434,8 +1440,81 @@ impl PocketLauncher {
             self.send_input(InputEvent::PointerUp { x, y });
         }
         self.upscale_x2 = enabled;
+        self.upscale_window_pending = enabled;
         if let Some(frame) = self.last_frame_snapshot.clone() {
             self.refresh_frame_texture(ctx, &frame);
+        }
+    }
+
+    fn grow_window_for_upscale(&mut self, ui: &egui::Ui) {
+        if !self.upscale_window_pending {
+            return;
+        }
+        let Some(frame) = self.last_frame_snapshot.as_ref() else {
+            return;
+        };
+        let ctx = ui.ctx();
+        let geometry = ctx.input(|input| {
+            let viewport = input.viewport();
+            let inner = viewport.inner_rect?;
+            let monitor = viewport.monitor_size?;
+            let decorations = viewport.outer_rect.map_or(Vec2::ZERO, |outer| {
+                (outer.size() - inner.size()).max(Vec2::ZERO)
+            });
+            Some((
+                inner.size(),
+                decorations,
+                monitor,
+                viewport.maximized.unwrap_or(false),
+            ))
+        });
+        let Some((current, decorations, monitor, maximized)) = geometry else {
+            return;
+        };
+        self.upscale_window_pending = false;
+        if maximized {
+            return;
+        }
+
+        let dpi = ctx.pixels_per_point();
+        let central = ui.available_rect_before_wrap().size();
+        let chrome = (current - central).max(Vec2::ZERO);
+        let required = if self.running_is_gizmondo {
+            Vec2::new(
+                2.0 * frame.texture_width as f32 / dpi
+                    + 2.0 * (crate::gizmondo_layout::MAX_SIDE + crate::gizmondo_layout::GAP),
+                2.0 * frame.texture_height as f32 / dpi
+                    + crate::gizmondo_layout::HEADER
+                    + crate::gizmondo_layout::GAP,
+            )
+        } else {
+            let [width, height] = Self::pocketpc_panel_size(frame, self.game_rotation);
+            let gap = crate::fullscreen_layout::POCKET_PC_GAP;
+            let side = crate::fullscreen_layout::POCKET_PC_MAX_SIDE;
+            let grid_controls = if self.live_grid {
+                crate::fullscreen_layout::LIVE_GRID_CONTROLS_HEIGHT
+            } else {
+                0.0
+            };
+            Vec2::new(
+                2.0 * width as f32 / dpi + 2.0 * (side + 2.0 * gap),
+                2.0 * height as f32 / dpi
+                    + crate::fullscreen_layout::POCKET_PC_TOOLBAR_HEIGHT
+                    + gap
+                    + grid_controls,
+            )
+        };
+        let target = (required + chrome).min(monitor - decorations).max(current);
+        if target.x > current.x || target.y > current.y {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target));
+        }
+    }
+
+    fn pocketpc_panel_size(frame: &FrameSnapshot, rotation: RotationPref) -> [u32; 2] {
+        if rotation.is_quarter_turn() {
+            [frame.height, frame.width]
+        } else {
+            [frame.width, frame.height]
         }
     }
 
@@ -1741,6 +1820,7 @@ impl PocketLauncher {
 
     fn return_to_library(&mut self, ctx: &egui::Context) {
         self.run_diagnostic = None;
+        self.grid_preview = false;
         self.live_grid = false;
         self.live_grid_launch_id = None;
         self.stylus_editor = None;
@@ -1757,6 +1837,7 @@ impl PocketLauncher {
         // Reset image zoom without emitting an InnerSize while native
         // fullscreen may still be active. Restore from the library snapshot.
         self.upscale_x2 = false;
+        self.upscale_window_pending = false;
         self.fullscreen_window_size = None;
         self.library_restore_pending = Some(self.library_viewport);
         self.game_viewport_active = false;
@@ -2995,6 +3076,7 @@ impl PocketLauncher {
                 Screen::Library
             };
         } else if cancel_clicked {
+            self.grid_preview = false;
             self.stylus_editor = None;
             self.screen = if self.running_game.is_some() {
                 Screen::Run
@@ -3186,15 +3268,26 @@ impl PocketLauncher {
                         ui.set_max_width(380.0);
                         ui.add(egui::Label::new(mode.description()).wrap(true));
                         ui.label(RichText::new("Follows screen rotation. Applies at the next game launch.").small().color(Color32::GRAY));
-                        if mode != ControlsMode::Normal && crate::controller_ui::button(ui,if mode==ControlsMode::Zones {"Test controls…"}else{"Configure grid…"}).clicked(){
-                            let (w,h)=draft.screen.size();
-                            let portrait=if rotation_turns(draft.rotation)%2==0 {h>w}else{w>h};
-                            self.controller_ui.stop_repeat();
-                            if mode == ControlsMode::Grid {
-                                self.grid_launch_confirmation = true;
-                            } else {
-                                self.stylus_editor = Some(StylusEditor::new(true, portrait));
+                        match mode {
+                            ControlsMode::Grid => {
+                                ui.horizontal(|ui| {
+                                    if crate::controller_ui::button(ui, "Configure Grid").clicked() {
+                                        self.grid_launch_confirmation = true;
+                                    }
+                                    if crate::controller_ui::button(ui, "View Grid").clicked() {
+                                        self.grid_preview = true;
+                                    }
+                                });
                             }
+                            ControlsMode::Zones => {
+                                if crate::controller_ui::button(ui, "Test controls…").clicked() {
+                                    let (width, height) = draft.screen.size();
+                                    let portrait = (height > width) ^ draft.rotation.is_quarter_turn();
+                                    self.controller_ui.stop_repeat();
+                                    self.stylus_editor = Some(StylusEditor::new(true, portrait));
+                                }
+                            }
+                            ControlsMode::Normal => {}
                         }
                     });
                     ui.end_row();
@@ -3452,6 +3545,7 @@ impl PocketLauncher {
             }
         }
         if save_clicked {
+            self.grid_preview = false;
             self.stylus_editor = None;
             self.release_all_keys();
             if let Err(e) = self.library.update_settings(&id, draft) {
@@ -3790,7 +3884,9 @@ impl PocketLauncher {
             [frame.texture_width, frame.texture_height]
         };
         let mut available = ui.available_rect_before_wrap();
-        if self.live_grid { available.max.y -= 60.0; }
+        if self.live_grid {
+            available.max.y -= crate::fullscreen_layout::LIVE_GRID_CONTROLS_HEIGHT;
+        }
         self.stylus_touch = [0.0; 4];
         let dpi = ui.ctx().pixels_per_point();
         let physical = [
@@ -3813,6 +3909,7 @@ impl PocketLauncher {
     }
 
     fn ui_run(&mut self, ui: &mut egui::Ui) {
+        self.grow_window_for_upscale(ui);
         if self.running_is_gizmondo {
             self.ui_gizmondo(ui);
             return;
@@ -3823,11 +3920,13 @@ impl PocketLauncher {
     /// Host presentation only: fixed controls, native pixels and the existing inverse input transform.
     fn ui_pocketpc(&mut self, ui: &mut egui::Ui) {
         let mut bounds = ui.available_rect_before_wrap();
-        if self.live_grid { bounds.max.y -= 60.0; }
+        if self.live_grid {
+            bounds.max.y -= crate::fullscreen_layout::LIVE_GRID_CONTROLS_HEIGHT;
+        }
         ui.painter()
             .rect_filled(bounds, 0.0, Color32::from_rgb(8, 13, 21));
         let gap = crate::fullscreen_layout::POCKET_PC_GAP;
-        let side = (bounds.width() * 0.19).clamp(72.0, 140.0);
+        let side = (bounds.width() * 0.19).clamp(72.0, crate::fullscreen_layout::POCKET_PC_MAX_SIDE);
         let pad = side.min((bounds.height() - 60.0).max(30.0) * 0.45);
         let pad_top = bounds.bottom() - pad - gap;
         let top = bounds.top() + crate::fullscreen_layout::POCKET_PC_TOOLBAR_HEIGHT;
@@ -3948,19 +4047,15 @@ impl PocketLauncher {
         );
         if let Some(frame) = self.last_frame_snapshot.as_ref() {
             let guest = Vec2::new(frame.width as f32, frame.height as f32);
-            let native = if self.game_rotation.is_quarter_turn() {
-                [frame.texture_height, frame.texture_width]
-            } else {
-                [frame.texture_width, frame.texture_height]
-            };
+            let panel = Self::pocketpc_panel_size(frame, self.game_rotation);
             let dpi = ui.ctx().pixels_per_point();
             let [left, top, width, height] = crate::fullscreen_layout::presentation_fit_capped(
                 [
                     (room.width().max(1.0) * dpi).floor() as u32,
                     (room.height().max(1.0) * dpi).floor() as u32,
                 ],
-                native,
-                4,
+                panel,
+                if self.upscale_x2 { 2 } else { 1 },
             );
             // Physical-pixel origin as well as size: fractional host DPI must not soften x1.
             let origin = Pos2::new(
@@ -5050,6 +5145,22 @@ impl PocketLauncher {
                         ctx.request_repaint();
                         continue;
                     }
+                    if self.screen == Screen::GameSettings
+                        && self.grid_preview
+                        && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if !down {
+                            self.controller_ui.release(&control);
+                        } else if control == "East" {
+                            self.grid_preview = false;
+                            self.controller_ui.stop_repeat();
+                        } else {
+                            self.controller_ui.press(&control);
+                        }
+                        ctx.request_repaint();
+                        continue;
+                    }
                     if Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) && self.route_long_press(true,device,&control,down) {continue;}
                     if (self.file_dialog.is_some() || self.restore_archive.is_some() || self.add_data.is_some())
                         && Some(device) == self.gamepad_selected
@@ -6115,6 +6226,7 @@ impl PocketLauncher {
         self.stylus_pointer=Default::default();
         self.stylus_tick=Instant::now();
         self.running_stylus_grid = game.settings.pocketpc_stylus_grid.clone();
+        self.live_grid_dirty = false;
         let (frame_tx, frame_rx) = crate::latest_frame::channel();
         let (input_tx, input_rx) = mpsc::channel();
         let (dependency_notice_tx, dependency_notice_rx) = mpsc::channel();
@@ -6786,10 +6898,15 @@ impl eframe::App for PocketLauncher {
                     crate::controller_ui::page_scope(ui, page, |ui| self.ui_settings(ui));
                 }
                 Screen::GameSettings if self.stylus_editor.is_some() => {
-                    if let Some((id, mut draft)) = self.game_settings_draft.take() {
-                        ui.heading("PocketPC controls");
-                        self.ui_stylus_editor(ui.ctx(), &mut draft);
-                        self.game_settings_draft = Some((id, draft));
+                    ui.heading("PocketPC controls");
+                    self.ui_stylus_editor(ui.ctx());
+                }
+                Screen::GameSettings if self.grid_preview => {
+                    if let Some((_, draft)) = self.game_settings_draft.as_ref() {
+                        let grid = draft.pocketpc_stylus_grid.clone();
+                        self.ui_grid_preview(ui.ctx(), &grid);
+                    } else {
+                        self.grid_preview = false;
                     }
                 }
                 Screen::GameSettings => {

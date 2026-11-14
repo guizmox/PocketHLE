@@ -11,21 +11,16 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.widget.*
-import org.json.JSONObject
 
-/** Local editor: no input is sent to a game and changes commit only with Done. */
+/** Offline touch steering test and read-only grid preview. */
 internal class StylusControlsDialog(
     context:Context, private val settings:GameSettings, private val config:LauncherConfig,
-    private val save:(StylusGridConfig)->Unit,
+    private val viewGrid: Boolean = false,
 ):Dialog(context) {
-    private val testing=settings.controlsMode()=="zones"
+    private val testing = !viewGrid
     private val grid=StylusGridConfig.parse(settings.pocketpcStylusGridJson)
     private val bindings=InputBindings(config,false)
-    private val fullscreen=JSONObject(config.originalJson).optString("gamepad_fullscreen").takeIf{it.isNotEmpty() && it!="null"}
-    private var virtualDialog:Dialog?=null
-    private var waiting:Int?=null
-    private var selected:Int?=null
-    private lateinit var status:TextView
+    private var virtualDialog: Dialog? = null
     private lateinit var cells:GridLayout
     private lateinit var preview:TestSurface
     private val arrows=BooleanArray(4)
@@ -33,7 +28,6 @@ internal class StylusControlsDialog(
     private val lastAxis=IntArray(2)
     private var stickX=0f
     private var stickY=0f
-    private var axisNavigationAt=0L
     private val portrait:Boolean by lazy {
         val landscape = settings.screen in listOf(
             "landscape", "wqvga_landscape", "vga_landscape", "wvga_landscape", "hpc",
@@ -43,39 +37,23 @@ internal class StylusControlsDialog(
     }
     override fun onCreate(state:Bundle?) {
         super.onCreate(state)
-        setTitle(if(testing) "Test touch steering" else "Touch zone mapping")
+        setTitle(if(testing) "Test touch steering" else "View Grid")
         val pad=(12*context.resources.displayMetrics.density).toInt()
         val content=LinearLayout(context).apply {orientation=LinearLayout.VERTICAL;setPadding(pad,pad,pad,pad)}
         val scroll=ScrollView(context).apply{addView(content)}
         setContentView(scroll)
-        status=TextView(context).apply {text=if(testing) "Try arrows / D-pad and the left stick. Release returns to the centre." else "Select a zone, then press a key, button or stick direction. Reserved PocketHLE-Reborn inputs are refused."}
-        content.addView(status)
-        if(!testing) {
-            grid.orient(portrait)
-            val sizes = StylusGridConfig.sizes.map { (columns, rows) ->
-                if (portrait) rows to columns else columns to rows
+        if (viewGrid) {
+            content.addView(TextView(context).apply { text = "${grid.columns} × ${grid.rows}" })
+            cells = GridLayout(context).apply {
+                columnCount = grid.columns
+                rowCount = grid.rows
             }
-            val spinner=Spinner(context).apply {
-                adapter=ArrayAdapter(context,android.R.layout.simple_spinner_dropdown_item,sizes.map{"${it.first} × ${it.second}"})
-                setSelection(sizes.indexOf(grid.columns to grid.rows).coerceAtLeast(0))
-            }
-            content.addView(spinner)
-            spinner.onItemSelectedListener=object:AdapterView.OnItemSelectedListener {
-                override fun onNothingSelected(parent:AdapterView<*>?) {}
-                override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long) {
-                    val (c,r)=sizes[position]
-                    if(c!=grid.columns || r!=grid.rows){grid.columns=c;grid.rows=r;grid.bindings.clear();waiting=null;selected=null;refreshCells();status.text="Grid resized; assignments cleared."}
-                }
-            }
-            cells=GridLayout(context).apply {columnCount=grid.columns;rowCount=grid.rows}
-            content.addView(cells,LinearLayout.LayoutParams(-1,-2))
-            content.post{refreshCells()}
-            val actions=LinearLayout(context)
-            actions.addView(Button(context).apply{text="Clear selected";setOnClickListener{selected?.let{cell->grid.bindings.removeAll{it.cell==cell}};waiting=null;refreshCells()}})
-            actions.addView(Button(context).apply{text="Clear all";setOnClickListener{grid.bindings.clear();waiting=null;refreshCells()}})
-            content.addView(actions)
-            content.addView(Button(context).apply{text="Cancel assignment";setOnClickListener{waiting=null;status.text="Assignment cancelled.";refreshCells()}})
+            content.addView(cells, LinearLayout.LayoutParams(-1, -2))
+            content.post { showGridCells() }
         } else {
+            content.addView(TextView(context).apply {
+                text = "Try arrows / D-pad and the left stick. Release returns to the centre."
+            })
             preview=TestSurface(context)
             val maxWidth=(context.resources.displayMetrics.widthPixels-pad*4).coerceAtLeast(160)
             val maxHeight=(context.resources.displayMetrics.heightPixels*.55f).toInt()
@@ -84,36 +62,42 @@ internal class StylusControlsDialog(
             content.addView(preview,LinearLayout.LayoutParams(width,(width/ratio).toInt()).apply{gravity=android.view.Gravity.CENTER_HORIZONTAL})
         }
         if(testing) content.addView(Button(context).apply{text="Test with touch controls";setOnClickListener{showVirtualControls()}})
-        content.addView(Button(context).apply{text="Done";setOnClickListener{if(!testing) save(grid);dismiss()}})
-        if(!testing)content.addView(Button(context).apply{text="Cancel";setOnClickListener{dismiss()}})
+        content.addView(Button(context).apply {
+            text = "Done"
+            setOnClickListener { dismiss() }
+            if (viewGrid) requestFocus()
+        })
         window?.setLayout((context.resources.displayMetrics.widthPixels*.94f).toInt(),android.view.WindowManager.LayoutParams.WRAP_CONTENT)
     }
-    private fun refreshCells() {
-        if(!::cells.isInitialized)return
-        val focused=(currentFocus?.tag as? Int)
-        cells.removeAllViews();cells.columnCount=grid.columns;cells.rowCount=grid.rows
-        val available=(cells.width.takeIf{it>0} ?: (context.resources.displayMetrics.widthPixels*.8f).toInt())
+    private fun showGridCells() {
+        val available = cells.width.takeIf { it > 0 }
+            ?: (context.resources.displayMetrics.widthPixels * .8f).toInt()
         val maxHeight = (context.resources.displayMetrics.heightPixels * .5f).toInt()
         val side = (minOf(available / grid.columns, maxHeight / grid.rows) - 2).coerceAtLeast(1)
-        for(cell in 0 until grid.columns*grid.rows) {
-            val label=if(waiting==cell) "Press input…" else grid.bindings.firstOrNull{it.cell==cell}?.input?.let { ControllerLabels.grid(it) } ?: "${cell+1}"
-            val button=Button(context).apply {
-                text=label;isAllCaps=false;textSize=10f;minWidth=0;minimumWidth=0;minHeight=0;minimumHeight=0
-                setPadding(2,2,2,2);tag=cell
-                contentDescription="Zone ${cell+1}: $label"
-                if(waiting==cell)setBackgroundColor(Color.rgb(40,110,180))
-                setOnClickListener{selected=cell;waiting=cell;status.text="Press an input. Back cancels assignment.";refreshCells();showVirtualControls()}
+        for (cell in 0 until grid.columns * grid.rows) {
+            val label = grid.bindings.firstOrNull { it.cell == cell }?.input
+                ?.let(ControllerLabels::grid) ?: (cell + 1).toString()
+            val tile = TextView(context).apply {
+                text = label
+                gravity = android.view.Gravity.CENTER
+                textSize = 10f
+                setBackgroundColor(0x337f7f7f)
+                contentDescription = "Zone ${cell + 1}: $label"
             }
-            cells.addView(button,GridLayout.LayoutParams().apply{this.width=side;this.height=side;setMargins(1,1,1,1)})
-            if(focused==cell)button.requestFocus()
+            cells.addView(tile, GridLayout.LayoutParams().apply {
+                width = side
+                height = side
+                setMargins(1, 1, 1, 1)
+            })
         }
     }
+
     /** Reuse the in-game bank and screen geometry; no native session exists here. */
     private fun showVirtualControls() {
         virtualDialog?.dismiss()
         val dialog=object:Dialog(context) {
             override fun dispatchKeyEvent(event:KeyEvent):Boolean {
-        ControllerLabels.observe(event)
+                ControllerLabels.observe(event)
                 if(event.keyCode==KeyEvent.KEYCODE_BACK || event.keyCode==KeyEvent.KEYCODE_ESCAPE) {
                     if(event.action==KeyEvent.ACTION_UP)dismiss()
                     return true
@@ -128,41 +112,32 @@ internal class StylusControlsDialog(
         val bank=PocketPcControls(context).apply{id=R.id.game_controls;configure(config, settings)}
         root.addView(screen);root.addView(bank)
         root.setDisplaySize(if(portrait)240 else 320,if(portrait)320 else 240)
-        val test=if(testing)TestSurface(context) else null
-        if(test!=null)screen.addView(test,FrameLayout.LayoutParams(-1,-1))
+        val test = TestSurface(context)
+        screen.addView(test,FrameLayout.LayoutParams(-1,-1))
         val hint=TextView(context).apply {
-            text=if(testing)"Touch steering — release to centre" else "Zone ${(waiting ?: 0)+1}: press a virtual control"
+            text = "Touch steering — release to centre"
             setTextColor(Color.WHITE);setBackgroundColor(0xaa101824.toInt());gravity=android.view.Gravity.CENTER
         }
         screen.addView(hint,FrameLayout.LayoutParams(-1,-2,android.view.Gravity.TOP))
         screen.addView(Button(context).apply{text="Back";setOnClickListener{dialog.dismiss()}},FrameLayout.LayoutParams(-2,-2,android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL))
-        fun redraw(){if(test!=null){updatePreview();test.xFraction=preview.xFraction;test.yFraction=preview.yFraction;test.invalidate()}}
+        fun redraw(){updatePreview();test.xFraction=preview.xFraction;test.yFraction=preview.yFraction;test.invalidate()}
         bank.dpad.onDirectionsChanged={_,mask->
             listOf(DpadDirections.UP to 0x26,DpadDirections.RIGHT to 0x27,DpadDirections.DOWN to 0x28,DpadDirections.LEFT to 0x25).forEachIndexed{i,(bit,vk)->
                 val down=mask and bit!=0
-                if(testing)setArrow("virtual:$vk",i,down) else if(down)virtualGridInput(vk)?.let{capture(it)}
+                setArrow("virtual:$vk",i,down)
             };redraw()
         }
-        bank.aim.onAim={x,y->
-            if(testing){stickX=x;stickY=y;redraw()}else {
-                val direction=listOf("Left" to -x,"Right" to x,"Up" to -y,"Down" to y).maxByOrNull{it.second}
-                if(direction!=null && direction.second>.18f)capture(GridInput("controller","Touch:Stick${direction.first}"))
-            }
+        bank.aim.onAim = { x, y ->
+            stickX = x
+            stickY = y
+            redraw()
         }
-        val keys=mapOf(R.id.btn_a to 0x11,R.id.btn_b to 0x20,R.id.btn_c to 0x10,R.id.btn_action to 0x0d,
-            R.id.btn_ppc_app1 to 0xc1,R.id.btn_ppc_app2 to 0xc2,R.id.btn_ppc_app3 to 0xc3,R.id.btn_ppc_app4 to 0xc4,R.id.btn_soft1 to 0x09)
-        keys.forEach{(id,vk)->bank.findViewById<View>(id).setOnTouchListener{v,e->
-            v.isPressed=e.actionMasked==MotionEvent.ACTION_DOWN
-            if(e.actionMasked==MotionEvent.ACTION_DOWN && !testing)virtualGridInput(vk)?.let{capture(it)}
-            true
-        }}
         // Host commands stay reserved and cannot be assigned to game zones.
         listOf(R.id.btn_soft2,R.id.btn_turbo,R.id.btn_stop_emulation,R.id.btn_fullscreen,R.id.btn_rotate_game).forEach{bank.findViewById<View>(it).isEnabled=false}
         dialog.setContentView(root)
         dialog.setOnDismissListener {
             bank.clearPressedControls();arrowSources.clear();arrows.fill(false);stickX=0f;stickY=0f
-            if(waiting!=null){waiting=null;status.text="Assignment cancelled.";refreshCells()}
-            if(testing)updatePreview()
+            updatePreview()
             virtualDialog=null
         }
         dialog.show()
@@ -170,60 +145,44 @@ internal class StylusControlsDialog(
     }
     override fun dismiss(){virtualDialog?.dismiss();super.dismiss()}
 
-    override fun dispatchKeyEvent(event:KeyEvent):Boolean {
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         ControllerLabels.observe(event)
-        val down=event.action==KeyEvent.ACTION_DOWN
-        if(event.keyCode==KeyEvent.KEYCODE_BACK || event.keyCode==KeyEvent.KEYCODE_ESCAPE) {
-            if(down && event.repeatCount==0){if(waiting!=null){waiting=null;status.text="Assignment cancelled.";refreshCells()}else dismiss()};return true
-        }
-        val sources=event.device?.sources ?: event.source
-        val controller=sources and InputDevice.SOURCE_GAMEPAD==InputDevice.SOURCE_GAMEPAD || sources and InputDevice.SOURCE_JOYSTICK==InputDevice.SOURCE_JOYSTICK
-        val name=if(controller)gridControllerName(event.keyCode) else gridKeyName(event)
-        if(waiting!=null){
-            if(down && event.repeatCount==0 && name!=null)capture(GridInput(if(controller)"controller" else "keyboard",name))
+        val down = event.action == KeyEvent.ACTION_DOWN
+        if (event.keyCode in listOf(KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_BUTTON_B)) {
+            if (down && event.repeatCount == 0) dismiss()
             return true
         }
-        if(testing){
-            if(controller && name=="East"){if(down)dismiss();return true}
-            val vk=if(controller)name?.let{bindings.controllerKey(it)} else bindings.keyboardKey(event)
-            val index=when(vk){0x26->0;0x27->1;0x28->2;0x25->3;else->null}
-            if(index!=null){setArrow("${event.deviceId}:$name",index,down);updatePreview()}
-            return true
+        if (viewGrid) return super.dispatchKeyEvent(event)
+        val sources = event.device?.sources ?: event.source
+        val controller = sources and InputDevice.SOURCE_GAMEPAD == InputDevice.SOURCE_GAMEPAD ||
+            sources and InputDevice.SOURCE_JOYSTICK == InputDevice.SOURCE_JOYSTICK
+        val name = if (controller) gridControllerName(event.keyCode) else gridKeyName(event)
+        val vk = if (controller) name?.let { bindings.controllerKey(it) } else bindings.keyboardKey(event)
+        val index = when (vk) {
+            0x26 -> 0
+            0x27 -> 1
+            0x28 -> 2
+            0x25 -> 3
+            else -> return super.dispatchKeyEvent(event)
         }
-        if(controller && name=="East"){if(down)dismiss();return true}
-        return super.dispatchKeyEvent(event)
-    }
-    private fun capture(input:GridInput) {
-        val cell=waiting ?: return
-        val error=if(input.source=="keyboard" && bindings.stylusKeyboardReserved(input.name))
-            "This key is currently assigned to the stylus. Reassign it in Keyboard bindings before using it in a grid."
-            else grid.bind(cell,input,fullscreen)
-        if(error==null){waiting=null;status.text="Assigned ${ControllerLabels.grid(input)}. Press Done to save.";refreshCells();virtualDialog?.dismiss()}else{status.text=error}
-    }
-    override fun onGenericMotionEvent(event:MotionEvent):Boolean {
-        if(event.action!=MotionEvent.ACTION_MOVE)return super.onGenericMotionEvent(event)
-        val controls=listOf("LeftStickLeft" to -event.getAxisValue(MotionEvent.AXIS_X),"LeftStickRight" to event.getAxisValue(MotionEvent.AXIS_X),
-            "LeftStickUp" to -event.getAxisValue(MotionEvent.AXIS_Y),"LeftStickDown" to event.getAxisValue(MotionEvent.AXIS_Y),
-            "RightStickLeft" to -event.getAxisValue(MotionEvent.AXIS_Z),"RightStickRight" to event.getAxisValue(MotionEvent.AXIS_Z),
-            "RightStickUp" to -event.getAxisValue(MotionEvent.AXIS_RZ),"RightStickDown" to event.getAxisValue(MotionEvent.AXIS_RZ),
-            "DPadLeft" to -event.getAxisValue(MotionEvent.AXIS_HAT_X),"DPadRight" to event.getAxisValue(MotionEvent.AXIS_HAT_X),
-            "DPadUp" to -event.getAxisValue(MotionEvent.AXIS_HAT_Y),"DPadDown" to event.getAxisValue(MotionEvent.AXIS_HAT_Y),
-            "LeftTrigger2" to event.getAxisValue(MotionEvent.AXIS_LTRIGGER),"RightTrigger2" to event.getAxisValue(MotionEvent.AXIS_RTRIGGER))
-        if(testing){
-            stickX=event.getAxisValue(MotionEvent.AXIS_X);stickY=event.getAxisValue(MotionEvent.AXIS_Y)
-            listOf("DPadUp","DPadRight","DPadDown","DPadLeft").forEachIndexed{i,n->
-                val value=controls.first{it.first==n}.second>.5f
-                setArrow("hat:${event.deviceId}:$n",i,value)
-            };updatePreview();return true
-        }
-        val direction=controls.firstOrNull{it.second>.18f}?.first ?: return true
-        if(waiting!=null){capture(GridInput("controller",direction));return true}
-        if(android.os.SystemClock.uptimeMillis()-axisNavigationAt>250) {
-            val focus=when{direction.endsWith("Left")->View.FOCUS_LEFT;direction.endsWith("Right")->View.FOCUS_RIGHT;direction.endsWith("Up")->View.FOCUS_UP;direction.endsWith("Down")->View.FOCUS_DOWN;else->null}
-            if(focus!=null){currentFocus?.focusSearch(focus)?.requestFocus();axisNavigationAt=android.os.SystemClock.uptimeMillis()}
-        }
+        setArrow("${event.deviceId}:$name", index, down)
+        updatePreview()
         return true
     }
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (viewGrid || event.action != MotionEvent.ACTION_MOVE) return super.onGenericMotionEvent(event)
+        stickX = event.getAxisValue(MotionEvent.AXIS_X)
+        stickY = event.getAxisValue(MotionEvent.AXIS_Y)
+        val hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X)
+        val hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        listOf(-hatY, hatX, hatY, -hatX).forEachIndexed { index, value ->
+            setArrow("hat:${event.deviceId}:$index", index, value > .5f)
+        }
+        updatePreview()
+        return true
+    }
+
     private fun setArrow(source:String,index:Int,down:Boolean) {
         val was=arrows[index]
         if(down)arrowSources[source]=index else arrowSources.remove(source)

@@ -1,5 +1,5 @@
 use super::*;
-use pocket_library::stylus_grid::{ControlsMode, HostInput, TouchAction};
+use pocket_library::stylus_grid::{ControlsMode, HostInput, StylusGrid, TouchAction};
 
 // Assignment labels and status messages must not change the modal bounds.
 fn editor_window<'a>(ctx: &egui::Context, title: &str) -> egui::Window<'a> {
@@ -251,30 +251,24 @@ impl PocketLauncher {
             }
         } else if down {
             if let Some(cell) = editor.waiting {
-                let grid = if self.live_grid {
-                    Some(&mut self.running_stylus_grid)
-                } else {
-                    self.game_settings_draft.as_mut().map(|(_, draft)| &mut draft.pocketpc_stylus_grid)
-                };
-                if let Some(grid) = grid {
-                    if matches!(&input,HostInput::Keyboard(key) if self.library.config().stylus_keyboard_reserved(key))
-                    {
-                        editor.message="This key is currently assigned to the stylus. Reassign it in Keyboard bindings before using it in a grid.".into();
-                        self.stylus_editor = Some(editor);
-                        return true;
+                let grid = &mut self.running_stylus_grid;
+                if matches!(&input,HostInput::Keyboard(key) if self.library.config().stylus_keyboard_reserved(key))
+                {
+                    editor.message="This key is currently assigned to the stylus. Reassign it in Keyboard bindings before using it in a grid.".into();
+                    self.stylus_editor = Some(editor);
+                    return true;
+                }
+                match grid.bind(
+                    cell,
+                    input,
+                    self.library.config().gamepad_fullscreen.as_deref(),
+                ) {
+                    Ok(()) => {
+                        editor.waiting = None;
+                        editor.message = "Assigned.".into();
+                        self.live_grid_dirty = true;
                     }
-                    match grid.bind(
-                        cell,
-                        input,
-                        self.library.config().gamepad_fullscreen.as_deref(),
-                    ) {
-                        Ok(()) => {
-                            editor.waiting = None;
-                            editor.message = "Assigned.".into();
-                            if self.live_grid { self.save_live_grid(); }
-                        }
-                        Err(error) => editor.message = error.into(),
-                    }
+                    Err(error) => editor.message = error.into(),
                 }
             }
         }
@@ -285,6 +279,13 @@ impl PocketLauncher {
         if self.screen != Screen::GameSettings && !(self.live_grid && self.screen == Screen::Run) {
             self.stylus_editor = None;
             return false;
+        }
+        if self.screen == Screen::GameSettings && self.grid_preview {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.grid_preview = false;
+                self.controller_ui.stop_repeat();
+            }
+            return true;
         }
         if self.stylus_editor.is_none() {
             return false;
@@ -327,6 +328,8 @@ impl PocketLauncher {
                                 e.waiting = None;
                                 e.message = "Assignment cancelled.".into();
                             }
+                        } else if self.live_grid && self.screen == Screen::Run {
+                            self.toggle_live_grid();
                         } else {
                             self.stylus_editor = None;
                         }
@@ -368,7 +371,7 @@ impl PocketLauncher {
             }
         } else if down {
             if control == "East" {
-                self.stylus_editor = None;
+                self.toggle_live_grid();
             } else if matches!(control, "Start" | "Select" | "Mode" | "Misc1") {
                 if let Some(e) = self.stylus_editor.as_mut() {
                     e.message = "Reserved PocketHLE-Reborn input.".into();
@@ -388,19 +391,35 @@ impl PocketLauncher {
         })
     }
 
-    fn save_live_grid(&mut self) {
-        if let Some(game) = self.running_game.as_ref().and_then(|id| self.library.get(id)) {
-            let id = game.id.clone();
-            let mut settings = game.settings.clone();
-            settings.pocketpc_stylus_grid = self.running_stylus_grid.clone();
-            if let Err(error) = self.library.update_settings(&id, settings) {
-                self.status = format!("Could not save touch grid: {error}");
-            }
+    fn save_live_grid(&mut self) -> bool {
+        if !self.live_grid_dirty {
+            return true;
         }
+        let Some(id) = self.running_game_id.as_deref() else {
+            return false;
+        };
+        let Some(mut settings) = self.library.get(id).map(|game| game.settings.clone()) else {
+            self.status = "Could not save touch grid: game not found.".into();
+            return false;
+        };
+        settings.pocketpc_stylus_grid = self.running_stylus_grid.clone();
+        if let Err(error) = self.library.update_settings(id, settings) {
+            self.status = format!("Could not save touch grid: {error}");
+            return false;
+        }
+        self.live_grid_dirty = false;
+        true
     }
 
     fn toggle_live_grid(&mut self) {
-        if self.stylus_editor.take().is_some() {
+        if self.stylus_editor.is_some() {
+            if !self.save_live_grid() {
+                if let Some(editor) = self.stylus_editor.as_mut() {
+                    editor.message.clone_from(&self.status);
+                }
+                return;
+            }
+            self.stylus_editor = None;
             self.controller_ui.stop_repeat();
             self.pointer_down_at = None;
             return;
@@ -415,13 +434,19 @@ impl PocketLauncher {
     }
 
     fn resize_live_grid(&mut self, columns: u8, rows: u8) {
+        if (columns, rows) == (self.running_stylus_grid.columns, self.running_stylus_grid.rows) {
+            return;
+        }
         self.cancel_grid();
         self.running_stylus_grid.resize(columns, rows);
+        self.live_grid_dirty = true;
         if let Some(editor) = self.stylus_editor.as_mut() {
             editor.selected = None;
             editor.waiting = None;
+            editor.message = "Grid size changed. Assignments cleared.".into();
+        } else {
+            self.save_live_grid();
         }
-        self.save_live_grid();
     }
 
     pub(super) fn live_grid_chord(&mut self, control: &str, down: bool) -> bool {
@@ -444,7 +469,7 @@ impl PocketLauncher {
                     editor.selected
                 }) {
                     self.running_stylus_grid.bindings.retain(|binding| binding.cell != cell);
-                    self.save_live_grid();
+                    self.live_grid_dirty = true;
                 }
             } else if index >= 2 {
                 self.toggle_live_grid();
@@ -473,6 +498,10 @@ impl PocketLauncher {
         }
         let (columns, rows) = (self.running_stylus_grid.columns, self.running_stylus_grid.rows);
         let editing = self.stylus_editor.is_some();
+        if editing {
+            ui.painter()
+                .rect_filled(rect, 0.0, Color32::from_black_alpha(153));
+        }
         let clip = ui.clip_rect();
         let center = rect.center().x.clamp(clip.left(), clip.right());
         let half_width = (center - clip.left()).min(clip.right() - center);
@@ -532,6 +561,21 @@ impl PocketLauncher {
                         if crate::controller_ui::button(ui, label).clicked() {
                             self.toggle_live_grid();
                         }
+                        if editing
+                            && crate::controller_ui::add_enabled(
+                                ui,
+                                !self.running_stylus_grid.bindings.is_empty(),
+                                egui::Button::new("Clear Grid"),
+                            )
+                            .clicked()
+                        {
+                            self.running_stylus_grid.bindings.clear();
+                            self.live_grid_dirty = true;
+                            if let Some(editor) = self.stylus_editor.as_mut() {
+                                editor.waiting = None;
+                                editor.message = "Grid cleared.".into();
+                            }
+                        }
                     });
                     ui.data_mut(|data| data.insert_temp(row_width_id, row.response.rect.width()));
                 });
@@ -545,158 +589,87 @@ impl PocketLauncher {
         });
     }
 
-    pub(super) fn ui_stylus_editor(&mut self, ctx: &egui::Context, draft: &mut GameSettings) {
-        let Some(mut editor) = self.stylus_editor.take() else {
-            return;
-        };
-        if !draft.pocketpc_stylus_grid.valid_size() {
-            draft.pocketpc_stylus_grid = Default::default();
-        }
-        draft.pocketpc_stylus_grid.orient(editor.portrait);
+    pub(super) fn ui_grid_preview(&mut self, ctx: &egui::Context, grid: &StylusGrid) {
         let mut open = true;
         let mut done = false;
-        let title = if editor.testing {
-            "Test touch steering"
-        } else {
-            "Touch zone mapping"
-        };
-        editor_window(ctx, title)
-            .open(&mut open)
-            .show(ctx,|ui| {
-                crate::controller_ui::page_scope(ui,"stylus_grid_modal",|ui| {
-                egui::ScrollArea::vertical().id_source("stylus_controls_editor_body").auto_shrink([false, false]).show(ui,|ui|{
-                    if !editor.testing {
-                        crate::controller_ui::ComboBox::from_id_source("stylus_grid_size")
-                            .selected_text(format!("{} × {}",draft.pocketpc_stylus_grid.columns,draft.pocketpc_stylus_grid.rows))
-                            .show_ui(ui,|ui|{
-                                for (c,r) in pocket_library::stylus_grid::StylusGrid::SIZES {
-                                    let (c,r)=if editor.portrait {(r,c)}else{(c,r)};
-                                    if crate::controller_ui::button(ui,format!("{c} × {r}")).clicked(){
-                                        draft.pocketpc_stylus_grid.resize(c,r);editor.waiting=None;editor.selected=None;
-                                        editor.message="Grid size changed; assignments cleared.".into();
-                                    }
-                                }
-                            });
-                        ui.label("Select a zone, then press a keyboard key, controller button or stick direction.");
-                        ui.label("Only assigned inputs become stylus presses. Reserved emulator shortcuts are refused.");
-                    }else{
-                        ui.label("Try your arrows / D-pad and left stick. Release to return to the centre.");
+        editor_window(ctx, "View Grid").open(&mut open).show(ctx, |ui| {
+            crate::controller_ui::page_scope(ui, "stylus_grid_preview", |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.label(format!("{} × {}", grid.columns, grid.rows));
+                    let columns = usize::from(grid.columns.max(1));
+                    let rows = usize::from(grid.rows.max(1));
+                    let max_height = (ctx.available_rect().height() - 150.0).max(64.0);
+                    let side = (ui.available_width() / columns as f32)
+                        .min(max_height / rows as f32)
+                        .clamp(14.0, 70.0);
+                    let (rect, _) = ui.allocate_exact_size(
+                        Vec2::new(side * columns as f32, side * rows as f32),
+                        Sense::hover(),
+                    );
+                    for row in 0..rows {
+                        for column in 0..columns {
+                            let cell = row * columns + column;
+                            let rect = Rect::from_min_size(
+                                rect.min + Vec2::new(column as f32 * side, row as f32 * side),
+                                Vec2::splat(side),
+                            );
+                            let label = grid
+                                .bindings
+                                .iter()
+                                .find(|binding| binding.cell == cell)
+                                .map(|binding| crate::controller_labels::grid(ctx, &binding.input))
+                                .unwrap_or_else(|| (cell + 1).to_string());
+                            ui.painter().rect_stroke(
+                                rect, 0.0, egui::Stroke::new(1.0, Color32::GRAY),
+                            );
+                            ui.painter().with_clip_rect(ui.clip_rect().intersect(rect)).text(
+                                rect.center(), egui::Align2::CENTER_CENTER, &label,
+                                egui::FontId::proportional(11.0), Color32::WHITE,
+                            );
+                            ui.interact(rect, ui.id().with(cell), Sense::hover())
+                                .on_hover_text(label);
+                        }
                     }
-                    let ratio=if editor.portrait {3.0/4.0}else{4.0/3.0};
-                    let max_h=(ctx.available_rect().height()-260.0).clamp(130.0,360.0);
-                    let width=ui.available_width().min(480.0).min(max_h*ratio).max(100.0);
-                    if editor.testing {
-                        let (rect,_)=ui.allocate_exact_size(Vec2::new(width,width/ratio),Sense::hover());
-                        let p=ui.painter();p.rect_filled(rect,4.0,Color32::from_rgb(18,32,48));
-                        p.line_segment([egui::pos2(rect.center().x,rect.top()),egui::pos2(rect.center().x,rect.bottom())],egui::Stroke::new(1.0,Color32::GRAY));
-                        p.line_segment([egui::pos2(rect.left(),rect.center().y),egui::pos2(rect.right(),rect.center().y)],egui::Stroke::new(1.0,Color32::GRAY));
-                        p.circle_filled(rect.min+Vec2::new(editor.point.0*rect.width(),editor.point.1*rect.height()),7.0,Color32::from_rgb(255,100,65));
-                    }else{
-                        let cols=draft.pocketpc_stylus_grid.columns.max(1) as usize;
-                        let rows=draft.pocketpc_stylus_grid.rows.max(1) as usize;
-                        let side=(width/cols as f32).min(max_h/rows as f32)-2.0;
-                        egui::Grid::new("stylus_binding_cells").spacing(Vec2::splat(2.0)).show(ui,|ui|{
-                            for row in 0..rows {
-                                for col in 0..cols {
-                                    let cell=row*cols+col;
-                                    let label=if editor.waiting==Some(cell){"Press input…".into()}else{
-                                        draft.pocketpc_stylus_grid.bindings.iter().find(|b|b.cell==cell).map(|b|crate::controller_labels::grid(ui.ctx(),&b.input)).unwrap_or_else(||format!("{}",cell+1))
-                                    };
-                                    let text=RichText::new(label).size(11.0).color(if editor.waiting==Some(cell){Color32::from_rgb(255,175,70)}else if draft.pocketpc_stylus_grid.bindings.iter().any(|b|b.cell==cell){Color32::from_rgb(100,220,180)}else{Color32::GRAY});
-                                    let response=crate::controller_ui::sized_button(ui,Vec2::splat(side),text);
-                                    if response.clicked(){self.controller_ui.stop_repeat();editor.selected=Some(cell);editor.waiting=Some(cell);editor.message="Waiting for input. Escape cancels.".into();}
-                                }
-                                ui.end_row();
-                            }
-                        });
-                        ui.horizontal(|ui|{
-                            if crate::controller_ui::button(ui,"Clear selected").clicked(){
-                                if let Some(cell)=editor.selected {draft.pocketpc_stylus_grid.bindings.retain(|b|b.cell!=cell);}
-                                editor.waiting=None;
-                            }
-                            if crate::controller_ui::button(ui,"Clear all").clicked(){draft.pocketpc_stylus_grid.bindings.clear();editor.waiting=None;}
-                            if crate::controller_ui::add_enabled(ui, editor.waiting.is_some(), egui::Button::new("Cancel assignment")).clicked(){editor.waiting=None;}
-                        });
-                        ui.label(&editor.message);
-                    }
-                    if crate::controller_ui::button(ui,"Done").clicked(){done=true;}
-                });
+                    done = crate::controller_ui::button(ui, "Done").clicked();
                 });
             });
-        if open && !done {
-            self.stylus_editor = Some(editor);
-        } else {
-            self.controller_ui.stop_repeat();
-        }
+        });
+        self.grid_preview = open && !done;
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn assignment_messages_keep_window_and_grid_cells_stationary() {
-        for screen in [
-            Vec2::new(1280.0, 800.0),
-            Vec2::new(800.0, 480.0),
-            Vec2::new(640.0, 400.0),
-        ] {
-            let ctx = egui::Context::default();
-            let draw = |assigned: bool| {
-                let mut cell = egui::Rect::NOTHING;
-                let _ =
-                    ctx.run(
-                        egui::RawInput {
-                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
-                            ..Default::default()
-                        },
-                        |ctx| {
-                            editor_window(ctx, "Touch zone mapping").show(ctx, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        ui.label("Select a zone, then press an input.");
-                                        let response = crate::controller_ui::sized_button(
-                                            ui,
-                                            Vec2::new(80.0, 70.0),
-                                            if assigned { "RightStickDown" } else { "1" },
-                                        );
-                                        cell = response.rect;
-                                        ui.add_enabled(
-                                            !assigned,
-                                            egui::Button::new("Cancel assignment"),
-                                        );
-                                        ui.label(if assigned {
-                                "This input is reserved by PocketHLE-Reborn. Choose another input."
-                            } else { "Waiting for input." });
-                                        let _ = ui.button("Done");
-                                    });
-                            });
-                        },
-                    );
-                (
-                    ctx.memory(|m| m.area_rect(egui::Id::new("stylus_controls_editor")))
-                        .unwrap(),
-                    cell,
-                )
-            };
-            draw(false);
-            let (window, cell) = draw(false);
-            for assigned in [true, false, true] {
-                let (next_window, next_cell) = draw(assigned);
-                assert!(
-                    next_window.min.distance(window.min) < 1.0,
-                    "window moved on {screen:?}: {window:?} -> {next_window:?}"
+    pub(super) fn ui_stylus_editor(&mut self, ctx: &egui::Context) {
+        let Some(editor) = self.stylus_editor.as_ref() else {
+            return;
+        };
+        let mut open = true;
+        let mut done = false;
+        editor_window(ctx, "Test touch steering").open(&mut open).show(ctx, |ui| {
+            crate::controller_ui::page_scope(ui, "stylus_steering_test", |ui| {
+                ui.label("Try your arrows / D-pad and left stick. Release to return to the centre.");
+                let ratio = if editor.portrait { 3.0 / 4.0 } else { 4.0 / 3.0 };
+                let max_height = (ctx.available_rect().height() - 260.0).clamp(130.0, 360.0);
+                let width = ui.available_width().min(480.0).min(max_height * ratio).max(100.0);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(width, width / ratio), Sense::hover());
+                let painter = ui.painter();
+                painter.rect_filled(rect, 4.0, Color32::from_rgb(18, 32, 48));
+                painter.line_segment(
+                    [egui::pos2(rect.center().x, rect.top()), egui::pos2(rect.center().x, rect.bottom())],
+                    egui::Stroke::new(1.0, Color32::GRAY),
                 );
-                assert!((next_window.size() - window.size()).length() < 1.0);
-                assert!(
-                    next_cell.min.distance(cell.min) < 1.0,
-                    "cell moved after assignment"
+                painter.line_segment(
+                    [egui::pos2(rect.left(), rect.center().y), egui::pos2(rect.right(), rect.center().y)],
+                    egui::Stroke::new(1.0, Color32::GRAY),
                 );
-                assert!(next_window.left() >= 0.0 && next_window.top() >= 0.0);
-                assert!(next_window.right() <= screen.x && next_window.bottom() <= screen.y);
-            }
+                painter.circle_filled(
+                    rect.min + Vec2::new(editor.point.0 * rect.width(), editor.point.1 * rect.height()),
+                    7.0, Color32::from_rgb(255, 100, 65),
+                );
+                done = crate::controller_ui::button(ui, "Done").clicked();
+            });
+        });
+        if !open || done {
+            self.stylus_editor = None;
+            self.controller_ui.stop_repeat();
         }
     }
 }
