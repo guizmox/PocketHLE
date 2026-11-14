@@ -10032,9 +10032,6 @@ fn crt_fopen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = open_cstr_path(ctx, &name, &mode);
     // Opt-in CoPilot diagnostic: a failed fopen can cause a silent startup exit.
     // The standard trace level hides the requested file and mode.
-    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
-        log::info!("CoPilot trace: fopen path={name:?} mode={mode:?} result=0x{h:08x}");
-    }
     // A game that silently gets a NULL `FILE*` usually goes on to spin
     // or bail somewhere far away from here, so say which path missed.
     if h == 0 {
@@ -11697,12 +11694,6 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     ctx.kernel
         .window_visibility
         .insert(hwnd, style & 0x1000_0000 != 0);
-    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
-        log::info!(
-            "CoPilot trace: CreateWindowExW class={class_name:?} hwnd=0x{hwnd:08x} parent=0x{parent:08x} style=0x{style:08x} nested_depth={}",
-            ctx.kernel.create_frame_stack.len() + usize::from(ctx.kernel.create_frame.is_some())
-        );
-    }
     let wnd_proc = ctx
         .kernel
         .window_class_procs
@@ -11827,15 +11818,7 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         ctx.cpu.write_reg(ArmReg::R2, 0)?;
         ctx.cpu.write_reg(ArmReg::R3, create_struct)?;
         ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
-        let nested_depth =
-            ctx.kernel.create_frame_stack.len() + usize::from(ctx.kernel.create_frame.is_some());
         begin_window_callback(ctx.kernel, frame, CreateStage::Create, hwnd);
-        if nested_depth != 0 && std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
-            log::info!(
-                "CoPilot trace: nested WM_CREATE depth={} hwnd=0x{hwnd:08x} wndproc=0x{wnd_proc:08x}",
-                nested_depth + 1
-            );
-        }
         if hwnd == FAKE_HWND {
             ctx.kernel.synthetic_create_sent = true;
         }
@@ -13570,11 +13553,6 @@ pub(crate) fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     // that handle invokes CoPilot's CWnd dispatcher with no attached object
     // and dereferences a null pointer at 0x0007c744.
     if hwnd == FAKE_DESKTOP_HWND {
-        if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
-            log::info!(
-                "CoPilot trace: SendMessageW desktop hwnd=0x{hwnd:08x} msg=0x{message:04x} wp=0x{wparam:08x} lp=0x{lparam:08x} -> default 0"
-            );
-        }
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     // The emulated status bar must never trampoline into the application's WndProc.
@@ -19376,14 +19354,6 @@ pub(crate) fn window_is_visible(kernel: &KernelState, hwnd: u32) -> bool {
 fn is_window_visible(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let visible = window_is_visible(ctx.kernel, hwnd);
-    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
-        log::info!(
-            "CoPilot trace: IsWindowVisible hwnd=0x{hwnd:08x} registered={} style={:?} tracked={:?} result={visible}",
-            ctx.kernel.window_classes.contains_key(&hwnd),
-            ctx.kernel.window_styles.get(&hwnd).copied(),
-            ctx.kernel.window_visibility.get(&hwnd).copied()
-        );
-    }
     Ok(DispatchOutcome::ReturnedR0(u32::from(visible)))
 }
 
@@ -24771,12 +24741,6 @@ fn create_dialog_indirect_param_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutco
     ctx.kernel.window_classes.insert(hwnd, "#32770".to_string());
     ctx.kernel.window_parents.insert(hwnd, parent);
     build_dialog_from_template_for(ctx, lp_template, hwnd, false);
-    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
-        log::info!(
-            "CoPilot trace: CreateDialog hwnd=0x{hwnd:08x} parent=0x{parent:08x} style={:?}",
-            ctx.kernel.window_styles.get(&hwnd)
-        );
-    }
     if dialog_proc == 0 {
         finish_modeless_dialog_show(ctx, hwnd);
         return Ok(DispatchOutcome::ReturnedR0(hwnd));

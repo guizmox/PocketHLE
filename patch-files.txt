@@ -1,4 +1,1 @@
-Cargo.lock
-Cargo.toml
-crates/pocket-netcf/Cargo.toml
-frontends/pocket-android/app/build.gradle.kts
+crates/pocket-library/src/session_diagnostic.rs

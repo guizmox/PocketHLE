@@ -214,9 +214,6 @@ fn dalk_file_exists(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
     let exists = path
         .as_deref()
         .is_some_and(|guest_path| guest_file_exists(&ctx.kernel.vfs, guest_path));
-    if std::env::var_os("POCKETHLE_COPILOT_TRACE").is_some() {
-        log::info!("CoPilot dALKUtil FileExists: path={path:?} exists={exists}");
-    }
     Ok(DispatchOutcome::ReturnedR0(u32::from(exists)))
 }
 
