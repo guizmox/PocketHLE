@@ -23,30 +23,44 @@ internal class LiveTouchGrid(
     private val bindings: InputBindings,
     private val fullscreenBinding: String?,
     private val releaseGameInput: () -> Unit,
-    private val save: () -> Unit,
+    private val save: () -> Boolean,
 ) {
     var editing = false
         private set
     private var selected = 0
     private var waiting = false
+    private var dirty = false
     private var portrait = grid.columns < grid.rows
     private var navigationDirection = 0
     private var nextNavigation = 0L
-    private var displayRect = DisplayRect(0, 0, 0, 0)
+    private var gameDisplayRect = DisplayRect(0, 0, 0, 0)
     private var sizes = StylusGridConfig.sizes
     private val held = BooleanArray(6)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val status = TextView(context).apply { gravity = android.view.Gravity.CENTER }
     private val toggle = Button(context)
     private val sizePicker = Spinner(context)
+    private val clear = Button(context).apply {
+        text = "Clear Grid"
+        visibility = View.GONE
+    }
     private val overlay = object : View(context) {
         override fun onDraw(canvas: Canvas) {
-            if (displayRect.width <= 0 || displayRect.height <= 0) return
-            val width = displayRect.width.toFloat() / grid.columns
-            val height = displayRect.height.toFloat() / grid.rows
+            if (gameDisplayRect.width <= 0 || gameDisplayRect.height <= 0) return
+            if (editing) {
+                paint.style = Paint.Style.FILL
+                paint.color = 0x99000000.toInt()
+                canvas.drawRect(
+                    gameDisplayRect.left.toFloat(), gameDisplayRect.top.toFloat(),
+                    (gameDisplayRect.left + gameDisplayRect.width).toFloat(),
+                    (gameDisplayRect.top + gameDisplayRect.height).toFloat(), paint,
+                )
+            }
+            val width = gameDisplayRect.width.toFloat() / grid.columns
+            val height = gameDisplayRect.height.toFloat() / grid.rows
             for (cell in 0 until grid.columns * grid.rows) {
-                val x = displayRect.left + cell % grid.columns * width
-                val y = displayRect.top + cell / grid.columns * height
+                val x = gameDisplayRect.left + cell % grid.columns * width
+                val y = gameDisplayRect.top + cell / grid.columns * height
                 paint.color = if (editing && cell == selected) Color.CYAN else 0x99ffffff.toInt()
                 paint.style = Paint.Style.STROKE
                 paint.strokeWidth = if (editing && cell == selected) 3f else 1f
@@ -65,10 +79,12 @@ internal class LiveTouchGrid(
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
             if (!editing) return false
-            if (event.actionMasked == MotionEvent.ACTION_UP && displayRect.width > 0 && displayRect.height > 0) {
-                val x = (event.x - displayRect.left) / displayRect.width
-                val y = (event.y - displayRect.top) / displayRect.height
+            if (event.actionMasked == MotionEvent.ACTION_UP && gameDisplayRect.width > 0 && gameDisplayRect.height > 0) {
+                val x = (event.x - gameDisplayRect.left) / gameDisplayRect.width
+                val y = (event.y - gameDisplayRect.top) / gameDisplayRect.height
                 if (x >= 0f && x < 1f && y >= 0f && y < 1f) {
+                    toggle.clearFocus()
+                    clear.clearFocus()
                     selected = (y * grid.rows).toInt() * grid.columns + (x * grid.columns).toInt()
                     waitForInput()
                 }
@@ -83,7 +99,10 @@ internal class LiveTouchGrid(
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER
             addView(sizePicker)
-            addView(toggle)
+            addView(toggle.apply { id = View.generateViewId() })
+            addView(clear.apply { id = View.generateViewId() })
+            toggle.nextFocusRightId = clear.id
+            clear.nextFocusLeftId = toggle.id
         }
         column.addView(controls)
         column.addView(TextView(context).apply {
@@ -93,11 +112,12 @@ internal class LiveTouchGrid(
         column.addView(status)
         toggle.text = "Configure Grid"
         toggle.setOnClickListener { toggleEditing() }
-        sizePicker.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
-            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (position == sizePicker.selectedItemPosition) resize(position)
-            }
+        clear.setOnClickListener {
+            grid.bindings.clear()
+            dirty = true
+            waiting = false
+            status.text = "Grid cleared."
+            overlay.invalidate()
         }
         refreshSizes()
     }
@@ -111,17 +131,24 @@ internal class LiveTouchGrid(
             waiting = false
             refreshSizes()
         }
-        if (displayRect != rect) {
-            displayRect = rect
+        if (gameDisplayRect != rect) {
+            gameDisplayRect = rect
             overlay.invalidate()
         }
     }
 
     private fun refreshSizes() {
         sizes = StylusGridConfig.sizes.map { (c, r) -> if (portrait) r to c else c to r }
+        sizePicker.onItemSelectedListener = null
         sizePicker.adapter = ArrayAdapter(sizePicker.context, android.R.layout.simple_spinner_dropdown_item,
             sizes.map { (c, r) -> "$c × $r" })
         sizePicker.setSelection(sizes.indexOf(grid.columns to grid.rows).coerceAtLeast(0))
+        sizePicker.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (position == sizePicker.selectedItemPosition) resize(position)
+            }
+        }
     }
 
     private fun resize(index: Int) {
@@ -135,16 +162,30 @@ internal class LiveTouchGrid(
         waiting = false
         status.text = "Grid size changed. Assignments cleared."
         overlay.invalidate()
-        save()
+        dirty = true
+        if (!editing) saveChanges()
+    }
+
+    private fun saveChanges(): Boolean {
+        if (!dirty) return true
+        if (!save()) {
+            status.text = "Could not save touch grid."
+            return false
+        }
+        dirty = false
+        return true
     }
 
     private fun toggleEditing() {
+        if (editing && !saveChanges()) return
         if (!editing) releaseGameInput()
         editing = !editing
+        toggle.clearFocus()
+        clear.clearFocus()
+        clear.visibility = if (editing) View.VISIBLE else View.GONE
         waiting = false
         toggle.text = if (editing) "Resume Game" else "Configure Grid"
         status.text = if (editing) "Select a zone to assign an input." else ""
-        if (!editing) toggle.clearFocus()
         overlay.invalidate()
     }
 
@@ -162,7 +203,7 @@ internal class LiveTouchGrid(
         if (error == null) {
             waiting = false
             overlay.invalidate()
-            save()
+            dirty = true
         }
     }
 
@@ -182,7 +223,7 @@ internal class LiveTouchGrid(
                 grid.bindings.removeAll { it.cell == selected }
                 status.text = "Assignment cleared."
                 overlay.invalidate()
-                save()
+                dirty = true
             }
         }
     }
@@ -218,6 +259,26 @@ internal class LiveTouchGrid(
             }
         }
         if (!editing) return false
+        if (!waiting && (toggle.hasFocus() || clear.hasFocus())) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> {
+                    if (down) {
+                        toggle.clearFocus()
+                        clear.clearFocus()
+                        overlay.invalidate()
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_BUTTON_A -> {
+                    if (down && event.repeatCount == 0) {
+                        (if (clear.hasFocus()) clear else toggle).performClick()
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> return false
+            }
+        }
         if (!down || event.repeatCount != 0) return true
         if (event.keyCode == KeyEvent.KEYCODE_ESCAPE || event.keyCode == KeyEvent.KEYCODE_BACK) {
             if (waiting) {
@@ -241,6 +302,10 @@ internal class LiveTouchGrid(
     }
 
     private fun moveSelection(x: Int, y: Int) {
+        if (y > 0 && selected / grid.columns == grid.rows - 1) {
+            toggle.requestFocus()
+            return
+        }
         val column = (selected % grid.columns + x).coerceIn(0, grid.columns - 1)
         val row = (selected / grid.columns + y).coerceIn(0, grid.rows - 1)
         selected = row * grid.columns + column

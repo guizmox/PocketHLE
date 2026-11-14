@@ -127,6 +127,12 @@ active state. Recording shows a red Stop video button while active, and a
 disabled Saving video state while encoding. Captures remain game-only and
 backup/restore remain disabled while a game/import is active. Filter changes
 are synchronized into any open settings draft before saving.
+In windowed mode, **Upscale ×2** applies to both Pocket PC and Gizmondo games.
+Enabling it expands a regular window when the image needs more space, up to
+the current monitor size. The game retains a smaller fit if the doubled image
+still cannot fit. Disabling it restores 1× presentation in the current window.
+This is a presentation control available across guest graphics APIs. OpenGL ES
+internal resolution is a separate setting.
 
 About is a dedicated page retaining version, project links and acknowledgments.
 Back/B/Escape return to the originating page without discarding its draft.
@@ -876,15 +882,23 @@ Native touch Start/Move/End/Cancel events and held pointer gestures also suspend
 navigation focus repair, including when no mouse-button edge accompanies the
 touch event. Each swipe continues from the existing scroll offset.
 
-**Configure Grid** starts a game with the grid over its live display.
-The size selector and **Configure Grid** button remain below the image.
-During this session, **L1 + R1** cycles sizes, **L2 + R2** toggles editing,
-and **L3 + R3** clears the selected assignment. Editing releases held game
-input and captures new actions while emulation continues. Select a cell and
-press a keyboard key, controller input, or Android virtual control to assign
-it. Assignments are saved as they change. Resizing clears the current grid.
-Landscape offers 4 × 3 through 7 × 6. Portrait transposes the grid and its
-assignments. **Test touch steering** remains available without starting the game.
+In a Pocket PC game's settings, **View Grid** shows the saved grid and its
+assignments without starting the game. **Configure Grid** starts the game with
+the grid over the live image. The size selector and **Configure Grid** are below
+the image. During this session, **L1 + R1** cycles sizes, **L2 + R2** toggles
+editing, and **L3 + R3** clears the selected assignment.
+
+Editing dims the image and captures input while the game continues running.
+Select a cell and press a keyboard key, controller input or Android virtual
+control to assign it. **Clear Grid** removes all assignments and keeps the
+current dimensions. Changing dimensions clears the assignments.
+
+**Resume Game** saves edits to the game's settings, restores normal brightness
+and returns input to the game. Changes made during editing require resuming
+before quitting to keep them. A size selected outside editing saves immediately.
+Landscape offers sizes from 4 × 3 to 8 × 7. Portrait transposes the grid and its
+assignments, with sizes from 3 × 4 to 7 × 8. **Test touch steering** remains
+available without starting the game.
 
 On desktop and Android, a new Pocket PC import keeps the detected name.
 Use **Rename** in the library tile menu to change it. When the import contains

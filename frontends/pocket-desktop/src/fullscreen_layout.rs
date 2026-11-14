@@ -202,6 +202,8 @@ mod tests {
 // Chrome reserved around the PocketPC display rectangle.
 pub const POCKET_PC_TOOLBAR_HEIGHT: f32 = 36.0;
 pub const POCKET_PC_GAP: f32 = 6.0;
+pub const POCKET_PC_MAX_SIDE: f32 = 140.0;
+pub const LIVE_GRID_CONTROLS_HEIGHT: f32 = 60.0;
 #[cfg(test)]
 mod rendered_resolution_tests {
     use super::*;

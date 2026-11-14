@@ -89,14 +89,25 @@ class GameSettingsActivity : HostKeyActivity() {
                             dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).requestFocus()
                         } else {
                             val config = LauncherConfig.fromJson(JSONObject(NativeBridge.readConfig(rootDir)))
-                            StylusControlsDialog(requireContext(), current, config) { }.show()
+                            StylusControlsDialog(requireContext(), current, config).show()
                         }
                         true
                     }
                 }
+                val viewGrid = androidx.preference.Preference(requireContext()).apply {
+                    key = "ppc_view_grid"
+                    title = "View Grid"
+                    isPersistent = false
+                    setOnPreferenceClickListener {
+                        val config = LauncherConfig.fromJson(JSONObject(NativeBridge.readConfig(rootDir)))
+                        StylusControlsDialog(requireContext(), current, config, viewGrid = true).show()
+                        true
+                    }
+                }
                 fun updateEditor() {
+                    viewGrid.isVisible = current.controlsMode() == "grid"
                     editor.isVisible=current.controlsMode()!="normal"
-                    editor.title=if(current.controlsMode()=="zones") "Test controls…" else "Configure grid…"
+                    editor.title=if(current.controlsMode()=="zones") "Test controls…" else "Configure Grid"
                     editor.summary=if(current.controlsMode()=="zones") "Test arrows / D-pad and progressive left-stick movement without starting a game." else "Start the game and configure the touch grid over the live game screen."
                 }
                 controlsCategory.addPreference(ListPreference(requireContext()).apply {
@@ -132,7 +143,9 @@ class GameSettingsActivity : HostKeyActivity() {
                         true
                     }
                 })
-                controlsCategory.addPreference(editor);updateEditor()
+                controlsCategory.addPreference(editor)
+                controlsCategory.addPreference(viewGrid)
+                updateEditor()
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
                     identityCategory.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                         key = keyName; title = label; isPersistent = false; text = initial

@@ -44,7 +44,7 @@ pub fn startup_failure(reason: String, log: Vec<String>) -> Diagnostic {
     }
 }
 
-/// Bound the stderr-based heuristic to startup, excluding frontend teardown.
+/// Limit exit-code and stderr heuristics to startup, excluding frontend teardown.
 pub const STARTUP_DIAGNOSTIC_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub fn classify(
@@ -67,8 +67,8 @@ pub fn classify(
         )
     } else if let Some(error) = runtime_error {
         ("Emulation stopped", error.to_owned())
-    } else if exit_code != 0 {
-        ("The game exited with an error", code.clone())
+    } else if startup_exit && exit_code != 0 {
+        ("The game exited during startup", code.clone())
     } else {
         let reason = startup_exit
             .then(|| {
@@ -99,6 +99,16 @@ mod tests {
         assert!(classify(false, true, 0, false, None, "", stderr()).is_none());
         assert!(classify(false, true, 0, true, None, "", vec![]).is_none());
         assert!(classify(true, true, 0, true, None, "", stderr()).is_none());
-        assert!(classify(false, true, 1, false, None, "", vec![]).is_some());
+    }
+
+    #[test]
+    fn guest_exit_codes_trigger_diagnostics_during_startup_only() {
+        assert!(classify(false, true, 13, false, None, "", vec![]).is_none());
+
+        let startup = classify(false, true, 13, true, None, "", vec![]).unwrap();
+        assert_eq!(startup.reason, "Exit code 0x0000000D.");
+
+        let crash = classify(false, true, 13, false, Some("CPU exception"), "", vec![]).unwrap();
+        assert_eq!(crash.reason, "CPU exception");
     }
 }

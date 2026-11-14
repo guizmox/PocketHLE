@@ -102,7 +102,7 @@ impl Default for StylusGrid {
     }
 }
 impl StylusGrid {
-    pub const SIZES: [(u8, u8); 4] = [(4, 3), (5, 4), (6, 5), (7, 6)];
+    pub const SIZES: [(u8, u8); 5] = [(4, 3), (5, 4), (6, 5), (7, 6), (8, 7)];
     fn supports(columns: u8, rows: u8) -> bool {
         Self::SIZES.contains(&(columns.max(rows), columns.min(rows)))
     }
@@ -326,14 +326,14 @@ mod tests {
     #[test]
     fn orientation_transposes_saved_bindings_without_clearing_them() {
         let mut grid = StylusGrid::default();
-        grid.resize(7, 6);
+        grid.resize(8, 7);
         let input = HostInput::Controller("South".into());
-        grid.bind(6, input.clone(), None).unwrap();
+        grid.bind(7, input.clone(), None).unwrap();
         let landscape = grid.clone();
         grid.orient(true);
-        assert_eq!((grid.columns, grid.rows), (6, 7));
-        assert_eq!(grid.cell_for(&input, None), Some(36));
-        assert_eq!(grid.point(36), (833, 9285));
+        assert_eq!((grid.columns, grid.rows), (7, 8));
+        assert_eq!(grid.cell_for(&input, None), Some(49));
+        assert_eq!(grid.point(49), (714, 9375));
         grid.orient(false);
         assert_eq!(grid, landscape);
     }

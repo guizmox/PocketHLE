@@ -1,2 +1,1 @@
-frontends/pocket-desktop/src/stylus_controls_ui.rs
 frontends/pocket-android/app/src/main/java/com/pockethle/app/LiveTouchGrid.kt
