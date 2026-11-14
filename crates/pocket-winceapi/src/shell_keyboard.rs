@@ -31,6 +31,9 @@ pub(crate) fn find(ctx: &mut CallCtx<'_>) -> Result<bool, KernelError> {
     Ok(title.is_empty() || title.eq_ignore_ascii_case("GMSHELL"))
 }
 fn edit_target(ctx: &CallCtx<'_>) -> u32 {
+    if let Some(hwnd) = ctx.kernel.text_input_target() {
+        return hwnd;
+    }
     let focus = ctx.kernel.controls.focus;
     if ctx.kernel.shell_keyboard.sip {
         if ctx.kernel.gapi_action_key != pocket_kernel::gapi::VK_RETURN {
@@ -352,16 +355,20 @@ pub(crate) fn sip_info(ctx: &mut CallCtx<'_>, p: u32) -> Result<DispatchOutcome,
     } else {
         (h, w)
     };
-    let top = pocket_kernel::classic_sip::top(dw as i32, dh as i32).max(0) as u32;
-    let bottom = dh.saturating_sub(26);
+    let [left, top, right, bottom] =
+        pocket_kernel::classic_sip::rect(&ctx.kernel.shell_keyboard, dw as i32, dh as i32)
+            .map(|v| v.max(0) as u32);
     let (mut desktop, panel) = if !on {
         ([0, 0, w, h], [0, 0, 0, 0])
     } else {
         match ctx.kernel.shell_keyboard.rotation % 4 {
-            1 => ([0, 0, top, h], [top, 0, bottom, h]),
-            2 => ([0, h - top, w, h], [0, h - bottom, w, h - top]),
-            3 => ([w - top, 0, w, h], [w - bottom, 0, w - top, h]),
-            _ => ([0, 0, w, top], [0, top, w, bottom]),
+            1 => ([0, 0, top, h], [top, h - right, bottom, h - left]),
+            2 => (
+                [0, h - top, w, h],
+                [w - right, h - bottom, w - left, h - top],
+            ),
+            3 => ([w - top, 0, w, h], [w - bottom, left, w - top, right]),
+            _ => ([0, 0, w, top], [left, top, right, bottom]),
         }
     };
     if ctx.kernel.pocket_pc_taskbar_visible() {
@@ -379,6 +386,47 @@ pub(crate) fn sip_info(ctx: &mut CallCtx<'_>, p: u32) -> Result<DispatchOutcome,
 pub(crate) fn sip_set_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
     set_info(ctx, p)
+}
+pub(crate) fn sip_default_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    let failed = |ctx: &mut CallCtx<'_>| {
+        crate::coredll::set_thread_error(ctx, 87);
+        Ok(DispatchOutcome::ReturnedR0(0))
+    };
+    if pointer == 0
+        || ctx
+            .cpu
+            .check_guest_access(pointer, 16, pocket_cpu::Prot::READ)
+            .is_err()
+    {
+        return failed(ctx);
+    }
+    let raw = ctx.cpu.read_mem(pointer, 16)?;
+    let rect: [i32; 4] =
+        std::array::from_fn(|i| i32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap()));
+    let (w, h) = if ctx.kernel.shell_keyboard.rotation % 2 == 0 {
+        (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height)
+    } else {
+        (ctx.kernel.framebuffer.height, ctx.kernel.framebuffer.width)
+    };
+    let [left, top, right, bottom] = rect;
+    if left < 0
+        || top < 0
+        || right <= left
+        || bottom <= top
+        || right as u32 > w
+        || bottom as u32 > h
+    {
+        return failed(ctx);
+    }
+    if ctx.kernel.shell_keyboard.default_sip_rect != Some(rect) {
+        ctx.kernel.shell_keyboard.default_sip_rect = Some(rect);
+        if ctx.kernel.shell_keyboard.visible {
+            notify(ctx);
+            ctx.kernel.invalidate_presentation();
+        }
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
 }
 pub(crate) fn set_info(ctx: &mut CallCtx<'_>, p: u32) -> Result<DispatchOutcome, KernelError> {
     if p == 0 || ctx.cpu.read_u32_le(p)? < 48 {
@@ -399,16 +447,7 @@ pub(crate) fn preference(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 }
 
 pub(crate) fn accepts_text(ctx: &CallCtx<'_>) -> bool {
-    ctx.kernel.gapi_action_key == pocket_kernel::gapi::VK_RETURN
-        && ((ctx.kernel.shell_keyboard.sip
-            && ctx.kernel.shell_keyboard.visible
-            && edit_target(ctx) != 0)
-            || ctx.kernel.controls.get(edit_target(ctx)).is_some_and(|c| {
-                c.class == ControlClass::Edit
-                    && c.enabled
-                    && c.style & 0x800 == 0
-                    && crate::coredll::window_is_visible(ctx.kernel, c.hwnd)
-            }))
+    ctx.kernel.accepts_text_input()
 }
 
 #[cfg(test)]
@@ -416,6 +455,85 @@ mod sip_tests {
     use super::*;
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
+    #[test]
+    fn native_shell_sip_rect_keeps_render_input_and_rotated_info_in_the_same_area() {
+        let (mut cpu, mut k, mut d) = setup();
+        k.framebuffer = pocket_kernel::framebuffer::deferred::DeferredFramebuffer::new(
+            pocket_kernel::framebuffer::Framebuffer::new(240, 320),
+        )
+        .unwrap();
+        let before = k.framebuffer.frame_counter;
+        let rect = [10i32, 120, 220, 220];
+        cpu.write_mem(
+            0x1000,
+            &rect
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SipSetDefaultRect",
+                &[0x1000]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(k.shell_keyboard.default_sip_rect, Some(rect));
+        assert_eq!(k.framebuffer.frame_counter, before);
+        cpu.write_mem(0x1008, &9i32.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SipSetDefaultRect",
+                &[0x1000]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(k.shell_keyboard.default_sip_rect, Some(rect));
+        k.shell_keyboard.visible = true;
+        k.shell_keyboard.sip = true;
+        cpu.write_mem(0x1100, &48u32.to_le_bytes()).unwrap();
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "SipGetInfo",
+            &[0x1100],
+        );
+        assert_eq!(
+            cpu.read_mem(0x1118, 16).unwrap(),
+            rect.into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(k.shell_keyboard.tap(5, 150, 240, 320), None);
+        assert_eq!(k.shell_keyboard.tap(235, 315, 240, 320), None);
+        k.shell_keyboard.rotation = 1;
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "coredll.dll",
+            "SipGetInfo",
+            &[0x1100],
+        );
+        assert_eq!(
+            cpu.read_mem(0x1118, 16).unwrap(),
+            [120u32, 100, 220, 310]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+    }
     #[test]
     fn startup_rotation_does_not_block_a_raw_framebuffer_game() {
         let (mut cpu, mut k, mut d) = setup();

@@ -598,6 +598,8 @@ Native dependencies remain transactional and real missing libraries/exports
 still fail loading. No game-name or DLL-version-specific fallback is added.
 
 Some CE DLLs tagged IMAGE_FILE_MACHINE_THUMB expose an ARM DllMain attach stub.
+Valid CE packed `.pdata` metadata selects the entry mode first; ARMNT has a
+different unwind format. See the [loader lifetime contract](AGENTS.md#15-image-and-thread-memory-lifetimes).
 The entry-mode detector recognizes the two-instruction ARM sequence
 `str lr,[sp,#-4]!; cmp r1,#1` for Thumb-tagged images, alongside the existing ARM
 prologues. Matching only the header or the first halfword is insufficient.

@@ -26,15 +26,22 @@ pub mod aygshell;
 mod backlight_tests;
 mod bluetooth;
 mod camera;
+mod ce_api_sets;
+mod ce_app_events;
 mod ce_crypto;
 mod ce_database;
+mod ce_debug;
+mod ce_devices;
+mod ce_exceptions;
 mod ce_fonts;
+mod ce_indirect;
 #[cfg(all(test, feature = "unicorn-tests"))]
 mod ce_native_tests;
 mod ce_notify;
 mod ce_phonebook;
 mod ce_services;
 mod ce_shortcut;
+mod ce_sip;
 pub mod commctrl;
 mod copilot;
 pub mod coredll;
@@ -60,17 +67,24 @@ pub mod gx;
 pub mod hss;
 mod htcsensor;
 mod imgdecmp;
+mod iphlpapi;
 mod legacy_services;
 #[cfg(feature = "video-static")]
 pub mod media_static;
 mod mfc;
 mod msxml;
+mod native_com;
 mod number_format;
 pub mod ole32;
+mod ole_automation;
+mod ole_bind;
+mod ole_run;
+mod ole_stream;
 pub mod ordinals;
 pub mod recording_encoder;
 mod scroll;
 mod sdl;
+mod security;
 mod serial;
 mod shell;
 mod shell_keyboard;
@@ -248,6 +262,7 @@ pub struct WinCeDispatcher {
     /// removing the dispatcher round-trip entirely. Populated
     /// alongside `by_name` via [`Self::register_constant`].
     by_name_constant: HashMap<(String, String), u32>,
+    system_ordinals: HashMap<String, HashMap<u16, String>>,
     /// Per-thunk lookup cache populated lazily on the first dispatch
     /// for that thunk. The hot path (which can fire ~10k times a
     /// second during a JumpyBall frame) used to recompute the
@@ -286,6 +301,7 @@ impl WinCeDispatcher {
         let mut d = Self {
             by_name: HashMap::new(),
             by_name_constant: HashMap::new(),
+            system_ordinals: HashMap::new(),
             by_thunk_va: HashMap::new(),
             halt_on_unimplemented: false,
             call_filter: None,
@@ -302,11 +318,20 @@ impl WinCeDispatcher {
         wininet::register(&mut d);
         ce_phonebook::register(&mut d);
         ce_shortcut::register(&mut d);
+        ce_indirect::register(&mut d);
         ce_fonts::register(&mut d);
         ce_crypto::register(&mut d);
+        security::register(&mut d);
+        iphlpapi::register(&mut d);
         ce_database::register(&mut d);
         ce_notify::register(&mut d);
         ce_services::register(&mut d);
+        ce_devices::register(&mut d);
+        ce_exceptions::register(&mut d);
+        ce_debug::register(&mut d);
+        ce_sip::register(&mut d);
+        ce_api_sets::register(&mut d);
+        ce_app_events::register(&mut d);
         ws2::register(&mut d);
         legacy_services::register(&mut d);
         ddraw::register(&mut d);
@@ -352,6 +377,39 @@ impl WinCeDispatcher {
         self.dependency_reported.clear();
     }
 
+    /// CE image exports replace legacy ordinal aliases for that DLL. Unknown
+    /// ordinals remain unknown; they must not acquire a different CE ABI.
+    pub fn set_system_ordinals(&mut self, tables: HashMap<String, HashMap<u16, String>>) {
+        self.by_name.retain(|(dll, name), _| {
+            !tables.contains_key(dll) || !(name.starts_with("ord:") || name.starts_with('#'))
+        });
+        self.by_name_constant.retain(|(dll, name), _| {
+            !tables.contains_key(dll) || !(name.starts_with("ord:") || name.starts_with('#'))
+        });
+        self.system_ordinals = tables;
+        self.by_thunk_va.clear();
+    }
+
+    fn profile_import_name(&self, thunk: &Thunk) -> String {
+        let ordinal = match &thunk.binding {
+            ImportBinding::Ordinal(ordinal) => Some(*ordinal),
+            ImportBinding::Name(name) => name
+                .strip_prefix("ord:")
+                .or_else(|| name.strip_prefix('#'))
+                .and_then(|n| n.parse().ok()),
+        };
+        if let (Some(ordinal), Some(table)) = (
+            ordinal,
+            self.system_ordinals.get(&thunk.dll.to_ascii_lowercase()),
+        ) {
+            return table
+                .get(&ordinal)
+                .cloned()
+                .unwrap_or_else(|| format!("ord:{ordinal}"));
+        }
+        import_name(thunk).into_owned()
+    }
+
     /// Query the same registered handlers and ordinal resolution as dispatch.
     /// Blanket ignored-library fallbacks are deliberately not implementations.
     pub fn supports_import(&self, dll: &str, binding: &ImportBinding) -> bool {
@@ -375,7 +433,7 @@ impl WinCeDispatcher {
             },
         };
         self.by_name
-            .contains_key(&(dll.to_ascii_lowercase(), import_name(&thunk).into_owned()))
+            .contains_key(&(dll.to_ascii_lowercase(), self.profile_import_name(&thunk)))
     }
 
     pub fn register_handler(&mut self, dll: &str, name: &str, handler: Handler) {
@@ -448,7 +506,7 @@ impl WinCeDispatcher {
         // The HashMap key is `(String, String)`, so we still have to
         // build owned strings for the lookup itself — but we only do
         // it once per unique thunk_va, not once per call.
-        let key = (dll_key, import_name(thunk).into_owned());
+        let key = (dll_key, self.profile_import_name(thunk));
         let resolved = self
             .by_name
             .get(&key)
@@ -501,7 +559,7 @@ impl Dispatcher for WinCeDispatcher {
         // in release builds. An explicit table sidesteps that.
         let dll_key = thunk.dll.to_ascii_lowercase();
         self.by_name_constant
-            .get(&(dll_key, import_name(thunk).into_owned()))
+            .get(&(dll_key, self.profile_import_name(thunk)))
             .copied()
         // Ignored libraries deliberately stay out of this. Answering
         // here would let the loader patch the IAT with a native
@@ -525,10 +583,11 @@ impl Dispatcher for WinCeDispatcher {
             .filter(|(registered_dll, _)| registered_dll == &dll_key)
             .map(|(_, name)| name.clone())
             .collect();
-        if dll_key == "coredll.dll"
-            || dll_key == "aygshell.dll"
-            || dll_key == "ws2.dll"
-            || pocket_gles::ordinals::is_gles_dll(&dll_key)
+        if !self.system_ordinals.contains_key(&dll_key)
+            && (dll_key == "coredll.dll"
+                || dll_key == "aygshell.dll"
+                || dll_key == "ws2.dll"
+                || pocket_gles::ordinals::is_gles_dll(&dll_key))
         {
             for ordinal in 0..=4095u16 {
                 if ordinals::lookup(&dll_key, ordinal).is_some() {
@@ -544,6 +603,13 @@ impl Dispatcher for WinCeDispatcher {
         // guest silently taking a "driver too old" fallback path.
         if pocket_gles::ordinals::is_gles_dll(&dll_key) {
             names.extend(pocket_gles::ordinals::names_for(&dll_key));
+        }
+        if let Some(table) = self.system_ordinals.get(&dll_key) {
+            for (&ordinal, name) in table {
+                names.push(name.clone());
+                names.push(format!("ord:{ordinal}"));
+                names.push(format!("#{ordinal}"));
+            }
         }
         names.sort();
         names.dedup();
@@ -574,6 +640,11 @@ impl Dispatcher for WinCeDispatcher {
     ) -> Result<DispatchOutcome, KernelError> {
         kernel.reclaim_finished_stacks(cpu)?;
         kernel.sync_transferred_handles();
+        coredll::system_sound::service_pending(kernel);
+        if let Some(outcome) = coredll::console::service_input(&mut CallCtx { cpu, thunk, kernel })?
+        {
+            return Ok(outcome);
+        }
         if let Some(outcome) = coredll::wake_due_worker(&mut CallCtx { cpu, thunk, kernel })? {
             return Ok(outcome);
         }
@@ -627,6 +698,7 @@ impl Dispatcher for WinCeDispatcher {
                 .as_ref()
                 .map(|sink| sink.enabled())
                 .unwrap_or(false);
+        let calling_thread = kernel.current_thread;
 
         // Capture args before the handler may mutate them. Skip the
         // four register reads entirely when nothing is going to log
@@ -751,7 +823,7 @@ impl Dispatcher for WinCeDispatcher {
                 Err(_) => (0, "error"),
             };
             let line = format!(
-                "{{\"dll\":\"{dll}\",\"name\":\"{n}\",\"args\":[{a0},{a1},{a2},{a3}],\"ret\":{ret},\"status\":\"{st}\",\"caller\":{caller}}}\n",
+                "{{\"dll\":\"{dll}\",\"name\":\"{n}\",\"args\":[{a0},{a1},{a2},{a3}],\"ret\":{ret},\"status\":\"{st}\",\"caller\":{caller},\"thread\":{calling_thread}}}\n",
                 dll = dll_key,
                 n = name,
                 a0 = args[0],
@@ -954,6 +1026,22 @@ mod tests {
         assert_eq!(d.constant_for(&t), None);
         let setter = fake_thunk("coredll.dll", "SetLastError");
         assert_eq!(d.constant_for(&setter), None);
+    }
+
+    #[test]
+    fn sound_apis_keep_their_registry_and_playback_side_effects() {
+        let mut d = WinCeDispatcher::new();
+        for name in [
+            "MessageBeep",
+            "PlaySoundW",
+            "PlaySoundA",
+            "sndPlaySoundW",
+            "sndPlaySoundA",
+        ] {
+            let thunk = fake_thunk("coredll.dll", name);
+            assert_eq!(d.constant_for(&thunk), None, "{name}");
+            assert!(d.resolve_handler(&thunk).is_some(), "{name}");
+        }
     }
 
     #[test]

@@ -142,6 +142,39 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
             }
         }
     }
+    // A filtered probe observes raw input without activating an HLE control.
+    // Native shell drag loops also run on UI workers: preserve the actual
+    // recipient, its client coordinates and thread ownership when inspecting
+    // their mouse range, leaving unrelated events queued.
+    let input = pending_input_is_available(ctx)
+        .then(|| {
+            ctx.kernel
+                .pending_input
+                .iter()
+                .enumerate()
+                .find_map(|(i, &event)| {
+                    let event = remap_input(
+                        event,
+                        ctx.kernel.gapi_keys_queried,
+                        ctx.kernel.gapi_action_key,
+                    );
+                    let message = addressed_input(ctx.kernel, event)?;
+                    (window_thread(ctx.kernel, message.0) == ctx.kernel.current_thread
+                        && accepts(ctx.kernel, message))
+                    .then_some((i, event, message))
+                })
+        })
+        .flatten();
+    if let Some((i, event, m)) = input {
+        if remove {
+            ctx.kernel.remove_pending_input(i);
+            if matches!(event, InputEvent::KeyDown { .. }) {
+                restore_active_dialog_focus(ctx.kernel);
+            }
+            update_key_state(ctx, event);
+        }
+        return Some(m);
+    }
     let now = monotonic_ms();
     let timer = ctx
         .kernel
@@ -161,17 +194,29 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
         }
         return Some((key.1, WM_TIMER, key.2, value.2));
     }
-    let paint = (FAKE_HWND, WM_PAINT, 0, 0);
-    if ctx.kernel.current_thread == 0
-        && now >= ctx.kernel.synthetic_paint_next_ms
-        && accepts(ctx.kernel, paint)
-    {
+    let target = if remove {
+        idle_paint_target(ctx.kernel)
+    } else {
+        synthetic_paint_target(ctx.kernel)
+    };
+    let paint = (target, WM_PAINT, 0, 0);
+    if ctx.kernel.current_thread == 0 && target != 0 && accepts(ctx.kernel, paint) {
+        // The ordinary PeekMessage path guarantees an empty poll after a
+        // fabricated paint. Filtered WM_PAINT probes need the same guarantee;
+        // a preceding WM_CLOSE probe must not consume that opportunity.
+        if ctx.kernel.synthetic_peek_paint_yield.remove(&0) {
+            return None;
+        }
+        if now < ctx.kernel.synthetic_paint_next_ms {
+            return None;
+        }
         if remove {
             ctx.kernel.synthetic_paint_next_ms = advance_deadline(
                 ctx.kernel.synthetic_paint_next_ms,
                 SYNTHETIC_PAINT_INTERVAL_MS,
                 now,
             );
+            ctx.kernel.synthetic_peek_paint_yield.insert(0);
         }
         return Some(paint);
     }
@@ -185,7 +230,8 @@ fn find_host_input(
     high: u32,
     remove: bool,
 ) -> Option<Message> {
-    if input_window_thread(ctx.kernel) != ctx.kernel.current_thread {
+    if ctx.kernel.ce.windows.enabled || input_window_thread(ctx.kernel) != ctx.kernel.current_thread
+    {
         return None;
     }
     let accepts = |kernel: &KernelState, message| matches(kernel, message, window, low, high);

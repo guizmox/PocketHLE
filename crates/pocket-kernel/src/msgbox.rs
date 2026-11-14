@@ -121,6 +121,10 @@ pub struct MessageBox {
     /// Set once the user picks a button; the `coredll` handler returns it
     /// from `MessageBoxW` and drops the box.
     pub result: Option<u32>,
+    screen: (i32, i32),
+    movable: bool,
+    drag_offset: Option<(i32, i32)>,
+    close_pressed: bool,
 }
 
 impl MessageBox {
@@ -228,6 +232,19 @@ impl MessageBox {
             h,
             default_button,
             result: None,
+            screen: (screen_w, screen_h),
+            movable: false,
+            drag_offset: None,
+            close_pressed: false,
+        }
+    }
+
+    /// Classic CE composition retains the windows behind the modal, so moving
+    /// it can expose their current pixels instead of leaving a painted trail.
+    pub fn set_movable(&mut self, movable: bool) {
+        self.movable = movable;
+        if !movable {
+            self.drag_offset = None;
         }
     }
 
@@ -276,16 +293,62 @@ impl MessageBox {
 
     /// Stylus down: latch whichever button was hit.
     pub fn pointer_down(&mut self, px: i32, py: i32) {
-        for button in &mut self.buttons {
-            button.pressed = button.contains(px, py);
+        self.drag_offset = None;
+        let (cx, cy, cw, ch) = self.close_box();
+        self.close_pressed = px >= cx && px < cx + cw && py >= cy && py < cy + ch;
+        if self.movable
+            && !self.close_pressed
+            && px >= self.x + 1
+            && px < self.x + self.w - 1
+            && py >= self.y + 1
+            && py < self.y + 1 + Self::CAPTION_H
+        {
+            self.drag_offset = Some((px - self.x, py - self.y));
         }
+        for button in &mut self.buttons {
+            button.pressed = self.drag_offset.is_none() && button.contains(px, py);
+        }
+    }
+
+    /// A held caption drag moves the whole dialog, including its button hit
+    /// regions. Keep the box on the logical CE screen so its caption remains
+    /// reachable; a move without a caption press does nothing.
+    pub fn pointer_move(&mut self, px: i32, py: i32) -> bool {
+        let Some((dx, dy)) = self.drag_offset else {
+            return false;
+        };
+        let x = px
+            .saturating_sub(dx)
+            .clamp(0, (self.screen.0 - self.w).max(0));
+        let y = py
+            .saturating_sub(dy)
+            .clamp(0, (self.screen.1 - self.h).max(0));
+        let (dx, dy) = (x - self.x, y - self.y);
+        if dx == 0 && dy == 0 {
+            return false;
+        }
+        self.x = x;
+        self.y = y;
+        for button in &mut self.buttons {
+            button.x += dx;
+            button.y += dy;
+        }
+        true
     }
 
     /// Stylus up. Chooses a button when released inside the one that was
     /// latched, and takes the cancel path on the close box.
     pub fn pointer_up(&mut self, px: i32, py: i32) {
+        if self.drag_offset.is_some() {
+            self.pointer_move(px, py);
+            self.drag_offset = None;
+            self.close_pressed = false;
+            return;
+        }
         let (cx, cy, cw, ch) = self.close_box();
-        if px >= cx && px < cx + cw && py >= cy && py < cy + ch {
+        let close = self.close_pressed && px >= cx && px < cx + cw && py >= cy && py < cy + ch;
+        self.close_pressed = false;
+        if close {
             self.result = Some(self.cancel_result());
             return;
         }
@@ -361,7 +424,12 @@ impl MessageBox {
     fn render_close_box(&self, surf: &mut Surface<'_>) {
         let (cx, cy, cw, ch) = self.close_box();
         surf.fill_rect(cx, cy, cw, ch, Self::FACE);
-        draw_edge(surf, cx, cy, cw, ch, Self::LIGHT, Self::SHADOW);
+        let (light, shadow) = if self.close_pressed {
+            (Self::SHADOW, Self::LIGHT)
+        } else {
+            (Self::LIGHT, Self::SHADOW)
+        };
+        draw_edge(surf, cx, cy, cw, ch, light, shadow);
         // The X, drawn as two diagonals inside the box.
         for i in 2..cw - 2 {
             surf.put_pixel(cx + i, cy + i, Self::TEXT);
@@ -577,8 +645,66 @@ mod tests {
     fn the_close_box_cancels() {
         let mut mb = box_of(mb::OKCANCEL);
         let (cx, cy, cw, ch) = mb.close_box();
+        mb.pointer_down(cx + cw / 2, cy + ch / 2);
         mb.pointer_up(cx + cw / 2, cy + ch / 2);
         assert_eq!(mb.result, Some(id::CANCEL));
+    }
+
+    #[test]
+    fn caption_drag_moves_button_hit_regions_without_answering_the_modal() {
+        let mut mb = box_of(mb::YESNO);
+        mb.set_movable(true);
+        let original = (mb.x, mb.y);
+        let old_no = mb.buttons[1].clone();
+        mb.pointer_down(mb.x + 10, mb.y + 5);
+        assert!(mb.pointer_move(original.0 + 90, original.1 + 45));
+        assert_eq!((mb.x, mb.y), (original.0 + 80, original.1 + 40));
+        assert_eq!(
+            (mb.buttons[1].x, mb.buttons[1].y),
+            (old_no.x + 80, old_no.y + 40)
+        );
+        mb.pointer_up(original.0 + 90, original.1 + 45);
+        assert_eq!(mb.result, None);
+        assert!(!mb.pointer_move(0, 0));
+        mb.pointer_down(old_no.x + 2, old_no.y + 2);
+        mb.pointer_up(old_no.x + 2, old_no.y + 2);
+        assert_eq!(mb.result, None);
+        let no = mb.buttons[1].clone();
+        mb.pointer_down(no.x + no.w / 2, no.y + no.h / 2);
+        mb.pointer_up(no.x + no.w / 2, no.y + no.h / 2);
+        assert_eq!(mb.result, Some(id::NO));
+    }
+
+    #[test]
+    fn caption_drag_stays_on_screen_and_cannot_turn_its_release_into_close() {
+        let mut mb = box_of(mb::OKCANCEL);
+        mb.set_movable(true);
+        mb.pointer_down(mb.x + 10, mb.y + 5);
+        mb.pointer_move(i32::MIN, i32::MIN);
+        assert_eq!((mb.x, mb.y), (0, 0));
+        mb.pointer_move(i32::MAX, i32::MAX);
+        assert_eq!((mb.x + mb.w, mb.y + mb.h), SCREEN);
+        let (cx, cy, cw, ch) = mb.close_box();
+        mb.pointer_up(cx + cw / 2, cy + ch / 2);
+        assert_eq!(mb.result, None);
+        let (cx, cy, cw, ch) = mb.close_box();
+        mb.pointer_down(cx + cw / 2, cy + ch / 2);
+        assert!(!mb.pointer_move(0, 0));
+        mb.pointer_up(cx + cw / 2, cy + ch / 2);
+        assert_eq!(mb.result, Some(id::CANCEL));
+    }
+
+    #[test]
+    fn client_and_unpressed_close_releases_neither_move_nor_dismiss_the_box() {
+        let mut mb = box_of(mb::OKCANCEL);
+        mb.set_movable(true);
+        let original = (mb.x, mb.y);
+        mb.pointer_down(mb.x + 2, mb.y + MessageBox::CAPTION_H + 4);
+        assert!(!mb.pointer_move(0, 0));
+        let (cx, cy, cw, ch) = mb.close_box();
+        mb.pointer_up(cx + cw / 2, cy + ch / 2);
+        assert_eq!((mb.x, mb.y), original);
+        assert_eq!(mb.result, None);
     }
 
     #[test]

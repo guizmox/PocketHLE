@@ -108,11 +108,14 @@ pub fn register(d: &mut WinCeDispatcher) {
     for name in METHOD_NAMES {
         d.register_handler("ole32.dll", name, msxml_method);
     }
-    // BSTR primitives GTShell calls around `load`; stubbed to 0 otherwise.
+    // Shared BSTR primitives for GTShell's DOM and native CE WebBrowser.
     for dll in ["oleaut32.dll", "coredll.dll"] {
         d.register_handler(dll, "SysAllocString", sys_alloc_string);
+        d.register_handler(dll, "SysAllocStringLen", sys_alloc_string_len);
+        d.register_handler(dll, "SysAllocStringByteLen", sys_alloc_string_byte_len);
         d.register_handler(dll, "SysFreeString", sys_free_string);
         d.register_handler(dll, "SysStringLen", sys_string_len);
+        d.register_handler(dll, "SysStringByteLen", sys_string_byte_len);
         d.register_handler(dll, "VariantInit", variant_init);
         d.register_handler(dll, "VariantClear", variant_clear);
     }
@@ -277,7 +280,7 @@ fn wrap_node(ctx: &mut CallCtx<'_>, doc: u32, id: usize) -> Result<u32, KernelEr
 
 /// Allocate a BSTR (4-byte byte-length prefix, UTF-16, null-terminated) and
 /// return the pointer to its first character, as `SysAllocString` would.
-fn alloc_bstr(ctx: &mut CallCtx<'_>, s: &str) -> Result<u32, KernelError> {
+pub(crate) fn alloc_bstr(ctx: &mut CallCtx<'_>, s: &str) -> Result<u32, KernelError> {
     let u: Vec<u16> = s.encode_utf16().collect();
     alloc_bstr_units(ctx, &u)
 }
@@ -334,6 +337,64 @@ fn sys_free_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
         ctx.kernel.heap.free(bstr - 4);
     }
     Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn sys_alloc_string_len(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let source = ctx.arg_u32(0)?;
+    let length = ctx.arg_u32(1)?;
+    let Some(bytes) = length.checked_mul(2) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    alloc_bstr_bytes(ctx, source, bytes).map(DispatchOutcome::ReturnedR0)
+}
+
+fn sys_alloc_string_byte_len(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // Shdocvw uses binary BSTRs as well as UTF-16 strings. The size prefix is
+    // always a byte count; preserve embedded zeroes and odd-length payloads.
+    let source = ctx.arg_u32(0)?;
+    let length = ctx.arg_u32(1)?;
+    alloc_bstr_bytes(ctx, source, length).map(DispatchOutcome::ReturnedR0)
+}
+
+fn alloc_bstr_bytes(ctx: &mut CallCtx<'_>, source: u32, length: u32) -> Result<u32, KernelError> {
+    let Some(size) = length.checked_add(6) else {
+        return Ok(0);
+    };
+    if source != 0
+        && length != 0
+        && ctx
+            .cpu
+            .check_guest_access(source, length, Prot::READ)
+            .is_err()
+    {
+        return Ok(0);
+    }
+    let base = allocate(ctx, size)?;
+    if base == 0 {
+        return Ok(0);
+    }
+    let write = (|| {
+        ctx.cpu.write_mem(base, &length.to_le_bytes())?;
+        if source != 0 && length != 0 {
+            let bytes = ctx.cpu.read_mem(source, length)?;
+            ctx.cpu.write_mem(base + 4, &bytes)?;
+        }
+        ctx.cpu.write_mem(base + 4 + length, &[0, 0])
+    })();
+    if let Err(error) = write {
+        ctx.kernel.heap.free(base);
+        return Err(error.into());
+    }
+    Ok(base + 4)
+}
+
+fn sys_string_byte_len(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let pointer = ctx.arg_u32(0)?;
+    Ok(DispatchOutcome::ReturnedR0(if pointer == 0 {
+        0
+    } else {
+        ctx.cpu.read_u32_le(pointer - 4)?
+    }))
 }
 
 /// Only known DOM classes are handled; unrelated COM classes retain OLE's path.
@@ -1171,6 +1232,81 @@ mod tests {
             &[0x1180],
         );
         assert_eq!(cpu.read_mem(0x1180, 16).unwrap(), [0; 16]);
+        assert_eq!(kernel.heap.free_bytes(), before);
+    }
+
+    #[test]
+    fn counted_bstrs_preserve_binary_bytes_embedded_nuls_and_null_source_allocations() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        let before = kernel.heap.free_bytes();
+        for name in ["SysAllocStringLen", "SysAllocStringByteLen"] {
+            assert_eq!(
+                crate::bluetooth::tests::call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "oleaut32.dll",
+                    name,
+                    &[0, u32::MAX],
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+        }
+        cpu.write_mem(0x2000, &[0x41, 0, 0, 0, 0x42, 0, 0xff])
+            .unwrap();
+        for (name, source, size, expected) in [
+            ("SysAllocStringLen", 0x2000, 3, vec![0x41, 0, 0, 0, 0x42, 0]),
+            (
+                "SysAllocStringByteLen",
+                0x2000,
+                7,
+                vec![0x41, 0, 0, 0, 0x42, 0, 0xff],
+            ),
+            ("SysAllocStringByteLen", 0, 5, vec![0; 5]),
+            ("SysAllocStringLen", 0, 0, Vec::new()),
+        ] {
+            let DispatchOutcome::ReturnedR0(bstr) = crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "oleaut32.dll",
+                name,
+                &[source, size],
+            ) else {
+                panic!("unexpected detour")
+            };
+            assert_ne!(bstr, 0);
+            assert_eq!(cpu.read_u32_le(bstr - 4).unwrap(), expected.len() as u32);
+            assert_eq!(cpu.read_mem(bstr, expected.len() as u32).unwrap(), expected);
+            assert_eq!(
+                cpu.read_mem(bstr + expected.len() as u32, 2).unwrap(),
+                [0, 0]
+            );
+            for (name, count) in [
+                ("SysStringByteLen", expected.len()),
+                ("SysStringLen", expected.len() / 2),
+            ] {
+                assert_eq!(
+                    crate::bluetooth::tests::call(
+                        &mut cpu,
+                        &mut kernel,
+                        &mut dispatcher,
+                        "coredll.dll",
+                        name,
+                        &[bstr]
+                    ),
+                    DispatchOutcome::ReturnedR0(count as u32)
+                );
+            }
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "SysFreeString",
+                &[bstr],
+            );
+        }
         assert_eq!(kernel.heap.free_bytes(), before);
     }
 

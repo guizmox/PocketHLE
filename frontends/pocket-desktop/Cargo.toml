@@ -64,3 +64,4 @@ winres = "0.1.12"
 
 [dev-dependencies]
 pocket-gles = { path = "../../crates/pocket-gles" }
+tempfile = "3"

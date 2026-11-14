@@ -461,6 +461,7 @@ mod tests {
             source_path: "synthetic-setup".into(),
             machine: 0x1c0,
             subsystem: 9,
+            subsystem_version: (4, 0),
             image_base: 0x10000,
             size_of_image: 0x2000,
             stack_reserve: 0x10000,

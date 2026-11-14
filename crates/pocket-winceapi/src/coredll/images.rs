@@ -3,6 +3,7 @@ use super::*;
 use pocket_kernel::imaging::Image;
 
 pub(crate) fn register_for(d: &mut WinCeDispatcher, dll: &str) {
+    image_drag::register(d, dll);
     for (name, handler) in [
         ("ImageList_Create", create as crate::Handler),
         ("ImageList_Destroy", destroy),
@@ -15,6 +16,7 @@ pub(crate) fn register_for(d: &mut WinCeDispatcher, dll: &str) {
         ("ImageList_GetIconSize", get_size),
         ("ImageList_SetIconSize", set_size),
         ("ImageList_SetBkColor", set_background),
+        ("ImageList_SetOverlayImage", set_overlay),
         ("ImageList_GetBkColor", get_background),
         ("ImageList_Draw", draw),
         ("ImageList_DrawEx", draw_ex),
@@ -33,6 +35,7 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
         ("DestroyIcon", destroy_icon),
         ("LoadImageW", load_image),
         ("LoadCursorW", load_cursor),
+        ("ExtractIconExW", extract_icon_ex),
     ] {
         d.register_handler("coredll.dll", name, handler);
     }
@@ -67,6 +70,24 @@ pub(super) fn shell_file_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
         attributes
     };
     let folder = attributes & 0x10 != 0;
+    let size = if flags & SHGFI_SMALLICON != 0 { 16 } else { 32 };
+    let icon = if flags & SHGFI_USEFILEATTRIBUTES == 0 {
+        file_icon(ctx.kernel, &path, attributes, size)
+    } else {
+        default_file_icon(folder, size)
+    };
+    let handle = ctx.kernel.gdi.register_icon(icon);
+    let mut data = [0u8; SHFILEINFO_BYTES as usize];
+    data[..4].copy_from_slice(&handle.to_le_bytes());
+    data[4..8].copy_from_slice(&u32::from(folder).to_le_bytes());
+    if let Err(error) = ctx.cpu.write_mem(out, &data) {
+        ctx.kernel.gdi.icons.remove(&handle);
+        return Err(error.into());
+    }
+    ret(1)
+}
+
+pub(super) fn default_file_icon(folder: bool, size: u32) -> Image {
     let mut icon = Image::new(16, 16).unwrap();
     for y in 0..16 {
         for x in 0..16 {
@@ -92,18 +113,40 @@ pub(super) fn shell_file_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, 
             icon.alpha[index] = if color == 0 { 0 } else { 255 };
         }
     }
-    if flags & SHGFI_SMALLICON == 0 {
-        icon = icon.scaled(32, 32).unwrap();
+    if size == 16 {
+        icon
+    } else {
+        icon.scaled(size, size).unwrap()
     }
-    let handle = ctx.kernel.gdi.register_icon(icon);
-    let mut data = [0u8; SHFILEINFO_BYTES as usize];
-    data[..4].copy_from_slice(&handle.to_le_bytes());
-    data[4..8].copy_from_slice(&u32::from(folder).to_le_bytes());
-    if let Err(error) = ctx.cpu.write_mem(out, &data) {
-        ctx.kernel.gdi.icons.remove(&handle);
-        return Err(error.into());
+}
+
+/// Browse uses the executable's actual resources without loading its code.
+pub(super) fn file_icon(kernel: &KernelState, path: &str, attributes: u32, size: u32) -> Image {
+    if attributes & 0x10 == 0
+        && path
+            .rsplit('.')
+            .next()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("dll"))
+    {
+        if let Some(host) = kernel.vfs.resolve(path) {
+            if std::fs::metadata(&host).is_ok_and(|m| m.len() <= 32 * 1024 * 1024) {
+                if let Ok(bytes) = std::fs::read(host) {
+                    if let Ok(image) = pocket_pe::load_bytes(&bytes) {
+                        for entry in image
+                            .resources
+                            .iter()
+                            .filter(|e| e.ty == ResourceKey::Id(14))
+                        {
+                            if let Some(icon) = file_group_icon(&image, &entry.name, size) {
+                                return icon;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
-    ret(1)
+    default_file_icon(attributes & 0x10 != 0, size)
 }
 
 fn resource(
@@ -123,6 +166,157 @@ fn resource(
         )),
         _ => Ok(None),
     }
+}
+
+fn file_resource<'a>(
+    image: &'a pocket_pe::LoadedImage,
+    ty: u32,
+    name: &ResourceKey,
+) -> Option<&'a [u8]> {
+    let entry = image
+        .resources
+        .iter()
+        .find(|e| e.ty == ResourceKey::Id(ty) && e.name == *name)?;
+    let section = image.sections.iter().find(|s| {
+        entry.data_rva >= s.virtual_address
+            && entry.data_rva
+                < s.virtual_address
+                    .saturating_add(s.virtual_size.max(s.data.len() as u32))
+    })?;
+    let at = (entry.data_rva - section.virtual_address) as usize;
+    section.data.get(at..at.checked_add(entry.size as usize)?)
+}
+
+fn file_group_icon(image: &pocket_pe::LoadedImage, name: &ResourceKey, size: u32) -> Option<Image> {
+    let group = file_resource(image, 14, name)?;
+    if group.len() < 6 {
+        return None;
+    }
+    let count = u16::from_le_bytes([group[4], group[5]]) as usize;
+    if count == 0 || count > 1024 || 6 + count * 14 > group.len() {
+        return None;
+    }
+    let mut choices: Vec<_> = (0..count)
+        .map(|i| {
+            let at = 6 + i * 14;
+            let w = if group[at] == 0 {
+                256
+            } else {
+                u32::from(group[at])
+            };
+            let h = if group[at + 1] == 0 {
+                256
+            } else {
+                u32::from(group[at + 1])
+            };
+            let depth = u16::from_le_bytes([group[at + 6], group[at + 7]]);
+            (
+                w.abs_diff(size) + h.abs_diff(size),
+                std::cmp::Reverse(depth),
+                at,
+            )
+        })
+        .collect();
+    choices.sort();
+    choices.into_iter().find_map(|(_, _, at)| {
+        let id = u16::from_le_bytes([group[at + 12], group[at + 13]]);
+        decode_icon(file_resource(image, 3, &ResourceKey::Id(u32::from(id)))?)?.scaled(size, size)
+    })
+}
+
+/// CerfDemo enumerates application icons without executing the application or
+/// its DLL. Returned icons are caller-owned and released by DestroyIcon.
+pub(super) fn extract_icon_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let path = match vfs_api_path(ctx, 0) {
+        Ok(path) => path,
+        Err(_) => return ret(0),
+    };
+    let index = ctx.arg_u32(1)? as i32;
+    let large = ctx.arg_u32(2)?;
+    let small = ctx.arg_u32(3)?;
+    let count = ctx.arg_u32(4)?;
+    if count > 256 {
+        set_thread_error(ctx, 87);
+        return ret(0);
+    }
+    if index != -1 || large != 0 || small != 0 {
+        for pointer in [large, small] {
+            if pointer != 0 && count != 0 && !vfs_probe_output(ctx, pointer, count * 4) {
+                set_thread_error(ctx, 87);
+                return ret(0);
+            }
+        }
+    }
+    let Some(host) = ctx.kernel.vfs.resolve(&path) else {
+        return ret(0);
+    };
+    if !std::fs::metadata(&host).is_ok_and(|m| m.len() <= 32 * 1024 * 1024) {
+        return ret(0);
+    }
+    let Ok(bytes) = std::fs::read(host) else {
+        return ret(0);
+    };
+    let Ok(image) = pocket_pe::load_bytes(&bytes) else {
+        return ret(0);
+    };
+    let mut groups: Vec<_> = image
+        .resources
+        .iter()
+        .filter(|e| e.ty == ResourceKey::Id(14))
+        .map(|e| e.name.clone())
+        .collect();
+    groups.dedup();
+    if index == -1 && large == 0 && small == 0 {
+        return ret(groups.len() as u32);
+    }
+    if count == 0 || large == 0 && small == 0 {
+        return ret(0);
+    }
+    let first = if index < 0 {
+        groups
+            .iter()
+            .position(|n| *n == ResourceKey::Id(index.unsigned_abs()))
+    } else {
+        Some(index as usize)
+    };
+    let Some(first) = first else {
+        return ret(0);
+    };
+    let mut writes = Vec::new();
+    let mut handles = Vec::new();
+    let mut extracted = 0;
+    for name in groups.iter().skip(first).take(count as usize) {
+        let large_image = if large != 0 {
+            file_group_icon(&image, name, 32)
+        } else {
+            None
+        };
+        let small_image = if small != 0 {
+            file_group_icon(&image, name, 16)
+        } else {
+            None
+        };
+        if large != 0 && large_image.is_none() || small != 0 && small_image.is_none() {
+            break;
+        }
+        for (pointer, icon) in [(large, large_image), (small, small_image)] {
+            if let Some(icon) = icon {
+                let handle = ctx.kernel.gdi.register_icon(icon);
+                handles.push(handle);
+                writes.push((pointer + extracted * 4, handle));
+            }
+        }
+        extracted += 1;
+    }
+    for (pointer, handle) in writes {
+        if let Err(error) = ctx.cpu.write_mem(pointer, &handle.to_le_bytes()) {
+            for handle in handles {
+                ctx.kernel.gdi.icons.remove(&handle);
+            }
+            return Err(error.into());
+        }
+    }
+    ret(extracted)
 }
 fn dib_image(raw: &[u8]) -> Option<Image> {
     let Some(dib) = decode_dib_to_rgb565(raw) else {
@@ -286,7 +480,7 @@ pub(super) fn decode_icon(raw: &[u8]) -> Option<Image> {
     }
     Some(image)
 }
-fn resource_icon(
+pub(super) fn resource_icon(
     ctx: &mut CallCtx<'_>,
     instance: u32,
     name: &ResourceKey,
@@ -557,13 +751,14 @@ pub(super) fn replace(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
 pub(super) fn get_icon(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
     let index = ctx.arg_u32(1)?;
+    let flags = ctx.arg_u32(2)?;
     let Some(image) = ctx
         .kernel
         .gdi
         .image_lists
         .get(&handle)
-        .and_then(|l| l.images.get(index as usize))
-        .cloned()
+        .and_then(|l| l.image(index as usize, flags))
+        .map(std::borrow::Cow::into_owned)
     else {
         return ret(0);
     };
@@ -575,14 +770,19 @@ pub(super) fn remove(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let Some(list) = ctx.kernel.gdi.image_lists.get_mut(&handle) else {
         return ret(0);
     };
-    if index == u32::MAX {
-        list.images.clear();
-    } else if (index as usize) < list.images.len() {
-        list.images.remove(index as usize);
-    } else {
-        return ret(0);
-    }
-    ret(1)
+    ret(u32::from(list.remove(index as i32)))
+}
+pub(super) fn set_overlay(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let index = ctx.arg_u32(1)? as i32;
+    let slot = ctx.arg_u32(2)?;
+    ret(u32::from(
+        ctx.kernel
+            .gdi
+            .image_lists
+            .get_mut(&handle)
+            .is_some_and(|list| list.set_overlay(index, slot)),
+    ))
 }
 pub(super) fn get_size(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
@@ -609,9 +809,12 @@ pub(super) fn set_size(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     let Some(list) = ctx.kernel.gdi.image_lists.get_mut(&handle) else {
         return ret(0);
     };
+    if (list.width, list.height) != (w, h) {
+        list.changed();
+    }
     list.width = w;
     list.height = h;
-    list.images.clear();
+    list.clear();
     ret(1)
 }
 pub(super) fn set_background(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -621,6 +824,9 @@ pub(super) fn set_background(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
         return ret(u32::MAX);
     };
     let old = list.background;
+    if old != color {
+        list.changed();
+    }
     list.background = color;
     ret(old)
 }
@@ -731,10 +937,14 @@ fn draw_impl(ctx: &mut CallCtx<'_>, extended: bool) -> Result<DispatchOutcome, K
     let dc = ctx.arg_u32(2)?;
     let x = ctx.arg_u32(3)? as i32;
     let y = ctx.arg_u32(4)? as i32;
+    let style = ctx.arg_u32(if extended { 9 } else { 5 })?;
     let Some(list) = ctx.kernel.gdi.image_lists.get(&list) else {
         return ret(0);
     };
-    let Some(mut image) = list.images.get(index as usize).cloned() else {
+    let Some(mut image) = list
+        .image(index as usize, style)
+        .map(std::borrow::Cow::into_owned)
+    else {
         return ret(0);
     };
     let background = list.background;

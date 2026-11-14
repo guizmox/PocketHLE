@@ -15,7 +15,7 @@ if (!(Get-Command cl.exe -ErrorAction SilentlyContinue) -or $env:VSCMD_ARG_TGT_A
     $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if (!$visualStudio) { throw 'No Visual Studio C++ toolchain found.' }
     $vcvars = Join-Path $visualStudio 'VC\Auxiliary\Build\vcvars64.bat'
-    $lines = & $env:ComSpec /d /s /c "`"`"$vcvars`" >nul && set`""
+    $lines = & $env:ComSpec /d /c "call `"$vcvars`" >nul && set"
     if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the Visual Studio x64 environment.' }
     foreach ($line in $lines) {
         $separator = $line.IndexOf('=')

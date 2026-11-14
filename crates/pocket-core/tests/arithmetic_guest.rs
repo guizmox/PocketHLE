@@ -20,6 +20,7 @@ fn static_ordinal_and_dynamic_arithmetic_return_without_entering_the_kernel_loop
         source_path: "arithmetic_inline_regression".into(),
         machine: pe::machine::ARM,
         subsystem: pe::subsystem::WINDOWS_CE_GUI,
+        subsystem_version: (4, 0),
         image_base: 0x10000,
         size_of_image: 0x2000,
         stack_reserve: 0x10000,

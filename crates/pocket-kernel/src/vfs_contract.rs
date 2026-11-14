@@ -1,6 +1,8 @@
 //! File contracts shared by all CPUs of one emulated device.
 use super::*;
 use std::sync::Weak;
+#[path = "vfs_timestamps.rs"]
+mod timestamps;
 #[derive(Clone, Default)]
 pub struct VfsShared(pub(super) Arc<Mutex<Shared>>);
 #[derive(Default)]
@@ -13,6 +15,10 @@ pub(super) struct Shared {
     #[cfg(test)]
     volume_scans: usize,
     attributes: HashMap<String, u32>,
+    // Unix backing stores cannot set birth time. Keep only that unsupported
+    // field in shared device metadata; access/write times use the actual file.
+    #[cfg(not(windows))]
+    creation_times: HashMap<String, u64>,
     bluetooth: crate::bluetooth::Service,
     camera: crate::camera::Service,
     gps: crate::gps::Service,
@@ -47,6 +53,13 @@ pub struct FileInfo {
     /// Zero means the backing store does not provide that timestamp.
     pub times: [u64; 3],
     pub size: u64,
+}
+
+/// One retained FindFirstFile/FindNextFile record, including its metadata.
+#[derive(Debug, Clone)]
+pub struct FindEntry {
+    pub name: String,
+    pub info: FileInfo,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -121,6 +134,7 @@ impl Vfs {
                 }
             }
             let attrs = self.attributes(from)? & 0x27;
+            let times = self.file_times(source).ok_or(30u32)?;
             let dest = self
                 .open_file(to, 2, 0, if fail_if_exists { 1 } else { 2 }, false, 0)?
                 .handle;
@@ -140,7 +154,8 @@ impl Vfs {
                         written += n;
                     }
                 }
-                self.flush(dest).map_err(|e| io_error(&e))
+                self.flush(dest).map_err(|e| io_error(&e))?;
+                self.set_file_times(dest, times.map(Some))
             })();
             self.close(dest);
             if copied.is_err() && fail_if_exists {
@@ -284,6 +299,22 @@ impl Vfs {
             return Err(87);
         }
         let normal = self.normalise_guest_path(path);
+        // CON: and NUL: are global devices, never files in a ROM/RAM mount.
+        match normal.rsplit('/').next() {
+            Some("con:" | "con0:" | "con1:") => {
+                return self.open_console_device(access).map(|handle| OpenResult {
+                    handle,
+                    existed: true,
+                })
+            }
+            Some("nul:" | "nul") => {
+                return self.open_null_device(access).map(|handle| OpenResult {
+                    handle,
+                    existed: true,
+                })
+            }
+            _ => {}
+        }
         if normal.rsplit('/').next() == Some("bth1:") {
             if disposition != 3 {
                 return Err(87);
@@ -979,32 +1010,45 @@ impl Vfs {
     pub fn file_information(&self, path: &str) -> Result<FileInfo, u32> {
         let attributes = self.attributes(path)?;
         if self.is_ram_path(path) {
+            let times = self
+                .ram
+                .as_ref()
+                .and_then(|ram| {
+                    let store = ram.files.lock().ok()?;
+                    let file = store
+                        .files
+                        .get(&self.normalise_guest_path(path))?
+                        .lock()
+                        .ok()?;
+                    Some(file.times)
+                })
+                .unwrap_or([0; 3]);
             return Ok(FileInfo {
                 attributes,
-                times: [0; 3],
+                times,
                 size: self.ram_file_size(path).unwrap_or(0),
             });
         }
         let (exact, _) = self.exact_path(path, false)?;
         let host = self.resolve(path).unwrap_or(exact);
         let metadata = host.metadata().map_err(|e| io_error(&e))?;
-        let convert = |time: std::io::Result<std::time::SystemTime>| -> u64 {
-            let Ok(time) = time else {
-                return 0;
-            };
-            let epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(11_644_473_600);
-            time.duration_since(epoch)
-                .ok()
-                .and_then(|duration| u64::try_from(duration.as_nanos() / 100).ok())
-                .unwrap_or(0)
+        let times = timestamps::metadata_times(&metadata);
+        #[cfg(not(windows))]
+        let times = {
+            let mut times = times;
+            let key = host
+                .canonicalize()
+                .map_err(|e| io_error(&e))?
+                .to_string_lossy()
+                .to_ascii_lowercase();
+            if let Some(time) = self.shared.0.lock().unwrap().creation_times.get(&key) {
+                times[0] = *time;
+            }
+            times
         };
         Ok(FileInfo {
             attributes,
-            times: [
-                convert(metadata.created()),
-                convert(metadata.accessed()),
-                convert(metadata.modified()),
-            ],
+            times,
             size: if metadata.is_dir() { 0 } else { metadata.len() },
         })
     }
@@ -1191,6 +1235,8 @@ impl Vfs {
             return Err(5);
         }
         s.attributes.remove(&key);
+        #[cfg(not(windows))]
+        s.creation_times.remove(&key);
         Ok(())
     }
     pub fn delete_file(&self, path: &str) -> bool {
@@ -1233,17 +1279,323 @@ impl Vfs {
             return Err(5);
         }
         if let Some(a) = s.attributes.remove(&source) {
-            s.attributes.insert(dest, a);
+            s.attributes.insert(dest.clone(), a);
+        }
+        #[cfg(not(windows))]
+        if let Some(time) = s.creation_times.remove(&source) {
+            s.creation_times.insert(dest, time);
         }
         Ok(())
     }
     pub fn move_file(&self, from: &str, to: &str) -> bool {
         self.rename(from, to).is_ok()
     }
+
+    /// Pocket Word saves to a temporary file, then atomically replaces the
+    /// document. MoveFile deliberately retains its no-overwrite contract.
+    pub fn replace_file(&self, destination: &str, source: &str) -> Result<(), u32> {
+        let ram_source = self.is_ram_path(source);
+        if ram_source != self.is_ram_path(destination) {
+            return Err(17); // ERROR_NOT_SAME_DEVICE
+        }
+        let shared = self.shared.clone();
+        let mut state = shared.0.lock().map_err(|_| 29u32)?;
+        let source_key = self.file_key(source, true)?;
+        let destination_key = self.file_key(destination, true)?;
+        if source_key == destination_key {
+            return Err(87);
+        }
+        if busy(&mut state, &source_key) || busy(&mut state, &destination_key) {
+            return Err(32);
+        }
+        if [&source_key, &destination_key].iter().any(|key| {
+            state
+                .attributes
+                .get(*key)
+                .is_some_and(|attributes| attributes & 1 != 0)
+        }) {
+            return Err(5);
+        }
+        if ram_source {
+            let source = self.ram_key(source).ok_or(87u32)?;
+            let destination = self.ram_key(destination).ok_or(87u32)?;
+            if source.is_empty() || destination.is_empty() {
+                return Err(5);
+            }
+            let ram = self.ram.as_ref().ok_or(5u32)?;
+            let mut store = ram.files.lock().map_err(|_| 29u32)?;
+            if store.dirs.contains_key(&destination) {
+                return Err(5);
+            }
+            let parent = destination
+                .rsplit_once('/')
+                .map(|pair| pair.0)
+                .unwrap_or("");
+            if !parent.is_empty() && !store.dirs.contains_key(parent) {
+                return Err(3);
+            }
+            let file = store.files.get(&source).cloned().ok_or(2u32)?;
+            {
+                let mut file = file.lock().map_err(|_| 29u32)?;
+                let name_bytes = (destination.encode_utf16().count() as u64 + 1) * 2;
+                let pages = crate::memory_division::pages(file.data.len() as u64 + name_bytes);
+                if !file.charge.resize(pages) {
+                    return Err(112);
+                }
+                file.name_bytes = name_bytes;
+            }
+            store.files.remove(&source);
+            store.files.insert(destination, file);
+        } else {
+            let (source_host, source_mount) = self.exact_path(source, true)?;
+            let (destination_host, destination_mount) = self.exact_path(destination, true)?;
+            if !std::ptr::eq(source_mount, destination_mount) {
+                return Err(17);
+            }
+            let source_metadata = source_host.metadata().map_err(|error| io_error(&error))?;
+            if !source_metadata.is_file() || source_metadata.permissions().readonly() {
+                return Err(5);
+            }
+            match destination_host.metadata() {
+                Ok(metadata) if !metadata.is_file() || metadata.permissions().readonly() => {
+                    return Err(5);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(&error)),
+            }
+            let source_normal = self.normalise_guest_path(source);
+            let destination_normal = self.normalise_guest_path(destination);
+            let mut source_marker = None;
+            for (normal, host) in [
+                (&source_normal, &source_host),
+                (&destination_normal, &destination_host),
+            ] {
+                for mount in self
+                    .mounts
+                    .iter()
+                    .filter(|mount| mount.read_only && mount.prefix == source_mount.prefix)
+                {
+                    let Some(lower) = self
+                        .host_path_for_mount(mount, normal)
+                        .filter(|p| p.is_file())
+                    else {
+                        continue;
+                    };
+                    let lower_key = lower
+                        .canonicalize()
+                        .map_err(|error| io_error(&error))?
+                        .to_string_lossy()
+                        .to_ascii_lowercase();
+                    if busy(&mut state, &lower_key) {
+                        return Err(32);
+                    }
+                    if !host.exists()
+                        && (lower
+                            .metadata()
+                            .map_err(|error| io_error(&error))?
+                            .permissions()
+                            .readonly()
+                            || state
+                                .attributes
+                                .get(&lower_key)
+                                .is_some_and(|attributes| attributes & 1 != 0))
+                    {
+                        return Err(5);
+                    }
+                    if normal == &source_normal {
+                        source_marker =
+                            Some(Self::overlay_marker(source_mount, normal).ok_or(5u32)?);
+                    }
+                }
+            }
+            // The upper source still exists while its whiteout is prepared, so
+            // failure leaves the same guest bytes visible. Never delete the old
+            // destination before the host's replacing rename has succeeded.
+            let mut created_marker = None;
+            if let Some(marker) = source_marker {
+                let directory = marker.parent().ok_or(5u32)?;
+                match std::fs::create_dir(directory) {
+                    Ok(()) => {}
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::AlreadyExists
+                            && directory
+                                .symlink_metadata()
+                                .is_ok_and(|metadata| metadata.is_dir()) => {}
+                    Err(error) => return Err(io_error(&error)),
+                }
+                if !Self::overlay_marker_exists(&marker) {
+                    OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&marker)
+                        .map_err(|error| io_error(&error))?;
+                    created_marker = Some(marker);
+                }
+            }
+            if let Err(error) = std::fs::rename(source_host, destination_host) {
+                if let Some(marker) = created_marker {
+                    let _ = std::fs::remove_file(marker);
+                }
+                return Err(io_error(&error));
+            }
+        }
+        state.volume_usage.clear();
+        state.attributes.remove(&destination_key);
+        if let Some(attributes) = state.attributes.remove(&source_key) {
+            state.attributes.insert(destination_key.clone(), attributes);
+        }
+        #[cfg(not(windows))]
+        {
+            state.creation_times.remove(&destination_key);
+            if let Some(time) = state.creation_times.remove(&source_key) {
+                state.creation_times.insert(destination_key, time);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn document_replacement_preserves_the_new_file_metadata_and_move_contract() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Document.pwd"), b"old document").unwrap();
+        std::fs::write(root.path().join("New.tmp"), b"new document").unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_save_dir("\\", root.path());
+        vfs.set_attributes("\\Document.pwd", 4).unwrap();
+        vfs.set_attributes("\\New.tmp", 0x22).unwrap();
+        let new_times = vfs.file_information("\\New.tmp").unwrap().times;
+        assert_eq!(vfs.rename("\\New.tmp", "\\Document.pwd"), Err(183));
+        vfs.replace_file("\\DOCUMENT.PWD", "\\new.tmp").unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("Document.pwd")).unwrap(),
+            b"new document"
+        );
+        assert_eq!(vfs.attributes("\\New.tmp"), Err(2));
+        let info = vfs.file_information("\\Document.pwd").unwrap();
+        assert_eq!(info.attributes, 0x22);
+        assert_eq!(info.times[0], new_times[0]);
+        assert_eq!(info.times[2], new_times[2]);
+    }
+
+    #[test]
+    fn failed_replacement_keeps_both_files_and_refuses_read_only_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("old"), b"old").unwrap();
+        std::fs::write(root.path().join("new"), b"new").unwrap();
+        std::fs::create_dir(root.path().join("folder")).unwrap();
+        std::fs::write(other.path().join("old"), b"external").unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_save_dir("\\", root.path());
+        vfs.mount_save_dir("\\Other\\", other.path());
+        vfs.mount_read_only("\\ROM\\", other.path());
+        assert_eq!(vfs.replace_file("\\old", "\\missing"), Err(2));
+        assert_eq!(vfs.replace_file("\\old", "\\old"), Err(87));
+        assert_eq!(vfs.replace_file("\\folder", "\\new"), Err(5));
+        assert_eq!(vfs.replace_file("\\absent\\file", "\\new"), Err(3));
+        assert_eq!(vfs.replace_file("\\Other\\old", "\\new"), Err(17));
+        assert_eq!(vfs.replace_file("\\ROM\\old", "\\new"), Err(5));
+        for path in ["\\old", "\\new"] {
+            vfs.set_attributes(path, 1).unwrap();
+            assert_eq!(vfs.replace_file("\\old", "\\new"), Err(5));
+            vfs.set_attributes(path, 0x80).unwrap();
+        }
+        assert_eq!(std::fs::read(root.path().join("old")).unwrap(), b"old");
+        assert_eq!(std::fs::read(root.path().join("new")).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(other.path().join("old")).unwrap(),
+            b"external"
+        );
+        assert!(!root.path().join("absent").exists());
+    }
+
+    #[test]
+    fn replacement_waits_for_the_last_shared_source_or_destination_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let mut parent = Vfs::new();
+        parent.mount_save_dir("\\", root.path());
+        let mut child = Vfs::new();
+        child.inherit_namespace(&parent.namespace_snapshot());
+        child.attach_shared_context(parent.shared_context());
+        for path in ["\\old", "\\new"] {
+            std::fs::write(root.path().join("old"), b"old").unwrap();
+            std::fs::write(root.path().join("new"), b"new").unwrap();
+            let handle = parent.open_file(path, 1, 3, 3, false, 0).unwrap().handle;
+            assert!(child.import_handle(99, parent.export_handle(handle).unwrap()));
+            parent.close(handle);
+            assert_eq!(parent.replace_file("\\old", "\\new"), Err(32));
+            assert_eq!(std::fs::read(root.path().join("old")).unwrap(), b"old");
+            assert_eq!(std::fs::read(root.path().join("new")).unwrap(), b"new");
+            child.close(99);
+            parent.replace_file("\\old", "\\new").unwrap();
+        }
+    }
+
+    #[test]
+    fn replacement_hides_the_removed_overlay_source_and_preserves_rom_bytes() {
+        let lower = tempfile::tempdir().unwrap();
+        let upper = tempfile::tempdir().unwrap();
+        std::fs::write(lower.path().join("old"), b"original destination").unwrap();
+        std::fs::write(lower.path().join("new"), b"original source").unwrap();
+        std::fs::write(upper.path().join("new"), b"saved document").unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_read_only_filesystem("\\", lower.path());
+        vfs.mount_save_dir("\\", upper.path());
+        let handle = vfs.open_file("\\old", 1, 3, 3, false, 0).unwrap().handle;
+        assert_eq!(vfs.replace_file("\\old", "\\new"), Err(32));
+        vfs.close(handle);
+        vfs.replace_file("\\old", "\\new").unwrap();
+        assert_eq!(vfs.attributes("\\new"), Err(2));
+        assert_eq!(
+            std::fs::read(vfs.resolve("\\old").unwrap()).unwrap(),
+            b"saved document"
+        );
+        assert_eq!(
+            std::fs::read(lower.path().join("old")).unwrap(),
+            b"original destination"
+        );
+        assert_eq!(
+            std::fs::read(lower.path().join("new")).unwrap(),
+            b"original source"
+        );
+        drop(vfs);
+        let mut reopened = Vfs::new();
+        reopened.mount_read_only_filesystem("\\", lower.path());
+        reopened.mount_save_dir("\\", upper.path());
+        assert_eq!(reopened.attributes("\\new"), Err(2));
+        assert_eq!(
+            reopened.list_dir("\\").unwrap(),
+            vec![("old".into(), 14, false)]
+        );
+    }
+
+    #[test]
+    fn ram_document_replacement_refunds_the_old_file_and_keeps_failed_save_bytes() {
+        let ram = crate::memory_division::MemoryDivision::new(64 * 4096, 16).unwrap();
+        let mut vfs = Vfs::new();
+        vfs.attach_ram(Some(ram.clone()));
+        for (path, bytes) in [("\\old", &b"old"[..]), ("\\new", &b"new document"[..])] {
+            let handle = vfs.open_file(path, 2, 3, 1, false, 0).unwrap().handle;
+            vfs.write(handle, bytes).unwrap();
+            vfs.close(handle);
+        }
+        let before = ram.snapshot().store_used;
+        assert_eq!(vfs.replace_file("\\old", "\\missing"), Err(2));
+        assert_eq!(vfs.ram_file_size("\\old"), Some(3));
+        vfs.replace_file("\\old", "\\new").unwrap();
+        assert_eq!(ram.snapshot().store_used, before - 1);
+        assert_eq!(vfs.ram_file_size("\\new"), None);
+        let handle = vfs.open_file("\\old", 1, 3, 3, false, 0).unwrap().handle;
+        let mut bytes = [0; 12];
+        assert_eq!(vfs.read(handle, &mut bytes), Some(12));
+        assert_eq!(&bytes, b"new document");
+        vfs.close(handle);
+    }
+
     #[test]
     fn save_overlay_can_delete_and_replace_an_installed_file() {
         let installed = tempfile::tempdir().unwrap();

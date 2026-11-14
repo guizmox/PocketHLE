@@ -946,13 +946,18 @@ impl AudioEngine {
             return false;
         };
         let active = s.device_active;
-        let Some(v) = s.wave_streams.get_mut(&handle) else {
+        let Some(v) = s.wave_streams.get(&handle) else {
             return false;
         };
         let channels = v.format.channels.max(1) as usize;
         if samples.is_empty() || samples.len() % channels != 0 || v.loop_buffer.is_some() {
             return false;
         }
+        let format = v.format;
+        if let Some(capture) = s.capture.as_mut() {
+            capture.write(&samples, format);
+        }
+        let v = s.wave_streams.get_mut(&handle).unwrap();
         v.advance_virtual(active);
         let repeats = repeats.max(1);
         let start = v.written;
@@ -1158,7 +1163,15 @@ impl AudioEngine {
     /// (for example Gizmondo MAS1 playback) keep running.
     pub fn flush_wave_out(&self) {
         if let Ok(mut s) = self.shared.lock() {
-            s.wave_streams.clear();
+            // PlaySound/MessageBeep have private channels, as MAS/HSS do.
+            // ceplayer closing its wave device must not cut a shell alert.
+            s.wave_streams.retain(|handle, _| {
+                matches!(
+                    *handle,
+                    crate::system_sound::PLAY_SOUND_STREAM
+                        | crate::system_sound::EVENT_SOUND_STREAM
+                )
+            });
             s.len = 0;
             s.read = 0;
             s.write = 0;
@@ -2066,6 +2079,7 @@ mod tests {
     fn voices_mix_rates_channels_and_preview_without_consuming() {
         let e = AudioEngine::new();
         let tap = e.tap();
+        tap.drain_into(&mut []); // deterministic device clock, no wall time
         let stereo = GuestFormat {
             channels: 2,
             ..mono(22050)

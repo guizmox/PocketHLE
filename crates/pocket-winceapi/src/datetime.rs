@@ -4,30 +4,32 @@ use crate::{CallCtx, WinCeDispatcher};
 use pocket_cpu::Prot;
 use pocket_kernel::{DispatchOutcome, KernelError};
 
-pub(crate) fn now() -> [u16; 8] {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let days = (ms / 86_400_000) as i64;
+pub(crate) fn now(time: std::time::SystemTime) -> [u16; 8] {
+    let ms = match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as i64,
+        Err(error) => -(error.duration().as_millis() as i64),
+    };
+    let days = ms.div_euclid(86_400_000);
+    let daytime = ms.rem_euclid(86_400_000);
     let (y, m, d) = crate::coredll::civil_from_days(days);
     [
         y as u16,
         m as u16,
-        ((days + 4) % 7) as u16,
+        (days + 4).rem_euclid(7) as u16,
         d as u16,
-        ((ms / 3_600_000) % 24) as u16,
-        ((ms / 60_000) % 60) as u16,
-        ((ms / 1000) % 60) as u16,
-        (ms % 1000) as u16,
+        (daytime / 3_600_000) as u16,
+        ((daytime / 60_000) % 60) as u16,
+        ((daytime / 1000) % 60) as u16,
+        (daytime % 1000) as u16,
     ]
 }
 pub(crate) fn register(d: &mut WinCeDispatcher) {
-    d.register_handler(
-        "coredll.dll",
-        "FileTimeToLocalFileTime",
-        file_time_to_local_file_time,
-    );
+    for name in ["SetSystemTime", "SetLocalTime"] {
+        d.register_handler("coredll.dll", name, set_clock);
+    }
+    for name in ["FileTimeToLocalFileTime", "LocalFileTimeToFileTime"] {
+        d.register_handler("coredll.dll", name, file_time_to_local_file_time);
+    }
     d.register_handler(
         "coredll.dll",
         "GetTimeZoneInformation",
@@ -42,7 +44,7 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
         d.register_handler("coredll.dll", name, format_api);
     }
 }
-/// Convert UTC FILETIME to the emulated local FILETIME. The emulated
+/// Convert between UTC FILETIME and the emulated local FILETIME. The emulated
 /// timezone is UTC with no DST, consistently with GetLocalTime and
 /// GetTimeZoneInformation, so the exact 100-ns timestamp is preserved.
 fn file_time_to_local_file_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -87,6 +89,49 @@ fn time_zone_information(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kerne
 fn fail(ctx: &mut CallCtx<'_>, error: u32) -> Result<DispatchOutcome, KernelError> {
     crate::coredll::set_thread_error(ctx, error);
     Ok(DispatchOutcome::ReturnedR0(0))
+}
+fn set_clock(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    use std::time::{Duration, UNIX_EPOCH};
+    let pointer = ctx.arg_u32(0)?;
+    if pointer == 0 || ctx.cpu.check_guest_access(pointer, 16, Prot::READ).is_err() {
+        return fail(ctx, 87);
+    }
+    let raw = ctx.cpu.read_mem(pointer, 16)?;
+    let st: [u16; 8] =
+        std::array::from_fn(|i| u16::from_le_bytes(raw[i * 2..i * 2 + 2].try_into().unwrap()));
+    let [year, month, _, day, hour, minute, second, millis] = st;
+    if !(1601..=30827).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour >= 24
+        || minute >= 60
+        || second >= 60
+        || millis >= 1000
+    {
+        return fail(ctx, 87);
+    }
+    let days = crate::coredll::days_from_civil(year as i32, month as i32, day as i32);
+    if crate::coredll::civil_from_days(days) != (year as i32, month as i32, day as i32) {
+        return fail(ctx, 87);
+    }
+    let timestamp = days * 86_400_000
+        + i64::from(hour) * 3_600_000
+        + i64::from(minute) * 60_000
+        + i64::from(second) * 1000
+        + i64::from(millis);
+    let elapsed = Duration::from_millis(timestamp.unsigned_abs());
+    let time = if timestamp < 0 {
+        UNIX_EPOCH.checked_sub(elapsed)
+    } else {
+        UNIX_EPOCH.checked_add(elapsed)
+    };
+    let Some(time) = time else {
+        return fail(ctx, 87);
+    };
+    // Local time is UTC in this device. Both setters update the shared emulated
+    // clock and deliver Explorer's subscribed event without editing host time.
+    ctx.kernel.object_handles.set_utc_time(time);
+    Ok(DispatchOutcome::ReturnedR0(1))
 }
 fn text(ctx: &mut CallCtx<'_>, ptr: u32, wide: bool) -> Result<String, KernelError> {
     let mut units = Vec::new();
@@ -297,7 +342,7 @@ fn format_api(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         return fail(ctx, 87);
     }
     let st = if ptr == 0 {
-        now()
+        now(ctx.kernel.object_handles.utc_now())
     } else {
         if ctx.cpu.check_guest_access(ptr, 16, Prot::READ).is_err() {
             return fail(ctx, 87);
@@ -409,7 +454,14 @@ mod tests {
     fn file_time_to_local_preserves_full_precision_in_virtual_utc() {
         let (mut cpu, mut k, mut d) = setup();
         // Include the epoch, a nonzero high DWORD and sub-millisecond ticks.
-        for ticks in [0u64, 1, 0x01db_eeab_1234_5679, 0x7fff_ffff_ffff_ffff] {
+        for (name, ticks) in ["FileTimeToLocalFileTime", "LocalFileTimeToFileTime"]
+            .into_iter()
+            .flat_map(|name| {
+                [0u64, 1, 0x01db_eeab_1234_5679, 0x7fff_ffff_ffff_ffff]
+                    .into_iter()
+                    .map(move |ticks| (name, ticks))
+            })
+        {
             cpu.write_mem(0x1200, &ticks.to_le_bytes()).unwrap();
             cpu.write_mem(0x1300, &[0xaa; 12]).unwrap();
             assert_eq!(
@@ -418,7 +470,7 @@ mod tests {
                     &mut k,
                     &mut d,
                     "coredll.dll",
-                    "FileTimeToLocalFileTime",
+                    name,
                     &[0x1200, 0x1300, 0x41ff, 0xb9000000]
                 ),
                 DispatchOutcome::ReturnedR0(1)
@@ -656,7 +708,7 @@ mod dispatch_tests {
                     .collect::<Vec<_>>()
             );
         }
-        assert!(now()[0] >= 2026);
+        assert!(now(std::time::SystemTime::now())[0] >= 2026);
         assert_eq!(
             call(
                 &mut cpu,

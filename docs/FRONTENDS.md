@@ -20,6 +20,12 @@ contract; changing an Android setting must not discard unrelated or unknown
 fields. Device/platform settings, renderer choice and frame limits apply at the
 next launch unless an individual live control explicitly says otherwise.
 
+Windows CE profiles can retain additional application folders in their `mounts`
+list. Each `guest_prefix` maps to a `host_dir`, resolved relative to the profile
+file or library root. Desktop and Android native runners use the same validation
+and private writable overlays; child sessions inherit the complete namespace.
+See [Windows CE profiles](WINDOWS-CE.md) for original/Portable Explorer layouts.
+
 Host optimizations are permanently active; no user optimization switches remain.
 See [always-on execution optimizations](AGENTS.md#always-on-execution-optimizations).
 In the global graphics settings, **GPU rendering** selects host OpenGL or the
@@ -307,6 +313,10 @@ is applied once. Startup waits for native fullscreen/maximize restoration to end
 before sizing. Saved fullscreen/window geometry does not override this policy;
 an explicit CLI display argument of 0 can still request fullscreen. Later manual
 resizing and fullscreen controls remain available.
+`--minimized` starts the desktop launcher or a selected CE profile in an
+inactive, minimized window. The initial window stays hidden while its normal
+geometry is applied, so background validation does not take focus from another
+application. Restore it through the host taskbar when interaction is wanted.
 Ending a game while its options are visible uses the same session cleanup. A
 queued game-to-game launch retains the original library snapshot.
 

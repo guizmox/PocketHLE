@@ -173,6 +173,18 @@ impl State {
         };
         Ok(())
     }
+    /// WinINet's local connected state describes access to its transport,
+    /// not proof that an Internet server is reachable. Preserve the Gizmondo
+    /// user's network gate and report a missing host provider as disconnected.
+    pub fn connected_state(&self) -> u32 {
+        if self.gprs_enabled == Some(false) {
+            0x12 // INTERNET_STATE_DISCONNECTED | DISCONNECTED_BY_USER
+        } else if self.backend.is_none() {
+            2 // INTERNET_STATE_DISCONNECTED
+        } else {
+            1 // INTERNET_STATE_CONNECTED
+        }
+    }
     /// The Gizmondo shell's GPRS gate represents access to the host HTTP
     /// transport, not proof that the configured server is reachable.
     pub fn gprs_shell_network_available(&self) -> Option<bool> {

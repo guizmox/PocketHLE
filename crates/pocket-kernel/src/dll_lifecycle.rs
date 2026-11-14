@@ -167,6 +167,19 @@ impl KernelState {
             })
             .map(|module| module.base)
             .collect();
+        // CE6 Remote Desktop releases cetscoem.dll from mstscax.dll's
+        // PROCESS_DETACH. A nested collection must not detach the outer
+        // group again or unmap the code it will return to. The outer loader
+        // continuation owns that group's cleanup until every callback returns.
+        for frame in &self.module_attach_frames {
+            pending.push(frame.base);
+            pending.extend(frame.cleanup.iter().copied());
+        }
+        if self.dll_notification_frame.is_some() {
+            // Normal process/thread notifications retain their frozen DLL
+            // set; process exit performs its final unmap after the callbacks.
+            pending.extend(self.modules.iter().map(|module| module.base));
+        }
         while let Some(base) = pending.pop() {
             if !reachable.insert(base) {
                 continue;
@@ -190,6 +203,35 @@ impl KernelState {
         let Some(index) = self.modules.iter().position(|module| module.handle == base) else {
             return Ok(());
         };
+        let strings: Vec<_> = self
+            .gdi
+            .resource_strings
+            .iter()
+            .filter_map(|(&resource, &copy)| {
+                self.modules[index]
+                    .resident_regions
+                    .iter()
+                    .any(|&(start, size)| {
+                        resource >= start
+                            && u64::from(resource) < u64::from(start) + u64::from(size)
+                    })
+                    .then_some((resource, copy))
+            })
+            .collect();
+        let thunks: Vec<_> = self
+            .runtime_thunks
+            .keys()
+            .copied()
+            .filter(|address| {
+                self.modules[index]
+                    .resident_regions
+                    .iter()
+                    .any(|&(start, size)| {
+                        *address >= start
+                            && u64::from(*address) < u64::from(start) + u64::from(size)
+                    })
+            })
+            .collect();
         while let Some(&(start, size)) = self.modules[index].resident_regions.last() {
             if size != 0 {
                 cpu.unmap_region(start, size)?;
@@ -197,9 +239,16 @@ impl KernelState {
             self.heap.release_resident(start, size);
             self.modules[index].resident_regions.pop();
         }
-        let satellites = self.modules.remove(index).satellites;
+        for (resource, copy) in strings {
+            self.gdi.resource_strings.remove(&resource);
+            self.heap.free(copy);
+        }
+        let module = self.modules.remove(index);
+        self.ce.module_versions.remove(&base);
+        self.ce.debug_zones.remove(&base);
+        self.ce.com.servers.retain(|_, handle| *handle != base);
         self.static_module_roots.retain(|&root| root != base);
-        for satellite in satellites {
+        for satellite in module.satellites {
             if let Some(module) = self
                 .modules
                 .iter_mut()
@@ -213,9 +262,12 @@ impl KernelState {
             }
         }
         self.dynamic_exports.remove(&base);
-        self.runtime_thunks
-            .retain(|address, _| *address < base || *address >= base + crate::MODULE_REGION_STRIDE);
-        self.free_module_bases.push(base);
+        for thunk in thunks {
+            self.runtime_thunks.remove(&thunk);
+        }
+        if let Some(slot) = module.module_slot {
+            self.free_module_bases.push(slot);
+        }
         Ok(())
     }
 }

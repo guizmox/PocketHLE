@@ -4412,7 +4412,9 @@ gl_FragColor=c;}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::raster;
+    #[cfg(unix)]
     #[test]
     #[ignore = "requires native OpenGL/GLES; cached host renderer identity"]
     fn host_renderer_identity_matches_the_current_desktop_and_es_driver() {
@@ -4432,6 +4434,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "requires native OpenGL/GLES; specialized fragment equivalence"]
     fn simple_fragment_matches_complete_rgb565_for_textures_alpha_and_blending() {
@@ -4540,6 +4543,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "requires native OpenGL/GLES; shader fallback and mixed transitions"]
     fn simple_fragment_restores_complex_states_and_avoids_mixed_program_churn() {
@@ -5219,8 +5223,6 @@ mod tests {
         assert_eq!(packed.len(), 80);
         assert_eq!(packed[75], 1.);
     }
-
-    #[cfg(unix)]
 
     fn identity_transforms() -> VertexTransforms {
         VertexTransforms {

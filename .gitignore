@@ -29,6 +29,9 @@ frontends/pocket-android/app/src/main/jniLibs/
 
 # Game / runtime artifacts (do NOT commit copyrighted game data)
 /game-data/
+/ce-data/
+/ce-images/
+/dist/
 /cab-extracted/
 *.cab
 *.exe

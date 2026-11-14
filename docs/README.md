@@ -11,6 +11,7 @@ retain their spelling.
 | --- | --- |
 | Install on Steam Deck through Proton | [Steam Deck](STEAMDECK.md) |
 | Configure games, controls, touch layouts and the desktop toolbar | [Frontends](FRONTENDS.md) |
+| Configure an extracted Windows CE image, Explorer or a console session | [Windows CE profiles](WINDOWS-CE.md) |
 | Run supported managed Pocket PC games | [.NET Compact Framework](FRONTENDS.md#net-compact-framework-games) |
 | Find reported titles and the limits of compatibility evidence | [Compatibility](COMPATIBILITY.md) |
 | Use Gizmondo hardware services, GTShell and Colors | [Gizmondo](GIZMONDO.md) |

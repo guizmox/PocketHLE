@@ -24,13 +24,15 @@ pub mod icon;
 pub use icon::{icon_from_pe_bytes, IconImage};
 
 pub mod resources;
+pub mod typelib;
 pub use resources::{collect_resources, ResourceEntry, ResourceKey};
 
 pub mod machine {
     /// Legacy ARM (`IMAGE_FILE_MACHINE_ARM`). Used by Pocket PC 2002 / 2003
     /// and most Windows Mobile 5/6 binaries — typically ARMv4T or ARMv5TE.
     pub const ARM: u16 = 0x01c0;
-    /// ARMv7 Thumb-2 (`IMAGE_FILE_MACHINE_THUMB`). Rare in WinCE.
+    /// ARM with Thumb interworking (`IMAGE_FILE_MACHINE_THUMB`).
+    /// CE images can still use an ARM entry stub with this machine tag.
     pub const THUMB: u16 = 0x01c2;
     /// `IMAGE_FILE_MACHINE_ARMNT` — Windows Phone 8 / WinRT.
     pub const ARMNT: u16 = 0x01c4;
@@ -119,6 +121,8 @@ pub struct LoadedImage {
     pub source_path: String,
     pub machine: u16,
     pub subsystem: u16,
+    /// Minimum subsystem version requested by the PE, used by GetProcessVersion.
+    pub subsystem_version: (u16, u16),
     pub image_base: u32,
     pub size_of_image: u32,
     /// Primary-thread stack reservation from the PE optional header.
@@ -140,6 +144,46 @@ pub struct LoadedImage {
 }
 
 impl LoadedImage {
+    /// CE's packed `.pdata` records describe the instruction set per function.
+    /// CalNot loads a Thumb-tagged pimres.dll whose DllMain is an ARM leaf;
+    /// its `cmp r1, #0` entry is not recognizable as a usual ARM prologue.
+    /// ARMNT uses a different unwind format and must keep its existing path.
+    pub fn ce_pdata_entry_uses_thumb(&self) -> Option<bool> {
+        if self.machine != machine::THUMB
+            || self.subsystem != subsystem::WINDOWS_CE_GUI
+            || self.entry_point == 0
+        {
+            return None;
+        }
+        let entry = self.image_base.checked_add(self.entry_point & !1)?;
+        let image_end = self.image_base.checked_add(self.size_of_image)?;
+        for section in &self.sections {
+            if section.name != ".pdata" {
+                continue;
+            }
+            let size = (section.virtual_size as usize).min(section.data.len());
+            for record in section.data[..size].chunks_exact(8) {
+                let start = LittleEndian::read_u32(&record[..4]) & !1;
+                let packed = LittleEndian::read_u32(&record[4..]);
+                let length = (packed >> 8) & 0x003f_ffff;
+                let arm = packed & (1 << 30) != 0;
+                let bytes = length.checked_mul(if arm { 4 } else { 2 })?;
+                let Some(end) = start.checked_add(bytes) else {
+                    continue;
+                };
+                if length != 0
+                    && start >= self.image_base
+                    && end <= image_end
+                    && entry >= start
+                    && entry < end
+                {
+                    return Some(!arm);
+                }
+            }
+        }
+        None
+    }
+
     pub fn entry_va(&self) -> u32 {
         let va = self.image_base.wrapping_add(self.entry_point);
         if self.machine == machine::THUMB || self.machine == machine::ARMNT {
@@ -179,21 +223,67 @@ fn parse_wince_pe(bytes: &[u8]) -> Result<PE<'_>, LoadError> {
 
 /// Read the version resource without constructing or loading a guest image.
 pub fn file_version_resource(bytes: &[u8]) -> Option<&[u8]> {
-    let pe = parse_wince_pe(bytes).ok()?;
-    let entry = resources::collect_resources(bytes, &pe)
-        .ok()?
+    file_resource(bytes, &ResourceKey::Id(16), &ResourceKey::Id(1))
+        .ok()
+        .flatten()
+}
+
+/// Read a resource from a PE file without mapping code, resolving imports or
+/// running an entry point. The returned bytes belong only to this file.
+pub fn file_resource<'a>(
+    bytes: &'a [u8],
+    ty: &ResourceKey,
+    name: &ResourceKey,
+) -> Result<Option<&'a [u8]>, LoadError> {
+    let pe = parse_wince_pe(bytes)?;
+    let Some(entry) = resources::collect_resources(bytes, &pe)?
         .into_iter()
-        .find(|entry| entry.ty == ResourceKey::Id(16) && entry.name == ResourceKey::Id(1))?;
-    let section = pe.sections.iter().find(|section| {
-        entry.data_rva >= section.virtual_address
-            && entry.data_rva - section.virtual_address < section.size_of_raw_data
-    })?;
+        .find(|entry| entry.ty == *ty && entry.name == *name)
+    else {
+        return Ok(None);
+    };
+    resource_bytes(bytes, &pe, &entry).map(Some)
+}
+
+/// Read all resources of a named type without constructing a guest image.
+/// CE profile initialization uses embedded TYPELIB metadata to reconstruct
+/// missing registrations in its private registry, including Messenger's /2.
+pub fn file_resources<'a>(
+    bytes: &'a [u8],
+    ty: &ResourceKey,
+) -> Result<Vec<(ResourceKey, &'a [u8])>, LoadError> {
+    let pe = parse_wince_pe(bytes)?;
+    resources::collect_resources(bytes, &pe)?
+        .into_iter()
+        .filter(|entry| entry.ty == *ty)
+        .map(|entry| resource_bytes(bytes, &pe, &entry).map(|data| (entry.name, data)))
+        .collect()
+}
+
+fn resource_bytes<'a>(
+    bytes: &'a [u8],
+    pe: &PE<'_>,
+    entry: &ResourceEntry,
+) -> Result<&'a [u8], LoadError> {
+    let invalid = || LoadError::SectionOob("resource outside file section".into());
+    let section = pe
+        .sections
+        .iter()
+        .find(|section| {
+            entry.data_rva >= section.virtual_address
+                && entry.data_rva - section.virtual_address < section.size_of_raw_data
+        })
+        .ok_or_else(invalid)?;
     let offset = entry.data_rva - section.virtual_address;
     if entry.size > section.size_of_raw_data - offset {
-        return None;
+        return Err(invalid());
     }
-    let start = section.pointer_to_raw_data.checked_add(offset)? as usize;
-    bytes.get(start..start.checked_add(entry.size as usize)?)
+    let start = section
+        .pointer_to_raw_data
+        .checked_add(offset)
+        .ok_or_else(invalid)? as usize;
+    let end = start.checked_add(entry.size as usize).ok_or_else(invalid)?;
+    bytes.get(start..end).ok_or_else(invalid)
 }
 
 /// Parse and lay out a PE32 image from raw bytes.
@@ -302,6 +392,10 @@ fn load_bytes_inner(
         source_path: String::new(),
         machine,
         subsystem: subsys,
+        subsystem_version: (
+            oh.windows_fields.major_subsystem_version,
+            oh.windows_fields.minor_subsystem_version,
+        ),
         image_base,
         size_of_image,
         stack_reserve: oh.windows_fields.size_of_stack_reserve as u32,
@@ -314,8 +408,16 @@ fn load_bytes_inner(
     })
 }
 
-/// Prepare a native runtime DLL at a new base. Reject unsupported relocation
-/// kinds and forwarded exports rather than exposing unusable guest addresses.
+/// A PE export redirected to another DLL's name or ordinal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportForwarder {
+    pub dll: String,
+    pub binding: ImportBinding,
+}
+
+/// Prepare a native runtime DLL at a new base. Forwarders are omitted from
+/// direct addresses; the dependency loader resolves `export_forwarders` before
+/// executing any guest code. A forwarder string is never an executable export.
 pub fn prepare_runtime_module(
     image: &mut LoadedImage,
     bytes: &[u8],
@@ -327,30 +429,7 @@ pub fn prepare_runtime_module(
         .optional_header
         .ok_or_else(|| LoadError::NotPe("missing optional header".into()))?;
     if let Some(dir) = oh.data_directories.get_export_table() {
-        let table = image_rva_bytes(image, dir.virtual_address, 40)?;
-        let ordinal_base = LittleEndian::read_u32(&table[16..20]);
-        let count = LittleEndian::read_u32(&table[20..24]);
-        let address_table = LittleEndian::read_u32(&table[28..32]);
-        let size = count
-            .checked_mul(4)
-            .ok_or_else(|| LoadError::NotPe("export table overflow".into()))?;
-        let addresses = image_rva_bytes(image, address_table, size)?.to_vec();
-        for (index, entry) in addresses.chunks_exact(4).enumerate() {
-            let rva = LittleEndian::read_u32(entry);
-            if rva == 0 {
-                continue;
-            }
-            if rva >= dir.virtual_address && rva < dir.virtual_address.saturating_add(dir.size) {
-                return Err(LoadError::NotPe(
-                    "forwarded runtime exports are not supported yet".into(),
-                ));
-            }
-            image_rva_bytes(image, rva & !1, 1)?;
-            let ordinal = ordinal_base
-                .checked_add(index as u32)
-                .ok_or_else(|| LoadError::NotPe("export ordinal overflow".into()))?;
-            image.exports.insert(format!("#{ordinal}"), rva);
-        }
+        image.exports = runtime_exports(image, dir.virtual_address, dir.size)?.0;
     }
     let delta = base.wrapping_sub(image.image_base);
     if delta != 0 {
@@ -369,6 +448,167 @@ pub fn prepare_runtime_module(
     Ok(())
 }
 
+/// ROM application DLLs have no relocation table. Their instructions may only
+/// run at the preferred address; the runtime loader must reserve it first.
+pub fn runtime_module_has_relocations(bytes: &[u8]) -> Result<bool, LoadError> {
+    let pe = parse_wince_pe(bytes)?;
+    let oh = pe
+        .header
+        .optional_header
+        .ok_or_else(|| LoadError::NotPe("missing optional header".into()))?;
+    Ok(oh
+        .data_directories
+        .get_base_relocation_table()
+        .is_some_and(|directory| directory.virtual_address != 0 && directory.size != 0))
+}
+
+/// Read forwarder metadata without mapping or executing the supplied DLL.
+pub fn export_forwarders(bytes: &[u8]) -> Result<BTreeMap<String, ExportForwarder>, LoadError> {
+    let pe = parse_wince_pe(bytes)?;
+    let image = load_bytes(bytes)?;
+    match pe
+        .header
+        .optional_header
+        .as_ref()
+        .and_then(|oh| oh.data_directories.get_export_table())
+    {
+        Some(dir) => Ok(runtime_exports(&image, dir.virtual_address, dir.size)?.1),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+fn image_ascii(image: &LoadedImage, rva: u32, limit: u32) -> Result<String, LoadError> {
+    let mut name = Vec::new();
+    for offset in 0..limit.min(4096) {
+        let at = rva
+            .checked_add(offset)
+            .ok_or_else(|| LoadError::NotPe("export string overflow".into()))?;
+        let byte = image_rva_bytes(image, at, 1)?[0];
+        if byte == 0 {
+            if name.is_empty() {
+                return Err(LoadError::NotPe("empty export string".into()));
+            }
+            return String::from_utf8(name)
+                .map_err(|_| LoadError::NotPe("invalid export string".into()));
+        }
+        if !byte.is_ascii() {
+            return Err(LoadError::NotPe("non-ASCII export string".into()));
+        }
+        name.push(byte);
+    }
+    Err(LoadError::NotPe("unterminated export string".into()))
+}
+
+fn parse_forwarder(text: &str) -> Result<ExportForwarder, LoadError> {
+    let invalid = || LoadError::NotPe(format!("invalid export forwarder {text:?}"));
+    let (dll, symbol) = text.rsplit_once('.').ok_or_else(invalid)?;
+    if dll.is_empty()
+        || dll == "."
+        || dll == ".."
+        || dll.contains(['\\', '/', ':'])
+        || symbol.is_empty()
+    {
+        return Err(invalid());
+    }
+    let binding = if let Some(ordinal) = symbol.strip_prefix('#') {
+        if ordinal.is_empty() || !ordinal.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        ImportBinding::Ordinal(ordinal.parse().map_err(|_| invalid())?)
+    } else {
+        ImportBinding::Name(symbol.into())
+    };
+    Ok(ExportForwarder {
+        dll: normalize_import_dll(dll).to_ascii_lowercase(),
+        binding,
+    })
+}
+
+type RuntimeExports = (IndexMap<String, u32>, BTreeMap<String, ExportForwarder>);
+
+fn runtime_exports(
+    image: &LoadedImage,
+    directory: u32,
+    size: u32,
+) -> Result<RuntimeExports, LoadError> {
+    let end = directory
+        .checked_add(size)
+        .filter(|_| size >= 40)
+        .ok_or_else(|| LoadError::NotPe("invalid export directory size".into()))?;
+    let table = image_rva_bytes(image, directory, 40)?;
+    let base = LittleEndian::read_u32(&table[16..20]);
+    let count = LittleEndian::read_u32(&table[20..24]);
+    let names_count = LittleEndian::read_u32(&table[24..28]);
+    if count == 0 && names_count == 0 {
+        return Ok((IndexMap::new(), BTreeMap::new()));
+    }
+    let addresses = image_rva_bytes(
+        image,
+        LittleEndian::read_u32(&table[28..32]),
+        count
+            .checked_mul(4)
+            .ok_or_else(|| LoadError::NotPe("export address count overflow".into()))?,
+    )?;
+    let mut direct = IndexMap::new();
+    let mut forwarded = BTreeMap::new();
+    for (index, entry) in addresses.chunks_exact(4).enumerate() {
+        let rva = LittleEndian::read_u32(entry);
+        if rva == 0 {
+            continue;
+        }
+        let ordinal = base
+            .checked_add(index as u32)
+            .filter(|n| *n <= u16::MAX as u32)
+            .ok_or_else(|| LoadError::NotPe("export ordinal exceeds CE ABI".into()))?;
+        let key = format!("#{ordinal}");
+        if rva >= directory && rva < end {
+            forwarded.insert(key, parse_forwarder(&image_ascii(image, rva, end - rva)?)?);
+        } else {
+            image_rva_bytes(image, rva & !1, 1)?;
+            direct.insert(key, rva);
+        }
+    }
+    if names_count != 0 {
+        let names = image_rva_bytes(
+            image,
+            LittleEndian::read_u32(&table[32..36]),
+            names_count
+                .checked_mul(4)
+                .ok_or_else(|| LoadError::NotPe("export name count overflow".into()))?,
+        )?;
+        let indices = image_rva_bytes(
+            image,
+            LittleEndian::read_u32(&table[36..40]),
+            names_count
+                .checked_mul(2)
+                .ok_or_else(|| LoadError::NotPe("export ordinal count overflow".into()))?,
+        )?;
+        for (pointer, index) in names.chunks_exact(4).zip(indices.chunks_exact(2)) {
+            let index = u32::from(LittleEndian::read_u16(index));
+            if index >= count {
+                return Err(LoadError::NotPe("export name index out of range".into()));
+            }
+            let name = image_ascii(image, LittleEndian::read_u32(pointer), 4096)?;
+            if direct.contains_key(&name) || forwarded.contains_key(&name) {
+                return Err(LoadError::NotPe("duplicate export name".into()));
+            }
+            let key = format!(
+                "#{}",
+                base.checked_add(index)
+                    .ok_or_else(|| LoadError::NotPe("export ordinal overflow".into()))?
+            );
+            if let Some(rva) = direct.get(&key).copied() {
+                direct.insert(name, rva);
+            } else if let Some(target) = forwarded.get(&key).cloned() {
+                forwarded.insert(name, target);
+            } else {
+                return Err(LoadError::NotPe("named export has no address".into()));
+            }
+        }
+    }
+    Ok((direct, forwarded))
+}
+
 fn image_rva_bytes(image: &LoadedImage, rva: u32, size: u32) -> Result<&[u8], LoadError> {
     for section in &image.sections {
         if let Some(offset) = rva.checked_sub(section.virtual_address) {
@@ -381,6 +621,66 @@ fn image_rva_bytes(image: &LoadedImage, rva: u32, size: u32) -> Result<&[u8], Lo
         }
     }
     Err(LoadError::SectionOob(format!("RVA 0x{rva:x}, size {size}")))
+}
+
+/// Exact named ordinals from a local CE DLL, without loading its code.
+/// System images use this metadata to select HLE handlers at the IAT boundary.
+pub fn export_ordinals(bytes: &[u8]) -> Result<std::collections::HashMap<u16, String>, LoadError> {
+    let pe = parse_wince_pe(bytes)?;
+    let image = load_bytes(bytes)?;
+    let Some(dir) = pe
+        .header
+        .optional_header
+        .as_ref()
+        .and_then(|oh| oh.data_directories.get_export_table())
+    else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let table = image_rva_bytes(&image, dir.virtual_address, 40)?;
+    let base = LittleEndian::read_u32(&table[16..20]);
+    let count = LittleEndian::read_u32(&table[24..28]);
+    let names = LittleEndian::read_u32(&table[32..36]);
+    let indices = LittleEndian::read_u32(&table[36..40]);
+    let pointers = image_rva_bytes(
+        &image,
+        names,
+        count
+            .checked_mul(4)
+            .ok_or_else(|| LoadError::NotPe("export name count overflow".into()))?,
+    )?;
+    let ordinals = image_rva_bytes(
+        &image,
+        indices,
+        count
+            .checked_mul(2)
+            .ok_or_else(|| LoadError::NotPe("export ordinal count overflow".into()))?,
+    )?;
+    let mut result = std::collections::HashMap::new();
+    for (pointer, index) in pointers.chunks_exact(4).zip(ordinals.chunks_exact(2)) {
+        let rva = LittleEndian::read_u32(pointer);
+        let ordinal = base
+            .checked_add(u32::from(LittleEndian::read_u16(index)))
+            .and_then(|n| u16::try_from(n).ok())
+            .ok_or_else(|| LoadError::NotPe("export ordinal exceeds CE ABI".into()))?;
+        let mut name = Vec::new();
+        for offset in 0..4096u32 {
+            let at = rva
+                .checked_add(offset)
+                .ok_or_else(|| LoadError::NotPe("export name overflow".into()))?;
+            let byte = image_rva_bytes(&image, at, 1)?[0];
+            if byte == 0 {
+                break;
+            }
+            name.push(byte);
+        }
+        if name.len() == 4096 {
+            return Err(LoadError::NotPe("unterminated export name".into()));
+        }
+        let name = String::from_utf8(name)
+            .map_err(|_| LoadError::NotPe("non-ASCII export name".into()))?;
+        result.insert(ordinal, name);
+    }
+    Ok(result)
 }
 
 fn apply_runtime_relocations(
@@ -739,6 +1039,7 @@ mod tests {
             source_path: String::new(),
             machine: machine::ARM,
             subsystem: subsystem::WINDOWS_CE_GUI,
+            subsystem_version: (4, 0),
             image_base: 0x100000,
             stack_reserve: 0x10000,
             size_of_image: 0x2000,
@@ -857,6 +1158,7 @@ mod tests {
             source_path: "x".into(),
             machine: machine::ARM,
             subsystem: subsystem::WINDOWS_CE_GUI,
+            subsystem_version: (4, 0),
             image_base: 0x10000,
             stack_reserve: 0x10000,
             size_of_image: 0,

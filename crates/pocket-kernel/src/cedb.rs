@@ -1,4 +1,5 @@
 //! Guest-local CEDB contacts and open cursors.
+pub mod generic;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -30,6 +31,7 @@ pub struct Cursor {
 
 #[derive(Default)]
 pub struct ContactStore {
+    pub generic: generic::Store,
     pub path: Option<PathBuf>,
     pub cursors: HashMap<u32, Cursor>,
     pub next_handle: u32,

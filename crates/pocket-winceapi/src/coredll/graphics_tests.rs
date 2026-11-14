@@ -84,6 +84,45 @@ fn pixel(kernel: &KernelState, x: u32, y: u32) -> u16 {
         kernel.framebuffer.resident_cpu().unwrap().pixels[i + 1],
     ])
 }
+
+#[test]
+fn native_text_background_setters_return_previous_dc_state_without_painting() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let dc = kernel.gdi.create_memory_dc();
+    let counter = kernel.framebuffer.frame_counter;
+    kernel.thread_last_errors.insert(0, 99);
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    assert_eq!(call(&mut ctx, get_bk_mode, &[dc]), 2);
+    assert_eq!(call(&mut ctx, set_bk_mode, &[dc, 1]), 2);
+    assert_eq!(call(&mut ctx, get_bk_mode, &[dc]), 1);
+    assert_eq!(call(&mut ctx, set_bk_mode, &[dc, 1]), 1);
+    let saved = ctx.kernel.gdi.save_dc(dc).unwrap();
+    assert_eq!(call(&mut ctx, set_bk_mode, &[dc, 2]), 1);
+    assert_eq!(call(&mut ctx, get_bk_mode, &[dc]), 2);
+    assert!(ctx.kernel.gdi.restore_dc(dc, saved as i32));
+    assert_eq!(call(&mut ctx, get_bk_mode, &[dc]), 1);
+    for invalid_mode in [0, 3, u32::MAX] {
+        assert_eq!(call(&mut ctx, set_bk_mode, &[dc, invalid_mode]), 0);
+        assert_eq!(call(&mut ctx, get_bk_mode, &[dc]), 1);
+    }
+    assert_eq!(call(&mut ctx, get_bk_mode, &[GDI_SCREEN_DC]), 2);
+    assert_eq!(call(&mut ctx, set_bk_color, &[dc, 0x123456]), 0xffffff);
+    assert_eq!(call(&mut ctx, set_bk_color, &[dc, 0x654321]), 0x123456);
+    assert_eq!(call(&mut ctx, get_bk_color, &[dc]), 0x654321);
+    assert_eq!(call(&mut ctx, get_bk_color, &[GDI_SCREEN_DC]), 0xffffff);
+    assert_eq!(call(&mut ctx, get_bk_mode, &[0xbaad]), 0);
+    assert_eq!(call(&mut ctx, set_bk_mode, &[0xbaad, 1]), 0);
+    assert_eq!(call(&mut ctx, set_bk_color, &[0xbaad, 0]), u32::MAX);
+    assert_eq!(ctx.kernel.thread_last_errors[&0], 99);
+    assert_eq!(ctx.kernel.framebuffer.frame_counter, counter);
+}
+
 #[test]
 fn image_list_resource_strip_draws_transparent_tiles_and_drawex_crops() {
     let mut cpu = scanf_cpu();
@@ -606,6 +645,62 @@ fn file_times_write_real_modification_time_and_compare_unsigned_values() {
 }
 
 #[test]
+fn file_time_buffers_are_validated_before_any_output_or_metadata_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cpu = scanf_cpu();
+    cpu.map_region(0x10000, 0x1000, Prot::READ).unwrap();
+    let mut kernel = fresh_kernel();
+    kernel.vfs.mount("\\", dir.path());
+    let handle = kernel
+        .vfs
+        .open_file("\\copy.txt", 3, 3, 2, false, 0)
+        .unwrap()
+        .handle;
+    let before = kernel.vfs.file_times(handle).unwrap();
+    let time = 116_444_736_020_000_000u64;
+    cpu.write_mem(0x2000, &time.to_le_bytes()).unwrap();
+    cpu.write_mem(0x2008, &time.to_le_bytes()).unwrap();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    assert_eq!(
+        call(
+            &mut ctx,
+            window_graphics::set_file_time,
+            &[handle, 0x2000, 0x2008, 0x20000]
+        ),
+        0
+    );
+    assert_eq!(ctx.kernel.thread_last_errors[&0], 87);
+    assert_eq!(ctx.kernel.vfs.file_times(handle).unwrap(), before);
+    ctx.cpu.write_mem(0x2040, &[0xa5; 16]).unwrap();
+    assert_eq!(
+        call(
+            &mut ctx,
+            window_graphics::get_file_time,
+            &[handle, 0x2040, 0x2048, 0x10000]
+        ),
+        0
+    );
+    assert_eq!(ctx.cpu.read_mem(0x2040, 16).unwrap(), [0xa5; 16]);
+    assert_eq!(
+        call(
+            &mut ctx,
+            window_graphics::set_file_time,
+            &[handle, 0x2000, 0, 0x2008]
+        ),
+        1
+    );
+    let times = ctx.kernel.vfs.file_times(handle).unwrap();
+    assert_eq!(times[0], time);
+    assert_eq!(times[1], before[1]);
+    assert_eq!(times[2], time);
+}
+
+#[test]
 fn rgb565_bitfield_icon_reads_external_masks_before_the_xor_and_and_planes() {
     let mut raw = vec![0u8; 60];
     raw[..4].copy_from_slice(&40u32.to_le_bytes());
@@ -824,7 +919,24 @@ fn nested_popup_keyboard_ignores_its_owners_focus_and_keeps_native_child_focus()
         thunk: &thunk,
     };
     assert!(controls_take_input(&mut ctx, InputEvent::KeyDown { vk: 0x27 }).is_none());
-    call(&mut ctx, set_focus, &[map]);
+    ctx.cpu.write_arg(0, map).unwrap();
+    assert_eq!(
+        set_focus(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2400)
+    );
+    assert_eq!(ctx.arg_u32(1).unwrap(), 8);
+    ctx.cpu.write_arg(0, 0).unwrap();
+    assert_eq!(
+        set_focus(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2300)
+    );
+    assert_eq!(ctx.arg_u32(1).unwrap(), 7);
+    ctx.cpu.write_arg(0, 0).unwrap();
+    assert_eq!(
+        set_focus(&mut ctx).unwrap(),
+        DispatchOutcome::ReturnedR0(list)
+    );
+    assert!(ctx.kernel.ce.focus_changes.is_empty());
     assert_eq!(ctx.kernel.controls.focus, map);
     assert_eq!(input_window(ctx.kernel), map);
     ctx.kernel.window_visibility.insert(map, false);
@@ -2972,6 +3084,54 @@ fn font_height_drives_extent_and_textout_without_changing_stock_metrics() {
     let bm = ctx.kernel.gdi.bitmap(bitmap).unwrap();
     assert!(bm.pixels[8 * 100 * 2..24 * 100 * 2].iter().any(|&b| b != 0));
     assert!(bm.pixels[32 * 100 * 2..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn text_face_queries_each_dc_and_bounds_terminated_utf16_without_publishing() {
+    let mut cpu = scanf_cpu();
+    let mut kernel = fresh_kernel();
+    let thunk = thunk_at(0x70000100);
+    let dc = kernel.gdi.create_memory_dc();
+    let other = kernel.gdi.create_memory_dc();
+    let mut raw = [0u8; 92];
+    raw[..4].copy_from_slice(&(-16i32).to_le_bytes());
+    for (i, unit) in "Шрифт".encode_utf16().enumerate() {
+        raw[28 + 2 * i..30 + 2 * i].copy_from_slice(&unit.to_le_bytes());
+    }
+    let font = kernel
+        .gdi
+        .create_logfont(pocket_kernel::gdi::Font::from_logfont(raw));
+    kernel.gdi.select_into(dc, font);
+    let published = kernel.framebuffer.frame_counter;
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    assert_eq!(call(&mut ctx, get_text_face_w, &[dc, 0, 0]), 6);
+    assert_eq!(call(&mut ctx, get_text_face_w, &[other, 0, 0]), 7);
+    assert_eq!(call(&mut ctx, get_text_face_w, &[dc, u32::MAX, 0]), 6);
+    ctx.cpu.write_mem(0x1600, &[0xa5; 32]).unwrap();
+    assert_eq!(call(&mut ctx, get_text_face_w, &[dc, 4, 0x1600]), 4);
+    let expected: Vec<u8> = "Шри\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    assert_eq!(ctx.cpu.read_mem(0x1600, 8).unwrap(), expected);
+    assert_eq!(ctx.cpu.read_mem(0x1608, 24).unwrap(), vec![0xa5; 24]);
+    assert_eq!(call(&mut ctx, get_text_face_w, &[dc, 1, 0x1600]), 1);
+    assert_eq!(ctx.cpu.read_mem(0x1600, 2).unwrap(), [0, 0]);
+    assert_eq!(call(&mut ctx, get_text_face_w, &[other, 32, 0x1600]), 7);
+    assert_eq!(
+        read_wstr(&mut ctx, 0x1600, 32).unwrap(),
+        "System".encode_utf16().collect::<Vec<_>>()
+    );
+    for args in [
+        [0x12345678, 32, 0x1600],
+        [dc, 0, 0x1600],
+        [dc, u32::MAX, 0x1600],
+        [dc, 32, 0xffff_fffe],
+    ] {
+        assert_eq!(call(&mut ctx, get_text_face_w, &args), 0);
+    }
+    assert_eq!(ctx.kernel.framebuffer.frame_counter, published);
 }
 
 #[test]

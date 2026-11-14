@@ -1,8 +1,20 @@
 //! Process-owned icon pixels and image lists. No guest pointers survive decoding.
 use crate::gdi::{Bitmap, Surface};
+use std::borrow::Cow;
 
 pub const MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
+/// A drag keeps copied pixels after its source list is changed or destroyed.
 #[derive(Debug, Clone)]
+pub struct ImageDrag {
+    pub image: Image,
+    pub hotspot: (i32, i32),
+    pub position: (i32, i32),
+    pub window: u32,
+    pub entered: bool,
+    pub visible: bool,
+    pub list_handle: u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
@@ -64,6 +76,42 @@ impl Image {
         }
         Some(out)
     }
+    fn overlay(&mut self, overlay: &Self) {
+        for i in 0..self.pixels.len() {
+            if overlay.invert[i] {
+                if self.invert[i] {
+                    self.invert[i] = false;
+                    self.alpha[i] = 0;
+                } else if self.alpha[i] == 0 {
+                    self.invert[i] = true;
+                } else {
+                    self.pixels[i] ^= 0xffff;
+                }
+                continue;
+            }
+            let a = u32::from(overlay.alpha[i]);
+            if a == 0 {
+                continue;
+            }
+            if a == 255 {
+                self.pixels[i] = overlay.pixels[i];
+                self.alpha[i] = 255;
+            } else {
+                let b = u32::from(self.alpha[i]) * (255 - a);
+                let alpha = a * 255 + b;
+                let channel = |shift: u32, mask: u32| {
+                    ((((u32::from(overlay.pixels[i]) >> shift) & mask) * a * 255
+                        + ((u32::from(self.pixels[i]) >> shift) & mask) * b
+                        + alpha / 2)
+                        / alpha)
+                        << shift
+                };
+                self.pixels[i] = (channel(11, 31) | channel(5, 63) | channel(0, 31)) as u16;
+                self.alpha[i] = ((alpha + 127) / 255) as u8;
+            }
+            self.invert[i] = false;
+        }
+    }
     /// Clip destination before iterating; malicious coordinates cannot cause huge loops.
     pub fn draw(&self, surface: &mut Surface<'_>, x: i32, y: i32, w: u32, h: u32, clip: [i32; 4]) {
         if w == 0 || h == 0 {
@@ -113,10 +161,14 @@ fn blend(s: u16, d: u16, a: u8) -> u16 {
 }
 #[derive(Debug, Clone)]
 pub struct ImageList {
+    pub generation: u64,
     pub width: u32,
     pub height: u32,
     pub images: Vec<Image>,
     pub background: u32,
+    /// One-based ILD_OVERLAYMASK slots. Portable Explorer assigns its shortcut
+    /// arrow here, then selects it through ImageList_Draw and LVIS_OVERLAYMASK.
+    pub overlays: [Option<usize>; 15],
 }
 impl ImageList {
     pub fn new(width: u32, height: u32) -> Option<Self> {
@@ -124,11 +176,78 @@ impl ImageList {
             return None;
         }
         Some(Self {
+            generation: 0,
             width,
             height,
             images: Vec::new(),
             background: 0xffff_ffff,
+            overlays: [None; 15],
         })
+    }
+    pub fn set_overlay(&mut self, index: i32, slot: u32) -> bool {
+        if !(1..=15).contains(&slot) {
+            return false;
+        }
+        let image = if index == -1 {
+            None
+        } else {
+            let Ok(index) = usize::try_from(index) else {
+                return false;
+            };
+            if index >= self.images.len() {
+                return false;
+            }
+            Some(index)
+        };
+        if self.overlays[(slot - 1) as usize] != image {
+            self.overlays[(slot - 1) as usize] = image;
+            self.changed();
+        }
+        true
+    }
+    pub fn image(&self, index: usize, flags: u32) -> Option<Cow<'_, Image>> {
+        let base = self.images.get(index)?;
+        let slot = ((flags & 0xf00) >> 8) as usize;
+        let overlay = slot
+            .checked_sub(1)
+            .and_then(|slot| self.overlays[slot])
+            .and_then(|index| self.images.get(index));
+        if let Some(overlay) = overlay {
+            let mut image = base.clone();
+            image.overlay(overlay);
+            Some(Cow::Owned(image))
+        } else {
+            Some(Cow::Borrowed(base))
+        }
+    }
+    pub fn clear(&mut self) {
+        if !self.images.is_empty() || self.overlays.iter().any(Option::is_some) {
+            self.changed();
+        }
+        self.images.clear();
+        self.overlays.fill(None);
+    }
+    pub fn remove(&mut self, index: i32) -> bool {
+        if index == -1 {
+            self.clear();
+            return true;
+        }
+        let Ok(index) = usize::try_from(index) else {
+            return false;
+        };
+        if index >= self.images.len() {
+            return false;
+        }
+        self.images.remove(index);
+        self.changed();
+        for slot in &mut self.overlays {
+            *slot = match *slot {
+                Some(i) if i == index => None,
+                Some(i) if i > index => Some(i - 1),
+                other => other,
+            };
+        }
+        true
     }
     pub fn replace(&mut self, index: i32, image: &Image) -> Option<usize> {
         let i = if index == -1 {
@@ -148,8 +267,10 @@ impl ImageList {
         let image = image.scaled(self.width, self.height)?;
         if i == self.images.len() {
             self.images.push(image);
-        } else {
+            self.changed();
+        } else if self.images[i] != image {
             self.images[i] = image;
+            self.changed();
         }
         Some(i)
     }
@@ -179,7 +300,12 @@ impl ImageList {
             }
             self.images.push(tile);
         }
+        self.changed();
         Some(first)
+    }
+
+    pub fn changed(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 #[cfg(test)]

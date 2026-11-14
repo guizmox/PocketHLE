@@ -132,6 +132,15 @@ struct PresentationRate {
 }
 
 impl PresentationStats {
+    /// CE desktop composition measures changes to the combined image while
+    /// keeping explicit presentation timing with the active application.
+    pub fn with_image_updates_from(&self, images: &Self) -> Self {
+        Self {
+            presents: self.presents.clone(),
+            changes: images.changes.clone(),
+        }
+    }
+
     pub fn record_present(&self) {
         self.record_at(std::time::Instant::now());
     }

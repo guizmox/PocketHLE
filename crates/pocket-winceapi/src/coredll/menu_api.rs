@@ -4,6 +4,13 @@ use pocket_kernel::MenuItem;
 fn ret(v: u32) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(v))
 }
+fn changed(k: &mut KernelState, menu: u32) {
+    k.gdi
+        .shell_menus
+        .measurements
+        .retain(|(h, _), _| *h != menu);
+    k.framebuffer.mark_dirty();
+}
 fn alloc(k: &mut KernelState, items: Vec<MenuItem>) -> u32 {
     let h = k.next_menu_handle;
     k.next_menu_handle = h.wrapping_add(1);
@@ -279,6 +286,7 @@ pub(super) fn set_info(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     let m = ctx.kernel.menus.entry(h).or_default();
     let prev = m.remove(&old).unwrap_or(0);
     m.insert(new, if mask & 1 != 0 { f(12) } else { prev });
+    changed(ctx.kernel, h);
     ret(1)
 }
 pub(super) fn submenu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -347,11 +355,47 @@ pub(super) fn check(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 pub(super) fn enable(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     flag(ctx, 3)
 }
+
+pub(super) fn radio(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (menu, first, last, check, flags) = (
+        ctx.arg_u32(0)?,
+        ctx.arg_u32(1)?,
+        ctx.arg_u32(2)?,
+        ctx.arg_u32(3)?,
+        ctx.arg_u32(4)?,
+    );
+    if flags & !0x400 != 0 || first > last || check < first || check > last {
+        return ret(0);
+    }
+    let by_position = flags & 0x400 != 0;
+    let Some((menu, selected)) = find(ctx.kernel, menu, check, by_position, 0) else {
+        return ret(0);
+    };
+    let items = ctx.kernel.menu_items.get_mut(&menu).unwrap();
+    if by_position && last as usize >= items.len() {
+        return ret(0);
+    }
+    let states = ctx.kernel.menus.entry(menu).or_default();
+    for (index, item) in items.iter_mut().enumerate() {
+        let value = if by_position { index as u32 } else { item.id };
+        if (first..=last).contains(&value) {
+            let state = states.entry(item.id).or_default();
+            *state = (*state & !8) | if index == selected { 8 } else { 0 };
+            if index == selected {
+                item.kind |= 0x200;
+            }
+        }
+    }
+    changed(ctx.kernel, menu);
+    ret(1)
+}
 fn make_item(ctx: &mut CallCtx<'_>, flags: u32, id: u32, p: u32) -> Result<MenuItem, KernelError> {
     Ok(MenuItem {
         id: if flags & 16 != 0 { 0 } else { id },
         submenu: if flags & 16 != 0 { id } else { 0 },
         kind: flags & 0x6b64,
+        data: if flags & 0x100 != 0 { p } else { 0 },
+        bitmap: if flags & 4 != 0 { p } else { 0 },
         text: if p != 0 && flags & 0x104 == 0 {
             read_wstr(ctx, p, 4096)?
         } else {
@@ -373,6 +417,7 @@ pub(super) fn append(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let v = make_item(ctx, f, id, p)?;
     ctx.kernel.menus.entry(h).or_default().insert(v.id, f & 0xb);
     ctx.kernel.menu_items.get_mut(&h).unwrap().push(v);
+    changed(ctx.kernel, h);
     ret(1)
 }
 pub(super) fn insert(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -385,8 +430,16 @@ pub(super) fn insert(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     );
     let at = if n == u32::MAX {
         ctx.kernel.menu_items.get(&h).map(|v| (h, v.len()))
+    } else if f & 0x400 != 0 {
+        // Portable Explorer inserts a PIDL placeholder at position zero in
+        // a newly-created empty Programs popup. The end is a valid insertion
+        // point even though it is not an existing item for Get/RemoveMenu.
+        ctx.kernel
+            .menu_items
+            .get(&h)
+            .and_then(|v| ((n as usize) <= v.len()).then_some((h, n as usize)))
     } else {
-        find(ctx.kernel, h, n, f & 0x400 != 0, 0)
+        find(ctx.kernel, h, n, false, 0)
     };
     let Some((h, i)) = at else {
         return ret(0);
@@ -394,6 +447,7 @@ pub(super) fn insert(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let v = make_item(ctx, f, id, p)?;
     ctx.kernel.menus.entry(h).or_default().insert(v.id, f & 0xb);
     ctx.kernel.menu_items.get_mut(&h).unwrap().insert(i, v);
+    changed(ctx.kernel, h);
     ret(1)
 }
 pub(super) fn modify(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -410,6 +464,7 @@ pub(super) fn modify(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     let v = make_item(ctx, f, id, p)?;
     ctx.kernel.menus.entry(h).or_default().insert(v.id, f & 0xb);
     ctx.kernel.menu_items.get_mut(&h).unwrap()[i] = v;
+    changed(ctx.kernel, h);
     ret(1)
 }
 pub(super) fn remove(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -421,6 +476,7 @@ pub(super) fn remove(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     if let Some(m) = ctx.kernel.menus.get_mut(&h) {
         m.remove(&v.id);
     }
+    changed(ctx.kernel, h);
     ret(1)
 }
 pub(super) fn destroy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -438,6 +494,21 @@ pub(super) fn destroy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         ctx.kernel.menus.remove(&h);
     }
     ctx.kernel.window_menus.retain(|_, v| !seen.contains(v));
+    ctx.kernel
+        .gdi
+        .shell_menus
+        .measurements
+        .retain(|(h, _), _| !seen.contains(h));
+    if ctx
+        .kernel
+        .gdi
+        .shell_menus
+        .active_popup()
+        .is_some_and(|(h, _, _)| seen.contains(&h))
+    {
+        ctx.kernel.gdi.shell_menus.close();
+    }
+    ctx.kernel.framebuffer.mark_dirty();
     ret(u32::from(existed))
 }
 pub(super) fn get_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -456,6 +527,53 @@ pub(super) fn set_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_new_programs_popup_accepts_its_first_owner_draw_item() {
+        use crate::bluetooth::tests::{call, setup};
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        let DispatchOutcome::ReturnedR0(menu) = call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "CreatePopupMenu",
+            &[],
+        ) else {
+            panic!("no menu");
+        };
+        for (position, id) in [(0, 65534), (1, 65535)] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "InsertMenuW",
+                    &[menu, position, 0x500, id, 0x2000]
+                ),
+                DispatchOutcome::ReturnedR0(1)
+            );
+        }
+        assert_eq!(
+            kernel.menu_items[&menu]
+                .iter()
+                .map(|i| (i.id, i.data))
+                .collect::<Vec<_>>(),
+            [(65534, 0x2000), (65535, 0x2000)]
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "InsertMenuW",
+                &[menu, 3, 0x500, 1, 0x2000]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(kernel.menu_items[&menu].len(), 2);
+    }
     #[test]
     fn standard_menu_implicit_and_explicit_separators_preserve_empty_commands() {
         let mut b = vec![0u8; 4];

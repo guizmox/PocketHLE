@@ -454,7 +454,11 @@ mod tests {
             .apply(&mut lib, true)
             .unwrap();
         assert_eq!(fs::read(dir.join("Data.bin")).unwrap(), b"new");
-        assert!(!dir.join("data.bin").exists());
+        // Windows resolves either spelling to the same file. Inspect the
+        // stored name to verify that replacing data preserves its casing.
+        assert!(fs::read_dir(&dir)
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name().to_str() != Some("data.bin")));
     }
 
     #[test]
@@ -504,7 +508,14 @@ mod tests {
             &[("assets/old", b"new"), ("assets/sub/new", b"added")],
         );
         let pending = prepare(&lib, "test", &source, "DATA.ZIP", true).unwrap();
-        assert_eq!(pending.conflicts(), &["assets/old"]);
+        assert_eq!(
+            pending
+                .conflicts()
+                .iter()
+                .map(|name| PathBuf::from(name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![PathBuf::from("assets/old")]
+        );
         assert!(!dir.join("assets/sub").exists());
         pending.apply(&mut lib, true).unwrap();
         assert_eq!(fs::read(dir.join("assets/keep")).unwrap(), b"keep");

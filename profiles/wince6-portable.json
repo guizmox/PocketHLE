@@ -1,0 +1,10 @@
+{
+  "profile_name": "wince6-portable",
+  "executable": "../portable-explorer/bin/explorer-portable.exe",
+  "image_root": "../wince6/fs",
+  "data_dir": "../ce-data/wince6",
+  "app_prefix": "\\Application\\",
+  "command_line": "\\Application\\",
+  "screen": "vga_landscape",
+  "classic_windows": true
+}

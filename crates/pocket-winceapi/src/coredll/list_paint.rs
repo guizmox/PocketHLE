@@ -44,19 +44,6 @@ fn restore(ctx: &mut CallCtx<'_>, f: &ListPaintFrame) -> Result<DispatchOutcome,
             }
         }
     }
-    if std::env::var_os("POCKETHLE_CONTROL_PAINT_TRACE").is_some() {
-        log::info!(
-            "List paint finished hwnd={:x} dc={:x} first={:?}",
-            f.hwnd,
-            f.dc,
-            ctx.kernel
-                .gdi
-                .dc(f.dc)
-                .and_then(|d| d.selected_bitmap)
-                .and_then(|b| ctx.kernel.gdi.bitmap(b))
-                .map(|b| b.pixels[..2].to_vec())
-        );
-    }
     do_free(ctx, f.scratch);
     for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
         .into_iter()
@@ -166,6 +153,86 @@ fn notify(
     Ok(DispatchOutcome::JumpTo(proc & !1))
 }
 
+fn next_display_info(
+    ctx: &mut CallCtx<'_>,
+    mut f: ListPaintFrame,
+) -> Result<DispatchOutcome, KernelError> {
+    loop {
+        let Some(c) = local_control(ctx, f.hwnd) else {
+            return restore(ctx, &f);
+        };
+        if f.item >= c.list_items.len() {
+            f.item = 0;
+            f.display_column = 0;
+            f.stage = 0;
+            return notify(ctx, f, 1);
+        }
+        let mut columns = vec![0];
+        if c.style & 3 == 1 {
+            columns.extend(
+                c.list_report_columns
+                    .iter()
+                    .map(|column| column.subitem)
+                    .filter(|&subitem| subitem != 0),
+            );
+        }
+        let Some(&subitem) = columns.get(f.display_column) else {
+            f.item += 1;
+            f.display_column = 0;
+            continue;
+        };
+        let text = c.list_text_callbacks.get(f.item).copied().unwrap_or(false)
+            && !c
+                .list_cached_text
+                .get(f.item)
+                .is_some_and(|columns| columns.contains(&subitem));
+        let image = subitem == 0 && c.list_image_callbacks.get(f.item).copied().unwrap_or(false);
+        let mask = u32::from(text) | if image { 2 | 8 } else { 0 };
+        if mask == 0 {
+            f.display_column += 1;
+            continue;
+        }
+        let proc = ctx.kernel.window_procs.get(&c.parent).copied().unwrap_or(0);
+        if proc == 0 {
+            return restore(ctx, &f);
+        }
+        // Portable Explorer inserts LPSTR_TEXTCALLBACK / I_IMAGECALLBACK.
+        // NMLVDISPINFOW is NMHDR followed by the CE LVITEM layout, with
+        // lParam retaining the guest's PIDL and writable text scratch.
+        let fields: [u32; 12] = [
+            c.hwnd,
+            c.id,
+            (-177i32) as u32,
+            mask,
+            f.item as u32,
+            subitem,
+            c.list_item_state(f.item),
+            0xff00,
+            f.scratch + 60,
+            1024,
+            c.list_images.get(f.item).copied().unwrap_or(-1) as u32,
+            c.list_items[f.item].1,
+        ];
+        ctx.cpu.write_mem(
+            f.scratch,
+            &fields
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )?;
+        ctx.cpu.write_mem(f.scratch + 60, &[0; 2048])?;
+        ctx.cpu.write_reg(ArmReg::R0, c.parent)?;
+        ctx.cpu.write_reg(ArmReg::R1, 0x4e)?;
+        ctx.cpu.write_reg(ArmReg::R2, c.id)?;
+        ctx.cpu.write_reg(ArmReg::R3, f.scratch)?;
+        ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+        f.stage = 4;
+        f.item_flags = mask;
+        ctx.kernel.gdi.list_paint_frames.push(f);
+        return Ok(DispatchOutcome::JumpTo(proc & !1));
+    }
+}
+
 fn next_item(ctx: &mut CallCtx<'_>, mut f: ListPaintFrame) -> Result<DispatchOutcome, KernelError> {
     let count = ctx
         .kernel
@@ -185,23 +252,67 @@ fn next_item(ctx: &mut CallCtx<'_>, mut f: ListPaintFrame) -> Result<DispatchOut
 
 pub(super) fn resume(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
     let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
-    if !ctx.kernel.gdi.list_paint_frames.last().is_some_and(|f| {
-        f.thread == ctx.kernel.current_thread && f.thunk == ctx.thunk.thunk_va && f.frame.sp == sp
-    }) {
+    let Some(index) = callback_frame_index(
+        &ctx.kernel.gdi.list_paint_frames,
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        sp,
+        |f| (f.thread, f.thunk, f.frame.sp),
+    ) else {
         return Ok(None);
-    }
-    let mut f = ctx.kernel.gdi.list_paint_frames.pop().unwrap();
+    };
+    let mut f = ctx.kernel.gdi.list_paint_frames.remove(index);
     let result = ctx.cpu.read_reg(ArmReg::R0)?;
-    if std::env::var_os("POCKETHLE_CONTROL_PAINT_TRACE").is_some() {
-        log::info!(
-            "List paint callback hwnd={:x} stage={} item={} result={:x}",
-            f.hwnd,
-            f.stage,
-            f.item,
-            result
-        );
-    }
     let outcome = match f.stage {
+        4 => {
+            let returned_mask = ctx.cpu.read_u32_le(f.scratch + 12)?;
+            let fields = f.item_flags & returned_mask;
+            let text = if fields & 1 != 0 {
+                let pointer = ctx.cpu.read_u32_le(f.scratch + 32)?;
+                Some(if pointer == 0 || pointer == u32::MAX {
+                    String::new()
+                } else {
+                    String::from_utf16_lossy(&read_wstr(ctx, pointer, 1024)?)
+                })
+            } else {
+                None
+            };
+            let subitem = ctx.cpu.read_u32_le(f.scratch + 20)?;
+            let image = ctx.cpu.read_u32_le(f.scratch + 40)? as i32;
+            let state = ctx.cpu.read_u32_le(f.scratch + 24)?;
+            let state_mask = ctx.cpu.read_u32_le(f.scratch + 28)? & 0xff00;
+            if let Some(c) = ctx
+                .kernel
+                .controls
+                .get_mut(f.hwnd)
+                .filter(|c| f.item < c.list_items.len())
+            {
+                if let Some(text) = text {
+                    c.set_list_text(f.item, subitem, text);
+                    if returned_mask & 0x1000 != 0 {
+                        c.list_cached_text
+                            .resize_with(c.list_items.len(), Default::default);
+                        c.list_cached_text[f.item].insert(subitem);
+                    }
+                }
+                if fields & 2 != 0 {
+                    c.list_images.resize(c.list_items.len(), -1);
+                    c.list_images[f.item] = image;
+                    // Original CE6 Explorer sets LVIF_DI_SETITEM after resolving
+                    // an icon. Repeating those native metadata callbacks during
+                    // selection repaint delayed the second tap past 500 ms.
+                    if returned_mask & 0x1000 != 0 {
+                        c.list_image_callbacks.resize(c.list_items.len(), false);
+                        c.list_image_callbacks[f.item] = false;
+                    }
+                }
+                if fields & 8 != 0 {
+                    c.set_list_item_state(f.item, state, state_mask);
+                }
+            }
+            f.display_column += 1;
+            next_display_info(ctx, f)?
+        }
         0 => {
             f.flags = result;
             if result & 4 != 0 {
@@ -259,7 +370,7 @@ pub(super) fn paint(ctx: &mut CallCtx<'_>, hwnd: u32) -> Result<DispatchOutcome,
         sp: ctx.cpu.read_reg(ArmReg::Sp)?,
         lr: ctx.cpu.read_reg(ArmReg::Lr)?,
     };
-    let DispatchOutcome::ReturnedR0(scratch) = do_alloc(ctx, 60)? else {
+    let DispatchOutcome::ReturnedR0(scratch) = do_alloc(ctx, 60 + 2048)? else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
     if scratch == 0 {
@@ -282,13 +393,6 @@ pub(super) fn paint(ctx: &mut CallCtx<'_>, hwnd: u32) -> Result<DispatchOutcome,
     } else {
         window_dc(ctx, hwnd)
     };
-    if std::env::var_os("POCKETHLE_CONTROL_PAINT_TRACE").is_some() {
-        log::info!(
-            "List paint start hwnd={hwnd:x} dc={dc:x} bg={:x} selected={:?}",
-            c.list_background,
-            c.list_selected
-        );
-    }
     if let Some(meta) = ctx.kernel.gdi.dc_mut(dc) {
         meta.selected_font = c.font;
     }
@@ -306,14 +410,136 @@ pub(super) fn paint(ctx: &mut CallCtx<'_>, hwnd: u32) -> Result<DispatchOutcome,
         item: 0,
         flags: 0,
         item_flags: 0,
+        display_column: 0,
     };
-    notify(ctx, f, 1)
+    next_display_info(ctx, f)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use pocket_cpu::{stub::StubCpu, Cpu};
+
+    #[test]
+    fn shell_display_info_caches_only_requested_fields_and_requeries_after_callback_reset() {
+        let mut cpu = super::super::tests::scanf_cpu();
+        cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut kernel = super::super::tests::fresh_kernel();
+        let hwnd = kernel.controls.create(
+            FAKE_HWND,
+            ControlClass::ListView,
+            3,
+            String::new(),
+            0x50000001,
+            0,
+            0,
+            320,
+            200,
+        );
+        let c = kernel.controls.get_mut(hwnd).unwrap();
+        c.list_items.push((String::new(), 123));
+        c.list_text_callbacks.push(true);
+        c.list_image_callbacks.push(true);
+        c.list_report_columns
+            .push(pocket_kernel::controls::ListColumn {
+                subitem: 1,
+                title: "Details".into(),
+                width: 80,
+                format: 0,
+            });
+        kernel.window_procs.insert(FAKE_HWND, 0x6000);
+        let thunk = super::super::tests::dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let start = |ctx: &mut CallCtx<'_>| {
+            for (reg, value) in [
+                (ArmReg::R0, hwnd),
+                (ArmReg::R1, WM_PAINT),
+                (ArmReg::R2, 0),
+                (ArmReg::R3, 0),
+            ] {
+                ctx.cpu.write_reg(reg, value).unwrap();
+            }
+            assert_eq!(paint(ctx, hwnd).unwrap(), DispatchOutcome::JumpTo(0x6000));
+            ctx.cpu.read_reg(ArmReg::R3).unwrap()
+        };
+        let ptr = start(&mut ctx);
+        assert_eq!(ctx.cpu.read_u32_le(ptr + 8).unwrap(), (-177i32) as u32);
+        assert_eq!(ctx.cpu.read_u32_le(ptr + 12).unwrap(), 11);
+        ctx.cpu
+            .write_mem(ptr + 12, &0x100bu32.to_le_bytes())
+            .unwrap();
+        ctx.cpu.write_mem(ptr + 40, &7u32.to_le_bytes()).unwrap();
+        ctx.cpu
+            .write_mem(
+                ptr + 60,
+                &"Explorer\0"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        assert_eq!(
+            resume(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(0x6000))
+        );
+        assert_eq!(ctx.cpu.read_u32_le(ptr + 20).unwrap(), 1); // uncached report subitem
+        assert_eq!(ctx.cpu.read_u32_le(ptr + 12).unwrap(), 1); // image is already cached
+        ctx.cpu
+            .write_mem(
+                ptr + 60,
+                &"Details\0"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        assert_eq!(
+            resume(&mut ctx).unwrap(),
+            Some(DispatchOutcome::JumpTo(0x6000))
+        );
+        assert_eq!(ctx.cpu.read_u32_le(ptr + 8).unwrap(), (-12i32) as u32);
+        ctx.cpu.write_reg(ArmReg::R0, 4).unwrap();
+        assert_eq!(
+            resume(&mut ctx).unwrap(),
+            Some(DispatchOutcome::ReturnedR0(0))
+        );
+        let c = ctx.kernel.controls.get(hwnd).unwrap();
+        assert_eq!(c.list_items[0], ("Explorer".into(), 123));
+        assert_eq!(c.list_images[0], 7);
+        assert!(!c.list_image_callbacks[0]);
+        assert!(c.list_cached_text[0].contains(&0));
+        assert!(!c.list_cached_text[0].contains(&1));
+        let ptr = start(&mut ctx);
+        assert_eq!(ctx.cpu.read_u32_le(ptr + 20).unwrap(), 1);
+        ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+        resume(&mut ctx).unwrap();
+        ctx.cpu.write_reg(ArmReg::R0, 4).unwrap();
+        resume(&mut ctx).unwrap();
+        let fields = [3, 0, 0, 0, 0, u32::MAX, 0, u32::MAX, 123];
+        ctx.cpu
+            .write_mem(
+                0x1100,
+                &fields
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(
+            list_view_message(&mut ctx, hwnd, 0x104c, 0, 0x1100).unwrap(),
+            1
+        );
+        let ptr = start(&mut ctx);
+        assert_eq!(ctx.cpu.read_u32_le(ptr + 20).unwrap(), 0);
+        assert_eq!(ctx.cpu.read_u32_le(ptr + 12).unwrap(), 11);
+    }
 
     #[test]
     fn navigator_skin_custom_background_survives_default_item_and_restores_caller() {

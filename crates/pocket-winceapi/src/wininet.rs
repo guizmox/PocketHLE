@@ -11,6 +11,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     for (name, f) in [
         ("InternetOpenW", open as crate::Handler),
         ("InternetSetOptionW", set_option),
+        ("InternetQueryOptionW", query_option),
         ("InternetConnectW", connect),
         ("HttpOpenRequestW", open_request),
         ("HttpAddRequestHeadersW", add_headers),
@@ -22,6 +23,48 @@ pub fn register(d: &mut WinCeDispatcher) {
     ] {
         d.register_handler("wininet.dll", name, f);
     }
+}
+fn query_option(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let option = ctx.arg_u32(1)?;
+    let buffer = ctx.arg_u32(2)?;
+    let length = ctx.arg_u32(3)?;
+    if handle != 0 && !ctx.kernel.internet.handles.contains_key(&handle) {
+        return fail(ctx, 6);
+    }
+    let value = match option {
+        // IESample queries the global state before enabling Work Offline in
+        // its File menu. The state comes from the real transport/gate above.
+        50 if handle == 0 => ctx.kernel.internet.connected_state(),
+        50 => return fail(ctx, 12018), // ERROR_INTERNET_INCORRECT_HANDLE_TYPE
+        9 => match ctx.kernel.internet.handles.get(&handle) {
+            Some(Handle::Session(_)) => 1,
+            Some(Handle::Connection(_)) => 4,
+            Some(Handle::Request(_)) => 13,
+            None => return fail(ctx, 6),
+        },
+        21 => match ctx.kernel.internet.handles.get(&handle) {
+            Some(Handle::Session(_)) => 0,
+            Some(Handle::Connection(connection)) => connection.parent,
+            Some(Handle::Request(request)) => request.parent,
+            None => return fail(ctx, 6),
+        },
+        _ => return fail(ctx, 12009), // ERROR_INTERNET_INVALID_OPTION
+    };
+    if !probe(ctx, length, 4, Prot::READ | Prot::WRITE) {
+        return fail(ctx, 87);
+    }
+    let capacity = ctx.cpu.read_u32_le(length)?;
+    if buffer == 0 || capacity < 4 {
+        ctx.cpu.write_mem(length, &4u32.to_le_bytes())?;
+        return fail(ctx, 122); // ERROR_INSUFFICIENT_BUFFER
+    }
+    if !probe(ctx, buffer, 4, Prot::WRITE) {
+        return fail(ctx, 87);
+    }
+    ctx.cpu.write_mem(buffer, &value.to_le_bytes())?;
+    ctx.cpu.write_mem(length, &4u32.to_le_bytes())?;
+    done(ctx, 1)
 }
 fn set_option(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let handle = ctx.arg_u32(0)?;
@@ -46,8 +89,136 @@ fn set_option(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 #[cfg(test)]
 mod option_tests {
+    use super::*;
     use crate::bluetooth::tests::{call, setup};
+    use pocket_cpu::Cpu;
     use pocket_kernel::DispatchOutcome;
+    use std::sync::Arc;
+
+    struct LocalBackend;
+    struct LocalClient;
+    impl net::Backend for LocalBackend {
+        fn open(&self, _: &SessionSpec) -> net::Result<Arc<dyn net::Client>> {
+            Ok(Arc::new(LocalClient))
+        }
+    }
+    impl net::Client for LocalClient {
+        fn start(&self, _: RequestSpec, _: Vec<u8>) -> net::Result<Box<dyn net::Transfer>> {
+            Err(50)
+        }
+    }
+
+    #[test]
+    fn ce_internet_option_queries_negotiate_buffers_report_real_handles_and_keep_network_gate() {
+        let (mut cpu, mut k, mut d) = setup();
+        k.internet = net::State::with_backend(Arc::new(LocalBackend));
+        let session = k
+            .internet
+            .open(SessionSpec {
+                agent: "Test".into(),
+                access: 1,
+                proxy: String::new(),
+                bypass: String::new(),
+            })
+            .unwrap();
+        let connection = k
+            .internet
+            .insert(Handle::Connection(Connection {
+                parent: session,
+                server: "localhost".into(),
+                port: 80,
+                user: String::new(),
+                password: String::new(),
+            }))
+            .unwrap();
+        cpu.write_mem(0x1200, &[0xa5; 12]).unwrap();
+        cpu.write_mem(0x1210, &2u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "wininet.dll",
+                "InternetQueryOptionW",
+                &[0, 50, 0x1200, 0x1210]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_u32_le(0x1210).unwrap(), 4);
+        assert_eq!(cpu.read_mem(0x1200, 12).unwrap(), [0xa5; 12]);
+        assert_eq!(k.thread_last_errors.get(&0), Some(&122));
+        for (handle, option, expected) in [
+            (0, 50, 1),
+            (session, 9, 1),
+            (connection, 9, 4),
+            (session, 21, 0),
+            (connection, 21, session),
+        ] {
+            cpu.write_mem(0x1210, &12u32.to_le_bytes()).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "wininet.dll",
+                    "InternetQueryOptionW",
+                    &[handle, option, 0x1200, 0x1210]
+                ),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(cpu.read_u32_le(0x1200).unwrap(), expected);
+            assert_eq!(cpu.read_u32_le(0x1210).unwrap(), 4);
+            assert_eq!(cpu.read_mem(0x1204, 8).unwrap(), [0xa5; 8]);
+        }
+        k.internet.set_gprs_enabled(false);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "wininet.dll",
+                "InternetQueryOptionW",
+                &[0, 50, 0x1200, 0x1210]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0x12);
+        assert!(!k.internet.gprs_connected);
+        for (handle, option, buffer, error) in [
+            (0, 50, 0, 122),
+            (0, 50, 0x700000, 87),
+            (session, 50, 0x1200, 12018),
+            (0, 999, 0x1200, 12009),
+        ] {
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "wininet.dll",
+                    "InternetQueryOptionW",
+                    &[handle, option, buffer, 0x1210]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            );
+            assert_eq!(k.thread_last_errors.get(&0), Some(&error));
+        }
+        k.internet.close(session);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "wininet.dll",
+                "InternetQueryOptionW",
+                &[connection, 9, 0x1200, 0x1210]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(k.thread_last_errors.get(&0), Some(&6));
+        assert!(k.internet.handles.is_empty());
+    }
+
     #[test]
     fn ce_internet_settings_notification_is_not_a_fake_connection_or_option() {
         let (mut cpu, mut k, mut d) = setup();

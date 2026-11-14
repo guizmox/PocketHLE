@@ -3,6 +3,8 @@ package com.pockethle.app
 import android.os.Bundle
 import androidx.appcompat.widget.Toolbar
 import androidx.preference.ListPreference
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.fragment.app.viewModels
 import org.json.JSONObject
 
 /** Per-game settings sheet. */
@@ -40,12 +42,17 @@ class GameSettingsActivity : HostKeyActivity() {
         private lateinit var rootDir: String
         private lateinit var gameId: String
         private var current: GameSettings = GameSettings.default()
+        private val ceImageModel: WindowsCeImageModel by viewModels()
+        private val selectCeImage = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) ceImageModel.importImage(uri)
+        }
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             rootDir = LibraryPaths.root(requireContext())
             gameId = arguments?.getString(EXTRA_GAME_ID).orEmpty()
             current = readGameSettings() ?: GameSettings.default()
             setPreferencesFromResource(R.xml.preferences_game, rootKey)
+            if (!NativeBridge.isGizmondoGame(rootDir, gameId)) addWindowsCePreferences()
             findPreference<ListPreference>("screen")?.isVisible =
                 !NativeBridge.isGizmondoGame(rootDir, gameId)
             findPreference<androidx.preference.PreferenceCategory>("device_identity_category")?.isVisible =
@@ -261,6 +268,81 @@ class GameSettingsActivity : HostKeyActivity() {
             }
         }
 
+        private fun addWindowsCePreferences() {
+            val category = androidx.preference.PreferenceCategory(requireContext()).apply {
+                key = "windows_ce_category"; title = "Windows CE desktop"; isPersistent = false
+            }
+            preferenceScreen.addPreference(category)
+            val enabled = androidx.preference.SwitchPreferenceCompat(requireContext()).apply {
+                title = "Use Windows CE profile"; isPersistent = false
+                isChecked = current.windowsCe != null
+                summary = "Classic windows and a shared desktop for Explorer and its applications."
+            }
+            val image = androidx.preference.Preference(requireContext()).apply {
+                title = "Choose extracted CE image…"; isPersistent = false
+                setOnPreferenceClickListener { selectCeImage.launch(null); true }
+            }
+            val frames = androidx.preference.SwitchPreferenceCompat(requireContext()).apply {
+                title = "Classic window frames"; isPersistent = false
+                isChecked = current.windowsCe?.classicWindows ?: true
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(windowsCe = (current.windowsCe ?: WindowsCeSettings()).copy(classicWindows = value as Boolean))
+                    writeGameSettings(); true
+                }
+            }
+            val arguments = androidx.preference.EditTextPreference(requireContext()).apply {
+                title = "Command line"; isPersistent = false
+                text = current.windowsCe?.commandLine.orEmpty()
+                dialogMessage = "Arguments passed to the CE application. Use \\Application\\ for Portable Explorer's folder layout."
+                summaryProvider = androidx.preference.EditTextPreference.SimpleSummaryProvider.getInstance()
+                setOnPreferenceChangeListener { _, value ->
+                    val text = value.toString()
+                    if (text.contains('\u0000')) false else {
+                        current = current.copy(windowsCe = (current.windowsCe ?: WindowsCeSettings()).copy(commandLine = text))
+                        writeGameSettings(); true
+                    }
+                }
+            }
+            fun refresh() {
+                val busy = ceImageModel.step.value == WindowsCeImageModel.Step.Copying
+                enabled.isEnabled = !busy
+                image.isEnabled = current.windowsCe != null && !busy
+                image.summary = if (busy) "Copying the selected image…" else
+                    current.windowsCe?.imageRoot?.let { "$it\nFilesystem, fonts and initial registry; changes are saved separately." }
+                        ?: "Optional. Select a folder containing Windows/coredll.dll, or a parent containing fs/Windows."
+                frames.isVisible = current.windowsCe != null
+                arguments.isVisible = current.windowsCe != null
+            }
+            enabled.setOnPreferenceChangeListener { _, value ->
+                current = if (value as Boolean) current.copy(
+                    windowsCe = current.windowsCe ?: WindowsCeSettings(), screen = "vga_landscape", rotation = "none", maxSlices = 0,
+                ) else current.copy(windowsCe = null)
+                findPreference<ListPreference>("screen")?.value = current.screen
+                findPreference<ListPreference>("rotation")?.value = current.rotation
+                writeGameSettings(); refresh(); true
+            }
+            category.addPreference(enabled); category.addPreference(image)
+            category.addPreference(frames); category.addPreference(arguments)
+            ceImageModel.step.observe(this) { step ->
+                when (step) {
+                    is WindowsCeImageModel.Step.Imported -> {
+                        current = current.copy(windowsCe = (current.windowsCe ?: WindowsCeSettings()).copy(
+                            imageRoot = step.imageRoot, dataDir = step.dataDir,
+                        ))
+                        enabled.isChecked = true
+                        writeGameSettings(); ceImageModel.consumed()
+                    }
+                    is WindowsCeImageModel.Step.Failed -> {
+                        android.widget.Toast.makeText(context, step.message, android.widget.Toast.LENGTH_LONG).show()
+                        ceImageModel.consumed()
+                    }
+                    else -> {}
+                }
+                refresh()
+            }
+            refresh()
+        }
+
         private fun readGameSettings(): GameSettings? {
             if (gameId.isEmpty()) return null
             val raw = NativeBridge.readGameSettings(rootDir, gameId)
@@ -280,7 +362,8 @@ class GameSettingsActivity : HostKeyActivity() {
                 (if (saved.isNull("executable_heap")) null else saved.optBoolean("executable_heap")) == current.executableHeap
             val eglFormatSaved = saved != null && saved.has("pocketpc_egl_rgba8888_only") &&
                 saved.optBoolean("pocketpc_egl_rgba8888_only") == current.pocketpcEglRgba8888Only
-            if (result?.optBoolean("ok", false) != true || !frameLimitSaved || !heapSaved || !eglFormatSaved) {
+            val ceSaved = saved != null && GameSettings.fromJson(saved).windowsCe?.copy(originalJson = "{}") == current.windowsCe?.copy(originalJson = "{}")
+            if (result?.optBoolean("ok", false) != true || !frameLimitSaved || !heapSaved || !eglFormatSaved || !ceSaved) {
                 android.widget.Toast.makeText(context, "Could not save settings. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             }
         }

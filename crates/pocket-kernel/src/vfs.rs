@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 mod contracts;
 #[path = "vfs_mapping.rs"]
 mod mapping;
-pub use contracts::{FileInfo, OpenResult, VfsShared};
+pub use contracts::{FileInfo, FindEntry, OpenResult, VfsShared};
 pub use mapping::MappedFile;
 
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.
@@ -273,6 +273,13 @@ struct Mount {
     fallback_files: RefCell<Option<Vec<PathBuf>>>,
 }
 
+/// A child inherits the exact namespace, including read-only and private
+/// overlays. Open descriptions and quotas travel separately through VfsShared.
+#[derive(Debug, Clone)]
+pub struct VfsNamespace {
+    mounts: Vec<Mount>,
+}
+
 /// The Gizmondo registration service device exposed as `REG1:`.
 const REGISTRATION_SERVICE_DEVICE: &str = "reg1:";
 
@@ -287,6 +294,7 @@ struct RamFile {
     data: RamData,
     charge: crate::memory_division::StoreCharge,
     name_bytes: u64,
+    times: [u64; 3],
 }
 #[derive(Debug)]
 enum RamData {
@@ -390,6 +398,8 @@ pub enum AccelerometerStream {
 
 #[derive(Clone)]
 enum VfsObjectInner {
+    Console(Arc<ConsoleOpen>),
+    Null(u32),
     Bluetooth(Arc<BluetoothOpen>),
     BluetoothDriver(Arc<BluetoothDriverOpen>),
     Camera(Arc<CameraOpen>),
@@ -439,9 +449,17 @@ pub struct BluetoothOpen {
     _lease: Arc<contracts::Lease>,
 }
 
+pub struct ConsoleOpen {
+    pub device: crate::console::SharedConsole,
+    pub access: u32,
+}
+
 /// Mount-point + open-handle table.
 pub struct Vfs {
     pub stdio_text_modes: [bool; 3],
+    console_device: Option<crate::console::SharedConsole>,
+    console_handles: HashMap<u32, Arc<ConsoleOpen>>,
+    null_handles: HashMap<u32, u32>,
     pub bluetooth: crate::bluetooth::State,
     bluetooth_handles: HashMap<u32, Arc<BluetoothOpen>>,
     bluetooth_driver_handles: HashMap<u32, Arc<BluetoothDriverOpen>>,
@@ -488,6 +506,9 @@ impl Vfs {
     pub fn new() -> Self {
         let mut vfs = Self {
             stdio_text_modes: [true; 3],
+            console_device: None,
+            console_handles: HashMap::new(),
+            null_handles: HashMap::new(),
             bluetooth: Default::default(),
             bluetooth_handles: HashMap::new(),
             bluetooth_driver_handles: HashMap::new(),
@@ -515,6 +536,38 @@ impl Vfs {
 
     pub fn attach_ram(&mut self, ram: Option<crate::memory_division::MemoryDivision>) {
         self.ram = ram;
+    }
+
+    pub fn console_device(&self) -> Option<crate::console::SharedConsole> {
+        self.console_device.clone()
+    }
+    pub fn ensure_console_device(&mut self) -> crate::console::SharedConsole {
+        self.console_device
+            .get_or_insert_with(Default::default)
+            .clone()
+    }
+    pub fn attach_console_device(&mut self, device: crate::console::SharedConsole) {
+        self.console_device = Some(device);
+    }
+    pub fn console_open(&self, handle: u32) -> Option<Arc<ConsoleOpen>> {
+        self.console_handles.get(&handle).cloned()
+    }
+    pub fn is_null(&self, handle: u32) -> bool {
+        self.null_handles.contains_key(&handle)
+    }
+    pub fn open_console_device(&mut self, access: u32) -> Result<u32, u32> {
+        let h = self.next_handle;
+        self.next_handle = self.next_handle.checked_add(1).ok_or(8u32)?;
+        let device = self.ensure_console_device();
+        self.console_handles
+            .insert(h, Arc::new(ConsoleOpen { device, access }));
+        Ok(h)
+    }
+    pub fn open_null_device(&mut self, access: u32) -> Result<u32, u32> {
+        let h = self.next_handle;
+        self.next_handle = self.next_handle.checked_add(1).ok_or(8u32)?;
+        self.null_handles.insert(h, access);
+        Ok(h)
     }
     /// External mounts, including read-only card/ROM overlays, always win.
     pub fn is_ram_path(&self, path: &str) -> bool {
@@ -573,6 +626,7 @@ impl Vfs {
                 data: RamData::Bytes(Vec::new()),
                 charge,
                 name_bytes,
+                times: [0; 3],
             }));
             store.files.insert(key, file.clone());
             file
@@ -595,13 +649,27 @@ impl Vfs {
         Some(handle)
     }
     pub fn read_failure_error(&self, handle: u32) -> u32 {
-        if self.lease(handle).is_some_and(|l| l.access & 1 == 0) {
+        if self
+            .console_handles
+            .get(&handle)
+            .is_some_and(|c| c.access & 1 == 0)
+            || self.null_handles.get(&handle).is_some_and(|a| a & 1 == 0)
+            || self.lease(handle).is_some_and(|l| l.access & 1 == 0)
+        {
             5
         } else {
             30
         }
     }
     pub fn write_failure_error(&self, handle: u32) -> u32 {
+        if self
+            .console_handles
+            .get(&handle)
+            .is_some_and(|c| c.access & 2 == 0)
+            || self.null_handles.get(&handle).is_some_and(|a| a & 2 == 0)
+        {
+            return 5;
+        }
         if let Some(lease) = self.lease(handle) {
             if lease.access & 2 == 0 {
                 return 5;
@@ -730,6 +798,13 @@ impl Vfs {
     /// Mount a host directory as read-only guest storage.
     pub fn mount_read_only(&mut self, guest_prefix: &str, host_dir: impl Into<PathBuf>) {
         self.mount_with_options(guest_prefix, host_dir, true);
+    }
+
+    /// A CE system image has exact device paths, rather than archive resource
+    /// aliases. Explorer must not find a missing file elsewhere by basename.
+    pub fn mount_read_only_filesystem(&mut self, guest_prefix: &str, host_dir: impl Into<PathBuf>) {
+        self.mount_read_only(guest_prefix, host_dir);
+        self.mounts.last_mut().unwrap().resource_fallback = false;
     }
 
     pub fn mount_save_dir(&mut self, guest_prefix: &str, host_dir: impl Into<PathBuf>) {
@@ -966,6 +1041,16 @@ impl Vfs {
             .iter()
             .map(|m| (m.prefix.clone(), m.host_dir.clone()))
             .collect()
+    }
+
+    pub fn namespace_snapshot(&self) -> VfsNamespace {
+        VfsNamespace {
+            mounts: self.mounts.clone(),
+        }
+    }
+
+    pub fn inherit_namespace(&mut self, namespace: &VfsNamespace) {
+        self.mounts.clone_from(&namespace.mounts);
     }
 
     fn normalise_guest_path(&self, guest_path: &str) -> String {
@@ -1338,6 +1423,7 @@ impl Vfs {
         let normalised = self.normalise_guest_path(guest_dir);
         let mut merged = std::collections::BTreeMap::new();
         let mut ram_directory = false;
+        let mut host_directory = false;
         if self.is_ram_path(guest_dir) {
             if let Some(ram) = &self.ram {
                 if let Ok(store) = ram.files.lock() {
@@ -1375,6 +1461,10 @@ impl Vfs {
             let Ok(entries) = std::fs::read_dir(host) else {
                 continue;
             };
+            // Pocket Word's Save As validates the parent through this listing.
+            // A fresh CE profile's empty My Documents still exists; filtered
+            // or overlay-deleted contents must not make it a missing directory.
+            host_directory = true;
             for entry in entries.flatten() {
                 if self.hidden_backing(mount, &entry.path()) {
                     continue;
@@ -1422,7 +1512,8 @@ impl Vfs {
                 .entry(child.to_string())
                 .or_insert((display.to_string(), 0, true));
         }
-        (ram_directory || !merged.is_empty()).then(|| merged.into_values().collect())
+        (ram_directory || host_directory || !merged.is_empty())
+            .then(|| merged.into_values().collect())
     }
 
     /// Create a guest directory through the writable mount that owns it.
@@ -1730,6 +1821,9 @@ impl Vfs {
     }
 
     pub fn read(&mut self, handle: u32, buf: &mut [u8]) -> Option<usize> {
+        if let Some(access) = self.null_handles.get(&handle) {
+            return (access & 1 != 0).then_some(0);
+        }
         if let Some(open) = self.ram_handles.get(&handle) {
             let mut open = open.lock().ok()?;
             if open.access == Access::Write
@@ -1827,6 +1921,9 @@ impl Vfs {
     }
 
     fn write_raw(&mut self, handle: u32, buf: &[u8]) -> Option<usize> {
+        if let Some(access) = self.null_handles.get(&handle) {
+            return (access & 2 != 0).then_some(buf.len());
+        }
         if let Some(open) = self.ram_handles.get(&handle) {
             let mut open = open.lock().ok()?;
             if open.access == Access::Read {
@@ -1862,31 +1959,6 @@ impl Vfs {
             of.file.seek(SeekFrom::End(0)).ok()?;
         }
         of.file.write(buf).ok()
-    }
-
-    /// FILETIME values for an existing file handle. Zero denotes unavailable
-    /// timestamps (including the RAM filesystem), rather than invented times.
-    pub fn file_times(&self, handle: u32) -> Option<[u64; 3]> {
-        if self.ram_handles.contains_key(&handle) {
-            return Some([0; 3]);
-        }
-        let file = self.handles.get(&handle)?.lock().ok()?;
-        let metadata = file.file.metadata().ok()?;
-        let convert = |time: std::io::Result<std::time::SystemTime>| -> u64 {
-            let Ok(time) = time else {
-                return 0;
-            };
-            let epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(11_644_473_600);
-            time.duration_since(epoch)
-                .ok()
-                .and_then(|d| u64::try_from(d.as_nanos() / 100).ok())
-                .unwrap_or(0)
-        };
-        Some([
-            convert(metadata.created()),
-            convert(metadata.accessed()),
-            convert(metadata.modified()),
-        ])
     }
 
     pub fn size(&mut self, handle: u32) -> Option<u64> {
@@ -1938,6 +2010,9 @@ impl Vfs {
     }
 
     pub fn flush(&mut self, handle: u32) -> std::io::Result<()> {
+        if self.console_handles.contains_key(&handle) || self.null_handles.contains_key(&handle) {
+            return Ok(());
+        }
         if self.ram_handles.contains_key(&handle) {
             return Ok(());
         }
@@ -1953,6 +2028,12 @@ impl Vfs {
 
     /// An opaque shared open description, retaining seek/access/device state.
     pub fn export_handle(&self, handle: u32) -> Option<VfsObject> {
+        if let Some(console) = self.console_handles.get(&handle) {
+            return Some(VfsObject(VfsObjectInner::Console(console.clone()), None));
+        }
+        if let Some(access) = self.null_handles.get(&handle) {
+            return Some(VfsObject(VfsObjectInner::Null(*access), None));
+        }
         if let Some(stream) = self.htc_sensor_stream(handle) {
             return Some(VfsObject(VfsObjectInner::HtcSensor(stream), None));
         }
@@ -1995,6 +2076,12 @@ impl Vfs {
             return false;
         }
         match object.0 {
+            VfsObjectInner::Console(console) => {
+                self.console_handles.insert(handle, console);
+            }
+            VfsObjectInner::Null(access) => {
+                self.null_handles.insert(handle, access);
+            }
             VfsObjectInner::BluetoothDriver(driver) => {
                 self.bluetooth_driver_handles.insert(handle, driver);
             }
@@ -2032,7 +2119,9 @@ impl Vfs {
         true
     }
     pub fn is_handle(&self, handle: u32) -> bool {
-        self.vibration_handles.contains_key(&handle)
+        self.console_handles.contains_key(&handle)
+            || self.null_handles.contains_key(&handle)
+            || self.vibration_handles.contains_key(&handle)
             || self.gps_handles.contains_key(&handle)
             || self.camera_handles.contains_key(&handle)
             || self.bluetooth_handles.contains_key(&handle)
@@ -2065,6 +2154,8 @@ impl Vfs {
     pub fn open_handles(&self) -> Vec<u32> {
         self.handles
             .keys()
+            .chain(self.console_handles.keys())
+            .chain(self.null_handles.keys())
             .chain(self.vibration_handles.keys())
             .chain(self.gps_handles.keys())
             .chain(self.camera_handles.keys())
@@ -2086,7 +2177,9 @@ impl Vfs {
     }
 
     pub fn close(&mut self, handle: u32) -> bool {
-        self.vibration_handles.remove(&handle).is_some()
+        self.console_handles.remove(&handle).is_some()
+            || self.null_handles.remove(&handle).is_some()
+            || self.vibration_handles.remove(&handle).is_some()
             || self.gps_handles.remove(&handle).is_some()
             || self.camera_handles.remove(&handle).is_some()
             || self.bluetooth_handles.remove(&handle).is_some()
@@ -2113,6 +2206,8 @@ impl Vfs {
             }
         }
         let n = self.handles.len() + self.ram_handles.len();
+        self.console_handles.clear();
+        self.null_handles.clear();
         self.ram_handles.clear();
         self.handles.clear();
         self.volumes.clear();
@@ -3278,6 +3373,31 @@ mod tests {
     }
 
     #[test]
+    fn existing_empty_directories_remain_present_in_a_merged_filesystem() {
+        let image = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir(image.path().join("Empty")).unwrap();
+        std::fs::create_dir(image.path().join("Filtered")).unwrap();
+        std::fs::write(image.path().join("Filtered/note.txt"), b"original").unwrap();
+        std::fs::create_dir(data.path().join("My Documents")).unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_read_only_filesystem("/", image.path());
+        vfs.mount_filesystem("/", data.path());
+        for path in [r"\Empty", r"\My Documents"] {
+            assert_eq!(vfs.list_dir(path), Some(Vec::new()));
+            assert_eq!(vfs.attributes(path).unwrap() & 0x10, 0x10);
+        }
+        assert_eq!(vfs.list_dir(r"\Missing"), None);
+        assert_eq!(vfs.list_dir(r"\Filtered\note.txt"), None);
+        vfs.delete(r"\Filtered\note.txt").unwrap();
+        assert_eq!(vfs.list_dir(r"\Filtered"), Some(Vec::new()));
+        assert_eq!(
+            std::fs::read(image.path().join("Filtered/note.txt")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
     fn isolated_empty_backing_is_not_a_game_subdirectory() {
         let saves = tempfile::tempdir().unwrap();
         let mut v = Vfs::new();
@@ -3434,6 +3554,9 @@ mod tests {
     #[test]
     fn device_paths_do_not_fall_back_to_basename_files() {
         let dir = tempfile::tempdir().unwrap();
+        // ':' cannot occur in a Windows host filename; the guest device
+        // refusal still applies there without a colon-named fallback fixture.
+        #[cfg(not(windows))]
         std::fs::write(dir.path().join("ACS1:"), b"not a device").unwrap();
         let mut v = Vfs::new();
         v.mount("\\Application\\", dir.path());

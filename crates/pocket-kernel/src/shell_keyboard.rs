@@ -8,6 +8,8 @@ pub struct ShellKeyboard {
     pub visible: bool,
     /// WinCE SIP request, independent of the Gizmondo shell protocol.
     pub sip: bool,
+    /// Original CE6 Explorer reserves a panel rectangle above its taskbar.
+    pub default_sip_rect: Option<[i32; 4]>,
     pub pointer_captured: bool,
     /// Touch highlight, independent of the controller selection.
     pub pressed_key: Option<usize>,
@@ -27,6 +29,7 @@ impl Default for ShellKeyboard {
         Self {
             visible: false,
             sip: false,
+            default_sip_rect: None,
             pointer_captured: false,
             pressed_key: None,
             rotation: 0,
@@ -97,6 +100,26 @@ impl ShellKeyboard {
     pub fn panel_height(h: i32) -> i32 {
         (h / 2).clamp(1, 128)
     }
+    /// The desktop must publish and route the whole keyboard, including its
+    /// dismiss strip outside a child CPL window. Use the renderer's SIP rectangle.
+    pub fn display_bounds(&self, w: i32, h: i32) -> (i32, i32, i32, i32) {
+        if !self.sip {
+            let height = Self::panel_height(h);
+            return (0, h - height, w, height);
+        }
+        let (_, _, dw, dh) = self.display_point(0, 0, w, h);
+        let [left, top, right, mut bottom] = crate::classic_sip::rect(self, dw, dh);
+        if self.default_sip_rect.is_none() {
+            bottom = dh;
+        }
+        let (left, top, right, bottom) = match self.rotation % 4 {
+            1 => (top, h - right, bottom, h - left),
+            2 => (w - right, h - bottom, w - left, h - top),
+            3 => (w - bottom, left, w - top, right),
+            _ => (left, top, right, bottom),
+        };
+        (left, top, (right - left).max(0), (bottom - top).max(0))
+    }
     pub fn display_point(&self, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
         match self.rotation % 4 {
             1 => (h - 1 - y, x, h, w),
@@ -117,8 +140,12 @@ impl ShellKeyboard {
         let (_, _, dw, dh) = self.display_point(0, 0, w as i32, h as i32);
         let mut bitmap = crate::gdi::Bitmap::new(dw as u32, dh as u32);
         self.render_panel(&mut Surface::Bitmap(&mut bitmap));
-        for y in crate::classic_sip::top(dw, dh)..dh {
-            for x in 0..dw {
+        let [left, top, right, mut bottom] = crate::classic_sip::rect(self, dw, dh);
+        if self.default_sip_rect.is_none() {
+            bottom = dh;
+        }
+        for y in top..bottom {
+            for x in left..right {
                 let (gx, gy) = match self.rotation % 4 {
                     1 => (y, h as i32 - 1 - x),
                     2 => (w as i32 - 1 - x, h as i32 - 1 - y),
@@ -261,6 +288,52 @@ mod rotation_tests {
 #[cfg(test)]
 mod case_tests {
     use super::*;
+    #[test]
+    fn desktop_keyboard_bounds_cover_rotated_keys_and_the_dismiss_strip() {
+        for (w, h) in [(240, 320), (640, 480)] {
+            for rotation in 0..4 {
+                let mut keyboard = ShellKeyboard {
+                    sip: true,
+                    rotation,
+                    ..Default::default()
+                };
+                let (_, _, dw, dh) = keyboard.display_point(0, 0, w, h);
+                let (x, y) = crate::classic_sip::key_center("q", dw, dh).unwrap();
+                for (x, y, value) in [(x, y, 'q' as u32), (dw - 13, dh - 13, 0)] {
+                    let (gx, gy) = match rotation {
+                        1 => (y, h - 1 - x),
+                        2 => (w - 1 - x, h - 1 - y),
+                        3 => (w - 1 - y, x),
+                        _ => (x, y),
+                    };
+                    let (left, top, width, height) = keyboard.display_bounds(w, h);
+                    assert!(gx >= left && gx < left + width && gy >= top && gy < top + height);
+                    let (dx, dy, _, _) = keyboard.display_point(gx, gy, w, h);
+                    assert_eq!(keyboard.tap(dx, dy, dw, dh), Some(value));
+                }
+                keyboard.default_sip_rect = Some([dw / 4, dh / 4, dw * 3 / 4, dh * 3 / 4]);
+                let bounds = keyboard.display_bounds(w, h);
+                assert!(
+                    bounds.0 >= 0
+                        && bounds.1 >= 0
+                        && bounds.0 + bounds.2 <= w
+                        && bounds.1 + bounds.3 <= h
+                );
+                assert_eq!(
+                    bounds.2 * bounds.3,
+                    (dw * 3 / 4 - dw / 4) * (dh * 3 / 4 - dh / 4)
+                );
+            }
+        }
+        let legacy = ShellKeyboard::default();
+        assert_eq!(legacy.display_bounds(640, 480), (0, 352, 640, 128));
+        let classic = ShellKeyboard {
+            sip: true,
+            ..Default::default()
+        };
+        assert_eq!(classic.display_bounds(640, 480), (0, 294, 640, 186));
+    }
+
     #[test]
     fn sip_case_toggle_preserves_selection_digits_and_gizmondo_letters() {
         let mut k = ShellKeyboard {

@@ -57,7 +57,10 @@ mod tests {
         }
 
         let report = run(root).unwrap();
-        assert!(report.starts_with("Moved 1 verified CAB aliases"));
+        assert!(
+            report.starts_with("Moved 1 verified CAB aliases"),
+            "{report}"
+        );
         let backup = fs::read_dir(root)
             .unwrap()
             .map(|entry| entry.unwrap().path())

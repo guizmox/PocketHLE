@@ -280,7 +280,7 @@ pub struct PocketLauncher {
     run_diagnostic: Option<(pocket_library::session_diagnostic::Diagnostic, bool)>,
     menu_host_press: std::collections::HashMap<(usize, String), Instant>,
     display_fullscreen: bool,
-    startup_window: Option<bool>,
+    startup_window: Option<(bool, bool)>,
     fullscreen_window_size: Option<Vec2>,
     reconstruction: Option<std::sync::Arc<std::sync::Mutex<crate::reconstruction::Reconstruction>>>,
     screenshot: crate::screenshot::SharedScreenshot,
@@ -312,6 +312,8 @@ pub struct PocketLauncher {
     restore_archive: Option<std::path::PathBuf>,
     file_dialog: Option<crate::file_dialog::FileDialog>,
     pending_run: Option<GameEntry>,
+    ce_launch: crate::ce_launch::CeLaunch,
+    ce_profiles: crate::ce_launch::CeProfiles,
     colors_startup_prompt: Option<(
         GameEntry,
         Vec<pocket_library::ColorsLanguage>,
@@ -381,6 +383,7 @@ pub struct PocketLauncher {
     running_game_id: Option<String>,
     /// True while the current title is a Gizmondo game.
     running_is_gizmondo: bool,
+    running_is_windows_ce: bool,
     /// Guest button waiting for the user to press the host key that
     /// should drive it, while the keybinding editor is in "press a
     /// key" mode.
@@ -662,6 +665,7 @@ fn draw_gizmondo_sd(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Library,
+    WindowsCe,
     Settings,
     GizmondoOptions,
     PocketPcOptions,
@@ -899,7 +903,11 @@ impl PocketLauncher {
             .games()
             .iter()
             .any(|g| is_gizmondo_game(g, library.root()));
+        let ce_launch = crate::ce_launch::CeLaunch::load(library.root());
+        let ce_profiles = crate::ce_launch::CeProfiles::load(library.root());
         Self {
+            ce_launch,
+            ce_profiles,
             library,
             library_tab: if library_gizmondo {
                 crate::deck_navigation::LibraryTab::Gizmondo
@@ -1011,6 +1019,7 @@ impl PocketLauncher {
             game_rotation: RotationPref::None,
             running_game_id: None,
             running_is_gizmondo: false,
+            running_is_windows_ce: false,
             input_gestures: Default::default(),
             input_gesture_clock: Instant::now(),
             input_controller: false,
@@ -1655,7 +1664,7 @@ impl PocketLauncher {
     fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
         use crate::toolbar_ui::{Action, State};
         let selected = match self.screen {
-            Screen::Library => Some(Action::Library),
+            Screen::Library | Screen::WindowsCe => Some(Action::Library),
             Screen::Settings => Some(Action::Emulator),
             Screen::GameSettings => Some(Action::Game),
             Screen::PocketPcOptions => Some(Action::PocketPc),
@@ -1898,6 +1907,7 @@ impl PocketLauncher {
                 crate::deck_navigation::LibraryTab::Recordings,
                 "Recordings",
             );
+            if crate::controller_ui::button(ui,"Windows CE…").clicked() { self.screen = Screen::WindowsCe; }
         });
         if self.library_tab != previous_tab {
             self.game_menu = None;
@@ -2045,6 +2055,48 @@ impl PocketLauncher {
                     }
                 });
         });
+    }
+
+    fn ui_windows_ce(&mut self, ui: &mut egui::Ui) {
+        use crate::ce_launch::Action;
+        match self.ce_launch.ui(ui, &self.ce_profiles) {
+            Some(Action::SaveProfile) => {
+                if let Err(error) = self.ce_profiles.remember(self.library.root(), &mut self.ce_launch)
+                    .and_then(|()| self.ce_launch.save(self.library.root())) {
+                    self.import_error_title = "Windows CE profile";
+                    self.import_error = Some(format!("{error:#}"));
+                }
+            }
+            Some(Action::PickExecutable) => {
+                self.library_busy = true;
+                let directory = std::path::Path::new(&self.ce_launch.executable).parent().map(std::path::Path::to_path_buf);
+                self.open_file_dialog(crate::file_dialog::Purpose::CeExecutable,directory,String::new());
+            }
+            Some(Action::PickImage) => {
+                self.library_busy = true;
+                let directory = (!self.ce_launch.image_root.trim().is_empty()).then(||std::path::PathBuf::from(&self.ce_launch.image_root));
+                self.open_file_dialog(crate::file_dialog::Purpose::CeImage,directory,String::new());
+            }
+            Some(Action::PickData) => {
+                self.library_busy = true;
+                let directory = (!self.ce_launch.data_dir.trim().is_empty()).then(||std::path::PathBuf::from(&self.ce_launch.data_dir));
+                self.open_file_dialog(crate::file_dialog::Purpose::CeData,directory,String::new());
+            }
+            Some(Action::Run) => {
+                let result = (|| {
+                    if !self.ce_launch.profile_name.trim().is_empty() { self.ce_profiles.remember(self.library.root(), &mut self.ce_launch)?; }
+                    let game = self.ce_launch.entry()?;
+                    self.ce_launch.save(self.library.root())?;
+                    Ok::<_, anyhow::Error>(game)
+                })();
+                match result {
+                    Ok(game) => self.spawn_run_selected(&game),
+                    Err(error) => { self.import_error_title = "Windows CE launch"; self.import_error = Some(format!("{error:#}")); }
+                }
+            }
+            Some(Action::Back) => self.screen = Screen::Library,
+            None => {}
+        }
     }
 
     fn ui_game_information(&mut self, ctx: &egui::Context) {
@@ -3909,12 +3961,49 @@ impl PocketLauncher {
     }
 
     fn ui_run(&mut self, ui: &mut egui::Ui) {
+        if self.running_is_windows_ce {
+            self.ui_ce_session(ui);
+            return;
+        }
         self.grow_window_for_upscale(ui);
         if self.running_is_gizmondo {
             self.ui_gizmondo(ui);
             return;
         }
         self.ui_pocketpc(ui);
+    }
+
+    fn ui_ce_session(&mut self, ui: &mut egui::Ui) {
+        let bounds = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(bounds, 0.0, Color32::from_rgb(8, 13, 21));
+        let header = Rect::from_min_max(bounds.min, Pos2::new(bounds.right(), bounds.top() + 32.0));
+        ui.allocate_ui_at_rect(header, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Stop / Library").clicked() { self.return_to_library(ui.ctx()); }
+                ui.label(if self.ce_launch.profile_name.is_empty() { "Windows CE".into() }
+                    else { format!("Windows CE — {}", self.ce_launch.profile_name) });
+            });
+        });
+        let room = Rect::from_min_max(Pos2::new(bounds.left(), header.bottom()), bounds.max);
+        if let Some(frame) = self.last_frame_snapshot.as_ref() {
+            let guest = Vec2::new(frame.width as f32, frame.height as f32);
+            let native = if self.game_rotation.is_quarter_turn() { [frame.texture_height, frame.texture_width] }
+                else { [frame.texture_width, frame.texture_height] };
+            let dpi = ui.ctx().pixels_per_point();
+            let [left, top, width, height] = crate::fullscreen_layout::presentation_fit_capped(
+                [(room.width().max(1.0) * dpi).floor() as u32, (room.height().max(1.0) * dpi).floor() as u32], native, 4);
+            let origin = Pos2::new((room.left() * dpi).round() / dpi, (room.top() * dpi).round() / dpi);
+            let rect = Rect::from_min_size(origin + Vec2::new(left as f32, top as f32) / dpi,
+                Vec2::new(width as f32, height as f32) / dpi);
+            ui.allocate_ui_at_rect(room, |ui| {
+                ui.set_clip_rect(room.intersect(ui.clip_rect()));
+                self.paint_guest_frame(ui, rect);
+                self.handle_pointer_clipped(ui.ctx(), &rect, guest, room);
+            });
+        } else {
+            ui.allocate_ui_at_rect(room, |ui| { ui.centered_and_justified(|ui| { ui.label("Starting Windows CE…"); }); });
+        }
+        ui.allocate_rect(bounds, Sense::hover());
     }
 
     /// Host presentation only: fixed controls, native pixels and the existing inverse input transform.
@@ -5652,11 +5741,36 @@ impl PocketLauncher {
                     }
                     continue;
                 }
-                if let egui::Event::Key { key, pressed, .. } = &event {
+                if let egui::Event::Key { key, pressed, repeat, modifiers, .. } = &event {
+                    // CE text controls and Pocket CMD use native editing keys,
+                    // independent of the game's configurable action bindings.
+                    if modifiers.ctrl && matches!(key, egui::Key::C | egui::Key::D | egui::Key::Z) {
+                        if *pressed && !repeat {
+                            let vk = match key { egui::Key::C => 0x43, egui::Key::D => 0x44, _ => 0x5a };
+                            for event in [InputEvent::KeyDown { vk: 0x11 }, InputEvent::KeyDown { vk },
+                                InputEvent::KeyUp { vk }, InputEvent::KeyUp { vk: 0x11 }] { self.send_input(event); }
+                        }
+                        continue;
+                    }
                     if matches!(key, egui::Key::Backspace) {
                         if *pressed {
                             self.send_input(InputEvent::Text { character: '\u{8}' });
                         }
+                        continue;
+                    }
+                    let native = match key {
+                        egui::Key::Tab => Some(9), egui::Key::Enter => Some(13),
+                        egui::Key::Escape if !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) => Some(27),
+                        egui::Key::Home => Some(0x24), egui::Key::End => Some(0x23), egui::Key::Delete => Some(0x2e),
+                        egui::Key::PageUp => Some(0x21), egui::Key::PageDown => Some(0x22),
+                        egui::Key::ArrowLeft => Some(0x25), egui::Key::ArrowUp => Some(0x26),
+                        egui::Key::ArrowRight => Some(0x27), egui::Key::ArrowDown => Some(0x28),
+                        _ => None,
+                    };
+                    if let Some(vk) = native {
+                        if *pressed {
+                            if !repeat && self.held.press(InputSource::Keyboard, vk) { self.send_input(InputEvent::KeyDown { vk }); }
+                        } else if self.held.release(InputSource::Keyboard, vk) { self.send_input(InputEvent::KeyUp { vk }); }
                         continue;
                     }
                     // Printable keys arrive as committed Text, never as game actions.
@@ -5845,6 +5959,18 @@ impl PocketLauncher {
                 }
             }
             Outcome::Selected(Purpose::Import, path) => self.import_selected_file(path),
+            Outcome::Selected(Purpose::CeExecutable, path) => {
+                self.ce_launch.executable = path.to_string_lossy().into_owned();
+                self.library_busy = false;
+            }
+            Outcome::Selected(Purpose::CeImage, path) => {
+                self.ce_launch.image_root = path.to_string_lossy().into_owned();
+                self.library_busy = false;
+            }
+            Outcome::Selected(Purpose::CeData, path) => {
+                self.ce_launch.data_dir = path.to_string_lossy().into_owned();
+                self.library_busy = false;
+            }
             Outcome::Selected(Purpose::RestoreBackup, path) => {
                 self.restore_archive = Some(path);
                 self.status = "Choose a restore mode.".into();
@@ -5960,15 +6086,34 @@ impl PocketLauncher {
         self.status = "Importing...".to_string();
     }
 
-    pub fn request_startup_window(&mut self, fullscreen: bool) {
-        self.startup_window = Some(fullscreen);
+    pub fn request_startup_window(&mut self, fullscreen: bool, minimized: bool) {
+        self.startup_window = Some((fullscreen, minimized));
     }
 
     pub fn launch_from_command_line(&mut self, game: &GameEntry, filter: Option<usize>) {
+        if let Some(ce) = &game.settings.windows_ce {
+            self.ce_launch = crate::ce_launch::CeLaunch {
+                profile_name: ce.profile_name.clone(),
+                executable: game.executable.to_string_lossy().into_owned(),
+                image_root: ce.image_root.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),
+                data_dir: ce.data_dir.as_ref().map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),
+                app_prefix: ce.app_prefix.clone(),
+                command_line: ce.command_line.clone(),
+                screen: game.settings.screen,
+                classic_windows: ce.classic_windows,
+                mounts: ce.mounts.clone(),
+            };
+            if !self.ce_launch.profile_name.is_empty() {
+                if let Err(error) = self.ce_profiles.remember(self.library.root(), &mut self.ce_launch)
+                    .and_then(|()| self.ce_launch.save(self.library.root())) {
+                    log::warn!("Cannot save CE launch profile: {error:#}");
+                }
+            }
+        }
         if let Some(filter) = filter.and_then(|i| UpscaleFilter::ALL.get(i)).copied() {
             self.upscale_filter = filter;
         }
-        self.selected_game = Some(game.id.clone());
+        self.selected_game = game.settings.windows_ce.is_none().then(||game.id.clone());
         // Preserve the normal launch path, including required startup prompts.
         self.spawn_run(game);
     }
@@ -6211,8 +6356,9 @@ impl PocketLauncher {
         self.screen = Screen::Run;
         self.game_viewport_active = true;
         self.running_game = Some(game.display_name.clone());
-        self.running_game_id = Some(game.id.clone());
+        self.running_game_id = game.settings.windows_ce.is_none().then(||game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
+        self.running_is_windows_ce = game.settings.windows_ce.is_some();
         self.running_simulated_tilt = !self.running_is_gizmondo
             && game.settings.effective_tilt_input(self.library.config()) != TiltInput::Accelerometer;
         self.gamepad_rx.set_accelerometer_enabled(!self.running_simulated_tilt);
@@ -6432,7 +6578,7 @@ impl eframe::App for PocketLauncher {
         }
         // Apply startup mode after native restoration, then size a normal window
         // using a fixed physical target capped to the actual monitor, never a game.
-        if let Some(fullscreen) = self.startup_window {
+        if let Some((fullscreen, minimized)) = self.startup_window {
             let target = LibraryViewport { fullscreen, maximized: false, size: None, position: None };
             if target.restore(ctx) {
                 if fullscreen {
@@ -6457,6 +6603,12 @@ impl eframe::App for PocketLauncher {
                         ctx.request_repaint_after(Duration::from_millis(16));
                     }
                 }
+            }
+            if minimized && self.startup_window.is_none() {
+                // Background CE validation starts hidden and inactive. Show it
+                // only after minimization, preserving the foreground game.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
         }
 
@@ -6875,6 +7027,11 @@ impl eframe::App for PocketLauncher {
             }
             match self.screen {
                 Screen::About => self.ui_about(ui),
+                Screen::WindowsCe => {
+                    crate::controller_ui::page_scope(ui,"windows_ce",|ui| {
+                        ScrollArea::vertical().show(ui,|ui| self.ui_windows_ce(ui));
+                    });
+                }
                 Screen::Library => {
                     ui.add_enabled_ui(
                         self.information_game.is_none() && self.rename_draft.is_none(),

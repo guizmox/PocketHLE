@@ -1417,7 +1417,7 @@ pub fn remove_materialised_cab_sources(
     copies: &[(PathBuf, PathBuf)],
     executable: &Path,
 ) -> io::Result<()> {
-    let path_key = |path: &Path| path.to_string_lossy().to_ascii_lowercase();
+    let path_key = cab_host_path_key;
     let (by_source, destinations) = cab_install_destinations(root, setup, header);
     let installed_copies: HashSet<_> = copies
         .iter()
@@ -1443,6 +1443,14 @@ pub fn remove_materialised_cab_sources(
 
 type CabDestinations = HashMap<String, Vec<Option<PathBuf>>>;
 
+fn cab_host_path_key(path: &Path) -> String {
+    // Portable manifests use '/', while Windows directory entries use '\\'.
+    // Both spellings must protect the selected executable during CAB cleanup.
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
+}
+
 fn cab_install_destinations(
     root: &Path,
     setup: Option<&WinCeSetupScript>,
@@ -1452,7 +1460,7 @@ fn cab_install_destinations(
     let mut destinations = HashSet::new();
     let mut record = |source: String, destination: Option<PathBuf>| {
         if let Some(path) = &destination {
-            destinations.insert(path.to_string_lossy().to_ascii_lowercase());
+            destinations.insert(cab_host_path_key(path));
         }
         by_source.entry(source).or_default().push(destination);
     };
@@ -1586,7 +1594,7 @@ fn redundant_cab_members(
     destinations: HashSet<String>,
     matches: impl Fn(&PathBuf, &Path) -> bool,
 ) -> Vec<PathBuf> {
-    let path_key = |path: &Path| path.to_string_lossy().to_ascii_lowercase();
+    let path_key = cab_host_path_key;
     let mut visited = HashSet::new();
     let mut redundant = Vec::new();
     for source in sources {

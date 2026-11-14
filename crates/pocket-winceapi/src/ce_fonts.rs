@@ -10,6 +10,9 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler("coredll.dll", "AddFontResourceW", add);
     d.register_handler("coredll.dll", "RemoveFontResourceW", remove);
     d.register_handler("coredll.dll", "EnumFontFamiliesW", enumerate);
+    // CE Messenger requests the LOGFONTW/TEXTMETRICW prefix of the same
+    // records while selecting its UI font through EnumFontsW.
+    d.register_handler("coredll.dll", "EnumFontsW", enumerate);
 }
 
 #[cfg(test)]
