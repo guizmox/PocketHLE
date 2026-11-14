@@ -3956,6 +3956,18 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), LibraryError> 
         .unwrap_or_else(|| Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(directory)?;
     temp.write_all(&bytes)?;
+    // Close the writer before publication: another Windows writer must be able
+    // to replace the installed file immediately, without an open handle here.
+    let temp = temp.into_temp_path();
+    // Concurrent MoveFileExW replacements can still race on the destination.
+    // Serialize only publication on Windows; the temporary writes stay separate.
+    #[cfg(windows)]
+    let _publication = {
+        static PUBLICATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        PUBLICATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    };
     temp.persist(path).map_err(|error| error.error)?;
     Ok(())
 }

@@ -2079,6 +2079,7 @@ mod tests {
     fn voices_mix_rates_channels_and_preview_without_consuming() {
         let e = AudioEngine::new();
         let tap = e.tap();
+        tap.drain_into(&mut []); // deterministic device clock, no wall time
         let stereo = GuestFormat {
             channels: 2,
             ..mono(22050)
