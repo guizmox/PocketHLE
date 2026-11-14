@@ -11502,6 +11502,7 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
                     ctx.cpu.write_reg(ArmReg::R3, frame.args[3])?;
                     ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
                     finish_window_callback(ctx.kernel);
+                    activate_visible_created_window(ctx.kernel, hwnd);
                     queue_window_paint(ctx.kernel, hwnd);
                     return Ok(DispatchOutcome::ReturnedR0(hwnd));
                 }
@@ -11549,7 +11550,8 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
                         o => o,
                     });
                 }
-                // Visible children need their first paint even when the app
+                activate_visible_created_window(ctx.kernel, hwnd);
+                // Visible windows need their first paint even when the app
                 // never calls ShowWindow again after WS_VISIBLE creation.
                 queue_window_paint(ctx.kernel, hwnd);
                 return Ok(DispatchOutcome::ReturnedR0(hwnd));
@@ -11730,6 +11732,20 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     };
     log::debug!("CreateWindowExW caption hwnd=0x{hwnd:08x}: {title:?}");
     ctx.kernel.window_titles.insert(hwnd, title);
+    if hwnd != FAKE_HWND
+        && style & 0x5000_0000 == 0x1000_0000
+        && ctx
+            .kernel
+            .gdi
+            .class_values
+            .get(&(class_name.to_ascii_lowercase(), -10))
+            .is_some_and(|&brush| brush != 0)
+    {
+        let dc = window_dc(ctx, hwnd);
+        if dc != GDI_SCREEN_DC {
+            erase_child_background(ctx, hwnd, dc)?;
+        }
+    }
     let create_struct = ctx.kernel.heap.alloc(0x40).unwrap_or(0);
     if create_struct != 0 {
         // CREATESTRUCTW: lpCreateParams, hInstance, hMenu, hwndParent, cy,
@@ -11831,7 +11847,26 @@ fn create_window_ex_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
             ctx.kernel.pending_create = Some((hwnd, create_struct));
         }
     }
+    activate_visible_created_window(ctx.kernel, hwnd);
     Ok(DispatchOutcome::ReturnedR0(hwnd))
+}
+
+fn activate_visible_created_window(kernel: &mut KernelState, hwnd: u32) {
+    const WS_CHILD: u32 = 0x4000_0000;
+    const WS_VISIBLE: u32 = 0x1000_0000;
+    const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
+    if kernel
+        .window_styles
+        .get(&hwnd)
+        .is_some_and(|&(style, ex_style)| {
+            style & (WS_CHILD | WS_VISIBLE) == WS_VISIBLE && ex_style & WS_EX_NOACTIVATE == 0
+        })
+    {
+        kernel.active_window = hwnd;
+        raise_window_panels(kernel, hwnd);
+        kernel.gdi.pending_window_erases.insert(hwnd);
+        kernel.invalidate_presentation();
+    }
 }
 
 /// `BOOL ShowWindow(HWND hWnd, int nCmdShow)`.
@@ -19488,6 +19523,13 @@ fn destroy_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 }
 
 fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
+    let directdraw = &mut ctx.kernel.framebuffer.directdraw;
+    if directdraw
+        .fullscreen_owner
+        .is_some_and(|(_, owner)| owner == *hwnd)
+    {
+        directdraw.fullscreen_owner = None;
+    }
     ctx.kernel
         .controls
         .pointer_capture

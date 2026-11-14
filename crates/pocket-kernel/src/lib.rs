@@ -2242,7 +2242,15 @@ impl KernelState {
     /// caller's policy for legacy unregistered synthetic windows.
     /// The shell bar follows its foreground owner, including owned dialogs.
     pub fn active_shell_bar(&self) -> Option<u32> {
-        let mut owner = self.active_window;
+        // A main window created with WS_VISIBLE may never call ShowWindow.
+        // Use the visible main window until another window is made active.
+        let mut owner = if self.active_window != 0 {
+            self.active_window
+        } else if self.window_tree_visible(0xdead0001, |_| false) {
+            0xdead0001
+        } else {
+            return None;
+        };
         for _ in 0..64 {
             if let Some(h) = self
                 .gdi
@@ -2354,9 +2362,74 @@ impl KernelState {
         let hidden = self
             .controls
             .window_handles()
-            .filter(|&hwnd| !self.window_tree_visible(hwnd, |h| h != 0))
+            .filter(|&hwnd| {
+                !self.window_tree_visible(hwnd, |h| h != 0)
+                    || self.directdraw_owns_window_pixels(hwnd)
+                    || self.covered_by_foreground_window(hwnd)
+            })
             .collect();
         self.controls.set_inherited_hidden(hidden);
+    }
+
+    fn covered_by_foreground_window(&self, mut hwnd: u32) -> bool {
+        let foreground = self.active_window;
+        let Some(&(x, y, w, h)) = self.window_rects.get(&foreground) else {
+            return false;
+        };
+        if self.controls.panel(foreground).is_some()
+            || !self.window_tree_visible(foreground, |_| false)
+        {
+            return false;
+        }
+
+        // Native top-level window backings are composited before their HLE
+        // children. A fully covered window's children must stay behind the
+        // foreground window, even when the guest has left them visible.
+        for _ in 0..64 {
+            if hwnd == foreground {
+                return false;
+            }
+            if let Some(child) = self.controls.get(hwnd) {
+                hwnd = child.parent;
+            } else if self
+                .window_styles
+                .get(&hwnd)
+                .is_some_and(|style| style.0 & 0x4000_0000 != 0)
+            {
+                hwnd = self.window_parents.get(&hwnd).copied().unwrap_or(0);
+            } else {
+                return self.window_rects.get(&hwnd).is_some_and(|&(a, b, c, d)| {
+                    x <= a
+                        && y <= b
+                        && x.saturating_add(w) >= a.saturating_add(c)
+                        && y.saturating_add(h) >= b.saturating_add(d)
+                });
+            }
+        }
+        false
+    }
+
+    fn directdraw_owns_window_pixels(&self, mut hwnd: u32) -> bool {
+        let Some((_, owner)) = self.framebuffer.directdraw.fullscreen_owner else {
+            return false;
+        };
+        for _ in 0..64 {
+            if hwnd == owner {
+                return true;
+            }
+            if let Some(child) = self.controls.get(hwnd) {
+                hwnd = child.parent;
+            } else if self
+                .window_styles
+                .get(&hwnd)
+                .is_some_and(|style| style.0 & 0x4000_0000 != 0)
+            {
+                hwnd = self.window_parents.get(&hwnd).copied().unwrap_or(0);
+            } else {
+                break;
+            }
+        }
+        false
     }
 
     pub fn composite_controls(&mut self) {
@@ -2567,6 +2640,11 @@ impl KernelState {
         let mut layers = Vec::new();
         let mut native_paint_changed = false;
         for (&hwnd, &dc) in &self.window_dcs {
+            // The fullscreen primary surface owns this window's pixels.
+            // Other windows can still composite their GDI content.
+            if self.directdraw_owns_window_pixels(hwnd) {
+                continue;
+            }
             if !present_windows
                 && controls.direct_surface_hwnd != 0
                 && hwnd == controls.direct_surface_hwnd
@@ -5857,7 +5935,7 @@ mod tests {
         .unwrap();
         let k = &mut process.state;
         let (owner, bar) = (0xdead0001, 0xdead0b01);
-        k.active_window = owner;
+        assert_eq!(k.active_window, 0);
         k.window_styles.insert(owner, (0x10000000, 0));
         k.window_styles.insert(bar, (0x90000000, 0));
         k.window_visibility.insert(owner, true);
@@ -5885,6 +5963,12 @@ mod tests {
             &0x07e0u16.to_le_bytes()
         );
         assert_eq!(k.framebuffer.frame_counter, counter);
+        k.window_visibility.insert(owner, false);
+        assert_eq!(k.active_shell_bar(), None);
+        k.window_visibility.insert(owner, true);
+        k.active_window = 0xdead0002;
+        assert_eq!(k.active_shell_bar(), None);
+        k.active_window = owner;
         k.window_visibility.insert(bar, false);
         k.framebuffer.fill(0x001f);
         k.composite_controls();

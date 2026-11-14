@@ -18,7 +18,8 @@ class AddDataModel(application: Application) : AndroidViewModel(application) {
     sealed class Step {
         data object Idle : Step()
         data object Busy : Step()
-        data class Zip(val uri: Uri, val name: String, val gameId: String) : Step()
+        data class Destination(val uri: Uri, val name: String, val gameId: String) : Step()
+        data class Zip(val source: Destination, val myDocuments: Boolean) : Step()
         data class Executable(val paths: List<String>) : Step()
         data class Overwrite(val paths: List<String>) : Step()
         data class Notice(val success: Boolean, val message: String, val launchOptions: JSONObject? = null) : Step()
@@ -47,18 +48,26 @@ class AddDataModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             result.fold(onSuccess = { name ->
-                if (name.endsWith(".zip", ignoreCase = true)) step.value = Step.Zip(uri, name, gameId)
-                else prepare(uri, name, gameId, false)
+                step.value = Step.Destination(uri, name, gameId)
             }, onFailure = { notice(it) })
+        }
+    }
+
+    fun chooseDestination(myDocuments: Boolean) {
+        val source = step.value as? Step.Destination ?: return
+        if (source.name.endsWith(".zip", ignoreCase = true)) {
+            step.value = Step.Zip(source, myDocuments)
+        } else {
+            prepare(source, false, myDocuments)
         }
     }
 
     fun chooseZip(extract: Boolean) {
         val choice = step.value as? Step.Zip ?: return
-        prepare(choice.uri, choice.name, choice.gameId, extract)
+        prepare(choice.source, extract, choice.myDocuments)
     }
 
-    private fun prepare(uri: Uri, name: String, gameId: String, extract: Boolean) {
+    private fun prepare(source: Step.Destination, extract: Boolean, myDocuments: Boolean) {
         step.value = Step.Busy
         viewModelScope.launch {
             // Finish native staging even if the Activity is closed, then release
@@ -68,10 +77,10 @@ class AddDataModel(application: Application) : AndroidViewModel(application) {
                     val ctx = getApplication<Application>()
                     val cache = File.createTempFile("add-data-", ".tmp", ctx.cacheDir)
                     try {
-                        ctx.contentResolver.openInputStream(uri)?.use { input ->
+                        ctx.contentResolver.openInputStream(source.uri)?.use { input ->
                             cache.outputStream().use { input.copyTo(it) }
                         } ?: error("Could not open the selected file")
-                        val json = checked(NativeBridge.prepareGameData(root, gameId, cache.absolutePath, name, extract))
+                        val json = checked(NativeBridge.prepareGameData(root, source.gameId, cache.absolutePath, source.name, extract, myDocuments))
                         val prepared = json.getString("token").toLong()
                         token = prepared
                         if (cleared) { NativeBridge.cancelGameData(root, prepared); token = null }

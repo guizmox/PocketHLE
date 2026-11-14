@@ -432,6 +432,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_prepareGameData<'loca
     source: JString<'local>,
     name: JString<'local>,
     extract: jni::sys::jboolean,
+    my_documents: jni::sys::jboolean,
 ) -> jstring {
     let result = (|| -> anyhow::Result<String> {
         let root = jstring_to_path(&mut env, library_root).context("Missing library root")?;
@@ -442,12 +443,19 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_prepareGameData<'loca
             .lock()
             .map_err(|_| anyhow::anyhow!("Library lock unavailable"))?;
         anyhow::ensure!(*sessions == 0, "Stop the running game before adding data");
-        let pending = pocket_library::add_data::prepare(
+        use pocket_library::add_data::{self, Destination};
+        let destination = if my_documents != 0 {
+            Destination::MyDocuments
+        } else {
+            Destination::ApplicationFolder
+        };
+        let pending = add_data::prepare_at(
             &Library::open(&root)?,
             &id,
             &source,
             &name,
             extract != 0,
+            destination,
         )?;
         let token = NEXT_IMPORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let json = serde_json::json!({"ok": true, "token": token.to_string(), "conflicts": pending.conflicts(), "executables": pending.executables()}).to_string();

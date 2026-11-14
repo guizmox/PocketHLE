@@ -1,11 +1,11 @@
 //! Shared data workflow, using the launcher file picker and controller widgets.
 use super::add_data_prompt::DataChoice;
 use super::*;
-use pocket_library::add_data::{self, PreparedData};
+use pocket_library::add_data::{self, Destination, PreparedData};
 use std::path::PathBuf;
 
 impl PocketLauncher {
-    pub(super) fn prepare_data(&mut self, id: String, path: PathBuf, extract: bool) {
+    pub(super) fn prepare_data(&mut self, id: String, path: PathBuf, extract: bool, destination: Destination) {
         self.data_game = Some(id.clone());
         self.library_busy = true;
         self.status = "Checking game data…".into();
@@ -18,12 +18,13 @@ impl PocketLauncher {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or_else(|| anyhow::anyhow!("Invalid filename"))?;
-                add_data::prepare(
+                add_data::prepare_at(
                     &Library::open_with_profile(root, profile)?,
                     &id,
                     &path,
                     name,
                     extract,
+                    destination,
                 )
             })()
             .map_err(|e| format!("{e:#}"));
@@ -79,8 +80,15 @@ impl PocketLauncher {
         self.controller_ui.stop_repeat();
         match (prompt, choice) {
             (_, DataChoice::Cancel) => self.status = "Add/Replace Data closed.".into(),
-            (DataPrompt::Zip { id, path }, DataChoice::Zip(extract)) => {
-                self.prepare_data(id, path, extract)
+            (DataPrompt::Destination { id, path }, DataChoice::Destination(destination)) => {
+                if add_data::is_zip(&path.to_string_lossy()) {
+                    self.add_data = Some(DataPrompt::Zip { id, path, destination });
+                } else {
+                    self.prepare_data(id, path, false, destination);
+                }
+            }
+            (DataPrompt::Zip { id, path, destination }, DataChoice::Zip(extract)) => {
+                self.prepare_data(id, path, extract, destination)
             }
             (DataPrompt::Executable(mut pending), DataChoice::Executable(selected)) => {
                 match pending.choose_executable(selected.as_deref()) {

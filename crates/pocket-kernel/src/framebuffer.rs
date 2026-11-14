@@ -36,6 +36,8 @@ pub struct DirectDrawOverlay {
 pub struct DirectDrawTiming {
     pub epoch: std::time::Instant,
     pub last_present: Option<std::time::Instant>,
+    /// DirectDraw interface and window that own the primary display.
+    pub fullscreen_owner: Option<(u32, u32)>,
     /// Optional user ceiling, separate from the modeled LCD/vblank clock.
     /// None = native LCD timing; Some(0) = unlimited; other values = FPS cap.
     pub frame_rate_limit: Option<u32>,
@@ -51,6 +53,7 @@ impl Default for DirectDrawTiming {
         Self {
             epoch: std::time::Instant::now(),
             last_present: None,
+            fullscreen_owner: None,
             frame_rate_limit: None,
             pending: Default::default(),
             recent_blank: Default::default(),

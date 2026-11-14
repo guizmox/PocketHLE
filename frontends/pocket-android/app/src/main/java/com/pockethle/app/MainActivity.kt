@@ -76,9 +76,15 @@ class MainActivity : HostKeyActivity() {
                 dialog.setCancelable(false)
                 dialog.controllerCancel = false
             }
+            is AddDataModel.Step.Destination -> {
+                dialog.setTitle("Choose data destination")
+                dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Application Folder") { _, _ -> addDataModel.chooseDestination(false) }
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEUTRAL, "My Documents") { _, _ -> addDataModel.chooseDestination(true) }
+                dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
+            }
             is AddDataModel.Step.Zip -> {
                 dialog.setTitle("Add/Replace Data — ZIP archive")
-                dialog.setMessage("Extract the ZIP contents into the game folder, or copy the ZIP file unchanged?")
+                dialog.setMessage("Extract the ZIP contents into the selected folder, or copy the ZIP file unchanged?")
                 dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Extract contents") { _, _ -> addDataModel.chooseZip(true) }
                 dialog.setButton(android.content.DialogInterface.BUTTON_NEUTRAL, "Copy ZIP unchanged") { _, _ -> addDataModel.chooseZip(false) }
                 dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
@@ -99,7 +105,7 @@ class MainActivity : HostKeyActivity() {
             }
             is AddDataModel.Step.Overwrite -> {
                 dialog.setTitle("Replace existing data?")
-                dialog.setMessage("Existing files or folders will be replaced. No files have been copied into the game folder yet.\n\n" + step.paths.joinToString("\n"))
+                dialog.setMessage("Existing files or folders will be replaced. No files have been copied into the selected folder yet.\n\n" + step.paths.joinToString("\n"))
                 dialog.setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Yes") { _, _ -> addDataModel.confirmOverwrite() }
                 dialog.setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Cancel") { _, _ -> addDataModel.cancel() }
             }

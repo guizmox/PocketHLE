@@ -4877,6 +4877,19 @@ impl PocketLauncher {
                     if down && Some(device) == self.gamepad_selected {
                         crate::controller_labels::activate(ctx, device);
                     }
+                    if self.run_diagnostic.is_some() {
+                        if Some(device) == self.gamepad_selected
+                            && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                        {
+                            if down {
+                                self.controller_ui.press(&control);
+                            } else {
+                                self.controller_ui.release(&control);
+                            }
+                            ctx.request_repaint();
+                        }
+                        continue;
+                    }
                     // Host gestures precede binding capture and generic menu navigation.
                     if self.screen != Screen::Run
                         && Some(device) == self.gamepad_selected
@@ -5117,10 +5130,6 @@ impl PocketLauncher {
                             self.deck_nav_repeat = None;
                             self.controller_ui.press(&control);
                             ctx.request_repaint();
-                            continue;
-                        }
-                        if self.run_diagnostic.is_some() {
-                            self.controller_ui.press(&control);
                             continue;
                         }
                         if self.launch_executable_choices.is_some() {
@@ -5650,11 +5659,7 @@ impl PocketLauncher {
             }
             Outcome::Selected(Purpose::AddData, path) => {
                 if let Some(id) = self.data_game.take() {
-                    if pocket_library::add_data::is_zip(&path.to_string_lossy()) {
-                        self.add_data = Some(DataPrompt::Zip { id, path });
-                    } else {
-                        self.prepare_data(id, path, false);
-                    }
+                    self.add_data = Some(DataPrompt::Destination { id, path });
                 }
             }
             Outcome::Selected(Purpose::Import, path) => self.import_selected_file(path),
@@ -6185,6 +6190,7 @@ impl eframe::App for PocketLauncher {
             ctx,
             raw,
             self.screen != Screen::Run
+                || self.run_diagnostic.is_some()
                 || self.file_dialog.is_some()
                 || self.restore_archive.is_some(),
         );
@@ -6303,7 +6309,7 @@ impl eframe::App for PocketLauncher {
                     .max_width((ctx.screen_rect().width() - 32.0).clamp(120.0, 640.0))
                     .collapsible(false)
                     .show(ctx, |ui| {
-                        crate::controller_ui::page_scope(ui, "run_diagnostic", |ui| {
+                        let mut contents = |ui: &mut egui::Ui| {
                             ui.label(diagnostic.reason.lines().next().unwrap_or_default());
                             if crate::controller_ui::button(ui, if *expanded { "Hide details" } else { "Show details" }).clicked() {
                                 *expanded = !*expanded;
@@ -6321,7 +6327,12 @@ impl eframe::App for PocketLauncher {
                                 ));
                             }
                             back = crate::controller_ui::button(ui, "Return to library").clicked();
-                        });
+                        };
+                        if ui.is_enabled() {
+                            crate::controller_ui::page_scope(ui, "run_diagnostic", contents);
+                        } else {
+                            contents(ui);
+                        }
                     });
             }
             if back {

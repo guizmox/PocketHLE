@@ -583,6 +583,15 @@ impl GameEntry {
         })
     }
 
+    pub fn my_documents_uses_separate_directory(&self, library_root: &Path) -> bool {
+        self.guest_launch_paths(library_root).is_none_or(|paths| {
+            !paths
+                .save_prefix
+                .trim_end_matches('\\')
+                .eq_ignore_ascii_case(r"\My Documents")
+        })
+    }
+
     pub fn guest_save_prefix(&self) -> Option<String> {
         self.save_prefix
             .clone()

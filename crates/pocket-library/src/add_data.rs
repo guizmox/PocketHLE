@@ -10,10 +10,17 @@ use crate::Library;
 const MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1_000_000;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Destination {
+    ApplicationFolder,
+    MyDocuments,
+}
+
 #[derive(Debug)]
 pub struct PreparedData {
     game_id: String,
     target: PathBuf,
+    destination: Destination,
     staging: tempfile::TempDir,
     conflicts: Vec<String>,
     executables: Vec<String>,
@@ -52,7 +59,7 @@ impl PreparedData {
     /// invalidates consent rather than silently overwriting additional files.
     pub fn apply(self, library: &mut Library, overwrite: bool) -> Result<()> {
         ensure!(
-            target(library, &self.game_id)? == self.target,
+            target(library, &self.game_id, self.destination)? == self.target,
             "Game directory changed; select the data again"
         );
         let content = self.staging.path().join("content");
@@ -69,6 +76,7 @@ impl PreparedData {
         fs::create_dir(&backup)?;
         let mut journal = Vec::new();
         let result = (|| -> Result<Option<crate::LibraryFile>> {
+            fs::create_dir_all(&self.target)?;
             publish(&content, &self.target, &backup, &mut journal)?;
             let Some(selected) = &self.executable else {
                 return Ok(None);
@@ -131,10 +139,30 @@ pub fn prepare(
     name: &str,
     extract: bool,
 ) -> Result<PreparedData> {
-    let target = target(library, id)?;
+    prepare_at(
+        library,
+        id,
+        source,
+        name,
+        extract,
+        Destination::ApplicationFolder,
+    )
+}
+
+pub fn prepare_at(
+    library: &Library,
+    id: &str,
+    source: &Path,
+    name: &str,
+    extract: bool,
+    destination: Destination,
+) -> Result<PreparedData> {
+    let target = target(library, id, destination)?;
+    let game = library.get(id).context("Game not found")?;
+    let directory = library.root().join(game.relative_dir());
     let staging = tempfile::Builder::new()
         .prefix(".add-data-")
-        .tempdir_in(target.parent().context("Missing game directory")?)?;
+        .tempdir_in(directory)?;
     let content = staging.path().join("content");
     fs::create_dir(&content)?;
     if extract {
@@ -170,10 +198,13 @@ pub fn prepare(
         Ok(())
     }
     let mut executables = Vec::new();
-    collect(&content, &content, &mut executables)?;
+    if destination == Destination::ApplicationFolder {
+        collect(&content, &content, &mut executables)?;
+    }
     Ok(PreparedData {
         game_id: id.into(),
         target,
+        destination,
         staging,
         conflicts,
         executables,
@@ -187,7 +218,7 @@ pub fn is_zip(name: &str) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
 }
 
-fn target(library: &Library, id: &str) -> Result<PathBuf> {
+fn target(library: &Library, id: &str, destination: Destination) -> Result<PathBuf> {
     let game = library.get(id).context("Game not found")?;
     let games = library.root().join("games");
     let directory = library.root().join(game.relative_dir());
@@ -204,7 +235,21 @@ fn target(library: &Library, id: &str) -> Result<PathBuf> {
         directory.parent() == Some(games.as_path()),
         "Invalid game directory"
     );
-    Ok(extracted.canonicalize()?)
+    if destination == Destination::ApplicationFolder {
+        return Ok(extracted.canonicalize()?);
+    }
+    let directory = directory.canonicalize()?;
+    let saves = child(&directory, std::ffi::OsStr::new("saves"))?;
+    ensure!(!saves.exists() || saves.is_dir(), "Invalid saves directory");
+    if !game.my_documents_uses_separate_directory(library.root()) {
+        return Ok(saves);
+    }
+    let documents = child(&saves, std::ffi::OsStr::new("my-documents"))?;
+    ensure!(
+        !documents.exists() || documents.is_dir(),
+        "Invalid My Documents directory"
+    );
+    Ok(documents)
 }
 
 /// Resolve like the guest's case-insensitive filesystem on every host. Refuse
@@ -410,6 +455,42 @@ mod tests {
             .unwrap();
         assert_eq!(fs::read(dir.join("Data.bin")).unwrap(), b"new");
         assert!(!dir.join("data.bin").exists());
+    }
+
+    #[test]
+    fn my_documents_preserves_zip_folders_without_offering_executables() {
+        let (root, mut lib, extracted) = library();
+        let source = zip(
+            root.path(),
+            &[("test/game.exe", b"data"), ("test/racer.gba", b"rom")],
+        );
+        let pending = prepare_at(
+            &lib,
+            "test",
+            &source,
+            "data.zip",
+            true,
+            Destination::MyDocuments,
+        )
+        .unwrap();
+        let documents = extracted.parent().unwrap().join("saves/my-documents");
+        assert!(pending.executables().is_empty());
+        assert!(!documents.exists());
+        pending.apply(&mut lib, false).unwrap();
+        assert_eq!(fs::read(documents.join("test/racer.gba")).unwrap(), b"rom");
+        assert_eq!(fs::read(documents.join("test/game.exe")).unwrap(), b"data");
+        assert!(!extracted.join("test").exists());
+        let pending = prepare_at(
+            &lib,
+            "test",
+            &source,
+            "data.zip",
+            true,
+            Destination::MyDocuments,
+        )
+        .unwrap();
+        assert_eq!(pending.conflicts().len(), 2);
+        assert!(pending.apply(&mut lib, false).is_err());
     }
 
     #[test]

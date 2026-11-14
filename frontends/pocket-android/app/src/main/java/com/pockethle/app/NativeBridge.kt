@@ -78,7 +78,7 @@ object NativeBridge {
 
     /** Returns `{"ok":true}` on success or `{"ok":false,"error":...}`. */
     /** Stage only; commit requires explicit overwrite consent if conflicts is nonempty. */
-    @JvmStatic external fun prepareGameData(libraryRoot: String, id: String, source: String, name: String, extract: Boolean): String
+    @JvmStatic external fun prepareGameData(libraryRoot: String, id: String, source: String, name: String, extract: Boolean, myDocuments: Boolean): String
     @JvmStatic external fun commitGameData(libraryRoot: String, token: Long, overwrite: Boolean, executable: String): String
     @JvmStatic external fun cancelGameData(libraryRoot: String, token: Long)
 

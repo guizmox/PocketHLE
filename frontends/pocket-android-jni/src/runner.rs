@@ -808,19 +808,17 @@ fn run_process_inner(
         if let Some(process) = emu.process_mut() {
             process.state.cedb.path = Some(save_dir.join("cedb-contacts.json"));
         }
-        if !is_gizmondo
-            && !paths
-                .save_prefix
-                .trim_end_matches('\\')
-                .eq_ignore_ascii_case(r"\My Documents")
-        {
-            emu.mount_isolated_save_dir(r"\My Documents\", save_dir.join("my-documents"));
-        }
         summary_lines.push(format!(
             "Save data: {} -> {:?}",
             save_dir.display(),
             paths.save_prefix
         ));
+    }
+    if entry.my_documents_uses_separate_directory(library_root) {
+        emu.mount_isolated_save_dir(
+            r"\My Documents",
+            entry.save_dir(library_root).join("my-documents"),
+        );
     }
     if !is_gizmondo && entry.source_cab.to_ascii_lowercase().ends_with(".cab") {
         if let Some(install_dir) = entry.install_dir.as_deref() {

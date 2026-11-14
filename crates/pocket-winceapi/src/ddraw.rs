@@ -263,7 +263,7 @@ pub fn register(d: &mut WinCeDispatcher) {
         let handler = match *name {
             "ddraw_qi" => ddraw_qi,
             "ddraw_add_ref" => add_ref,
-            "ddraw_release" => release,
+            "ddraw_release" => ddraw_release,
             "ddraw_create_surface" => ddraw_create_surface,
             "ddraw4_create_surface" => ddraw4_create_surface,
             "ddraw_flip_to_gdi" => ddraw_flip_to_gdi_or_create_surface,
@@ -507,8 +507,29 @@ fn ddraw_create_palette(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Kernel
 /// to draw, and CE has no `Initialize` slot to do it in instead, so this
 /// is the point the synthetic framebuffer has to exist by.
 fn ddraw_set_cooperative_level(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const DDSCL_FULLSCREEN: u32 = 0x0000_0001;
     ensure_framebuffer(ctx)?;
+    let object = ctx.arg_u32(0)?;
+    let hwnd = ctx.arg_u32(1)?;
+    if hwnd != 0 && ctx.arg_u32(2)? & DDSCL_FULLSCREEN != 0 {
+        ctx.kernel.framebuffer.directdraw.fullscreen_owner = Some((object, hwnd));
+    } else {
+        clear_fullscreen_owner(ctx, object);
+    }
     Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn clear_fullscreen_owner(ctx: &mut CallCtx<'_>, object: u32) {
+    let owner = &mut ctx.kernel.framebuffer.directdraw.fullscreen_owner;
+    if owner.is_some_and(|(current, _)| current == object) {
+        *owner = None;
+    }
+}
+
+fn ddraw_release(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let object = ctx.arg_u32(0)?;
+    clear_fullscreen_owner(ctx, object);
+    release(ctx)
 }
 
 fn create_surface_at(ctx: &mut CallCtx<'_>, out: u32) -> Result<DispatchOutcome, KernelError> {

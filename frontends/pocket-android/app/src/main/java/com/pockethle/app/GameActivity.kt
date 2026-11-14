@@ -621,14 +621,15 @@ class GameActivity : AppCompatActivity() {
             isFocusable = false
         }
         var expanded = false
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(scroll)
-            .setNeutralButton("Show details", null)
-            .setNegativeButton("Copy diagnostic", null)
-            .setPositiveButton("Return to library") { _, _ -> finish() }
-            .setCancelable(false)
-            .create()
+        val dialog = AddDataDialog(this) { false }.apply {
+            setTitle(title)
+            setView(scroll)
+            setButton(android.content.DialogInterface.BUTTON_NEUTRAL, "Show details", null as android.content.DialogInterface.OnClickListener?)
+            setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Copy diagnostic", null as android.content.DialogInterface.OnClickListener?)
+            setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Return to library") { _, _ -> finish() }
+            setCancelable(false)
+            controllerCancel = false
+        }
         dialog.setOnShowListener {
             val showDetails = dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)
             showDetails.setOnClickListener {

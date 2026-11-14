@@ -133,11 +133,13 @@ is unchanged by this desktop-only toolbar.
 ## Adding data to an installed game
 
 Every PocketPC and Gizmondo game has **Add/Replace Data** in its library tile
-overflow menu on desktop and Android. The file picker accepts any single file. Non-ZIP files are
-copied with their original filename to `games/<id>/extracted/`. For ZIP files,
-the user chooses **Extract contents** or **Copy ZIP unchanged**. Extraction keeps
-the archive's directory structure, including wrapper directories; it does not
-reimport the game or guess an installation layout.
+overflow menu on desktop and Android. After selecting a file, choose
+**Application Folder** (`games/<id>/extracted/`) or **My Documents**
+(the game's mounted `\My Documents`, normally `games/<id>/saves/my-documents/`).
+For ZIP files, choose **Extract contents** or **Copy ZIP unchanged**.
+Extraction preserves the archive's directory structure. For example,
+`test/racer.gba` goes to `saves/my-documents/test/racer.gba` when using
+**My Documents**.
 
 Preparation reads into a private staging directory, leaving installed content
 untouched. Existing directories are merged; unrelated contents remain. Before
@@ -149,13 +151,12 @@ and Android as well as Windows. Unsafe paths, duplicate ZIP names, symbolic
 links and special files are rejected. A changed conflict set requires a fresh
 selection rather than extending prior overwrite consent.
 
-If a copied file is an EXE, or an extracted ZIP contains EXEs, a separate choice
-allows **Keep current executable** or selection of one added EXE (with its full
-relative path). Keeping the current EXE does not cancel the data addition. A ZIP
-copied unchanged does not offer its internal EXEs. Choosing a replacement updates
-both `game.json` and `library.json` after the data is published. Files and manifest
-changes share rollback on an operation error; rollback failure retains recovery
-files and reports their location. This is not a crash/power-loss transaction.
+In **Application Folder**, a copied or extracted EXE triggers a choice between
+**Keep current executable** and an added EXE. Selecting a replacement updates
+`game.json` and `library.json` after publication. File and manifest changes
+share rollback on an operation error. If rollback fails, PocketHLE retains
+the recovery files and reports their location. In **My Documents**, files go
+through the overwrite confirmation only when needed.
 
 All choices, Cancel and the final notice support keyboard and external controller
 navigation, without consulting gameplay bindings. Android uses native focus plus

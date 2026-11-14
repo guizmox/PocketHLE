@@ -1,12 +1,14 @@
 //! Controller-navigable choices for staged game data; rendering never commits files.
 use eframe::egui::{self, Vec2};
-use pocket_library::add_data::PreparedData;
+use pocket_library::add_data::{Destination, PreparedData};
 use std::path::PathBuf;
 
 pub(super) enum DataPrompt {
+    Destination { id: String, path: PathBuf },
     Zip {
         id: String,
         path: PathBuf,
+        destination: Destination,
     },
     Executable(PreparedData),
     Overwrite(PreparedData),
@@ -19,6 +21,7 @@ pub(super) enum DataPrompt {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DataChoice {
     Cancel,
+    Destination(Destination),
     Zip(bool),
     Executable(Option<String>),
     Overwrite,
@@ -27,9 +30,11 @@ pub(super) enum DataChoice {
 impl DataPrompt {
     pub(super) fn show(&self, ctx: &egui::Context) -> Option<DataChoice> {
         let mut choice = None;
+        let mut destination = None;
         let mut executable_choice: Option<Option<String>> = None;
         let mut cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let title = match self {
+            DataPrompt::Destination { .. } => "Choose data destination",
             DataPrompt::Zip { .. } => "Add/Replace Data — ZIP archive",
             DataPrompt::Executable(_) => "Choose game executable",
             DataPrompt::Overwrite(_) => "Replace existing data?",
@@ -44,8 +49,16 @@ impl DataPrompt {
             .show(ctx, |ui| {
                 let mut contents = |ui: &mut egui::Ui| {
                     match self {
+                        DataPrompt::Destination { .. } => {
+                            if crate::controller_ui::button(ui, "Application Folder").clicked() {
+                                destination = Some(Destination::ApplicationFolder);
+                            }
+                            if crate::controller_ui::button(ui, "My Documents").clicked() {
+                                destination = Some(Destination::MyDocuments);
+                            }
+                        }
                         DataPrompt::Zip { .. } => {
-                            ui.label("Extract the ZIP contents into the game folder, or copy the ZIP file unchanged?");
+                            ui.label("Extract the ZIP contents into the selected folder, or copy the ZIP file unchanged?");
                             if crate::controller_ui::button(ui, "Extract contents").clicked() { choice = Some(true); }
                             if crate::controller_ui::button(ui, "Copy ZIP unchanged").clicked() { choice = Some(false); }
                         }
@@ -59,7 +72,7 @@ impl DataPrompt {
                             });
                         }
                         DataPrompt::Overwrite(pending) => {
-                            ui.label("Existing files or folders will be replaced. No files have been copied into the game folder yet.");
+                            ui.label("Existing files or folders will be replaced. No files have been copied into the selected folder yet.");
                             egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                                 for path in pending.conflicts() { ui.label(path); }
                             });
@@ -82,6 +95,8 @@ impl DataPrompt {
             });
         if cancel {
             Some(DataChoice::Cancel)
+        } else if let Some(destination) = destination {
+            Some(DataChoice::Destination(destination))
         } else if let Some(path) = executable_choice {
             Some(DataChoice::Executable(path))
         } else {
@@ -120,12 +135,32 @@ mod tests {
     }
 
     #[test]
+    fn controller_can_choose_my_documents() {
+        let ctx = egui::Context::default();
+        let mut nav = Navigation::default();
+        let prompt = DataPrompt::Destination {
+            id: "game".into(),
+            path: "data.zip".into(),
+        };
+        assert_eq!(frame(&ctx, &mut nav, &prompt), None);
+        assert_eq!(frame(&ctx, &mut nav, &prompt), None);
+        nav.press("DPadDown");
+        assert_eq!(frame(&ctx, &mut nav, &prompt), None);
+        nav.press("South");
+        assert_eq!(
+            frame(&ctx, &mut nav, &prompt),
+            Some(DataChoice::Destination(Destination::MyDocuments))
+        );
+    }
+
+    #[test]
     fn controller_can_choose_copy_zip_and_cancel_without_touch_input() {
         let ctx = egui::Context::default();
         let mut nav = Navigation::default();
         let prompt = DataPrompt::Zip {
             id: "game".into(),
             path: "data.zip".into(),
+            destination: Destination::ApplicationFolder,
         };
         assert_eq!(frame(&ctx, &mut nav, &prompt), None);
         // egui measures a new Window with disabled contents on its first pass.
