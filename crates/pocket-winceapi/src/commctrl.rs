@@ -62,6 +62,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     for f in ["CreateStatusWindow", "CreateStatusWindowW"] {
         d.register_handler(dll, f, create_status_window);
     }
+    crate::coredll::command_bar::register(d);
 }
 
 fn init_controls(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -95,6 +96,9 @@ fn init_controls_ex(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 }
 /// `CreateStatusWindowW(style, lpszText, hwndParent, wID)`.
 fn create_status_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if ctx.kernel.ce.windows.enabled {
+        return crate::coredll::status_control::create(ctx);
+    }
     let style = ctx.arg_u32(0)?;
     let text = ctx.arg_u32(1)?;
     let parent = ctx.arg_u32(2)?;

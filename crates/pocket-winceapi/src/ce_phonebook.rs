@@ -6,12 +6,16 @@ use pocket_kernel::{registry::RegistryValue, DispatchOutcome, KernelError};
 const ENTRY_SIZE: u32 = 3472;
 const DIAL_SIZE: u32 = 1464;
 const CONN_SIZE: u32 = 52;
+// CE6 ras.h uses pack(4), DWORD + WCHAR[21] + two padding bytes.
+const NAME_SIZE: u32 = 48;
 const MAX_BYTES: u32 = 65536;
 type Result<T> = std::result::Result<T, u32>;
 
 pub fn register(d: &mut WinCeDispatcher) {
     for (name, handler) in [
         ("RasEnumConnections", enumerate as Handler),
+        ("RasEnumEntries", enumerate_entries),
+        ("RasEnumEntriesW", enumerate_entries),
         ("RasGetEntryProperties", get),
         ("RasSetEntryProperties", set),
         ("RasSetEntryDialParams", set_dial),
@@ -200,6 +204,124 @@ mod tests {
         };
         serde_json::from_slice(&b).unwrap()
     }
+    #[test]
+    fn phonebook_entry_enumeration_negotiates_the_ce48_byte_unicode_array() {
+        let (mut cpu, mut k, mut d) = setup();
+        for name in ["Work", "Тест"] {
+            assert!(k.registry.set_value(
+                &format!("HKCU\\Comm\\RasBook\\{name}"),
+                "Entry",
+                RegistryValue::Binary(vec![1])
+            ));
+        }
+        cpu.write_mem(0x1400, &0u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1404, &99u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "RasEnumEntries",
+                &[0, 0, 0, 0x1400, 0x1404]
+            ),
+            DispatchOutcome::ReturnedR0(603)
+        );
+        assert_eq!(cpu.read_u32_le(0x1400).unwrap(), 96);
+        assert_eq!(cpu.read_u32_le(0x1404).unwrap(), 2);
+        cpu.write_mem(0x1800, &[0xa5; 100]).unwrap();
+        cpu.write_mem(0x1800, &NAME_SIZE.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1400, &NAME_SIZE.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "RasEnumEntries",
+                &[0, 0, 0x1800, 0x1400, 0x1404]
+            ),
+            DispatchOutcome::ReturnedR0(603)
+        );
+        assert_eq!(cpu.read_mem(0x1804, 96).unwrap(), vec![0xa5; 96]);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "RasEnumEntriesW",
+                &[0, 0, 0x1800, 0x1400, 0x1404]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        for (index, name) in ["Work", "Тест"].into_iter().enumerate() {
+            let data = cpu
+                .read_mem(0x1800 + index as u32 * NAME_SIZE, NAME_SIZE)
+                .unwrap();
+            assert_eq!(&data[..4], &NAME_SIZE.to_le_bytes());
+            assert_eq!(string(&data[4..46]).unwrap(), name);
+            assert_eq!(&data[46..], &[0, 0]);
+        }
+        assert_eq!(cpu.read_mem(0x1860, 4).unwrap(), vec![0xa5; 4]);
+    }
+    #[test]
+    fn empty_phonebook_has_no_invented_entries_and_bad_outputs_leave_size_intact() {
+        let (mut cpu, mut k, mut d) = setup();
+        cpu.write_mem(0x1400, &0u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1404, &99u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "RasEnumEntries",
+                &[0, 0, 0, 0x1400, 0x1404]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_mem(0x1400, 8).unwrap(), vec![0; 8]);
+        cpu.write_mem(0x1400, &NAME_SIZE.to_le_bytes()).unwrap();
+        cpu.write_mem(0x1800, &999u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "RasEnumEntries",
+                &[0, 0, 0x1800, 0x1400, 0x1404]
+            ),
+            DispatchOutcome::ReturnedR0(632)
+        );
+        assert_eq!(cpu.read_u32_le(0x1400).unwrap(), NAME_SIZE);
+        cpu.write_mem(0x1800, &NAME_SIZE.to_le_bytes()).unwrap();
+        cpu.map_region(0x8000, 0x1000, Prot::READ).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "RasEnumEntries",
+                &[0, 0, 0x1800, 0x1400, 0x8000]
+            ),
+            DispatchOutcome::ReturnedR0(610)
+        );
+        assert_eq!(cpu.read_u32_le(0x1400).unwrap(), NAME_SIZE);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "RasEnumEntries",
+                &[1, 0, 0, 0x1400, 0x1404]
+            ),
+            DispatchOutcome::ReturnedR0(87)
+        );
+    }
 }
 fn finish(value: Result<()>) -> std::result::Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(value.err().unwrap_or(0)))
@@ -317,6 +439,63 @@ fn enumerate(ctx: &mut CallCtx<'_>) -> std::result::Result<DispatchOutcome, Kern
         ctx.cpu
             .write_mem(count, &0u32.to_le_bytes())
             .map_err(|_| 610u32)?;
+        Ok(())
+    })())
+}
+fn enumerate_entries(ctx: &mut CallCtx<'_>) -> std::result::Result<DispatchOutcome, KernelError> {
+    let reserved = ctx.arg_u32(0)?;
+    let phonebook = ctx.arg_u32(1)?;
+    let p = ctx.arg_u32(2)?;
+    let size = ctx.arg_u32(3)?;
+    let count = ctx.arg_u32(4)?;
+    finish((|| {
+        // CE stores its phonebook in the device registry, not a host .pbk.
+        if reserved != 0 || phonebook != 0 {
+            return Err(87);
+        }
+        access(ctx, size, 4, Prot::READ | Prot::WRITE)?;
+        access(ctx, count, 4, Prot::WRITE)?;
+        let capacity = word(ctx, size)?;
+        if p != 0 && word(ctx, p)? != NAME_SIZE {
+            return Err(632);
+        }
+        let names = ctx.kernel.registry.subkeys("HKCU\\Comm\\RasBook");
+        let needed = u32::try_from(names.len())
+            .ok()
+            .and_then(|count| count.checked_mul(NAME_SIZE))
+            .filter(|bytes| *bytes <= MAX_BYTES)
+            .ok_or(8u32)?;
+        let mut data = Vec::with_capacity(needed as usize);
+        for name in &names {
+            key(name).map_err(|_| 621u32)?;
+            let units: Vec<_> = name.encode_utf16().collect();
+            if units.len() > 20 {
+                return Err(621);
+            }
+            let mut entry = [0u8; NAME_SIZE as usize];
+            entry[..4].copy_from_slice(&NAME_SIZE.to_le_bytes());
+            for (index, unit) in units.into_iter().enumerate() {
+                entry[4 + index * 2..6 + index * 2].copy_from_slice(&unit.to_le_bytes());
+            }
+            data.extend_from_slice(&entry);
+        }
+        if needed != 0 && capacity >= needed {
+            access(ctx, p, needed, Prot::WRITE)?;
+        }
+        // ConnMC negotiates the complete array before showing saved entries.
+        // Failed pointer/structure validation leaves both result words intact.
+        ctx.cpu
+            .write_mem(size, &needed.to_le_bytes())
+            .map_err(|_| 610u32)?;
+        ctx.cpu
+            .write_mem(count, &(names.len() as u32).to_le_bytes())
+            .map_err(|_| 610u32)?;
+        if capacity < needed {
+            return Err(603);
+        }
+        if needed != 0 {
+            ctx.cpu.write_mem(p, &data).map_err(|_| 610u32)?;
+        }
         Ok(())
     })())
 }

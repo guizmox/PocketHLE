@@ -4,12 +4,16 @@ use pocket_kernel::gdi::ControlColorFrame;
 
 pub(super) fn resume(ctx: &mut CallCtx<'_>) -> Result<Option<DispatchOutcome>, KernelError> {
     let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
-    if !ctx.kernel.gdi.control_color_frames.last().is_some_and(|f| {
-        f.thread == ctx.kernel.current_thread && f.thunk == ctx.thunk.thunk_va && f.frame.sp == sp
-    }) {
+    let Some(index) = callback_frame_index(
+        &ctx.kernel.gdi.control_color_frames,
+        ctx.kernel.current_thread,
+        ctx.thunk.thunk_va,
+        sp,
+        |f| (f.thread, f.thunk, f.frame.sp),
+    ) else {
         return Ok(None);
-    }
-    let f = ctx.kernel.gdi.control_color_frames.pop().unwrap();
+    };
+    let f = ctx.kernel.gdi.control_color_frames.remove(index);
     let brush = ctx.cpu.read_reg(ArmReg::R0)?;
     let color = class_background_color(ctx, brush);
     let text_color = ctx.kernel.gdi.dc(f.dc).map_or(0, |d| d.text_color);

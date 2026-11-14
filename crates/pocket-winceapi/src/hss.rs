@@ -845,10 +845,12 @@ mod tests {
         satellite_wave[44..46].copy_from_slice(&2000i16.to_le_bytes());
         cpu.write_mem(0x3100, &satellite_wave).unwrap();
         kernel.modules.push(pocket_kernel::LoadedModule {
+            data_file: false,
             dependencies: vec![],
             attached: false,
             satellites: vec![],
             resident_regions: vec![],
+            module_slot: None,
             handle: 0x3000,
             name: "audio-fixture.dll".into(),
             base: 0x3000,

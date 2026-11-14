@@ -114,7 +114,7 @@ pub(super) fn message(
         4 => {
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
             c.list_items.clear();
-            c.list_selected = None;
+            c.select_choice(None);
             c.list_scroll_y = 0;
             redraw = true;
             0
@@ -129,11 +129,12 @@ pub(super) fn message(
             .map_or(u32::MAX, |i| i as u32),
         7 => {
             let c = ctx.kernel.controls.get_mut(hwnd).unwrap();
-            c.list_selected = if (wp as usize) < c.list_items.len() {
+            let selected = if (wp as usize) < c.list_items.len() {
                 Some(wp as usize)
             } else {
                 None
             };
+            c.select_choice(selected);
             redraw = true;
             c.list_selected.map_or(u32::MAX, |i| i as u32)
         }
@@ -202,7 +203,7 @@ pub(super) fn message(
             });
             if op == 14 {
                 if let Some(i) = found {
-                    c.list_selected = Some(i);
+                    c.select_choice(Some(i));
                     redraw = true;
                 }
             }

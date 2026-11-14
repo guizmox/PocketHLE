@@ -3072,6 +3072,7 @@ dependencies = [
  "sdl3",
  "serde",
  "serde_json",
+ "tempfile",
  "windows 0.54.0",
  "winres",
  "xbrz-rs",

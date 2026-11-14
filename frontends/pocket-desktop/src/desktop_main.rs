@@ -9,6 +9,7 @@
 // framebuffer produced by [`pocket_core::Emulator`].
 
 mod app;
+mod ce_launch;
 mod bindings_visual;
 mod controller_ui;
 mod deck_navigation;
@@ -175,6 +176,7 @@ fn run_launcher() -> Result<()> {
     let profile = startup.profile;
     let steam_deck = profile == pocket_library::LauncherProfile::SteamDeck;
     let launch = startup.launch;
+    let mut ce_launch = startup.ce_launch;
     let title = if steam_deck {
         "PocketHLE-Reborn — Steam Deck"
     } else {
@@ -182,13 +184,19 @@ fn run_launcher() -> Result<()> {
     };
     let library_root = default_library_root();
     let log_path = init_logging(&library_root);
+    log::info!("PocketHLE GUI version {}", env!("CARGO_PKG_VERSION"));
     log::info!("Using library root: {}", library_root.display());
     if let Some(path) = log_path {
         log::info!("Logging to {}", path.display());
     }
-    let library = Library::open_with_profile(&library_root, profile).context("opening PocketHLE-Reborn library")?;
+    let library = Library::open_with_profile(&library_root, profile).context("opening PocketHLE library")?;
+    if let Some(source) = startup.ce_profile {
+        ce_launch = Some(crate::ce_launch::CeLaunch::load_profile(&library_root, &source)?);
+    }
 
-    let launch_game = launch
+    let launch_game = if let Some(ce) = &ce_launch {
+        Some(ce.entry().context("preparing Windows CE launch")?)
+    } else { launch
         .as_ref()
         .map(|args| {
             launch_args::find_game(
@@ -201,9 +209,10 @@ fn run_launcher() -> Result<()> {
             .map(|id| library.games().iter().find(|g| g.id == id).unwrap().clone())
             .map_err(anyhow::Error::msg)
         })
-        .transpose()?;
-    let explicit_fullscreen = launch.as_ref().and_then(|a| a.fullscreen);
-    let fullscreen = launch_args::startup_fullscreen(explicit_fullscreen);
+        .transpose()? };
+    let explicit_fullscreen = startup.ce_fullscreen.or_else(||launch.as_ref().and_then(|a| a.fullscreen));
+    let minimized = startup.minimized;
+    let fullscreen = !minimized && launch_args::startup_fullscreen(explicit_fullscreen);
 
     let icon = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
         .context("decoding PocketHLE-Reborn logo")?
@@ -226,6 +235,8 @@ fn run_launcher() -> Result<()> {
             .with_maximized(false)
             .with_min_inner_size([640.0, 420.0])
             .with_fullscreen(fullscreen)
+            .with_active(!minimized)
+            .with_visible(!minimized)
             .with_title(title),
         ..Default::default()
     };
@@ -241,7 +252,7 @@ fn run_launcher() -> Result<()> {
             }
             // Reapply after native window creation/restoration. Do this once;
             // the user can subsequently leave fullscreen using the normal controls.
-            app.request_startup_window(fullscreen);
+            app.request_startup_window(fullscreen, minimized);
             Box::new(app) as Box<dyn eframe::App>
         }),
     )

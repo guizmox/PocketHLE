@@ -225,6 +225,7 @@ pub struct Dc {
     pub selected_font: u32,
     pub selected_palette: u32,
     pub brush_color: u32,
+    pub brush_origin: (i32, i32),
     pub pen_color: u32,
     pub text_color: u32,
     pub text_align: u32,
@@ -244,6 +245,7 @@ impl Default for Dc {
             selected_font: STOCK_SYSTEM_FONT,
             selected_palette: STOCK_DEFAULT_PALETTE,
             brush_color: 0x00ff_ffff,
+            brush_origin: (0, 0),
             pen_color: 0,
             text_color: 0,
             text_align: 0,
@@ -338,6 +340,7 @@ pub struct ListPaintFrame {
     pub item: usize,
     pub flags: u32,
     pub item_flags: u32,
+    pub display_column: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +384,9 @@ pub struct FontEnumFrame {
 
 #[derive(Debug, Default)]
 pub struct GdiState {
+    /// NUL-terminated copies for CE's pointer-return LoadString variant.
+    /// Keyed by resource VA; unloaded module regions release their copies.
+    pub resource_strings: HashMap<u32, u32>,
     pub installed_fonts: Vec<crate::text::InstalledFont>,
     pub installed_font_bytes: usize,
     font_registrations: Vec<(std::path::PathBuf, usize, usize)>,
@@ -396,6 +402,10 @@ pub struct GdiState {
     pub scroll_erases: HashMap<u32, Vec<[i32; 4]>>,
     pub icons: HashMap<u32, crate::imaging::Image>,
     pub image_lists: HashMap<u32, crate::imaging::ImageList>,
+    pub image_drag: Option<crate::imaging::ImageDrag>,
+    pub brush_patterns: HashMap<u32, std::sync::Arc<Bitmap>>,
+    pub rebars: HashMap<u32, crate::controls::RebarState>,
+    pub command_adornments: std::collections::HashSet<u32>,
     pub system_brushes: HashMap<i32, u32>,
     pub dialog_bitmaps: HashMap<(u32, u32), u32>,
     pub owner_draw_frames: Vec<OwnerDrawFrame>,
@@ -413,6 +423,7 @@ pub struct GdiState {
 impl GdiState {
     pub fn new() -> Self {
         let mut s = Self {
+            resource_strings: HashMap::new(),
             installed_fonts: Vec::new(),
             installed_font_bytes: 0,
             font_registrations: Vec::new(),
@@ -428,6 +439,10 @@ impl GdiState {
             scroll_erases: HashMap::new(),
             icons: HashMap::new(),
             image_lists: HashMap::new(),
+            image_drag: None,
+            brush_patterns: HashMap::new(),
+            rebars: HashMap::new(),
+            command_adornments: Default::default(),
             system_brushes: HashMap::new(),
             dialog_bitmaps: HashMap::new(),
             owner_draw_frames: Vec::new(),
@@ -607,6 +622,18 @@ impl GdiState {
         h
     }
 
+    pub fn create_pattern_brush(&mut self, bitmap: Bitmap) -> u32 {
+        let color = bitmap.pixels.get(..2).map_or(0, |p| {
+            let p = u16::from_le_bytes([p[0], p[1]]);
+            (u32::from(p >> 11) * 255 / 31)
+                | ((u32::from((p >> 5) & 63) * 255 / 63) << 8)
+                | ((u32::from(p & 31) * 255 / 31) << 16)
+        });
+        let h = self.create_solid_brush(color);
+        self.brush_patterns.insert(h, std::sync::Arc::new(bitmap));
+        h
+    }
+
     pub fn create_pen(&mut self, color: u32, width: u32) -> u32 {
         let h = self.alloc_handle();
         self.objects.insert(h, GdiObject::Pen(Pen { color, width }));
@@ -701,6 +728,7 @@ impl GdiState {
             return false;
         }
         self.saved_dcs.remove(&handle);
+        self.brush_patterns.remove(&handle);
         self.regions.remove(&handle).is_some() || self.objects.remove(&handle).is_some()
     }
 

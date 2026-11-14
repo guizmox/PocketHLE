@@ -1,0 +1,10 @@
+{
+  "profile_name": "wince6-cmd",
+  "executable": "../wince6/fs/Windows/cmd.exe",
+  "image_root": "../wince6/fs",
+  "data_dir": "../ce-data/wince6-cmd",
+  "app_prefix": "\\Windows\\",
+  "command_line": "",
+  "screen": "vga_landscape",
+  "classic_windows": true
+}

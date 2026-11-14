@@ -34,13 +34,22 @@ use pocket_cpu::{
 use pocket_pe::{machine, ImportBinding, ImportSymbol, LoadedImage, ResourceEntry};
 
 pub mod accelerometer;
+pub mod api_sets;
+mod app_events;
 pub mod async_keys;
 pub mod audio;
+pub mod automation;
 pub mod bluetooth;
 pub mod camera;
+pub mod caret;
+pub mod ce;
+pub mod ce_hive;
 pub mod cedb;
 pub mod classic_sip;
+pub mod clipboard;
 pub mod colors;
+pub mod com_stream;
+pub mod console;
 pub mod controls;
 pub mod crypto;
 pub mod desktop_services;
@@ -75,12 +84,17 @@ pub mod shared_objects;
 pub mod shell_keyboard;
 pub mod shell_menu;
 pub mod stylus_stick;
+pub mod system_sound;
 pub mod text;
+mod text_input;
 mod tls;
 pub mod touch_steering;
 pub mod tracker;
 pub mod vfs;
 pub mod vibration;
+mod window_cleanup;
+mod window_compositor;
+pub mod windowing;
 pub mod zlib;
 
 pub use audio::{AudioEngine, AudioTap, GuestFormat, VoiceParams};
@@ -720,6 +734,7 @@ pub struct ModalDialog {
 /// the HLE has to both remember the parts and draw them.
 #[derive(Debug, Clone, Default)]
 pub struct StatusBar {
+    pub simple: bool,
     /// Parent window the bar is docked to the bottom of.
     pub parent: u32,
     /// Height in pixels, from the `CreateStatusWindow` call.
@@ -782,6 +797,50 @@ impl StatusBar {
             self.height
         } else {
             Self::DEFAULT_HEIGHT
+        }
+    }
+
+    /// A classic CE status control belongs to its parent client, not the
+    /// display's bottom edge. Portable Explorer keeps its taskbar below it.
+    pub fn render_at(
+        &self,
+        surface: &mut gdi::Surface<'_>,
+        rect: (i32, i32, i32, i32),
+        face: Option<&gdi::Font>,
+        background: Option<u16>,
+    ) {
+        let (x, y, width, height) = rect;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        surface.fill_rect(x, y, width, height, background.unwrap_or(Self::BG));
+        surface.fill_rect(x, y, width, 1, Self::EDGE);
+        for (i, text) in self.part_text.iter().enumerate() {
+            if self.simple && i != 255 {
+                continue;
+            }
+            if !self.simple && i == 255 {
+                continue;
+            }
+            let (left, right) = if self.simple {
+                (0, width)
+            } else {
+                self.part_span(i, width)
+            };
+            if left >= right {
+                continue;
+            }
+            if left > 0 {
+                surface.fill_rect(x + left, y + 3, 1, (height - 6).max(0), 0x8410);
+            }
+            let layout = text::layout(face, &text.encode_utf16().collect::<Vec<_>>());
+            layout.draw(
+                surface,
+                x + left + 3,
+                y + (height - layout.height) / 2,
+                Self::FG,
+                [x + left + 2, y + 1, x + right - 2, y + height],
+            );
         }
     }
 
@@ -969,7 +1028,7 @@ pub struct ControlNotifyFrame {
 /// in the `WM_SIZE` arm, so a title that draws immediately after
 /// `CreateWindowExW` — before it ever reaches its message pump — sees a
 /// zeroed layout and refuses to paint.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MenuItem {
     pub id: u32,
     pub kind: u32,
@@ -1121,6 +1180,8 @@ impl Dispatcher for NullDispatcher {
 /// code, patched imports, and exports registered in `dynamic_exports`.
 #[derive(Debug, Clone)]
 pub struct LoadedModule {
+    /// LOAD_LIBRARY_AS_DATAFILE: resources only, never exports or callbacks.
+    pub data_file: bool,
     /// Native import edges; lifetime follows reachability from explicit loads.
     pub dependencies: Vec<u32>,
     pub attached: bool,
@@ -1128,6 +1189,9 @@ pub struct LoadedModule {
     pub satellites: Vec<u32>,
     /// Exact mapped ranges, including import thunks, for teardown and RAM accounting.
     pub resident_regions: Vec<(u32, u32)>,
+    /// Allocator slot for the image or its separate import-thunk pool. ROM
+    /// images keep their preferred address and must not enter the free list.
+    pub module_slot: Option<u32>,
     /// `HMODULE` handed back to the guest. Equal to [`Self::base`],
     /// which is what the real CE loader returns.
     pub handle: u32,
@@ -1193,11 +1257,13 @@ pub struct ChildProcess {
 pub struct ProcessHandleContext {
     display_turns: u8,
     pub table: handles::HandleTable,
+    ce_device: ce::device::Context,
     vfs_shared: vfs::VfsShared,
     registry_store: std::sync::Arc<std::sync::Mutex<registry::RegistryStore>>,
     events: shared_objects::SharedObjects<EventObject>,
     semaphores: shared_objects::SharedObjects<SemaphoreObject>,
     mutexes: shared_objects::SharedObjects<MutexObject>,
+    console: console::Context,
 }
 #[derive(Debug, Default)]
 pub struct MutexObject {
@@ -1244,6 +1310,8 @@ pub struct KernelState {
     pub framebuffer: framebuffer::deferred::DeferredFramebuffer,
     /// Tracked GDI objects (DCs, bitmaps, brushes, pens, fonts).
     pub gdi: GdiState,
+    pub console: console::State,
+    pub ce: ce::State,
     /// Flat resource table for `FindResourceW` / `LoadResource`.
     pub resources: Vec<ResourceEntry>,
     /// Image base for resource RVA → VA conversion.
@@ -1251,6 +1319,7 @@ pub struct KernelState {
     /// Size and entry point copied from the loaded PE header for module introspection APIs.
     pub image_size: u32,
     pub image_entry: u32,
+    pub image_version: u32,
     pub dynamic_exports: HashMap<u32, HashMap<String, u32>>,
     /// Original executable IAT, retained for binding native DLL data and functions together.
     pub image_imports: Vec<pocket_pe::ImportSymbol>,
@@ -1390,7 +1459,7 @@ pub struct KernelState {
     pub pending_startup: std::collections::VecDeque<(u32, u32, u32)>,
     /// Open `FindFirstFileW` enumerations: handle -> remaining
     /// `(name, size, is_dir)` entries.
-    pub find_handles: HashMap<u32, std::collections::VecDeque<(String, u64, bool, u32)>>,
+    pub find_handles: HashMap<u32, std::collections::VecDeque<vfs::FindEntry>>,
     /// Next `FindFirstFileW` handle to hand out.
     pub next_find_handle: u32,
     /// In-memory Windows CE registry. Seeded from the CAB's
@@ -1849,14 +1918,101 @@ impl KernelState {
         }
     }
 
+    /// Explorer and Control Panel use one device registry across processes.
+    /// Apply changed settings at input polling boundaries, without repeatedly
+    /// overwriting volume or SIP changes made through an application's APIs.
+    pub fn sync_ce_settings(&mut self) {
+        if self.ce.version.is_none() {
+            return;
+        }
+        let number = |key: &str, name: &str, fallback: u32| match self.registry.value(key, name) {
+            Some(crate::registry::RegistryValue::Dword(value)) => value,
+            _ => fallback,
+        };
+        self.controls.double_click_time_ms =
+            u64::from(number(r"HKCU\ControlPanel\Pen", "DoubleTapTimeout", 500).clamp(1, 5000));
+        self.ce.settings.key_repeat_delay_ms =
+            u64::from(number(r"HKCU\ControlPanel\Keyboard", "InitialDelay", 400).clamp(100, 2000));
+        self.ce.settings.key_repeat_interval_ms =
+            u64::from(number(r"HKCU\ControlPanel\Keyboard", "RepeatRate", 33).clamp(10, 1000));
+        let audio = (
+            number(r"HKCU\ControlPanel\Volume", "Volume", u32::MAX),
+            number(r"HKCU\ControlPanel\Volume", "Mute", 7),
+        );
+        if self.ce.settings.audio != Some(audio) {
+            // Changing Explorer's event checkbox must not reset ceplayer's
+            // per-stream volume. Device volume follows only its own enable bit.
+            if self
+                .ce
+                .settings
+                .audio
+                .map(|(volume, mute)| (volume, mute & 2))
+                != Some((audio.0, audio.1 & 2))
+            {
+                self.audio
+                    .set_wave_volume(0, if audio.1 & 2 != 0 { audio.0 } else { 0 });
+            }
+            self.audio.set_wave_volume(
+                system_sound::EVENT_SOUND_STREAM,
+                system_sound::SoundCategory::Event.volume(&self.registry),
+            );
+            self.audio.set_wave_volume(
+                system_sound::PLAY_SOUND_STREAM,
+                self.ce.sounds.category.volume(&self.registry),
+            );
+            self.ce.settings.audio = Some(audio);
+        }
+        if let Some(crate::registry::RegistryValue::Dword(visible)) =
+            self.registry.value(r"HKCU\ControlPanel\SIP", "Visible")
+        {
+            let visible = visible != 0;
+            if self.ce.settings.sip_visible != Some(visible) {
+                self.ce.settings.sip_visible = Some(visible);
+                self.shell_keyboard.sip = true;
+                self.shell_keyboard.requested = visible;
+                if !visible && self.shell_keyboard.visible {
+                    self.shell_keyboard.visible = false;
+                    self.invalidate_presentation();
+                }
+            }
+        }
+    }
+
     pub fn take_process_launch(&mut self) -> Option<ProcessLaunch> {
         if self.pending_process_launch.is_some() {
             return self.pending_process_launch.take();
         }
+        while self.process_launch_enabled {
+            let Some((guest_path, command_line)) = self.object_handles.take_app_event() else {
+                break;
+            };
+            let Some(executable) = self.vfs.resolve(&guest_path).filter(|path| path.is_file())
+            else {
+                log::debug!("CeRunAppAtEvent: registered executable unavailable: {guest_path:?}");
+                continue;
+            };
+            let Some((process_handle, table)) = self.object_handles.new_child() else {
+                log::warn!(
+                    "CeRunAppAtEvent: could not allocate a guest process for {guest_path:?}"
+                );
+                break;
+            };
+            table.hold_start();
+            return Some(ProcessLaunch {
+                concurrent: true,
+                command_line,
+                creation_flags: 0,
+                call_key: None,
+                executable,
+                guest_path,
+                process_handle,
+                thread_handle: process_handle + 1,
+            });
+        }
         if self.scheduled_process_launches.is_empty() {
             return None;
         }
-        self.take_scheduled_process_launch(std::time::SystemTime::now())
+        self.take_scheduled_process_launch(self.object_handles.utc_now())
     }
 
     /// Drain one expired notification through the same guest process runner.
@@ -1899,14 +2055,17 @@ impl KernelState {
         Some(ProcessHandleContext {
             display_turns: self.async_keys.display_turns,
             table: self.object_handles.child(handle)?,
+            ce_device: self.ce.device.clone(),
             vfs_shared: self.vfs.shared_context(),
             registry_store: self.registry.store.clone(),
             events: self.events.clone(),
             semaphores: self.semaphores.clone(),
             mutexes: self.mutexes.clone(),
+            console: self.console_context(),
         })
     }
     pub fn reclaim_finished_stacks(&mut self, cpu: &mut dyn Cpu) -> Result<(), KernelError> {
+        self.reclaim_finished_windows();
         self.reclaim_finished_tls();
         // An interrupted guest enumeration owns its scratch buffer. Retire it
         // with its thread even if other threads keep the process alive.
@@ -1923,6 +2082,39 @@ impl KernelState {
             .retain(|frame| !finished(frame.thread));
         let heap = &mut self.heap;
         self.gdi.font_enum_frames.retain(|frame| {
+            if finished(frame.thread) {
+                heap.free(frame.scratch);
+                false
+            } else {
+                true
+            }
+        });
+        self.ce.sip_enumerations.retain(|frame| {
+            if finished(frame.thread) {
+                heap.free(frame.scratch);
+                false
+            } else {
+                true
+            }
+        });
+        self.ce.shell_folder_calls.retain(|frame| {
+            if finished(frame.thread) {
+                heap.free(frame.scratch);
+                false
+            } else {
+                true
+            }
+        });
+        self.ce.api_waits.retain(|key, _| !finished(key.0));
+        self.ce.power_calls.retain(|key, _| !finished(key.0));
+        self.ce
+            .carets
+            .threads
+            .retain(|thread, _| !finished(*thread));
+        self.ce
+            .focus_changes
+            .retain(|frame| !finished(frame.thread));
+        self.controls.common_control_frames.retain(|frame| {
             if finished(frame.thread) {
                 heap.free(frame.scratch);
                 false
@@ -2015,15 +2207,18 @@ impl KernelState {
         Ok(())
     }
     pub fn attach_handle_context(&mut self, context: ProcessHandleContext) {
+        self.ce.device = context.ce_device;
         self.async_keys.display_turns = context.display_turns;
         self.vfs.attach_shared_context(context.vfs_shared);
         // Registry values belong to the device; handles and overrides stay local.
         self.registry.store = context.registry_store;
         self.object_handles = context.table;
+        self.object_handles.set_process_version(self.image_version);
         self.events = context.events;
         self.semaphores = context.semaphores;
         self.mutexes = context.mutexes;
         self.sync_transferred_handles();
+        self.attach_console_context(context.console);
     }
     /// Publish primary handles before the parent is suspended. Resources keep
     /// their open description; only the receiving process gets the new alias.
@@ -2141,9 +2336,58 @@ impl KernelState {
         true
     }
 
+    fn ce_wake_input_count(&self) -> usize {
+        self.pending_input
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    InputEvent::KeyDown { .. }
+                        | InputEvent::PointerDown { .. }
+                        | InputEvent::Text { .. }
+                )
+            })
+            .count()
+    }
+
+    pub fn begin_ce_suspend(&mut self) -> u64 {
+        let generation = self.ce.device.suspend(self.object_handles.process_id());
+        self.ce.suspend_observation = Some((generation, self.ce_wake_input_count()));
+        generation
+    }
+
+    /// PowerOffSystem returns after new guest input, not an already queued
+    /// key or a timeout. The frontend remains active while guest CPUs pause.
+    fn poll_ce_suspend_input(&mut self) -> bool {
+        let Some(generation) = self.ce.device.suspended_generation() else {
+            self.ce.suspend_observation = None;
+            return false;
+        };
+        let count = self.ce_wake_input_count();
+        if self
+            .ce
+            .suspend_observation
+            .is_some_and(|(observed, before)| observed == generation && count > before)
+        {
+            if self.ce.device.resume_generation(generation) {
+                self.object_handles.emit_app_event(11);
+                log::info!("emulated CE device resumed by guest input");
+            }
+            self.ce.suspend_observation = None;
+        } else {
+            self.ce.suspend_observation = Some((generation, count));
+        }
+        self.ce.device.suspended_generation().is_some()
+    }
+
     /// Record process termination without changing the suspended parent process.
     pub fn record_process_exit(&mut self, code: u32) {
         self.process_exit_code = Some(code);
+        self.ce
+            .device
+            .release_process(self.object_handles.process_id());
+        self.ce.power_calls.clear();
+        self.ce.suspend_observation = None;
         for (_, p) in self.legacy_winsock.hostent_buffers.drain() {
             self.heap.free(p);
         }
@@ -2165,6 +2409,13 @@ impl KernelState {
         self.message_frames.clear();
         self.notify_message_frames.clear();
         for frame in self.gdi.font_enum_frames.drain(..) {
+            self.heap.free(frame.scratch);
+        }
+        for frame in self.ce.sip_enumerations.drain(..) {
+            self.heap.free(frame.scratch);
+        }
+        self.ce.api_waits.clear();
+        for frame in self.controls.common_control_frames.drain(..) {
             self.heap.free(frame.scratch);
         }
         self.gdi.clear_guest_fonts();
@@ -2215,7 +2466,12 @@ impl KernelState {
         &mut self,
     ) -> Result<std::borrow::Cow<'_, Framebuffer>, String> {
         if (!self.shell_keyboard.sip || !self.shell_keyboard.visible)
-            && self.gdi.shell_menus.tracking.is_none()
+            && self.gdi.shell_menus.active_handle().is_none()
+            && !self
+                .gdi
+                .image_drag
+                .as_ref()
+                .is_some_and(|drag| drag.visible)
         {
             return Ok(std::borrow::Cow::Borrowed(
                 self.framebuffer.presentation_cpu()?,
@@ -2224,9 +2480,9 @@ impl KernelState {
         let mut frame = self.framebuffer.presentation_cpu()?.clone();
         // Native GDI/SIP overlays use guest coordinates and take precedence.
         frame.clear_render_presentation();
-        if self.gdi.shell_menus.tracking.is_some() {
+        if let Some(menu_bar) = self.gdi.shell_menus.active_handle() {
             self.gdi.shell_menus.render(
-                shell_menu::TRACKING_HANDLE,
+                menu_bar,
                 &mut gdi::Surface::Screen(&mut frame),
                 &self.gdi,
                 &self.menu_items,
@@ -2235,6 +2491,33 @@ impl KernelState {
         }
         self.shell_keyboard
             .render(&mut gdi::Surface::Screen(&mut frame));
+        if let Some(drag) = self.gdi.image_drag.as_ref().filter(|drag| drag.visible) {
+            let origin = if drag.window == 0 {
+                (0, 0)
+            } else {
+                self.native_window_screen_rect(drag.window)
+                    .map(|r| (r.0, r.1))
+                    .or_else(|| self.controls.screen_rect(drag.window).map(|r| (r.0, r.1)))
+                    .unwrap_or_default()
+            };
+            let x = origin
+                .0
+                .saturating_add(drag.position.0)
+                .saturating_sub(drag.hotspot.0);
+            let y = origin
+                .1
+                .saturating_add(drag.position.1)
+                .saturating_sub(drag.hotspot.1);
+            let clip = [0, 0, frame.width as i32, frame.height as i32];
+            drag.image.draw(
+                &mut gdi::Surface::Screen(&mut frame),
+                x,
+                y,
+                drag.image.width,
+                drag.image.height,
+                clip,
+            );
+        }
         Ok(std::borrow::Cow::Owned(frame))
     }
 
@@ -2314,6 +2597,18 @@ impl KernelState {
         self.gapi_action_key == gapi::VK_RETURN
             && !self.gdi.shell_menus.taskbar_hidden
             && !self.gdi.shell_menus.gx_fullscreen
+            && self.ce.shell.taskbar.is_none()
+    }
+
+    pub fn is_desktop_window(&self, hwnd: u32) -> bool {
+        self.ce.shell.desktop == Some(hwnd)
+            || self.native_window_screen_rect(hwnd).is_some_and(|bounds| {
+                windowing::is_desktop_layer(
+                    self.window_styles.get(&hwnd).map_or(0, |s| s.0),
+                    bounds,
+                    (self.framebuffer.width, self.framebuffer.height),
+                )
+            })
     }
 
     pub fn window_client_origin(&self, mut hwnd: u32) -> Option<(i32, i32)> {
@@ -2325,6 +2620,22 @@ impl KernelState {
                 return Some((x, y));
             }
             if let Some(p) = self.controls.panel(hwnd) {
+                if let Some(rect) = self.window_rects.get(&hwnd).filter(|_| {
+                    self.window_styles
+                        .get(&hwnd)
+                        .is_some_and(|style| style.0 & 0x4000_0000 != 0)
+                }) {
+                    // CE6 Remote Desktop embeds nested options pages. Their
+                    // USER rectangles are relative to the parent's client;
+                    // DialogPanel's rendering coordinates remain screen-based.
+                    let border = i32::from(p.border);
+                    x = x.saturating_add(rect.0).saturating_add(border);
+                    y = y
+                        .saturating_add(rect.1)
+                        .saturating_add(border + p.caption_h());
+                    hwnd = *self.window_parents.get(&hwnd)?;
+                    continue;
+                }
                 let (a, b) = p.client_origin();
                 return Some((x.saturating_add(a), y.saturating_add(b)));
             }
@@ -2337,6 +2648,9 @@ impl KernelState {
             let r = self.window_rects.get(&hwnd)?;
             x = x.saturating_add(r.0);
             y = y.saturating_add(r.1);
+            let inset = self.window_metrics(hwnd).insets();
+            x = x.saturating_add(inset[0]);
+            y = y.saturating_add(inset[1]);
             if !self
                 .window_styles
                 .get(&hwnd)
@@ -2353,12 +2667,45 @@ impl KernelState {
         None
     }
     pub fn refresh_control_visibility(&mut self) {
+        let panels: Vec<_> = self
+            .controls
+            .panel_handles()
+            .filter(|hwnd| {
+                self.window_styles
+                    .get(hwnd)
+                    .is_some_and(|style| style.0 & 0x4000_0000 != 0)
+            })
+            .filter_map(|hwnd| {
+                self.native_window_screen_rect(hwnd)
+                    .map(|rect| (hwnd, rect))
+            })
+            .collect();
+        for (hwnd, rect) in panels {
+            let panel = self.controls.panel_mut(hwnd).unwrap();
+            panel.x = rect.0;
+            panel.y = rect.1;
+        }
         let origins = self
             .window_rects
             .keys()
             .filter_map(|&h| self.window_client_origin(h).map(|p| (h, p)))
             .collect();
         self.controls.set_native_origins(origins);
+        let bar_bounds: Vec<_> = self
+            .gdi
+            .shell_menus
+            .bars
+            .iter()
+            .filter(|(_, bar)| bar.bounds.is_some())
+            .filter_map(|(&h, _)| {
+                self.controls
+                    .screen_rect(h)
+                    .map(|(x, y, w, t)| (h, [x, y, x + w, y + t]))
+            })
+            .collect();
+        for (h, bounds) in bar_bounds {
+            self.gdi.shell_menus.bars.get_mut(&h).unwrap().bounds = Some(bounds);
+        }
         let hidden = self
             .controls
             .window_handles()
@@ -2444,8 +2791,10 @@ impl KernelState {
     }
 
     fn composite_window_layers(&mut self, present_windows: bool) {
+        self.refresh_console_window();
         self.refresh_control_visibility();
-        if !present_windows
+        if !self.ce.windows.enabled
+            && !present_windows
             && self.controls.is_empty()
             && self.modal.is_none()
             && self.active_shell_bar().is_none()
@@ -2510,6 +2859,7 @@ impl KernelState {
                 .hash(&mut hash);
             c.list_items.hash(&mut hash);
             c.list_images.hash(&mut hash);
+            c.list_states.hash(&mut hash);
             c.list_image_lists.hash(&mut hash);
             c.list_positions.hash(&mut hash);
             let stamp = hash.finish();
@@ -2619,6 +2969,10 @@ impl KernelState {
         }
         self.controls
             .layout_choice_popups(self.framebuffer.height as i32);
+        if self.ce.windows.enabled {
+            self.composite_classic_windows();
+            return;
+        }
         let frame_counter = self.framebuffer.frame_counter;
         let controls = self.controls.clone();
         let modal = self.modal.clone();
@@ -2824,7 +3178,12 @@ impl KernelState {
     /// is compared, case-insensitively.
     pub fn module_by_name(&self, name: &str) -> Option<&LoadedModule> {
         let key = module_file_name(name);
-        self.modules.iter().find(|m| m.name == key)
+        self.modules.iter().find(|m| !m.data_file && m.name == key)
+    }
+
+    pub fn data_file_module_by_name(&self, name: &str) -> Option<&LoadedModule> {
+        let key = module_file_name(name);
+        self.modules.iter().find(|m| m.data_file && m.name == key)
     }
 
     /// Resources and image base to search for a given `hModule`.
@@ -2952,6 +3311,10 @@ pub struct GuestThread {
     pub parked_wait_handles: Vec<u32>,
     /// `true` for WaitForMultipleObjects(..., TRUE, ...).
     pub parked_wait_all: bool,
+    /// Queue wake mask for MsgWaitForMultipleObjects[Ex]. Some(0) still
+    /// denotes a combined wait, but messages cannot satisfy that mask.
+    /// None retains the ordinary object-wait/GetMessage scheduling contract.
+    pub parked_wait_message_mask: Option<u32>,
 }
 #[allow(clippy::too_many_arguments)]
 impl GuestThread {
@@ -2990,6 +3353,7 @@ impl GuestThread {
             parked_in_pump: false,
             parked_wait_handles: Vec::new(),
             parked_wait_all: false,
+            parked_wait_message_mask: None,
         }
     }
 }
@@ -3981,6 +4345,9 @@ impl Heap {
 /// Fake `HMODULE` for the resident `ole32.dll` compatibility module.
 pub const SDLAUNCH_MODULE_HANDLE: u32 = 0x1000_0009;
 pub const OLE32_MODULE_HANDLE: u32 = 0x1000_0007;
+pub const IPHLPAPI_MODULE_HANDLE: u32 = 0x1000_000e;
+pub const CRYPT32_MODULE_HANDLE: u32 = 0x1000_000f;
+pub const SECUR32_MODULE_HANDLE: u32 = 0x1000_0010;
 pub const WININET_MODULE_HANDLE: u32 = 0x1000_000b;
 pub const WS2_MODULE_HANDLE: u32 = 0x1000_000a;
 pub const NOTE_PRJ_MODULE_HANDLE: u32 = 0x1000_000c;
@@ -4089,6 +4456,29 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
                 .entry(NOTE_PRJ_MODULE_HANDLE)
                 .or_insert_with(HashMap::new)
                 .insert(name, thunk.thunk_va);
+        } else if let Some((_, handle)) = ce::CPL_MODULES
+            .iter()
+            .find(|(dll, _)| thunk.dll.eq_ignore_ascii_case(dll))
+        {
+            exports
+                .entry(*handle)
+                .or_insert_with(HashMap::new)
+                .insert(name, thunk.thunk_va);
+        } else if thunk.dll.eq_ignore_ascii_case("iphlpapi.dll") {
+            exports
+                .entry(IPHLPAPI_MODULE_HANDLE)
+                .or_default()
+                .insert(name, thunk.thunk_va);
+        } else if thunk.dll.eq_ignore_ascii_case("crypt32.dll") {
+            exports
+                .entry(CRYPT32_MODULE_HANDLE)
+                .or_default()
+                .insert(name, thunk.thunk_va);
+        } else if thunk.dll.eq_ignore_ascii_case("secur32.dll") {
+            exports
+                .entry(SECUR32_MODULE_HANDLE)
+                .or_default()
+                .insert(name, thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("ole32.dll") {
             ole32.insert(name.clone(), thunk.thunk_va);
         } else if thunk.dll.eq_ignore_ascii_case("libegl.dll") {
@@ -4139,6 +4529,9 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
 }
 pub struct Process {
     pub image: LoadedImage,
+    /// Selected before section payloads are released. CalNot's CE function
+    /// table must remain authoritative when the main loop starts later.
+    entry_uses_thumb: bool,
     pub thunks: Vec<Thunk>,
     pub thunk_by_va: HashMap<u32, usize>,
     pub stack_top: u32,
@@ -4384,6 +4777,9 @@ impl Process {
 
         let mut dynamic_exports_to_add = Vec::new();
         for dll in [
+            "iphlpapi.dll",
+            "crypt32.dll",
+            "secur32.dll",
             "aygshell.dll",
             "coredll.dll",
             "commctrl.dll",
@@ -4400,6 +4796,7 @@ impl Process {
             "ws2.dll",
             "wininet.dll",
             "note_prj.dll",
+            "cplmain.cpl",
             "toolhelp.dll",
         ] {
             dynamic_exports_to_add.extend(
@@ -4513,10 +4910,8 @@ impl Process {
         )?;
         cpu.write_reg(ArmReg::Sp, stack_top - 16)?;
         cpu.write_reg(ArmReg::Lr, PROCESS_EXIT_TRAMPOLINE_VA)?;
-        if image.machine != machine::MIPS_R3000
-            && image.machine != machine::MIPS_R4000
-            && image_uses_thumb_entry(cpu, &image)?
-        {
+        let entry_uses_thumb = image_uses_thumb_entry(cpu, &image)?;
+        if entry_uses_thumb {
             let cpsr = cpu.read_reg(ArmReg::Cpsr)? | (1 << 5);
             cpu.write_reg(ArmReg::Cpsr, cpsr)?;
             log::debug!("starting Thumb-mode entry with CPSR.T set");
@@ -4641,6 +5036,10 @@ impl Process {
         let img_base = image.image_base;
         let img_size = image.size_of_image;
         let img_entry = image.entry_va();
+        let img_version =
+            (u32::from(image.subsystem_version.0) << 16) | u32::from(image.subsystem_version.1);
+        let object_handles = handles::HandleTable::default();
+        object_handles.set_process_version(img_version);
         let image_imports = image.imports.clone();
         // A game's satellite DLLs sit next to the EXE on a real device, so
         // the directory we loaded the EXE from is the natural search path
@@ -4656,6 +5055,7 @@ impl Process {
         }
         Ok(Process {
             image,
+            entry_uses_thumb,
             thunks,
             thunk_by_va,
             stack_top,
@@ -4679,7 +5079,7 @@ impl Process {
                     stack_region: Some((stack_base - 0x2000, stack_size + 0x2000)),
                     ..MainThreadState::default()
                 },
-                object_handles: handles::HandleTable::default(),
+                object_handles,
                 crypto: Default::default(),
                 cedb: Default::default(),
                 mapped_views: Default::default(),
@@ -4687,10 +5087,13 @@ impl Process {
                 random_seed: 0x1234_abcd,
                 framebuffer: framebuffer::deferred::DeferredFramebuffer::default(),
                 gdi: GdiState::new(),
+                console: console::State::default(),
+                ce: ce::State::default(),
                 resources,
                 image_base: img_base,
                 image_size: img_size,
                 image_entry: img_entry,
+                image_version: img_version,
                 dynamic_exports,
                 image_imports,
                 gles_local_ordinals: HashMap::new(),
@@ -5061,6 +5464,13 @@ pub fn image_uses_thumb_entry(cpu: &mut dyn Cpu, image: &LoadedImage) -> Result<
     if image.machine != machine::THUMB && image.machine != machine::ARMNT {
         return Ok(false);
     }
+    if let Some(thumb) = image.ce_pdata_entry_uses_thumb() {
+        log::debug!(
+            "CE function table selects {} entry mode",
+            if thumb { "Thumb" } else { "ARM" }
+        );
+        return Ok(thumb);
+    }
     let entry = image.entry_va() & !1;
     let bytes = cpu.read_mem(entry, 4)?;
     let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -5095,7 +5505,7 @@ pub fn run_main_loop_with_hook(
     max_slices: u64,
     mut frame_hook: Option<&mut dyn FrameHook>,
 ) -> Result<(), KernelError> {
-    let thumb_mode = image_uses_thumb_entry(cpu, &process.image)?;
+    let thumb_mode = process.entry_uses_thumb;
     let entry = process.image.entry_va() & !1;
     let mut pc = if thumb_mode { entry | 1 } else { entry };
     log::info!(
@@ -5138,6 +5548,31 @@ pub fn run_main_loop_with_hook(
             let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
             if process.state.apply_process_controls(cpu, &mut pc)? {
                 return Ok(());
+            }
+        }
+        if process.state.ce.device.suspended_generation().is_some()
+            && process.state.poll_ce_suspend_input()
+        {
+            let now = Instant::now();
+            if last_frontend_poll
+                .is_none_or(|then| now.duration_since(then) >= FRONTEND_POLL_INTERVAL)
+            {
+                last_frontend_poll = Some(now);
+                if let Some(hook) = frame_hook.as_deref_mut() {
+                    if hook.on_frame(&mut process.state) == FrameAction::Stop {
+                        log::info!("frame hook requested stop during CE suspend");
+                        return Ok(());
+                    }
+                }
+            }
+            if process.state.should_stop {
+                return Ok(());
+            }
+            if process.state.poll_ce_suspend_input() {
+                // No execution gate is held, so another process can stop
+                // this caller. Do not execute guest code while suspended.
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
             }
         }
         // Switch TLS before any guest code, including DllMain notifications.
@@ -5702,6 +6137,7 @@ pub fn run_main_loop_with_hook(
             if due || input_due {
                 last_frontend_poll = Some(now);
                 process.state.sync_backlight();
+                process.state.sync_ce_settings();
                 process.state.sync_power_notifications();
                 let action = hook.on_frame(&mut process.state);
                 last_presented_frame = process.state.framebuffer.frame_counter;
@@ -5946,7 +6382,9 @@ mod tests {
                 owner,
                 menu: 0,
                 sip: true,
+                close_button: false,
                 background: 0xf800,
+                bounds: None,
             },
         );
         assert!(k.controls.is_empty());
@@ -6426,6 +6864,99 @@ mod tests {
         assert_eq!(bar.part_span(1, 240), (70, 240));
     }
 
+    #[test]
+    fn native_tab_pages_compose_controls_clip_and_follow_parent_visibility() {
+        use controls::ControlClass;
+        use gdi::Surface;
+        const WS_VISIBLE: u32 = 0x1000_0000;
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let k = &mut process.state;
+        k.ce.windows.enabled = true;
+        k.framebuffer.resize(320, 240);
+        let main = 0xdead0001;
+        let page = 0xdead0002;
+        k.window_rects.insert(main, (10, 10, 260, 190));
+        k.window_styles.insert(
+            main,
+            (
+                WS_VISIBLE | windowing::WS_CAPTION | windowing::WS_SYSMENU,
+                0,
+            ),
+        );
+        k.active_window = main;
+        let tab = k.controls.create(
+            main,
+            ControlClass::Tab,
+            1,
+            String::new(),
+            WS_VISIBLE | 0x40000000,
+            6,
+            6,
+            220,
+            120,
+        );
+        // SampleApp's native page has a built-in control as its parent.
+        // An oversized page also verifies clipping at that mixed boundary.
+        k.window_rects.insert(page, (2, 22, 250, 140));
+        k.window_styles.insert(page, (WS_VISIBLE | 0x40000000, 0));
+        k.window_parents.insert(page, tab);
+        let dc = k.gdi.create_memory_dc();
+        let bitmap = k.gdi.create_compatible_bitmap(250, 140);
+        k.gdi.dc_mut(dc).unwrap().selected_bitmap = Some(bitmap);
+        Surface::Bitmap(k.gdi.bitmap_mut(bitmap).unwrap()).fill_rect(0, 0, 250, 140, 0x07e0);
+        k.window_dcs.insert(page, dc);
+        let button = k.controls.create(
+            page,
+            ControlClass::Button,
+            2,
+            "Page button".into(),
+            WS_VISIBLE | 0x40000000,
+            10,
+            10,
+            100,
+            24,
+        );
+        k.composite_controls();
+        let (px, py) = k.window_client_origin(page).unwrap();
+        let (tx, ty) = k.window_client_origin(tab).unwrap();
+        let pixel = |k: &KernelState, x: i32, y: i32| {
+            let offset = (y as usize * 320 + x as usize) * 2;
+            u16::from_le_bytes(
+                k.framebuffer.resident_cpu().unwrap().pixels[offset..offset + 2]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(pixel(k, px + 4, py + 4), 0x07e0);
+        let button_origin = k.window_client_origin(button).unwrap();
+        assert_ne!(pixel(k, button_origin.0 + 4, button_origin.1 + 4), 0x07e0);
+        assert_ne!(pixel(k, tx + 224, py + 4), 0x07e0);
+        assert_ne!(pixel(k, px + 4, ty + 124), 0x07e0);
+        let revision = k.framebuffer.frame_counter;
+        k.composite_controls();
+        assert_eq!(k.framebuffer.frame_counter, revision);
+        k.window_visibility.insert(page, false);
+        k.composite_controls();
+        assert_ne!(pixel(k, px + 4, py + 4), 0x07e0);
+        assert_eq!(k.controls.is_visible(button), Some(false));
+        k.window_visibility.insert(page, true);
+        k.window_visibility.insert(main, false);
+        k.composite_controls();
+        assert_eq!(k.controls.is_visible(tab), Some(false));
+        assert_eq!(k.controls.is_visible(button), Some(false));
+        assert_eq!(
+            pixel(k, px + 4, py + 4),
+            framebuffer::colorref_to_rgb565(windowing::system_color(1)),
+        );
+    }
+
     /// An unset trailing edge behaves like -1 rather than collapsing
     /// the part to zero width.
     #[test]
@@ -6638,6 +7169,7 @@ mod tests {
             source_path: "test".into(),
             machine: pocket_pe::machine::ARM,
             subsystem: pocket_pe::subsystem::WINDOWS_CE_GUI,
+            subsystem_version: (4, 0),
             image_base,
             stack_reserve: 0x10000,
             size_of_image: text_size + 0x1000,
@@ -6780,6 +7312,101 @@ mod tests {
             StopReason::Hook(fallback)
         );
         assert_eq!(cpu.read_u32_le(entry).unwrap(), 0xe3520001);
+    }
+
+    #[test]
+    fn ce_suspend_keeps_stop_available_without_executing_guest_code_or_using_stale_input() {
+        let mut loader_cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut loader_cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        process
+            .state
+            .pending_input
+            .push_back(InputEvent::KeyDown { vk: 0x0d });
+        process.state.begin_ce_suspend();
+        // Deliberately unmapped: executing even one CPU slice must fail.
+        let mut cpu = StrictMapCpu::new();
+        let gate = process.state.object_handles.execution_gate();
+        let mut calls = 0;
+        let mut hook = |state: &mut KernelState| {
+            assert!(
+                gate.try_lock().is_ok(),
+                "suspend must release the process gate"
+            );
+            assert!(state.ce.device.suspended_generation().is_some());
+            calls += 1;
+            match calls {
+                1 => state
+                    .pending_input
+                    .push_back(InputEvent::PointerMove { x: 10, y: 10 }),
+                2 => state
+                    .pending_input
+                    .push_back(InputEvent::KeyUp { vk: 0x0d }),
+                _ => return FrameAction::Stop,
+            }
+            FrameAction::Continue
+        };
+        run_main_loop_with_hook(
+            &mut cpu,
+            &mut process,
+            &mut NullDispatcher,
+            100,
+            0,
+            Some(&mut hook),
+        )
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(cpu.last_slice_timeout, None);
+        assert_eq!(process.state.process_exit_code, None);
+    }
+
+    #[test]
+    fn ce_suspend_resumes_on_new_input_and_preserves_the_event_for_the_guest() {
+        let mut loader_cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut loader_cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let mut cpu = StrictMapCpu::new();
+        cpu.map_region(0x11000, 4096, Prot::READ | Prot::WRITE | Prot::EXEC)
+            .unwrap();
+        cpu.write_mem(0x11000, &0xeaff_fffeu32.to_le_bytes())
+            .unwrap();
+        process.state.begin_ce_suspend();
+        let mut calls = 0;
+        let mut hook = |state: &mut KernelState| {
+            calls += 1;
+            if calls == 1 {
+                assert!(state.ce.device.suspended_generation().is_some());
+                state
+                    .pending_input
+                    .push_back(InputEvent::KeyDown { vk: 0x0d });
+            }
+            FrameAction::Continue
+        };
+        run_main_loop_with_hook(
+            &mut cpu,
+            &mut process,
+            &mut NullDispatcher,
+            100,
+            1,
+            Some(&mut hook),
+        )
+        .unwrap();
+        assert_eq!(process.state.ce.device.suspended_generation(), None);
+        assert_eq!(cpu.last_slice_timeout, Some(20_000));
+        assert_eq!(
+            process.state.pending_input.front(),
+            Some(&InputEvent::KeyDown { vk: 0x0d })
+        );
     }
 
     #[test]
@@ -6958,6 +7585,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ce_function_table_selects_arm_dll_leaf_and_overrides_ambiguous_entry_bytes() {
+        for (words, packed, thumb) in [
+            // CalNot's pimres DllMain starts with cmp r1,#0; beq detach.
+            ([0xe351_0000u32, 0x0a00_0005], 0x4000_0e00u32, false),
+            // Metadata must also preserve a real Thumb function when its
+            // first two halfwords happen to match the old ARM heuristic.
+            ([0xe1a0_0000, 0x4770_2001], 0x0000_0800, true),
+        ] {
+            let mut image = image_based_at(0x10000, 0x1000);
+            image.machine = machine::THUMB;
+            image.size_of_image = 0x3000;
+            image.subsystem = pocket_pe::subsystem::WINDOWS_CE_GUI;
+            for (slot, word) in image.sections[0].data[..8].chunks_exact_mut(4).zip(words) {
+                slot.copy_from_slice(&word.to_le_bytes());
+            }
+            let mut data = 0x11000u32.to_le_bytes().to_vec();
+            data.extend_from_slice(&packed.to_le_bytes());
+            image.sections.push(pocket_pe::LoadedSection {
+                name: ".pdata".into(),
+                virtual_address: 0x2000,
+                virtual_size: 8,
+                characteristics: 0x4000_0040,
+                data,
+            });
+            assert_eq!(image.ce_pdata_entry_uses_thumb(), Some(thumb));
+            let mut cpu = StubCpu::new();
+            let process =
+                Process::map_into(image, &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
+            assert!(process
+                .image
+                .sections
+                .iter()
+                .all(|section| section.data.is_empty()));
+            assert_eq!(process.entry_uses_thumb, thumb);
+            assert_eq!(cpu.read_reg(ArmReg::Cpsr).unwrap() & 0x20 != 0, thumb);
+        }
+    }
+
+    #[test]
+    fn ce_function_table_ignores_invalid_records_and_armnt_unwind_format() {
+        for (machine_tag, start, packed) in [
+            (machine::THUMB, 0x11000u32, 0x4000_0000u32),
+            (machine::THUMB, 0xffff_fff0, 0x403f_ff00),
+            (machine::THUMB, 0x14000, 0x4000_0800),
+            (machine::ARMNT, 0x11000, 0x4000_0800),
+        ] {
+            let mut image = image_based_at(0x10000, 0x1000);
+            image.machine = machine_tag;
+            image.size_of_image = 0x3000;
+            image.subsystem = pocket_pe::subsystem::WINDOWS_CE_GUI;
+            image.sections[0].data[..4].copy_from_slice(&[0x01, 0x20, 0x70, 0x47]);
+            let mut data = start.to_le_bytes().to_vec();
+            data.extend_from_slice(&packed.to_le_bytes());
+            image.sections.push(pocket_pe::LoadedSection {
+                name: ".pdata".into(),
+                virtual_address: 0x2000,
+                virtual_size: 8,
+                characteristics: 0x4000_0040,
+                data,
+            });
+            let mut cpu = StubCpu::new();
+            let process =
+                Process::map_into(image, &mut cpu, &|_, _| None, &NullDispatcher).unwrap();
+            assert!(image_uses_thumb_entry(&mut cpu, &process.image).unwrap());
+        }
+    }
+
     /// An image based *above* slot 0 still gets the alias window, since
     /// its CRT startup addresses itself through slot-relative pointers
     /// and nothing is mapped at `0x10000` to collide with.
@@ -7027,6 +7722,7 @@ mod tests {
             source_path: "test".into(),
             machine: pocket_pe::machine::ARM,
             subsystem: pocket_pe::subsystem::WINDOWS_CE_GUI,
+            subsystem_version: (4, 0),
             image_base: 0x10000,
             stack_reserve: 0x10000,
             size_of_image: 0x2000,
@@ -7086,6 +7782,7 @@ impl Drop for KernelState {
         if self.process_exit_code.is_none() {
             self.record_process_exit(0xc0000001);
         }
+        self.release_console_window();
         for (handle, _) in self.object_handles.owned() {
             if let Some((object, last)) = self.object_handles.close(handle) {
                 self.clean_object(object, last);

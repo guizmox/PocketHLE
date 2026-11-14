@@ -8,6 +8,7 @@ struct State<T> {
     receiver_alive: bool,
     senders: usize,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    version: Option<u64>,
 }
 pub struct Sender<T>(Arc<Mutex<State<T>>>);
 pub struct Receiver<T>(Arc<Mutex<State<T>>>);
@@ -17,6 +18,7 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
         receiver_alive: true,
         senders: 1,
         wake: None,
+        version: None,
     }));
     (Sender(state.clone()), Receiver(state))
 }
@@ -28,10 +30,22 @@ impl<T> Clone for Sender<T> {
 }
 impl<T> Sender<T> {
     pub fn send(&self, image: T) -> Result<(), SendError<T>> {
+        self.send_impl(image, None)
+    }
+    /// Concurrent CE processes may finish packing an earlier composition
+    /// after a newer one. Keep the latest desktop even after it was consumed.
+    pub fn send_versioned(&self, image: T, version: u64) -> Result<(), SendError<T>> {
+        self.send_impl(image, Some(version))
+    }
+    fn send_impl(&self, image: T, version: Option<u64>) -> Result<(), SendError<T>> {
         let (previous, wake) = {
             let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
             if !state.receiver_alive {
                 return Err(SendError(image));
+            }
+            if let Some(version) = version {
+                if state.version.is_some_and(|last| version <= last) { return Ok(()); }
+                state.version = Some(version);
             }
             let previous = state.pending.replace(image);
             let wake = if previous.is_none() {
@@ -93,6 +107,17 @@ impl<T> Drop for Receiver<T> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn delayed_desktop_composition_cannot_replace_a_newer_consumed_frame() {
+        let (tx, rx) = channel();
+        tx.send_versioned("new", 2).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), "new");
+        tx.send_versioned("old", 1).unwrap();
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+        tx.send_versioned("newest", 3).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), "newest");
+    }
 
     #[test]
     fn wakes_once_per_pending_image_and_runs_outside_the_lock() {

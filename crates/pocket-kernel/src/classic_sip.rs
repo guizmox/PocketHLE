@@ -28,8 +28,23 @@ pub fn height(w: i32, h: i32) -> i32 {
 pub fn top(w: i32, h: i32) -> i32 {
     h - 26 - height(w, h)
 }
+pub fn rect(k: &ShellKeyboard, w: i32, h: i32) -> [i32; 4] {
+    if let Some([left, top, right, bottom]) = k.default_sip_rect {
+        [
+            left.clamp(0, w.max(0)),
+            top.clamp(0, h.max(0)),
+            right.clamp(0, w.max(0)),
+            bottom.clamp(0, h.max(0)),
+        ]
+    } else {
+        [0, top(w, h), w, h - 26]
+    }
+}
 fn cells(k: &ShellKeyboard, w: i32, h: i32) -> Vec<Cell> {
     use Key::*;
+    let [panel_left, panel_top, panel_right, panel_bottom] = rect(k, w, h);
+    let panel_width = panel_right - panel_left;
+    let panel_height = panel_bottom - panel_top;
     let mut rows: Vec<Vec<(String, Key, i32)>> = vec![vec![]; 5];
     rows[0].push(("123".into(), Symbols, 1));
     for ch in (if k.shift {
@@ -98,12 +113,12 @@ fn cells(k: &ShellKeyboard, w: i32, h: i32) -> Vec<Cell> {
     for (row, keys) in rows.into_iter().enumerate() {
         let total: i32 = keys.iter().map(|k| k.2).sum();
         let mut used = 0;
-        let y = top(w, h) + height(w, h) * row as i32 / 5;
-        let bottom = top(w, h) + height(w, h) * (row as i32 + 1) / 5;
+        let y = panel_top + panel_height * row as i32 / 5;
+        let bottom = panel_top + panel_height * (row as i32 + 1) / 5;
         for (label, key, units) in keys {
-            let left = w * used / total;
+            let left = panel_left + panel_width * used / total;
             used += units;
-            let right = w * used / total;
+            let right = panel_left + panel_width * used / total;
             let index = out.len();
             out.push(Cell {
                 label,
@@ -123,11 +138,12 @@ pub fn key_center(label: &str, w: i32, h: i32) -> Option<(i32, i32)> {
 }
 pub fn tap(k: &mut ShellKeyboard, x: i32, y: i32, w: i32, h: i32) -> Option<u32> {
     k.pressed_key = None;
-    if x < 0 || x >= w || y < top(w, h) || y >= h {
-        return None;
-    }
-    if y >= h - 26 {
+    if k.default_sip_rect.is_none() && (h - 26..h).contains(&y) && (0..w).contains(&x) {
         return (x >= w - 26).then_some(0);
+    }
+    let [left, top, right, bottom] = rect(k, w, h);
+    if x < left || x >= right || y < top || y >= bottom {
+        return None;
     }
     let c = cells(k, w, h)
         .into_iter()
@@ -174,7 +190,8 @@ pub fn render(k: &ShellKeyboard, s: &mut Surface<'_>) {
     let (w, h) = (w as i32, h as i32);
     let scale = (w.min(h) / 240).max(1);
     let font = Font::new(-11 * scale);
-    s.fill_rect(0, top(w, h), w, height(w, h), 0xbdf7);
+    let [left, top, right, bottom] = rect(k, w, h);
+    s.fill_rect(left, top, right - left, bottom - top, 0xbdf7);
     for c in cells(k, w, h) {
         let [x, y, right, bottom] = c.rect;
         let pressed = k.pointer_captured && k.pressed_key == Some(c.index);
@@ -236,6 +253,10 @@ pub fn render(k: &ShellKeyboard, s: &mut Surface<'_>) {
         );
     }
     // The input-panel button remains in the shell's bottom command strip.
+    // A native shell with SipSetDefaultRect owns that strip and its SIP button.
+    if k.default_sip_rect.is_some() {
+        return;
+    }
     s.fill_rect(w - 26, h - 26, 26, 26, 0xc618);
     for r in 0..3 {
         for c in 0..5 {
@@ -246,6 +267,44 @@ pub fn render(k: &ShellKeyboard, s: &mut Surface<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn requested_panel_draws_and_accepts_keys_only_inside_the_native_shell_rectangle() {
+        let mut k = ShellKeyboard {
+            sip: true,
+            visible: true,
+            default_sip_rect: Some([20, 120, 220, 220]),
+            ..Default::default()
+        };
+        let mut image = crate::gdi::Bitmap::new(240, 320);
+        let untouched = 0x1357u16;
+        for pixel in image.pixels.chunks_exact_mut(2) {
+            pixel.copy_from_slice(&untouched.to_le_bytes());
+        }
+        k.render(&mut Surface::Bitmap(&mut image));
+        let pixel = |x: usize, y: usize| {
+            u16::from_le_bytes(
+                image.pixels[(y * 240 + x) * 2..(y * 240 + x) * 2 + 2]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert_eq!(pixel(0, 150), untouched);
+        assert_eq!(pixel(239, 319), untouched);
+        let q = cells(&k, 240, 320)
+            .into_iter()
+            .find(|c| c.label == "q")
+            .unwrap();
+        assert_eq!(
+            k.tap(
+                (q.rect[0] + q.rect[2]) / 2,
+                (q.rect[1] + q.rect[3]) / 2,
+                240,
+                320
+            ),
+            Some('q' as u32)
+        );
+        assert_ne!(pixel(21, 121), untouched);
+    }
     #[test]
     fn classic_layout_types_lowercase_caps_shift_and_virtual_keys() {
         let mut k = ShellKeyboard {

@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn register(d: &mut WinCeDispatcher) {
     for (name, handler) in [
         ("GetFileTime", get_file_time as crate::Handler),
+        ("SetFileTime", set_file_time),
         ("CompareFileTime", compare_file_time),
         ("SetClassLongW", set_class_long),
         ("GetClassLongW", get_class_long),
@@ -33,7 +34,13 @@ pub(super) fn get_file_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
     let pointers = [ctx.arg_u32(1)?, ctx.arg_u32(2)?, ctx.arg_u32(3)?];
     for p in pointers {
         if p != 0 {
-            ctx.cpu.read_mem(p, 8)?;
+            match ctx.cpu.check_guest_access(p, 8, Prot::WRITE) {
+                Ok(()) => {}
+                Err(error @ pocket_cpu::CpuError::ImageOutOfMemory { .. }) => {
+                    return Err(error.into())
+                }
+                Err(_) => return fail(ctx, 87),
+            }
         }
     }
     for (p, value) in pointers.into_iter().zip(times) {
@@ -42,6 +49,27 @@ pub(super) fn get_file_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
         }
     }
     ret(1)
+}
+pub(super) fn set_file_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    let mut times = [None; 3];
+    for (index, value) in times.iter_mut().enumerate() {
+        let p = ctx.arg_u32(index as u8 + 1)?;
+        if p != 0 {
+            match ctx.cpu.check_guest_access(p, 8, Prot::READ) {
+                Ok(()) => {}
+                Err(error @ pocket_cpu::CpuError::ImageOutOfMemory { .. }) => {
+                    return Err(error.into())
+                }
+                Err(_) => return fail(ctx, 87),
+            }
+            *value = Some(u64::from_le_bytes(
+                ctx.cpu.read_mem(p, 8)?.try_into().unwrap(),
+            ));
+        }
+    }
+    let result = ctx.kernel.vfs.set_file_times(handle, times);
+    vfs_api_bool(ctx, result)
 }
 pub(super) fn compare_file_time(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let a = ctx.arg_u32(0)?;

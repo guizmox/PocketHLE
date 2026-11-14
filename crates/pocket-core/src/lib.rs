@@ -13,6 +13,8 @@
 //! provides a fully working ARM backend.
 
 mod cab_setup;
+pub mod ce_desktop;
+pub mod ce_image;
 mod colors_wallet;
 
 use std::path::Path;
@@ -38,6 +40,8 @@ pub struct Emulator {
     /// or after [`Emulator::load_pe`]. See that method for why.
     requested_screen: Option<(u32, u32)>,
     requested_frame_rate_limit: Option<u32>,
+    ce_image: Option<std::sync::Arc<ce_image::WindowsCeImage>>,
+    classic_windows: bool,
     pub instruction_budget_per_slice: u64,
     pub max_slices: u64,
 }
@@ -50,6 +54,8 @@ impl Emulator {
             dispatcher: WinCeDispatcher::new(),
             requested_screen: None,
             requested_frame_rate_limit: None,
+            ce_image: None,
+            classic_windows: false,
             instruction_budget_per_slice: 1_000_000,
             max_slices: 1024,
         }
@@ -72,6 +78,8 @@ impl Emulator {
             dispatcher: WinCeDispatcher::new(),
             requested_screen: None,
             requested_frame_rate_limit: None,
+            ce_image: None,
+            classic_windows: false,
             instruction_budget_per_slice: 1_000_000,
             max_slices: 1024,
         })
@@ -171,6 +179,30 @@ impl Emulator {
         self.dispatcher.halt_on_unimplemented = halt;
     }
 
+    /// Configure image export metadata before mapping imports. System binaries
+    /// supply data only; CerfDemo and Explorer still use the HLE kernel/GDI.
+    pub fn set_windows_ce_image(
+        &mut self,
+        image: std::sync::Arc<ce_image::WindowsCeImage>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.process.is_none(),
+            "configure the CE image before load_pe"
+        );
+        self.dispatcher.set_system_ordinals(image.ordinals.clone());
+        self.ce_image = Some(image);
+        self.set_classic_windows(true);
+        Ok(())
+    }
+
+    pub fn set_classic_windows(&mut self, enabled: bool) {
+        self.classic_windows = enabled;
+        if let Some(process) = self.process.as_mut() {
+            process.state.ce.windows.enabled = enabled;
+            process.state.ce.windows.last_stamp = None;
+        }
+    }
+
     /// Forward every dispatched API call as JSON-lines to `sink`.
     pub fn set_trace_sink(&mut self, sink: Box<dyn std::io::Write + Send>) {
         self.dispatcher.set_trace_sink(sink);
@@ -202,18 +234,34 @@ impl Emulator {
         colors_wallet::apply(&raw, &mut image).context("Colors wallet compatibility")?;
         pocket_winceapi::reset_media_backends();
         let arch = self.cpu.arch();
+        let system_ordinals = self.ce_image.as_ref().map(|image| &image.ordinals);
         let gles_tables = pocket_winceapi::gles_exports::local_tables(path, &image)
             .map_err(anyhow::Error::msg)?;
         let nv_combiner_client = pocket_winceapi::gles::uses_nv_combiner(&image);
         let mut process = Process::map_into_with_executable_heap(
             image,
             self.cpu.as_mut(),
-            &|dll, ord| pocket_winceapi::gles_exports::resolve(&gles_tables, dll, ord, arch),
+            &|dll, ord| match system_ordinals
+                .and_then(|tables| tables.get(&dll.to_ascii_lowercase()))
+            {
+                Some(table) => table.get(&ord).cloned(),
+                None => pocket_winceapi::gles_exports::resolve(&gles_tables, dll, ord, arch),
+            },
             &self.dispatcher,
             executable_heap,
         )
         .context("mapping image into CPU")?;
         process.state.gles_local_ordinals = gles_tables;
+        process.state.ce.windows.enabled = self.classic_windows;
+        if self.classic_windows || self.ce_image.is_some() {
+            // Pocket Word's native RichEdit expects committed WM_CHAR input.
+            // CE CLI sessions and their children have no game-input profile
+            // to replace the legacy Gizmondo action-key default after load.
+            process.state.gapi_action_key = pocket_kernel::gapi::VK_RETURN;
+        }
+        if let Some(image) = &self.ce_image {
+            image.configure_process(&mut process.state);
+        }
         pocket_winceapi::gles::set_nv_combiner_client(nv_combiner_client);
         self.process = Some(process);
         // A frontend that sized the screen before loading gets its

@@ -188,6 +188,19 @@ pub trait Cpu {
     }
 
     fn map_region(&mut self, va: u32, size: u32, prot: Prot) -> Result<(), CpuError>;
+    /// Inspect reservations, including cold image pages and PAGE_NOACCESS,
+    /// without reading memory or committing physical RAM. A preferred-base
+    /// ROM DLL must never overwrite an existing mapping.
+    fn is_region_free(&self, va: u32, size: u32) -> Result<bool, CpuError> {
+        for page in image_pages::ImagePages::range(va, size)? {
+            match self.check_guest_access(page, 1, Prot::NONE) {
+                Ok(()) => return Ok(false),
+                Err(CpuError::BadMemory { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
     /// Map stable shared pages without copying them. The CPU retains the owner
     /// until unmapping/drop, including when every guest handle has closed.
     ///

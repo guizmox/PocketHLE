@@ -149,10 +149,10 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeCapturePresenta
     _class: JClass<'_>,
     id: jlong,
 ) -> jboolean {
-    let Some(p) = get(id) else { return 0 };
+    let Some(_p) = get(id) else { return 0 };
     #[cfg(unix)]
     {
-        let mut root = p.root.lock().unwrap_or_else(|e| e.into_inner());
+        let mut root = _p.root.lock().unwrap_or_else(|e| e.into_inner());
         if root.is_some() {
             return 1;
         }
@@ -162,7 +162,7 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeCapturePresenta
                 *root = Some(r);
                 return 1;
             }
-            Err(e) => p.fail(&e),
+            Err(e) => _p.fail(&e),
         }
     }
     0
@@ -172,12 +172,12 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeAttachPresentat
     _env: JNIEnv<'_>,
     _class: JClass<'_>,
     id: jlong,
-    cpu_filter: jboolean,
+    _cpu_filter: jboolean,
 ) -> jboolean {
-    let Some(p) = get(id) else { return 0 };
+    let Some(_p) = get(id) else { return 0 };
     #[cfg(unix)]
     {
-        let root = p.root.lock().unwrap_or_else(|e| e.into_inner());
+        let root = _p.root.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(root) = root.as_ref() {
             // Java created this context with the retained root as share_context.
             match unsafe { root.capture_consumer() } {
@@ -185,12 +185,12 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeAttachPresentat
                     UI.with(|slot| {
                         slot.borrow_mut().insert(id as u64, ui);
                     });
-                    p.ui_ready.store(true, Ordering::Release);
-                    p.cpu_filter.store(cpu_filter != 0, Ordering::Release);
-                    p.refresh();
+                    _p.ui_ready.store(true, Ordering::Release);
+                    _p.cpu_filter.store(_cpu_filter != 0, Ordering::Release);
+                    _p.refresh();
                     return 1;
                 }
-                Err(e) => p.fail(&e),
+                Err(e) => _p.fail(&e),
             }
         }
     }

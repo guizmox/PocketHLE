@@ -11,6 +11,25 @@ impl KernelState {
     }
 
     pub fn sync_thread_tls(&mut self, cpu: &mut dyn Cpu) -> Result<(), KernelError> {
+        if self.ce.windows.enabled || self.ce.version.is_some() {
+            let pid = self.object_handles.process_id();
+            let tid = self
+                .current_thread
+                .checked_sub(1)
+                .and_then(|i| self.threads.get(i))
+                .map(|t| t.id)
+                .filter(|id| *id != 0)
+                .or_else(|| self.object_handles.thread_id(self.current_thread))
+                .unwrap_or(1);
+            if self.ce.inline_ids != Some((pid, tid)) {
+                // CE5 SDKs inline GetCurrentProcessId/GetCurrentThreadId as
+                // KData reads. Portable Explorer compares these with window
+                // ownership and hides itself if the identities disagree.
+                cpu.write_mem(crate::USER_KDATA_STRUCT_VA + 8, &tid.to_le_bytes())?;
+                cpu.write_mem(crate::USER_KDATA_STRUCT_VA + 12, &pid.to_le_bytes())?;
+                self.ce.inline_ids = Some((pid, tid));
+            }
+        }
         if self.tls_owner == self.current_thread {
             return Ok(());
         }

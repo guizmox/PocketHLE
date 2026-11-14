@@ -1,5 +1,5 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
-//! Linux command-line frontend for PocketHLE.
+//! Native Windows/Linux command-line frontend for PocketHLE.
 
 use std::path::PathBuf;
 
@@ -10,6 +10,7 @@ use pocket_core::Emulator;
 
 mod archive;
 mod managed;
+mod session;
 mod xvfb;
 
 #[derive(Parser, Debug)]
@@ -116,6 +117,18 @@ enum Command {
         /// on-device install path.
         #[arg(long)]
         module_path: Option<String>,
+        /// Command line passed to WinMain and GetCommandLineW (without the EXE name).
+        #[arg(long, default_value = "")]
+        app_args: String,
+        /// Extracted Windows CE image: image container, fs, or Windows directory.
+        #[arg(long)]
+        ce_root: Option<PathBuf>,
+        /// Private writable filesystem and registry for this CE image.
+        #[arg(long)]
+        ce_data: Option<PathBuf>,
+        /// Classic CE captions, borders and window buttons (automatic with --ce-root).
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        classic_windows: Option<bool>,
         /// Record everything the game sends to `waveOut*` /
         /// `PlaySound` into a 16-bit PCM WAV file. Works with no host
         /// audio device, which makes it the way to check a game's
@@ -218,7 +231,7 @@ enum Command {
     },
 }
 
-#[derive(Clone, Debug, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum CpuBackend {
     Stub,
     #[cfg(feature = "unicorn")]
@@ -263,6 +276,10 @@ fn main() -> Result<()> {
             rom_dir,
             rom_prefix,
             module_path,
+            app_args,
+            ce_root,
+            ce_data,
+            classic_windows,
             display,
             dump_audio_to,
             dump_frames_to,
@@ -289,6 +306,10 @@ fn main() -> Result<()> {
             rom_dir.as_deref(),
             &rom_prefix,
             module_path.as_deref(),
+            &app_args,
+            ce_root.as_deref(),
+            ce_data.as_deref(),
+            classic_windows,
             display,
             dump_audio_to.as_deref(),
             dump_frames_to.as_deref(),
@@ -565,6 +586,10 @@ fn cmd_run(
     rom_dir: Option<&std::path::Path>,
     rom_prefix: &str,
     module_path: Option<&str>,
+    app_args: &str,
+    ce_root: Option<&std::path::Path>,
+    ce_data: Option<&std::path::Path>,
+    classic_windows: Option<bool>,
     display: bool,
     dump_audio_to: Option<&std::path::Path>,
     dump_frames_to: Option<&std::path::Path>,
@@ -590,6 +615,16 @@ fn cmd_run(
         CpuBackend::Mips => Emulator::with_unicorn_cpu_for_arch(pocket_core::cpu::Arch::Mips)?,
     };
     emu.set_halt_on_unimplemented(halt_on_unimplemented);
+    let ce_image = ce_root
+        .map(pocket_core::ce_image::WindowsCeImage::load)
+        .transpose()?
+        .map(std::sync::Arc::new);
+    if let Some(image) = &ce_image {
+        emu.set_windows_ce_image(image.clone())?;
+    }
+    if let Some(enabled) = classic_windows {
+        emu.set_classic_windows(enabled);
+    }
     emu.max_slices = max_slices;
     emu.instruction_budget_per_slice = instructions_per_slice;
     if let Some(p) = trace_json {
@@ -640,6 +675,41 @@ fn cmd_run(
         return Ok(());
     }
     emu.load_pe(&_launcher.exe)?;
+    emu.set_startup_command_line(app_args)?;
+    let device_data = if ce_image.is_some() || ce_data.is_some() || classic_windows == Some(true) {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        ce_image
+            .as_ref()
+            .map(|image| &image.filesystem)
+            .hash(&mut hash);
+        if ce_image.is_none() {
+            _launcher.exe.parent().hash(&mut hash);
+        }
+        let data = ce_data
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("ce-data").join(format!("{:016x}", hash.finish())));
+        let data = pocket_core::ce_image::configure_device(
+            &mut emu.process_mut().unwrap().state,
+            ce_image.as_deref(),
+            &data,
+        )?;
+        if let Some(image) = &ce_image {
+            println!(
+                "Windows CE {}.{} build {}; {} hive keys; data: {}",
+                image.version.0,
+                image.version.1,
+                image.version.2,
+                image.hives.iter().map(|h| h.keys.len()).sum::<usize>(),
+                data.display()
+            );
+        } else {
+            println!("Windows CE data: {}", data.display());
+        }
+        Some(data)
+    } else {
+        None
+    };
     emu.set_programmable_gles(adreno200);
     emu.set_gizmondo_audio_compatibility(_launcher.native_screen.is_some());
     // An explicit `--screen` wins; otherwise a launcher that recognised
@@ -663,19 +733,46 @@ fn cmd_run(
         println!("Recording guest audio to {}", path.display());
     }
     if let Some(dir) = rom_dir {
-        emu.mount_dir(rom_prefix, dir);
+        if let Some(data) = &device_data {
+            pocket_core::ce_image::mount_application(
+                &mut emu.process_mut().unwrap().state.vfs,
+                data,
+                rom_prefix,
+                dir,
+            )?;
+        } else {
+            emu.mount_dir(rom_prefix, dir);
+        }
         println!(
             "Mounted host directory {} at guest prefix {:?}",
             dir.display(),
             rom_prefix
         );
     } else if let Some(dir) = _launcher.mount_dir.as_deref() {
-        emu.mount_dir(rom_prefix, dir);
+        if let Some(data) = &device_data {
+            pocket_core::ce_image::mount_application(
+                &mut emu.process_mut().unwrap().state.vfs,
+                data,
+                rom_prefix,
+                dir,
+            )?;
+        } else {
+            emu.mount_dir(rom_prefix, dir);
+        }
         println!(
             "Auto-mounted extracted dir {} at guest prefix {:?}",
             dir.display(),
             rom_prefix
         );
+    } else if let Some(data) = &device_data {
+        if let Some(dir) = _launcher.exe.parent() {
+            pocket_core::ce_image::mount_application(
+                &mut emu.process_mut().unwrap().state.vfs,
+                data,
+                rom_prefix,
+                dir,
+            )?;
+        }
     }
     for (prefix, dir) in &_launcher.extra_mounts {
         emu.mount_dir(prefix, dir);
@@ -697,7 +794,11 @@ fn cmd_run(
         );
     }
     let effective_module_path = module_path.or(_launcher.guest_exe_path.as_deref());
-    let message_budget = resolve_message_budget(message_budget, path, effective_module_path);
+    let message_budget = resolve_message_budget(
+        message_budget.or(ce_image.as_ref().map(|_| 0)),
+        path,
+        effective_module_path,
+    );
     println!("Synthetic message budget: {message_budget} (0 = unlimited)");
     if let Some(path) = effective_module_path {
         emu.set_module_path(path);
@@ -881,6 +982,29 @@ fn cmd_run(
         emu.dispatcher().registered_count()
     );
 
+    if ce_image.is_some() || classic_windows == Some(true) {
+        // The host display stays on this thread. Children reuse the existing
+        // kernel launch transaction and run independent CPUs on worker threads.
+        return session::run(
+            emu,
+            session::Config {
+                backend,
+                image: ce_image,
+                screen: (fb_w, fb_h),
+                message_budget,
+                max_slices,
+                instructions_per_slice,
+                halt_on_unimplemented,
+                trace: trace_json.map(std::path::Path::to_path_buf),
+                display,
+                dump_dir: dump_frames_to.map(std::path::Path::to_path_buf),
+                dump_stride: dump_frame_stride,
+                max_frames,
+                scheduled,
+            },
+        );
+    }
+
     let mut hooks: Vec<Box<dyn pocket_core::kernel::FrameHook>> = Vec::new();
     if let Some(path) = std::env::var_os("POCKETHLE_INPUT_FILE") {
         hooks.push(Box::new(LiveInputHook {
@@ -938,6 +1062,9 @@ fn cmd_run(
         emu.run_with_hook(&mut combined)
     };
     emu.stop_audio();
+    if let Some(process) = emu.process() {
+        process.state.registry.flush()?;
+    }
 
     if let Ok(spec) = std::env::var("POCKETHLE_DUMP_MEMORY") {
         let mut parts = spec.splitn(3, ':');
@@ -1051,8 +1178,15 @@ fn parse_virtual_key(value: &str) -> anyhow::Result<u16> {
         "left" | "arrowleft" => gapi::VK_LEFT,
         "right" | "arrowright" => gapi::VK_RIGHT,
         "enter" | "return" => gapi::VK_RETURN,
+        "backspace" => 0x08,
+        "tab" => 0x09,
         "space" => 0x20,
         "escape" | "esc" | "back" => 0x1b,
+        "pageup" | "pgup" => 0x21,
+        "pagedown" | "pgdown" => 0x22,
+        "end" => 0x23,
+        "home" => 0x24,
+        "delete" | "del" => 0x2e,
         "a" | "action" | "select" | "ok" | "fire" => gapi::VK_A,
         "b" => gapi::VK_B,
         "c" => gapi::VK_C,
@@ -1082,6 +1216,23 @@ mod key_name_tests {
         assert_eq!(parse_virtual_key("5").unwrap(), 0x35);
         assert_eq!(parse_virtual_key("0x28").unwrap(), gapi::VK_DOWN);
         assert!(parse_virtual_key("nope").is_err());
+    }
+
+    #[test]
+    fn text_editing_keys_keep_backspace_separate_from_back() {
+        for (name, vk) in [
+            ("backspace", 0x08),
+            ("back", 0x1b),
+            ("tab", 0x09),
+            ("home", 0x24),
+            ("end", 0x23),
+            ("delete", 0x2e),
+            ("pgup", 0x21),
+            ("pagedown", 0x22),
+        ] {
+            assert_eq!(parse_virtual_key(name).unwrap(), vk);
+        }
+        assert_eq!(parse_virtual_key(" Backspace ").unwrap(), 0x08);
     }
 }
 
@@ -1495,6 +1646,41 @@ impl ScheduledInputHook {
             | pocket_core::kernel::InputEvent::MouseMessage { .. } => {}
         }
     }
+
+    fn poll(
+        &mut self,
+        counter: u64,
+        output: &mut std::collections::VecDeque<pocket_core::kernel::InputEvent>,
+    ) {
+        if counter != self.last_counter {
+            self.last_counter = counter;
+            self.frames_seen += 1;
+            self.last_frame_at = std::time::Instant::now();
+        }
+        let stalled = self.frames_seen > 0 && self.last_frame_at.elapsed() >= Self::STALL;
+        while let Some(&(at, event)) = self.pending.front() {
+            if !scheduled_input_due(
+                event,
+                at,
+                self.frames_seen,
+                stalled,
+                self.release_is_held(event),
+            ) {
+                break;
+            }
+            self.pending.pop_front();
+            self.update_held(event);
+            output.push_back(event);
+            log::info!(
+                "delivering scheduled input {event:?} at frame {}",
+                self.frames_seen
+            );
+            if at > self.frames_seen {
+                self.last_frame_at = std::time::Instant::now();
+                break;
+            }
+        }
+    }
 }
 
 impl pocket_core::kernel::FrameHook for ScheduledInputHook {
@@ -1658,108 +1844,4 @@ impl pocket_core::kernel::FrameHook for DumpFrameHook {
 }
 
 #[cfg(feature = "display")]
-mod display_window {
-    use std::time::{Duration, Instant};
-
-    use anyhow::{Context, Result};
-    use minifb::{Window, WindowOptions};
-    use pocket_core::kernel::{FrameAction, FrameHook, KernelState};
-
-    const DISPLAY_UPDATE_INTERVAL: Duration = Duration::from_millis(16);
-    const EVENT_POLL_INTERVAL_SLICES: u64 = 100_000;
-
-    pub struct DisplayHook {
-        window: Window,
-        buffer: Vec<u32>,
-        width: usize,
-        height: usize,
-        last_frame: u64,
-        last_emit_at: Option<Instant>,
-        ticks_since_poll: u64,
-    }
-
-    impl DisplayHook {
-        pub fn new(width: u32, height: u32) -> Result<Self> {
-            let w = width as usize;
-            let h = height as usize;
-            let window = Window::new(
-                "PocketHLE-Reborn",
-                w,
-                h,
-                WindowOptions {
-                    resize: true,
-                    scale: minifb::Scale::X2,
-                    ..WindowOptions::default()
-                },
-            )
-            .context("opening minifb window")?;
-            // No `set_target_fps`: minifb's FPS cap blocks every
-            // `update_with_buffer` call to ~16 ms, but `on_frame`
-            // is invoked *per emulator slice*. With the cap on,
-            // the entire run loop gets throttled to ~60 slices/s,
-            // which is several orders of magnitude below what a
-            // real PPC2003 game needs to reach its first WM_PAINT.
-            // Frame pacing comes from the guest's own GAPI flips.
-            Ok(Self {
-                window,
-                buffer: vec![0; w * h],
-                width: w,
-                height: h,
-                last_frame: 0,
-                last_emit_at: None,
-                ticks_since_poll: 0,
-            })
-        }
-    }
-
-    impl FrameHook for DisplayHook {
-        fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
-            if !self.window.is_open() {
-                return FrameAction::Stop;
-            }
-
-            let counter = state.framebuffer.frame_counter;
-            let dirty = counter != self.last_frame;
-            let due = self
-                .last_emit_at
-                .map(|t| t.elapsed() >= DISPLAY_UPDATE_INTERVAL)
-                .unwrap_or(true);
-
-            if dirty && due {
-                self.last_frame = counter;
-                self.last_emit_at = Some(Instant::now());
-                let frame = match state.presentation_framebuffer() {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        log::error!("window presentation failed: {error}");
-                        return pocket_core::kernel::FrameAction::Stop;
-                    }
-                };
-                for (src, px) in frame.pixels.chunks_exact(2).zip(self.buffer.iter_mut()) {
-                    *px = rgb565_to_minifb(u16::from_le_bytes([src[0], src[1]]));
-                }
-                let w = self.width;
-                let h = self.height;
-                let _ = self.window.update_with_buffer(&self.buffer, w, h);
-                self.ticks_since_poll = 0;
-            } else {
-                self.ticks_since_poll = self.ticks_since_poll.saturating_add(1);
-                if self.ticks_since_poll >= EVENT_POLL_INTERVAL_SLICES {
-                    self.ticks_since_poll = 0;
-                    self.window.update();
-                }
-            }
-            FrameAction::Continue
-        }
-    }
-
-    fn rgb565_to_minifb(p: u16) -> u32 {
-        let r5 = ((p >> 11) & 0x1f) as u32;
-        let g6 = ((p >> 5) & 0x3f) as u32;
-        let b5 = (p & 0x1f) as u32;
-        let r = (r5 << 3) | (r5 >> 2);
-        let g = (g6 << 2) | (g6 >> 4);
-        let b = (b5 << 3) | (b5 >> 2);
-        (r << 16) | (g << 8) | b
-    }
-}
+mod display_window;

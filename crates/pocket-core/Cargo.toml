@@ -41,6 +41,18 @@ required-features = ["unicorn"]
 name = "navigator_input_probe"
 required-features = ["unicorn"]
 
+[[example]]
+name = "cod2_probe"
+required-features = ["unicorn"]
+
+[[example]]
+name = "memory_probe"
+required-features = ["unicorn"]
+
+[[example]]
+name = "tomtom_startup_probe"
+required-features = ["unicorn"]
+
 [dev-dependencies]
 tempfile = "3"
 pocket-gles = { path = "../pocket-gles" }

@@ -20,6 +20,16 @@ fn lines(
     while i < chars.len() {
         let c = chars[i];
         i += 1;
+        // Explorer's owner-drawn Start items keep '&' in their resources.
+        // DrawText consumes the mnemonic prefix; DT_NOPREFIX retains it,
+        // and a doubled ampersand represents one literal ampersand.
+        if c == 38 && format & 0x800 == 0 {
+            if chars.get(i) == Some(&38) {
+                i += 1;
+            } else {
+                continue;
+            }
+        }
         if !single && (c == 10 || c == 13) {
             if c == 13 && chars.get(i) == Some(&10) {
                 i += 1;

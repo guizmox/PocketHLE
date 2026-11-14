@@ -36,6 +36,51 @@ fn div(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 mod tests {
     use super::*;
     #[test]
+    fn unsigned_decimal_file_sizes_and_signed_long_text_keep_their_ce_width() {
+        use crate::bluetooth::tests::{call, setup};
+        use pocket_cpu::Cpu;
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        for (name, value, radix, expected) in [
+            ("_ultow", u32::MAX, 10, "4294967295"),
+            ("_ultoa", u32::MAX, 10, "4294967295"),
+            ("_ultow", 0x8000_0000, 10, "2147483648"),
+            ("_ltow", 0x8000_0000, 10, "-2147483648"),
+            ("_itow", u32::MAX, 16, "ffffffff"),
+            ("_ultow", 0, 2, "0"),
+            ("_ultow", 35, 36, "z"),
+        ] {
+            cpu.write_mem(0x1200, &[0xaa; 80]).unwrap();
+            assert_eq!(
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    name,
+                    &[value, 0x1200, radix]
+                ),
+                DispatchOutcome::ReturnedR0(0x1200)
+            );
+            let expected: Vec<u8> = if name.ends_with('w') {
+                expected
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .flat_map(u16::to_le_bytes)
+                    .collect()
+            } else {
+                expected.bytes().chain(Some(0)).collect()
+            };
+            assert_eq!(
+                cpu.read_mem(0x1200, expected.len() as u32).unwrap(),
+                expected
+            );
+            assert_eq!(
+                cpu.read_mem(0x1200 + expected.len() as u32, 2).unwrap(),
+                [0xaa; 2]
+            );
+        }
+    }
+    #[test]
     fn signed_quotient_and_remainder_follow_c_rules() {
         for (n, d, q, r) in [
             (4990, 50, 99i32, 40i32),

@@ -14,6 +14,7 @@ pub enum HandleObject {
     Mutex(u32),
     File(u32),
     Mapping(u32),
+    ApiSet(u32),
     Device(u32),
     RemoteThread(u32, usize),
     RemoteProcess(u32),
@@ -56,9 +57,15 @@ struct Domain {
     held_start: HashSet<u32>,
     entries: HashMap<(u32, u32), Option<HandleObject>>,
     names: HashMap<String, HandleObject>,
+    clipboard_formats: HashMap<String, u32>,
+    clipboard: crate::clipboard::Clipboard,
+    api_sets: crate::api_sets::Registry,
+    app_events: crate::app_events::AppEvents,
+    utc_clock: Option<(std::time::Instant, std::time::SystemTime)>,
     next: u32,
     next_pid: u32,
     active: HashSet<u32>,
+    process_versions: HashMap<u32, u32>,
     process_images: HashMap<u32, (String, u32)>,
     toolhelp_snapshots: HashMap<(u32, u32), ToolhelpSnapshot>,
     exits: HashMap<(u32, Option<usize>), u32>,
@@ -99,8 +106,107 @@ impl Default for HandleTable {
     }
 }
 impl HandleTable {
+    pub fn utc_now(&self) -> std::time::SystemTime {
+        self.domain
+            .lock()
+            .unwrap()
+            .utc_clock
+            .map_or_else(std::time::SystemTime::now, |(anchor, timestamp)| {
+                timestamp.checked_add(anchor.elapsed()).unwrap_or(timestamp)
+            })
+    }
+    /// Set only the emulated device clock, shared by all children. Interval
+    /// timers keep their monotonic clock; the host clock is never changed.
+    pub fn set_utc_time(&self, timestamp: std::time::SystemTime) {
+        let mut d = self.domain.lock().unwrap();
+        d.utc_clock = Some((std::time::Instant::now(), timestamp));
+        d.app_events.emit(1);
+    }
+    pub fn register_app_event(&self, name: String, event: u32) -> Result<(), u32> {
+        self.domain.lock().unwrap().app_events.register(name, event)
+    }
+    pub fn emit_app_event(&self, event: u32) {
+        self.domain.lock().unwrap().app_events.emit(event);
+    }
+    pub fn take_app_event(&self) -> Option<(String, String)> {
+        self.domain.lock().unwrap().app_events.take()
+    }
+    pub fn create_api_set(
+        &mut self,
+        name: [u8; 4],
+        methods: Vec<u32>,
+        signatures: Vec<u64>,
+    ) -> Option<u32> {
+        let handle = self.reserve()?;
+        let mut d = self.domain.lock().unwrap();
+        d.api_sets.insert(
+            handle,
+            crate::api_sets::ApiSet {
+                owner: self.pid,
+                name,
+                methods,
+                signatures,
+                id: None,
+            },
+        );
+        d.entries
+            .insert((self.pid, handle), Some(HandleObject::ApiSet(handle)));
+        Some(handle)
+    }
+    pub fn register_api_set(&self, handle: u32, id: u32) -> Result<(), u32> {
+        let mut d = self.domain.lock().unwrap();
+        let Some(Some(HandleObject::ApiSet(key))) = d.entries.get(&(self.pid, handle)).copied()
+        else {
+            return Err(6);
+        };
+        d.api_sets.register(self.pid, key, id)
+    }
+    pub fn query_api_set(&self, name: [u8; 4]) -> Option<u32> {
+        self.domain.lock().unwrap().api_sets.query(name)
+    }
+    pub fn api_set_provider(&self, id: u32) -> Option<crate::api_sets::ApiSet> {
+        self.domain.lock().unwrap().api_sets.provider(id)
+    }
+    pub fn api_set_ready(&self, id: u32) -> bool {
+        self.domain.lock().unwrap().api_sets.ready(id)
+    }
     pub fn process_id(&self) -> u32 {
         self.pid
+    }
+    pub fn set_process_version(&self, version: u32) {
+        self.domain
+            .lock()
+            .unwrap()
+            .process_versions
+            .insert(self.pid, version);
+    }
+    pub fn process_version(&self, pid: u32) -> Option<u32> {
+        let domain = self.domain.lock().unwrap();
+        domain
+            .active
+            .contains(&pid)
+            .then(|| domain.process_versions.get(&pid).copied())
+            .flatten()
+    }
+    /// The closure must not access guest memory or reenter the handle domain.
+    pub fn with_clipboard<T>(
+        &self,
+        f: impl FnOnce(&mut crate::clipboard::Clipboard, u32) -> T,
+    ) -> T {
+        f(&mut self.domain.lock().unwrap().clipboard, self.pid)
+    }
+    pub fn register_clipboard_format(&self, name: &str) -> Option<u32> {
+        let name = name.to_lowercase();
+        let mut domain = self.domain.lock().unwrap();
+        if let Some(&id) = domain.clipboard_formats.get(&name) {
+            return Some(id);
+        }
+        let id = 0xc000 + domain.clipboard_formats.len() as u32;
+        if id > 0xffff {
+            return None;
+        }
+        domain.clipboard_formats.insert(name, id);
+        Some(id)
     }
     pub fn set_process_image(&self, path: &str, image_base: u32) {
         self.domain
@@ -218,6 +324,17 @@ impl HandleTable {
             .threads
             .get(&(self.pid, index))
             .map(|t| t.tid)
+    }
+    /// System-wide thread IDs identify live threads independently of handle
+    /// ownership. Opening one creates a new owned reference in the caller.
+    pub fn thread_by_id(&self, tid: u32) -> Option<(u32, usize)> {
+        let domain = self.domain.lock().unwrap();
+        domain.threads.iter().find_map(|(&(pid, index), thread)| {
+            (thread.tid == tid
+                && domain.active.contains(&pid)
+                && !domain.exits.contains_key(&(pid, Some(index))))
+            .then_some((pid, index))
+        })
     }
     pub fn set_thread_count(&self, index: usize, count: u32) {
         if let Some(t) = self
@@ -429,6 +546,9 @@ impl HandleTable {
         if last {
             d.names.retain(|_, o| *o != object);
             d.files.remove(&object);
+            if let HandleObject::ApiSet(key) = object {
+                d.api_sets.remove(key);
+            }
         }
         Some((self.local(object), last))
     }
@@ -507,11 +627,12 @@ impl HandleTable {
         self.domain.lock().unwrap().active.contains(&pid)
     }
     pub fn set_exit(&self, thread: Option<usize>, code: u32) {
-        self.domain
-            .lock()
-            .unwrap()
-            .exits
-            .insert((self.pid, thread), code);
+        let mut domain = self.domain.lock().unwrap();
+        domain.exits.insert((self.pid, thread), code);
+        domain.clipboard.release(self.pid, thread);
+        if thread.is_none() {
+            domain.api_sets.release(self.pid);
+        }
     }
     pub fn exit_code(&self, pid: u32, thread: Option<usize>) -> Option<u32> {
         let d = self.domain.lock().unwrap();
@@ -537,7 +658,10 @@ impl HandleTable {
     }
     pub fn mark_inactive(&self) {
         let mut d = self.domain.lock().unwrap();
+        d.clipboard.release(self.pid, None);
+        d.api_sets.release(self.pid);
         d.active.remove(&self.pid);
+        d.process_versions.remove(&self.pid);
         d.process_images.remove(&self.pid);
         d.toolhelp_snapshots.retain(|&(pid, _), _| pid != self.pid);
         d.held_start.remove(&self.pid);

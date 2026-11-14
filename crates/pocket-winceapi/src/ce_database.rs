@@ -1,4 +1,5 @@
-//! CEDB contacts used by the Gizmondo shell.
+//! CEDB contacts and typed CE desktop databases share the guest API boundary.
+mod generic;
 use crate::{CallCtx, Handler, WinCeDispatcher};
 use pocket_cpu::Prot;
 use pocket_kernel::{cedb::Cursor, DispatchOutcome, KernelError};
@@ -11,6 +12,7 @@ const SORT_PROPERTY: u32 = 0x4013_001f;
 type Outcome = Result<DispatchOutcome, KernelError>;
 
 pub fn register(d: &mut WinCeDispatcher) {
+    generic::register(d);
     for (name, handler) in [
         ("CeOpenDatabaseEx2", open as Handler),
         ("CeSetDatabaseInfoEx2", set_info),
@@ -44,6 +46,9 @@ fn access(ctx: &CallCtx<'_>, ptr: u32, size: u32, prot: Prot) -> bool {
 }
 
 fn open(ctx: &mut CallCtx<'_>) -> Outcome {
+    if generic::should_open(ctx)? {
+        return generic::open(ctx);
+    }
     let volume = ctx.arg_u32(0)?;
     let oid_ptr = ctx.arg_u32(1)?;
     let name = ctx.arg_u32(2)?;
@@ -89,10 +94,10 @@ fn open(ctx: &mut CallCtx<'_>) -> Outcome {
 fn set_info(ctx: &mut CallCtx<'_>) -> Outcome {
     let volume = ctx.arg_u32(0)?;
     let oid = ctx.arg_u32(1)?;
-    let info = ctx.arg_u32(2)?;
     if !system_volume(ctx, volume) || oid != DATABASE_OID {
-        return fail(ctx, 87, 0);
+        return generic::set_info(ctx);
     }
+    let info = ctx.arg_u32(2)?;
     let Ok(data) = ctx.cpu.read_mem(info, 0x68) else {
         return fail(ctx, 998, 0);
     };
@@ -120,6 +125,9 @@ fn set_info(ctx: &mut CallCtx<'_>) -> Outcome {
 
 fn get_info(ctx: &mut CallCtx<'_>) -> Outcome {
     let handle = ctx.arg_u32(0)?;
+    if generic::has_handle(ctx, handle) {
+        return generic::get_info(ctx);
+    }
     let out = ctx.arg_u32(1)?;
     if !ctx.kernel.cedb.cursors.contains_key(&handle) {
         return fail(ctx, 6, 0);
@@ -152,6 +160,9 @@ fn get_info(ctx: &mut CallCtx<'_>) -> Outcome {
 
 fn seek(ctx: &mut CallCtx<'_>) -> Outcome {
     let handle = ctx.arg_u32(0)?;
+    if generic::has_handle(ctx, handle) {
+        return generic::seek(ctx);
+    }
     let kind = ctx.arg_u32(1)?;
     let value = ctx.arg_u32(2)?;
     let count = ctx.arg_u32(3)?;
@@ -226,6 +237,9 @@ fn property(ctx: &mut CallCtx<'_>, ptr: u32) -> Option<(u32, Option<Vec<u16>>)> 
 
 fn write(ctx: &mut CallCtx<'_>) -> Outcome {
     let handle = ctx.arg_u32(0)?;
+    if generic::has_handle(ctx, handle) {
+        return generic::write(ctx);
+    }
     let oid = ctx.arg_u32(1)?;
     let count = ctx.arg_u32(2)?;
     let ptr = ctx.arg_u32(3)?;
@@ -268,6 +282,9 @@ fn write(ctx: &mut CallCtx<'_>) -> Outcome {
 
 fn delete(ctx: &mut CallCtx<'_>) -> Outcome {
     let handle = ctx.arg_u32(0)?;
+    if generic::has_handle(ctx, handle) {
+        return generic::delete(ctx);
+    }
     let oid = ctx.arg_u32(1)?;
     if !ctx.kernel.cedb.cursors.contains_key(&handle) {
         return fail(ctx, 6, 0);
@@ -288,6 +305,9 @@ fn delete(ctx: &mut CallCtx<'_>) -> Outcome {
 
 fn read(ctx: &mut CallCtx<'_>) -> Outcome {
     let handle = ctx.arg_u32(0)?;
+    if generic::has_handle(ctx, handle) {
+        return generic::read(ctx);
+    }
     let flags = ctx.arg_u32(1)?;
     let count_ptr = ctx.arg_u32(2)?;
     let ids_ptr = ctx.arg_u32(3)?;

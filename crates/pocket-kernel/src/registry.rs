@@ -29,6 +29,8 @@ pub enum RegistryValue {
     Dword(u32),
     /// `REG_BINARY`.
     Binary(Vec<u8>),
+    /// Other CE registry types retain their original type and wire bytes.
+    Raw { kind: u32, bytes: Vec<u8> },
 }
 
 impl RegistryValue {
@@ -38,6 +40,7 @@ impl RegistryValue {
             RegistryValue::Sz(_) => 1,
             RegistryValue::Binary(_) => 3,
             RegistryValue::Dword(_) => 4,
+            RegistryValue::Raw { kind, .. } => *kind,
         }
     }
 
@@ -51,6 +54,7 @@ impl RegistryValue {
                 .collect(),
             RegistryValue::Dword(value) => value.to_le_bytes().to_vec(),
             RegistryValue::Binary(bytes) => bytes.clone(),
+            RegistryValue::Raw { bytes, .. } => bytes.clone(),
         }
     }
 }
@@ -429,7 +433,7 @@ impl Registry {
         // Despite its name, CE's Mute value enables sound categories. Bit 1
         // enables application audio. Interstellar Flames checks it both at
         // startup and on resume, disabling music/SFX when the value is absent.
-        reg.set_value(r"HKCU\ControlPanel\Volume", "Mute", RegistryValue::Dword(2));
+        reg.set_value(r"HKCU\ControlPanel\Volume", "Mute", RegistryValue::Dword(7));
         // Gizmondo OEMINC.H: range 1..31. Neutral is Colors slider position 2,
         // OnLevel 11 / DimLevel 0 (SDK hardware default is 24). Colors reads
         // OnLevel to initialise its own brightness slider, then writes both
@@ -936,18 +940,19 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn application_audio_default_is_queryable() {
+    fn device_audio_default_is_queryable() {
         let mut registry = Registry::with_device_defaults();
         let handle = registry.open(r"HKCU\ControlPanel\Volume").unwrap();
         let key = registry.path_for(handle).unwrap();
         let value = registry.value(&key, "MUTE").unwrap();
         assert_eq!(value.type_code(), 4);
-        assert_eq!(value.to_bytes(), 2u32.to_le_bytes());
+        // Explorer's CE defaults enable notifications, applications and events.
+        assert_eq!(value.to_bytes(), 7u32.to_le_bytes());
         registry.close(handle);
     }
 
     #[test]
-    fn application_audio_persistence_fills_missing_value_and_preserves_choices() {
+    fn device_audio_persistence_fills_missing_value_and_preserves_choices() {
         let key = r"HKCU\ControlPanel\Volume";
         // No volume key, an empty key, a key with another setting, and saved
         // sound-category masks including an explicit mute must all survive.
@@ -957,6 +962,7 @@ mod tests {
             (true, Some(0)),
             (true, Some(1)),
             (true, Some(2)),
+            (true, Some(4)),
             (true, Some(7)),
         ] {
             for other_setting in [false, true] {
@@ -978,7 +984,7 @@ mod tests {
                 loaded.configure_persistence(&path).unwrap();
                 assert_eq!(
                     loaded.value(key, "Mute"),
-                    Some(RegistryValue::Dword(saved.unwrap_or(2)))
+                    Some(RegistryValue::Dword(saved.unwrap_or(7)))
                 );
                 assert_eq!(
                     loaded.value(key, "Volume"),

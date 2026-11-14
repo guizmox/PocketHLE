@@ -402,9 +402,11 @@ fn sh_create_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     ctx.kernel.gdi.shell_menus.bars.insert(
         hwnd,
         pocket_kernel::shell_menu::Bar {
+            bounds: None,
             owner: parent,
             menu,
             sip: flags & 8 == 0 && !ctx.kernel.gdi.shell_menus.sip_button_hidden,
+            close_button: false,
             background,
         },
     );
@@ -433,8 +435,21 @@ pub(crate) fn menu_input(
     ctx.kernel.framebuffer.mark_dirty();
     use pocket_kernel::shell_menu::Action;
     match action {
-        Action::Command(owner, id) => Some(Some((owner, 0x111, id, 0))),
-        Action::Open(owner, menu) => Some(Some((owner, 0x117, menu, 0))),
+        Action::Close(owner) => Some(Some((owner, 0x10, 0, 0))),
+        Action::Command(owner, id) => {
+            crate::coredll::system_sound::play_event(
+                ctx.kernel,
+                pocket_kernel::system_sound::SystemEvent::MenuSelect,
+            );
+            Some(Some((owner, 0x111, id, 0)))
+        }
+        Action::Open(owner, menu) => {
+            crate::coredll::system_sound::play_event(
+                ctx.kernel,
+                pocket_kernel::system_sound::SystemEvent::MenuPopup,
+            );
+            Some(Some((owner, 0x117, menu, 0)))
+        }
         Action::Sip => {
             crate::shell_keyboard::sip_show(ctx, !ctx.kernel.shell_keyboard.visible);
             Some(None)

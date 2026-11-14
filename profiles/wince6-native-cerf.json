@@ -1,0 +1,11 @@
+{
+  "profile_name": "wince6-native-cerf",
+  "executable": "../wince6/fs/Windows/explorer.exe",
+  "image_root": "../wince6/fs",
+  "data_dir": "../ce-data/wince6-native",
+  "app_prefix": "\\Windows\\",
+  "command_line": "",
+  "screen": "vga_landscape",
+  "classic_windows": true,
+  "mounts": [{ "guest_prefix": "\\CERF\\", "host_dir": "../cerf/arm" }]
+}

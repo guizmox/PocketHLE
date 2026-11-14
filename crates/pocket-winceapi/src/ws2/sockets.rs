@@ -6,6 +6,9 @@ use pocket_kernel::bluetooth::{SocketAddress, WOULD_BLOCK};
 use std::time::{Duration, Instant};
 type Outcome = Result<DispatchOutcome, KernelError>;
 
+#[cfg(test)]
+mod sendto_tests;
+
 pub(super) fn register(d: &mut WinCeDispatcher) {
     for (name, handler) in [
         ("socket", socket as crate::Handler),
@@ -14,6 +17,7 @@ pub(super) fn register(d: &mut WinCeDispatcher) {
         ("connect", connect),
         ("accept", accept),
         ("send", send),
+        ("sendto", send_to),
         ("recv", recv),
         ("closesocket", close),
         ("shutdown", shutdown),
@@ -324,6 +328,12 @@ fn recv(ctx: &mut CallCtx<'_>) -> Outcome {
     transfer(ctx, false)
 }
 fn send(ctx: &mut CallCtx<'_>) -> Outcome {
+    transfer(ctx, true)
+}
+fn send_to(ctx: &mut CallCtx<'_>) -> Outcome {
+    // RFCOMM is connection-oriented: Winsock ignores the destination of
+    // sendto on a connected stream. udp2tcp's invalid IPv4 socket must still
+    // fail with WSAENOTSOCK, never a fabricated byte count or host UDP send.
     transfer(ctx, true)
 }
 fn transfer(ctx: &mut CallCtx<'_>, sending: bool) -> Outcome {

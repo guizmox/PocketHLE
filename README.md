@@ -28,6 +28,11 @@ project. We chose the name together with PocketHLE's original author,
 j92580498-max, to make the two projects easy to distinguish.
 [Original PocketHLE project](https://github.com/j92580498-max/PocketHLE).
 
+Windows CE desktop profiles provide classic GDI frames, a shared shell/application
+desktop and image-backed registry settings. See [Windows CE setup](docs/WINDOWS-CE.md)
+for Windows and Android configuration. Supply your own extracted CE filesystem
+and application binaries; these profiles use HLE rather than booting its kernel.
+
 | If you want to… | Start here |
 | --- | --- |
 | Install and import a game | [Using PocketHLE-Reborn](#using) |

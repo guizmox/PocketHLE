@@ -13,6 +13,9 @@ pub enum Purpose {
     AddData,
     RestoreBackup,
     SaveBackup,
+    CeExecutable,
+    CeImage,
+    CeData,
 }
 impl Purpose {
     fn title(self) -> &'static str {
@@ -21,6 +24,9 @@ impl Purpose {
             Self::AddData => "Add/Replace Data — select a file",
             Self::RestoreBackup => "Open PocketHLE-Reborn backup",
             Self::SaveBackup => "Save PocketHLE-Reborn backup",
+            Self::CeExecutable => "Select a Windows CE application",
+            Self::CeImage => "Select an extracted Windows CE image folder",
+            Self::CeData => "Select a Windows CE device data folder",
         }
     }
     fn accepts(self, path: &Path) -> bool {
@@ -30,6 +36,8 @@ impl Purpose {
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let extensions: &[&str] = match self {
             Self::Import => &["rar", "cab", "zip", "exe", "dll"],
+            Self::CeExecutable => &["exe"],
+            Self::CeImage | Self::CeData => &[],
             _ => &["zip"],
         };
         extensions.iter().any(|e| extension.eq_ignore_ascii_case(e))
@@ -466,7 +474,10 @@ impl FileDialog {
         }
     }
     fn choose(&mut self, path: PathBuf) {
-        if self.purpose == Purpose::SaveBackup {
+        if matches!(self.purpose, Purpose::CeImage | Purpose::CeData) {
+            if path.is_dir() { self.finished = Some(Outcome::Selected(self.purpose,path)); }
+            else { self.error = Some("Select an existing folder.".into()); }
+        } else if self.purpose == Purpose::SaveBackup {
             match std::fs::metadata(&path) {
                 Ok(meta) if meta.is_dir() => {
                     self.error = Some("This name belongs to a folder.".into())
@@ -563,7 +574,7 @@ impl FileDialog {
                         ui.spacing_mut().item_spacing.y = 1.0;
                         for entry in &self.entries {
                             if (!self.show_hidden && entry.hidden) || !entry.name.to_lowercase().contains(&search)
-                                || (!entry.directory && !self.all_files && !self.purpose.accepts(&entry.path)) { continue; }
+                                || (!entry.directory && (matches!(self.purpose, Purpose::CeImage | Purpose::CeData) || !self.all_files && !self.purpose.accepts(&entry.path))) { continue; }
                             count += 1;
                             ui.push_id(&entry.path, |ui| {
                                 let response = track(&mut zones, 1, pad::add_enabled(ui, true, FileRow { entry, selected: self.selected.as_ref() == Some(&entry.path) }));
@@ -605,13 +616,21 @@ impl FileDialog {
                     if keep_form { self.new_folder = Some(name); }
                 }
                 ui.horizontal(|ui| {
-                    ui.label("File name:");
+                    let folder_picker = matches!(self.purpose, Purpose::CeImage | Purpose::CeData);
+                    ui.label(if folder_picker { "Folder:" } else { "File name:" });
                     ui.spacing_mut().text_edit_width = (ui.available_width() - 185.0).max(80.0);
-                    track(&mut zones, 2, pad::text_edit(ui, &mut self.filename, "Select a file"));
+                    if folder_picker {
+                        let mut directory = self.directory.to_string_lossy().into_owned();
+                        ui.add(egui::TextEdit::singleline(&mut directory).interactive(false));
+                    } else {
+                        track(&mut zones, 2, pad::text_edit(ui, &mut self.filename, "Select a file"));
+                    }
                     if track(&mut zones, 2, pad::button(ui, "Cancel")).clicked() { self.finished = Some(Outcome::Cancelled(self.purpose)); }
-                    let label = match self.purpose { Purpose::SaveBackup => "Save backup", Purpose::RestoreBackup => "Open backup", Purpose::Import => "Import", Purpose::AddData => "Add/Replace Data" };
-                    if track(&mut zones, 2, pad::add_enabled(ui, !self.loading && (!self.filename.is_empty() || self.selected.is_some()), egui::Button::new(label))).clicked() {
-                        if self.purpose == Purpose::SaveBackup {
+                    let label = match self.purpose { Purpose::SaveBackup => "Save backup", Purpose::RestoreBackup => "Open backup", Purpose::Import => "Import", Purpose::AddData => "Add/Replace Data", Purpose::CeExecutable => "Select EXE", Purpose::CeImage | Purpose::CeData => "Choose this folder" };
+                    if track(&mut zones, 2, pad::add_enabled(ui, !self.loading && (folder_picker || !self.filename.is_empty() || self.selected.is_some()), egui::Button::new(label))).clicked() {
+                        if folder_picker {
+                            self.choose(self.directory.clone());
+                        } else if self.purpose == Purpose::SaveBackup {
                             match backup_filename(&self.filename) { Ok(name) => self.choose(self.directory.join(name)), Err(error) => self.error = Some(error) }
                         } else if self.selected.as_ref().is_some_and(|path| path.is_dir()) && self.filename.is_empty() {
                             self.navigate(self.selected.clone().unwrap());

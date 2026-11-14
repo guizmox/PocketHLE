@@ -5,25 +5,78 @@ pub struct LaunchArgs {
     pub fullscreen: Option<bool>,
     pub filter: Option<usize>,
 }
-pub const HELP: &str = "Usage: pockethle-gui [--steam-deck] [\"Game name or ID\" [0|1 [filter-index]]]\n\n0 = fullscreen, 1 = windowed. Omitted display mode opens a normal 1280x800 window (capped to the screen).\nFilters: 0 no filter, 1 reconstruction, 2 SMAA, 3 SMAA Soft,\n4 xBRZ, 5 bicubic, 6 Lanczos, 7 bilinear, 8 nearest.\n--steam-deck selects the Proton/Deck profile, separate settings.";
+pub const HELP: &str = "Usage: pockethle-gui [--steam-deck] [\"Game name or ID\" [0|1 [filter-index]]]\n       pockethle-gui --ce-exe app.exe [CE options]\n\n0 = fullscreen, 1 = windowed. Omitted display mode opens a normal 1280x800 window (capped to the screen).\nFilters: 0 no filter, 1 reconstruction, 2 SMAA, 3 SMAA Soft,\n4 xBRZ, 5 bicubic, 6 Lanczos, 7 bilinear, 8 nearest.\n--steam-deck selects the Proton/Deck profile, separate settings.\n--minimized opens an inactive, minimized window without taking focus.\n\nCE options:\n  --ce-profile NAME|FILE  Launch a saved CE profile or JSON profile file\n  --ce-root folder       Extracted image containing Windows or fs/Windows\n  --ce-data folder       Writable device data (automatic when omitted)\n  --ce-app-prefix path   Guest folder for the EXE and DLLs (default \\Application\\)\n  --ce-args text         Arguments passed to the guest application\n  --ce-screen WxH        640x480 (default), 320x240, 240x320, 480x320, 480x640\n  --ce-no-frames         Disable classic window decorations\n  --fullscreen          Start the CE session in fullscreen\n  --windowed            Start the CE session in a normal window";
 
 #[derive(Debug, PartialEq)]
 pub struct StartupArgs {
     pub profile: pocket_library::LauncherProfile,
     pub help: bool,
+    pub minimized: bool,
     pub launch: Option<LaunchArgs>,
+    pub ce_launch: Option<crate::ce_launch::CeLaunch>,
+    pub ce_profile: Option<String>,
+    pub ce_fullscreen: Option<bool>,
 }
 
 pub fn parse(mut args: Vec<String>) -> Result<StartupArgs, String> {
     use pocket_library::LauncherProfile;
     let mut profile = LauncherProfile::Standard;
     let mut help = false;
+    let mut minimized = false;
+    let mut ce = crate::ce_launch::CeLaunch::default();
+    let mut ce_options = false;
+    let mut ce_profile = None;
+    let mut ce_fullscreen = None;
+    let mut seen = std::collections::HashSet::new();
     while let Some(arg) = args.first() {
         match arg.as_str() {
             "--steam-deck" if profile == LauncherProfile::Standard => {
                 profile = LauncherProfile::SteamDeck
             }
             "--help" | "-h" => help = true,
+            "--minimized" if !minimized => minimized = true,
+            "--ce-profile" => {
+                if ce_profile.is_some() { return Err("Duplicate --ce-profile".into()); }
+                ce_profile = Some(args.get(1).cloned().ok_or_else(|| format!("--ce-profile requires a profile name or JSON file\n{HELP}"))?);
+                args.remove(0);
+            }
+            "--ce-exe" | "--ce-root" | "--ce-data" | "--ce-app-prefix" | "--ce-args" | "--ce-screen" => {
+                let option = arg.clone();
+                if !seen.insert(option.clone()) {
+                    return Err(format!("Duplicate option: {option}"));
+                }
+                let value = args.get(1).cloned().ok_or_else(||format!("{option} requires a value\n{HELP}"))?;
+                match option.as_str() {
+                    "--ce-exe" => ce.executable = value,
+                    "--ce-root" => ce.image_root = value,
+                    "--ce-data" => ce.data_dir = value,
+                    "--ce-app-prefix" => ce.app_prefix = crate::ce_launch::app_prefix(&value).map_err(|e|e.to_string())?,
+                    "--ce-args" => ce.command_line = value,
+                    "--ce-screen" => {
+                        use pocket_library::ScreenPref;
+                        ce.screen = match value.as_str() {
+                            "640x480" => ScreenPref::VgaLandscape,
+                            "320x240" => ScreenPref::Landscape,
+                            "240x320" => ScreenPref::Qvga,
+                            "480x320" => ScreenPref::Hpc,
+                            "480x640" => ScreenPref::Vga,
+                            _ => return Err(format!("Unsupported CE screen: {value}\n{HELP}")),
+                        };
+                    }
+                    _ => unreachable!(),
+                }
+                ce_options = true;
+                args.remove(0);
+            }
+            "--ce-no-frames" => {
+                if !ce.classic_windows { return Err("Duplicate --ce-no-frames".into()); }
+                ce.classic_windows = false;
+                ce_options = true;
+            }
+            "--fullscreen" | "--windowed" => {
+                if ce_fullscreen.is_some() { return Err("Specify one display mode".into()); }
+                ce_fullscreen = Some(arg == "--fullscreen");
+            }
             "--" => {
                 args.remove(0);
                 break;
@@ -35,11 +88,27 @@ pub fn parse(mut args: Vec<String>) -> Result<StartupArgs, String> {
         }
         args.remove(0);
     }
-    let launch = if help { None } else { parse_launch(args)? };
+    if !help && ce_profile.is_some() && (ce_options || !args.is_empty()) {
+        return Err("Use --ce-profile with --fullscreen/--windowed; edit other CE options in the profile".into());
+    }
+    let ce_launch = if !help && ce_options {
+        if ce.executable.trim().is_empty() || !args.is_empty() {
+            return Err(format!("A CE launch requires --ce-exe and cannot include a library game\n{HELP}"));
+        }
+        Some(ce)
+    } else { None };
+    if !help && ce_fullscreen.is_some() && ce_launch.is_none() && ce_profile.is_none() {
+        return Err(format!("--fullscreen/--windowed require --ce-exe; library games use 0 or 1\n{HELP}"));
+    }
+    let launch = if help || ce_launch.is_some() || ce_profile.is_some() { None } else { parse_launch(args)? };
     Ok(StartupArgs {
         profile,
         help,
+        minimized,
         launch,
+        ce_launch,
+        ce_profile,
+        ce_fullscreen,
     })
 }
 
@@ -150,6 +219,17 @@ mod tests {
     #[test]
     fn no_args_preserves_launcher() {
         assert_eq!(parse_launch(vec![]).unwrap(), None);
+    }
+    #[test]
+    fn named_ce_profiles_launch_without_an_executable_option() {
+        let p = parse(args(&["--ce-profile", "wince6", "--windowed"])).unwrap();
+        assert_eq!(p.ce_profile.as_deref(), Some("wince6"));
+        assert_eq!(p.ce_fullscreen, Some(false));
+        assert!(p.launch.is_none());
+        assert!(p.ce_launch.is_none());
+        assert!(parse(args(&["--ce-profile"])).is_err());
+        assert!(parse(args(&["--ce-profile", "wince6", "Game"])).is_err());
+        assert!(parse(args(&["--ce-profile", "wince6", "--ce-exe", "app.exe"])).is_err());
     }
     #[test]
     fn display_modes_and_optional_filter() {

@@ -1,5 +1,6 @@
 //! Minimal OLE32 and Windows Media Player compatibility layer.
 
+use pocket_cpu::Prot;
 use pocket_kernel::{DispatchOutcome, KernelError};
 
 use crate::{CallCtx, WinCeDispatcher};
@@ -57,15 +58,24 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "CoInitializeEx", s_ok);
     d.register_handler(dll, "CoUninitialize", void_returning);
     d.register_handler(dll, "CoCreateGuid", co_create_guid);
+    d.register_handler(dll, "StringFromCLSID", string_from_clsid);
+    d.register_handler(dll, "StringFromIID", string_from_clsid);
     d.register_handler(dll, "StringFromGUID2", string_from_guid2);
+    d.register_handler(dll, "CLSIDFromString", clsid_from_string);
+    d.register_handler(dll, "IIDFromString", clsid_from_string);
+    d.register_handler(dll, "CoGetClassObject", co_get_class_object);
     d.register_handler(dll, "OleInitialize", s_ok);
     d.register_handler(dll, "OleUninitialize", void_returning);
+    d.register_handler(dll, "OleRun", crate::ole_run::run);
     d.register_handler(dll, "CoCreateInstance", co_create_instance);
     for &name in &WMP_METHODS {
         d.register_handler(dll, name, wmp_method);
     }
     d.register_handler(dll, WMP_CHILD_METHOD, wmp_child_method);
     crate::directshow::register(d);
+    crate::ole_bind::register(d);
+    crate::ole_stream::register(d);
+    crate::ole_automation::register(d);
     d.register_constant(dll, "CoGetMalloc", 0, zero_returning);
 }
 
@@ -109,6 +119,9 @@ fn alloc_child(ctx: &mut CallCtx<'_>) -> Result<u32, KernelError> {
 }
 
 fn co_create_instance(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = crate::native_com::resume(ctx)? {
+        return Ok(outcome);
+    }
     const CLSID_WMP: [u8; 16] = [
         0x52, 0x2a, 0xf5, 0x6b, 0x4a, 0x39, 0xd3, 0x11, 0xb1, 0x53, 0x00, 0xc0, 0x4f, 0x79, 0xfa,
         0xa6,
@@ -136,6 +149,9 @@ fn co_create_instance(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         return Ok(outcome);
     }
     if clsid_bytes != CLSID_WMP || iid_bytes != IID_WMP_PLAYER {
+        if let Some(outcome) = crate::native_com::activate(ctx, true)? {
+            return Ok(outcome);
+        }
         ctx.cpu.write_mem(out, &0u32.to_le_bytes())?;
         return Ok(DispatchOutcome::ReturnedR0(0x8000_4002));
     }
@@ -264,49 +280,6 @@ fn co_task_mem_realloc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
     Ok(DispatchOutcome::ReturnedR0(new_p))
 }
 
-fn string_from_guid2(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // 38 characters including braces, plus the terminator.
-    const LENGTH: u32 = 39;
-    let guid = ctx.arg_u32(0)?;
-    let out = ctx.arg_u32(1)?;
-    if guid == 0
-        || out == 0
-        || (ctx.arg_u32(2)? as i32) < LENGTH as i32
-        || ctx
-            .cpu
-            .check_guest_access(guid, 16, pocket_cpu::Prot::READ)
-            .is_err()
-        || ctx
-            .cpu
-            .check_guest_access(out, LENGTH * 2, pocket_cpu::Prot::WRITE)
-            .is_err()
-    {
-        return Ok(DispatchOutcome::ReturnedR0(0));
-    }
-    let bytes = ctx.cpu.read_mem(guid, 16)?;
-    let text = format!(
-        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
-        u16::from_le_bytes(bytes[4..6].try_into().unwrap()),
-        u16::from_le_bytes(bytes[6..8].try_into().unwrap()),
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15],
-    );
-    let encoded: Vec<_> = text
-        .encode_utf16()
-        .chain([0])
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    ctx.cpu.write_mem(out, &encoded)?;
-    Ok(DispatchOutcome::ReturnedR0(LENGTH))
-}
-
 fn co_create_guid(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static SEED: AtomicU32 = AtomicU32::new(0xFEED_BABE);
@@ -321,4 +294,266 @@ fn co_create_guid(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     }
     ctx.cpu.write_mem(p, &buf)?;
     Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+pub(crate) fn guid_string(bytes: &[u8]) -> String {
+    let data1 = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    let data2 = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
+    let data3 = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
+    format!(
+        "{{{data1:08X}-{data2:04X}-{data3:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
+
+fn read_guid_string(ctx: &mut CallCtx<'_>, guid: u32) -> Result<Option<Vec<u8>>, KernelError> {
+    if guid == 0 || ctx.cpu.check_guest_access(guid, 16, Prot::READ).is_err() {
+        return Ok(None);
+    }
+    let bytes = ctx.cpu.read_mem(guid, 16)?;
+    Ok(Some(
+        guid_string(&bytes)
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    ))
+}
+
+// Portable Explorer builds shell namespace paths from CLSIDs. Its native
+// idlist code copies this allocated string and releases it with CoTaskMemFree.
+fn string_from_clsid(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    const INVALID: u32 = 0x8007_0057;
+    const OUT_OF_MEMORY: u32 = 0x8007_000e;
+    let guid = ctx.arg_u32(0)?;
+    let output = ctx.arg_u32(1)?;
+    if output == 0 || ctx.cpu.check_guest_access(output, 4, Prot::WRITE).is_err() {
+        return Ok(DispatchOutcome::ReturnedR0(INVALID));
+    }
+    ctx.cpu.write_mem(output, &0u32.to_le_bytes())?;
+    let Some(bytes) = read_guid_string(ctx, guid)? else {
+        return Ok(DispatchOutcome::ReturnedR0(INVALID));
+    };
+    let Some(pointer) = ctx.kernel.heap.alloc(bytes.len() as u32) else {
+        return Ok(DispatchOutcome::ReturnedR0(OUT_OF_MEMORY));
+    };
+    let write = ctx
+        .cpu
+        .write_mem(pointer, &bytes)
+        .and_then(|()| ctx.cpu.write_mem(output, &pointer.to_le_bytes()));
+    if let Err(error) = write {
+        ctx.kernel.heap.free(pointer);
+        return Err(error.into());
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn string_from_guid2(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let guid = ctx.arg_u32(0)?;
+    let output = ctx.arg_u32(1)?;
+    let capacity = ctx.arg_u32(2)?;
+    if output == 0
+        || (capacity as i32) < 39
+        || ctx.cpu.check_guest_access(output, 78, Prot::WRITE).is_err()
+    {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let Some(bytes) = read_guid_string(ctx, guid)? else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    ctx.cpu.write_mem(output, &bytes)?;
+    Ok(DispatchOutcome::ReturnedR0(39))
+}
+
+fn parse_guid(text: &[u16]) -> Option<[u8; 16]> {
+    if text.len() != 38
+        || text[0] != b'{' as u16
+        || text[37] != b'}' as u16
+        || [9, 14, 19, 24].iter().any(|&i| text[i] != b'-' as u16)
+    {
+        return None;
+    }
+    let mut digits = Vec::with_capacity(32);
+    for (i, &unit) in text.iter().enumerate().take(37).skip(1) {
+        if [9, 14, 19, 24].contains(&i) {
+            continue;
+        }
+        digits.push(char::from_u32(u32::from(unit))?.to_digit(16)? as u8);
+    }
+    let mut bytes = [0; 16];
+    for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
+        *byte = pair[0] * 16 + pair[1];
+    }
+    bytes[..4].reverse();
+    bytes[4..6].reverse();
+    bytes[6..8].reverse();
+    Some(bytes)
+}
+
+fn clsid_from_string(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let input = ctx.arg_u32(0)?;
+    let output = ctx.arg_u32(1)?;
+    if output == 0 || ctx.cpu.check_guest_access(output, 16, Prot::WRITE).is_err() {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    }
+    let guid = if input == 0 {
+        Some([0; 16])
+    } else {
+        let mut text = Vec::new();
+        let mut terminated = false;
+        for i in 0..39 {
+            let Some(address) = input.checked_add(i * 2) else {
+                break;
+            };
+            if ctx.cpu.check_guest_access(address, 2, Prot::READ).is_err() {
+                break;
+            }
+            let bytes = ctx.cpu.read_mem(address, 2)?;
+            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if unit == 0 {
+                terminated = true;
+                break;
+            }
+            text.push(unit);
+        }
+        terminated.then(|| parse_guid(&text)).flatten()
+    };
+    let Some(guid) = guid else {
+        return Ok(DispatchOutcome::ReturnedR0(0x8004_01f3));
+    };
+    ctx.cpu.write_mem(output, &guid)?;
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+fn co_get_class_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = crate::native_com::resume(ctx)? {
+        return Ok(outcome);
+    }
+    let output = ctx.arg_u32(4)?;
+    if output == 0 || ctx.cpu.check_guest_access(output, 4, Prot::WRITE).is_err() {
+        return Ok(DispatchOutcome::ReturnedR0(0x8007_0057));
+    }
+    ctx.cpu.write_mem(output, &0u32.to_le_bytes())?;
+    if let Some(outcome) = crate::native_com::activate(ctx, false)? {
+        return Ok(outcome);
+    }
+    // Private shell classes stay in native pceshell. Unavailable host COM
+    // classes must fail; S_OK with a null factory crashes the caller.
+    Ok(DispatchOutcome::ReturnedR0(0x8004_0111))
+}
+
+#[cfg(test)]
+mod guid_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_cpu::Cpu;
+    use pocket_kernel::DispatchOutcome;
+
+    #[test]
+    fn shell_clsid_string_uses_com_allocation_and_mixed_endian_guid_layout() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        kernel.heap = pocket_kernel::Heap::new(0x5000_0000, 0x10000);
+        cpu.map_region(
+            0x5000_0000,
+            0x10000,
+            pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+        )
+        .unwrap();
+        cpu.write_mem(
+            0x1100,
+            &[
+                0x52, 0x2a, 0xf5, 0x6b, 0x4a, 0x39, 0xd3, 0x11, 0xb1, 0x53, 0, 0xc0, 0x4f, 0x79,
+                0xfa, 0xa6,
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "ole32.dll",
+                "StringFromCLSID",
+                &[0x1100, 0x1200]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        let pointer = cpu.read_u32_le(0x1200).unwrap();
+        assert!(kernel.heap.msize(pointer).unwrap() >= 78);
+        let expected: Vec<u8> = "{6BF52A52-394A-11D3-B153-00C04F79FAA6}\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(cpu.read_mem(pointer, 78).unwrap(), expected);
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "ole32.dll",
+            "CoTaskMemFree",
+            &[pointer],
+        );
+        assert!(kernel.heap.msize(pointer).is_none());
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "ole32.dll",
+                "StringFromGUID2",
+                &[0x1100, 0x1300, 38]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "ole32.dll",
+                "StringFromGUID2",
+                &[0x1100, 0x1300, 39]
+            ),
+            DispatchOutcome::ReturnedR0(39)
+        );
+        assert_eq!(cpu.read_mem(0x1300, 78).unwrap(), expected);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "ole32.dll",
+                "CLSIDFromString",
+                &[0x1300, 0x1400]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(
+            cpu.read_mem(0x1400, 16).unwrap(),
+            cpu.read_mem(0x1100, 16).unwrap()
+        );
+        cpu.write_mem(0x1302, &(b'Z' as u16).to_le_bytes()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "ole32.dll",
+                "CLSIDFromString",
+                &[0x1300, 0x1400]
+            ),
+            DispatchOutcome::ReturnedR0(0x8004_01f3)
+        );
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "ole32.dll",
+                "StringFromCLSID",
+                &[0, 0x1200]
+            ),
+            DispatchOutcome::ReturnedR0(0x8007_0057)
+        );
+        assert_eq!(cpu.read_u32_le(0x1200).unwrap(), 0);
+    }
 }

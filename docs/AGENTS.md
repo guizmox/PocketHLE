@@ -273,7 +273,7 @@ A handler returns a `DispatchOutcome` (`:521`):
 | `ReturnedR0(u32)` | Normal return. `void` handlers return 0; the guest ignores it. |
 | `ReturnedR0R1(u32, u32)` | 64-bit return, low word in r0. |
 | `JumpTo(va)` | Resume the guest at `va` instead of `LR`. Used to block modally by re-entering the same thunk — see `message_box_w`. |
-| `Halt(reason)` | Stop the run loop. `ExitProcess`, `TerminateProcess`. |
+| `Halt` | Stop the run loop. `ExitProcess`, `TerminateProcess`; the handler logs a reason and records the guest exit code separately. |
 
 **`resolve_handler` memoizes by `thunk_va` and import identity, including negative results**
 (`crates/pocket-winceapi/src/lib.rs:280`). Runtime DLL slots may be reused after `FreeLibrary`: the cached DLL,
@@ -544,6 +544,12 @@ file and `resolve` would otherwise fail them.
 independent paths that mix together. Which one a game uses decides where
 a silence bug lives.
 
+CE system sounds use private wave streams, including on the AudioTap/Android
+path. `MessageBeep` is stateful, never an IAT constant. Preserve positional
+REG_MULTI_SZ silent slots, EventMask, and the independent application/event
+enable bits. PlaySound stop and wave-device closure must not flush unrelated
+audio. See [CE sound settings](WINDOWS-CE.md#desktop-behavior-and-control-panel).
+
 The WinMM mixer API exposes one virtual PCM mixer with a speaker destination,
 a connected stereo wave-output source and volume control. The implementation
 is `coredll/mixer.rs`: device enumeration, ID/open/close, capabilities, line and
@@ -801,6 +807,13 @@ retains section metadata; resources move to KernelState.resources. The CPU
 keeps backing bytes only for pages not yet committed; see §19. MIPS and
 CPU wrappers without deferred-page support retain the eager fallback.
 
+For a CE Thumb-tagged image, valid packed `.pdata` function records select
+the entry's ARM/Thumb mode before falling back to instruction heuristics.
+CE's 8-byte function-table format must not be applied to ARMNT unwind records.
+The process retains the chosen mode before releasing section payloads; the main
+loop must not recompute it from the now-empty PE. CalNot's pimres.dll has an ARM
+leaf entry without a normal prologue despite its Thumb machine tag.
+
 Runtime modules retain their exact section and thunk mappings in
 `LoadedModule.resident_regions`. `FreeLibrary` decrements the load count;
 the last reference calls `DllMain(base, DLL_PROCESS_DETACH, NULL)` before
@@ -914,8 +927,10 @@ PROCESS_ATTACH callback. HLE imports retain their existing hooks; native
 imports bind directly to relocated guest exports, by name or ordinal. Resolve
 new dependencies beside the importing DLL first (case-insensitive filename),
 then through the existing module search. Publish exports before traversing
-imports so cycles bind without allocating duplicate copies. Native forwarder
-exports remain rejected by prepare_runtime_module. Image page commitment follows §19.
+imports so cycles bind without allocating duplicate copies. Forwarder exports
+resolve through the complete native/HLE graph by name or ordinal, with bounded
+recursion and cycle detection. Invalid targets fail transactionally. Image page
+commitment follows §19.
 ARM EXEs with imports into supplied native DLL data sections use the same
 loader before entry. Bind their IAT slots and complete PROCESS_ATTACH before
 executing the EXE. Native function-only imports retain lazy dispatch.
@@ -1074,8 +1089,10 @@ exit signals the appropriate object and releases stacks/TLS/abandoned mutexes.
 A child may outlive its parent: drop the parent's emulator before joining
 children, while shared handles/RAM remain alive through child references.
 
-The desktop session shares stop/input but only its foreground process submits
-frames. All process jobs must finish before completing the session. API state
+The desktop session shares stop/input. Ordinary game sessions publish from the
+foreground process; opt-in CE desktop sessions compose immutable captures from
+all visible processes through pocket-core::ce_desktop. All process jobs must
+finish before completing the session. API state
 is per process; thread-local multimedia stays on the owning host thread.
 ARM v7 verifies all 132 RAM checks plus the separate process/orphan reports in
 three exit variants; the real desktop runner executes the same process probes.
@@ -1235,6 +1252,13 @@ processing and normal handoff. Existing single-thread behavior remains separate.
 The original experiment and its limited headless measurements are retained in
 [implementation notes](history/IMPLEMENTATION-NOTES.md#history-message-pump).
 
+Combined `MsgWaitForMultipleObjects[Ex]` waits retain their object handles,
+WAITALL policy and queue wake mask while parked. ANY wakes for either a ready
+object or owned traffic in that mask; ALL requires both matching traffic and all
+objects. A zero mask still denotes a combined wait. Readiness previews preserve
+input, timer deadlines and auto-reset events; the resumed call acquires results
+at its original thunk with its registers, stack arguments and timeout intact.
+
 ## PocketPC Preset ID
 
 
@@ -1264,6 +1288,16 @@ Validation: isolated original ARM routines for a supplied purchased game;
 persistence regression. Full Android/desktop native builds and device gameplay
 remain to be checked. No build dependencies or lockfile changes.
 
+
+## CE device sessions
+
+The CE device context also shares reserved filesystem names, password-active
+metadata and virtual suspend generations between parent and child processes.
+`PowerOffSystem` pauses guest CPU slices while frontend stop/input polling remains
+available outside the execution gate. New key, stylus-down or text input resumes
+the device; stale queued input and pointer movement do not. Keep the waiting
+call's continuation until its original suspend generation finishes. Owner teardown
+releases its namespace and suspend state. See [CE services](WINDOWS-CE.md#ce-device-and-service-boundaries).
 
 ## Optional executable ARM diagnostics
 

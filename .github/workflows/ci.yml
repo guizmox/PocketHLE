@@ -13,6 +13,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  CARGO_BUILD_JOBS: "2"
   # Keep Cargo artifacts separate from extracted FFmpeg sources.
   CARGO_TARGET_DIR: ${{ github.workspace }}/target/cargo
   # Keep older native dependencies compatible with recent CMake releases.
@@ -112,11 +113,11 @@ jobs:
             cmake build-essential libclang-dev clang lld python3
       - name: build static FFmpeg
         run: bash tools/build-ffmpeg.sh x86_64-unknown-linux-gnu 4
-      - run: cargo build --workspace --release --locked
+      - run: cargo build --workspace --release --locked --features pocket-winceapi/unicorn-tests
       - name: run workspace tests sequentially
-        # Includes launcher profiles/controller navigation. Executable ARM
-        # diagnostics require the non-default arm-diagnostics feature.
-        run: cargo test --workspace --release --locked -- --test-threads=1
+        # Includes launcher navigation and synthetic ARM/Thumb callback ABI
+        # regressions. HARDWARE DIAG fixtures remain a separate opt-in feature.
+        run: cargo test --workspace --release --locked --features pocket-winceapi/unicorn-tests --no-fail-fast -- --test-threads=1
 
   build-unicorn:
     name: build with unicorn-engine
@@ -211,7 +212,7 @@ jobs:
       - name: build CLI + desktop
         shell: pwsh
         run: |
-          cargo build --release --locked -p pocket-cli
+          cargo build --release --locked -p pocket-cli --features unicorn
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked -p pocket-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -230,6 +231,9 @@ jobs:
           cp target/cargo/release/pockethle-gui.exe dist/PocketHLE-Reborn-windows/
           cp README.md dist/PocketHLE-Reborn-windows/
           cp docs/STEAMDECK.md dist/PocketHLE-Reborn-windows/README-SteamDeck.md
+          cp docs/WINDOWS-CE.md dist/PocketHLE-Reborn-windows/README-Windows-CE.md
+          mkdir -p dist/PocketHLE-Reborn-windows/profiles
+          cp profiles/wince6-portable.json profiles/wince6-native.json profiles/wince6-native-cerf.json profiles/wince6-cmd.json dist/PocketHLE-Reborn-windows/profiles/
           cp -f README.ru.md dist/PocketHLE-Reborn-windows/ 2>/dev/null || true
       - name: zip artifacts
         shell: pwsh
@@ -292,4 +296,23 @@ jobs:
         with:
           name: PocketHLE-Reborn-android
           path: dist/android/PocketHLE-Reborn-*.apk
+          if-no-files-found: error
+
+  wince-source-and-profile:
+    name: WinCE profile and corresponding source
+    runs-on: ubuntu-24.04
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - name: Package profile templates and complete locked source
+        run: |
+          mkdir -p target dist/release
+          cargo vendor --locked vendor-cargo > target/vendor-config.toml
+          python3 tools/package-wince-profile.py --output dist/release/PocketHLE-Reborn-WinCE-profile.zip
+          python3 tools/package-wince-source.py --output dist/release/PocketHLE-Reborn-source-kit.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketHLE-Reborn-profile-and-source
+          path: dist/release/*.zip
           if-no-files-found: error

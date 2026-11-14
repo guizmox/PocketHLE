@@ -48,6 +48,7 @@ fn run_mixer(dispatcher: &mut dyn Dispatcher, thumb: bool) -> [i16; 4] {
             pe::machine::ARM
         },
         subsystem: pe::subsystem::WINDOWS_CE_GUI,
+        subsystem_version: (4, 0),
         image_base: 0x10000,
         size_of_image: 0x2000,
         stack_reserve: 0x10000,
@@ -237,6 +238,7 @@ fn run_io_worker(dispatcher: &mut dyn Dispatcher) -> u32 {
         source_path: "slow_resource_worker".into(),
         machine: pe::machine::ARM,
         subsystem: pe::subsystem::WINDOWS_CE_GUI,
+        subsystem_version: (4, 0),
         image_base: 0x10000,
         size_of_image: 0x2000,
         stack_reserve: 0x10000,

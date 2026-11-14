@@ -218,6 +218,7 @@ impl Runner {
             game.launch_path(library_root)
         };
         let mut summary_lines = vec![format!("Game: {}", game.display_name)];
+        let ce = game.settings.windows_ce.as_ref();
 
         let metadata = pocket_core::pe::load_file(&exe).ok();
         let machine = metadata
@@ -298,6 +299,27 @@ impl Runner {
         emu.max_slices = game.settings.max_slices;
         emu.instruction_budget_per_slice = game.settings.instructions_per_slice;
 
+        if let Some(ce) = ce {
+            if hook.ce_desktop.is_none() {
+                hook.ce_desktop = Some(Arc::new(Mutex::new(CeDesktopView::default())));
+            }
+            if hook.ce_image.is_none() {
+                if let Some(root) = &ce.image_root {
+                    let root = if root.is_absolute() { root.clone() } else { library_root.join(root) };
+                    match pocket_core::ce_image::WindowsCeImage::load(&root) {
+                        Ok(image) => hook.ce_image = Some(Arc::new(image)),
+                        Err(error) => return (RunOutcome { summary: format!("Cannot load Windows CE image: {error:#}"), framebuffer: None },193),
+                    }
+                }
+            }
+            if let Some(image) = &hook.ce_image {
+                if let Err(error) = emu.set_windows_ce_image(image.clone()) {
+                    return (RunOutcome { summary: format!("Cannot configure Windows CE image: {error:#}"), framebuffer: None },193);
+                }
+            }
+            emu.set_classic_windows(ce.classic_windows);
+        }
+
         let is_gizmondo = is_gizmondo_game(&game, &library_root);
         if let Err(e) = emu.load_pe_with_executable_heap(
             &exe,
@@ -334,7 +356,7 @@ impl Runner {
                 && (game.settings.controls_mode()
                     == pocket_library::stylus_grid::ControlsMode::Zones);
         }
-        if !is_gizmondo {
+        if !is_gizmondo && ce.is_none() {
             let tx = hook.dependency_notice_tx.clone();
             emu.configure_pocketpc_dependencies(library_root, move |message| {
                 if let Some(tx) = &tx {
@@ -365,7 +387,7 @@ impl Runner {
                 0xc0000017,
             );
         }
-        if !is_gizmondo {
+        if !is_gizmondo && ce.is_none() {
             if let Err(error) = emu.configure_pocketpc_storage(library_root) {
                 if let Some(startup) = startup.as_mut() {
                     startup.error = 29;
@@ -385,7 +407,25 @@ impl Runner {
             "registry-pocketpc.json"
         });
 
-        if !is_gizmondo {
+        let mut device_data = None;
+        if let Some(ce) = ce.filter(|_| guest_path.is_none()) {
+            use std::hash::{Hash,Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            if let Some(image) = &hook.ce_image { image.filesystem.hash(&mut hash); }
+            else { exe.parent().hash(&mut hash); }
+            let data = ce.data_dir.as_ref().map(|path| if path.is_absolute() { path.clone() } else { library_root.join(path) })
+                .unwrap_or_else(||library_root.join("ce-data").join(format!("{:016x}",hash.finish())));
+            let state = &mut emu.process_mut().unwrap().state;
+            match pocket_core::ce_image::configure_device(state,hook.ce_image.as_deref(),&data) {
+                Ok(data) => {
+                    summary_lines.push(format!("Windows CE device data: {}",data.display()));
+                    device_data = Some(data);
+                }
+                Err(error) => return (RunOutcome { summary: format!("Cannot initialize Windows CE device: {error:#}"), framebuffer: None },29),
+            }
+        }
+
+        if !is_gizmondo && ce.is_none() {
             if let Err(error) = emu.set_pocketpc_processor(&launcher_config.pocketpc_processor) {
                 log::warn!("{error}; using default PXA270 identity");
                 let _ = emu.set_pocketpc_processor("pxa270");
@@ -465,13 +505,13 @@ impl Runner {
             }
 
             let registry_result = (|| {
-                process
-                    .state
-                    .registry
-                    .configure_persistence(&registry_path)?;
+                if ce.is_none() {
+                    process.state.registry.configure_persistence(&registry_path)?;
+                }
                 if is_gizmondo && guest_path.is_none() {
                     process.state.registry.reset_gizmondo_backlight()?;
                     process.state.sync_backlight();
+                    process.state.sync_ce_settings();
                 }
                 Ok::<(), std::io::Error>(())
             })();
@@ -489,6 +529,7 @@ impl Runner {
                 );
             }
             let (preset, platform) = launcher_config.device_identity_hex(is_gizmondo);
+            if ce.is_none() {
             if let Err(e) = pocket_core::kernel::device_identity::DeviceIdentity::configure(
                 &mut process.state.registry,
                 preset,
@@ -502,6 +543,7 @@ impl Runner {
                     },
                     29,
                 );
+            }
             }
             if is_gizmondo {
                 process
@@ -531,7 +573,7 @@ impl Runner {
                 }
             }
         }
-        if !is_gizmondo {
+        if !is_gizmondo && ce.is_none() {
             if let Err(e) = emu
                 .set_pocketpc_identity(
                     &game.settings.pocketpc_owner_name,
@@ -619,6 +661,7 @@ impl Runner {
 
         let extracted = game.extracted_dir(&library_root);
 
+        if ce.is_none() {
         emu.mount_read_only_dir("\\Application\\", &extracted);
         emu.mount_read_only_dir("\\Program Files\\", &extracted);
         emu.mount_read_only_dir("\\Program Files\\Game\\", &extracted);
@@ -704,6 +747,7 @@ impl Runner {
                 }
             }
         }
+        }
         // Use the real card-relative executable path after installing aliases.
         // CoPilot derives pid.cfg from GetModuleFileNameW and exits immediately
         // when a nested application is falsely reported at the card root.
@@ -725,7 +769,39 @@ impl Runner {
         // synthetic message pump in pocket-winceapi.
         emu.set_synthetic_message_budget(0);
 
-        if let Some(guest_exe) = guest_path {
+        if let Some(ce) = ce {
+            let prefix = match crate::ce_launch::app_prefix(&ce.app_prefix) {
+                Ok(prefix) => prefix,
+                Err(error) => return (RunOutcome { summary: format!("Invalid CE application folder: {error:#}"), framebuffer: None },87),
+            };
+            if let Some(data) = &device_data {
+                if let Some(parent) = exe.parent() {
+                    if let Err(error) = pocket_core::ce_image::mount_application(&mut emu.process_mut().unwrap().state.vfs, data, &prefix, parent) {
+                        return (RunOutcome { summary: format!("Cannot mount CE application: {error:#}"), framebuffer: None }, 29);
+                    }
+                }
+            }
+            let module = guest_path.map(str::to_owned).unwrap_or_else(||format!("{prefix}{}",exe.file_name().unwrap_or_default().to_string_lossy()));
+            let mounts = match ce.resolved_mounts(library_root) {
+                Ok(mounts) => mounts,
+                Err(error) => return (RunOutcome { summary: format!("Invalid CE folders: {error:#}"), framebuffer: None },87),
+            };
+            if let Some(data) = &device_data {
+                for (prefix, host) in mounts {
+                    if let Err(error) = pocket_core::ce_image::mount_application(&mut emu.process_mut().unwrap().state.vfs, data, &prefix, &host) {
+                        return (RunOutcome { summary: format!("Cannot mount CE folder {prefix}: {error:#}"), framebuffer: None },29);
+                    }
+                }
+            }
+            emu.set_module_path(&module);
+            if let Some((directory,_)) = module.rsplit_once('\\') { emu.set_default_dir(&format!("{directory}\\")); }
+            if let Some(namespace) = &hook.inherited_namespace {
+                emu.process_mut().unwrap().state.vfs.inherit_namespace(namespace);
+            }
+            log::info!("Windows CE application: {module}; classic frames={}",ce.classic_windows);
+        }
+
+        if let Some(guest_exe) = guest_path.filter(|_| ce.is_none()) {
             emu.set_module_path(guest_exe);
             if let Some((directory, _)) = guest_exe.rsplit_once('\\') {
                 emu.set_default_dir(&format!("{directory}\\"));
@@ -745,6 +821,11 @@ impl Runner {
             card_root: card_root.clone(),
         });
         hook.pid = emu.process().unwrap().state.object_handles.process_id();
+        if let Some(ce) = ce.filter(|_| startup.is_none() && guest_path.is_none()) {
+            if let Err(error) = emu.set_startup_command_line(&ce.command_line) {
+                return (RunOutcome { summary: format!("Cannot initialize CE command line: {error:#}"), framebuffer: None },8);
+            }
+        }
         if let Some(startup) = startup.as_mut() {
             if let Err(error) = emu.set_startup_command_line(&startup.command_line) {
                 startup.error = 8;
@@ -814,6 +895,7 @@ impl Runner {
         pocket_core::winceapi::gles::deferred_frame::release_reader();
         if let Some(table) = table {
             table.complete_process_exit(exit_code);
+            hook.retire_desktop_process(hook.pid, table.focus_after_exit(hook.parent_pid));
         }
         hook.finish_children();
         (
@@ -1077,7 +1159,34 @@ impl Drop for ProcessStartup {
 }
 
 
+#[derive(Default)]
+struct CeDesktopView {
+    desktop: pocket_core::ce_desktop::Desktop,
+    last_emit_at: Option<Instant>,
+    image_revision: u64,
+    image_id: u64,
+}
+impl CeDesktopView {
+    fn snapshot(&mut self) -> Result<Option<(u64, FrameSnapshot)>, String> {
+        let Some(frame) = self.desktop.compose()? else { return Ok(None); };
+        if self.image_id == 0 || self.image_revision != frame.image_revision {
+            self.image_revision = frame.image_revision;
+            self.image_id = FrameSnapshot::next_image_id();
+        }
+        Ok(Some((frame.revision, FrameSnapshot {
+            image_id: self.image_id, presentation_stats: frame.stats,
+            width: frame.logical[0], height: frame.logical[1],
+            texture_width: frame.image[0], texture_height: frame.image[1],
+            rgba: frame.rgba, rgb565: None, text_input: frame.text_input,
+            shared: None, deferred: None, backlight: 11,
+        })))
+    }
+}
+
 struct RunHook {
+    ce_image: Option<Arc<pocket_core::ce_image::WindowsCeImage>>,
+    ce_desktop: Option<Arc<Mutex<CeDesktopView>>>,
+    inherited_namespace: Option<pocket_core::kernel::vfs::VfsNamespace>,
     system_media: SystemMediaView,
     last_system_media: Option<SystemMediaStatus>,
     media_was_foreground: bool,
@@ -1095,6 +1204,7 @@ struct RunHook {
     stop_all: Arc<AtomicBool>,
     foreground: Arc<AtomicU32>,
     pid: u32,
+    parent_pid: u32,
     children: Vec<ChildJob<(RunOutcome, u32)>>,
     last_frame: u64,
     frame_send_failed: bool,
@@ -1117,6 +1227,75 @@ struct RunHook {
 }
 
 impl RunHook {
+    fn activate_process(&self, pid: u32) {
+        if let Some(view) = &self.ce_desktop {
+            let mut view = view.lock().unwrap_or_else(|e| e.into_inner());
+            view.desktop.activate(pid);
+            self.foreground.store(view.desktop.focused_process(), Ordering::Release);
+        } else {
+            self.foreground.store(pid, Ordering::Release);
+        }
+    }
+
+    fn retire_desktop_process(&mut self, pid: u32, next: u32) {
+        let Some(view) = self.ce_desktop.as_ref() else { return; };
+        let frame = {
+            let mut view = view.lock().unwrap_or_else(|e| e.into_inner());
+            view.desktop.remove(pid, next);
+            self.foreground.store(view.desktop.focused_process(), Ordering::Release);
+            view.snapshot()
+        };
+        self.send_desktop_frame(frame);
+    }
+
+    fn send_desktop_frame(&mut self, frame: Result<Option<(u64, FrameSnapshot)>, String>) {
+        match frame {
+            Ok(Some((version, frame))) => {
+                if let Some(tx) = &self.frame_tx {
+                    self.frame_send_failed |= tx.send_versioned(frame, version).is_err();
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::error!("CE desktop presentation failed: {error}");
+                self.stop_all.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    fn publish_desktop(&mut self, state: &mut KernelState) {
+        let Some(shared) = self.ce_desktop.clone() else { return; };
+        let now = Instant::now();
+        let counter = state.framebuffer.frame_counter;
+        let completed = state.framebuffer.presentation_stats.completed();
+        if (counter != self.last_frame || completed != self.last_completed || self.last_emit_at.is_none())
+            && presentation_phase(self.last_emit_at, now, Some(IMPLICIT_FRAME_INTERVAL)).is_some() {
+            // Materialize a process's immutable image before locking the shared
+            // desktop. Guest CPU/GDI state is never shared between processes.
+            match pocket_core::ce_desktop::ProcessFrame::capture(state) {
+                Ok(frame) => {
+                    let result = shared.lock().unwrap_or_else(|e| e.into_inner()).desktop.publish(self.pid, frame);
+                    if let Err(error) = result { self.send_desktop_frame(Err(error)); return; }
+                    let owner = shared.lock().unwrap_or_else(|e| e.into_inner()).desktop.focused_process();
+                    self.foreground.store(owner, Ordering::Release);
+                    self.last_frame = counter;
+                    self.last_completed = completed;
+                    self.last_emit_at = Some(now);
+                }
+                Err(error) => { self.send_desktop_frame(Err(error)); return; }
+            }
+        }
+        let frame = {
+            let mut view = shared.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(phase) = presentation_phase(view.last_emit_at, now, Some(IMPLICIT_FRAME_INTERVAL)) {
+                let frame = view.snapshot();
+                if matches!(frame, Ok(Some(_))) { view.last_emit_at = Some(phase); }
+                frame
+            } else { Ok(None) }
+        };
+        self.send_desktop_frame(frame);
+    }
+
     fn run_pending_child(&mut self, state: &mut KernelState) {
         let Some(request) = state.take_process_launch() else {
             return;
@@ -1146,6 +1325,7 @@ impl RunHook {
                 let parent_pid = self.pid;
                 let foreground = self.foreground.clone();
                 let mut child_hook = self.child_hook();
+                if context.game.settings.windows_ce.is_some() { child_hook.inherited_namespace = Some(state.vfs.namespace_snapshot()); }
                 let ram = state.memory_division.clone();
                 let command_line = request.command_line.clone();
                 let guest_path = request.guest_path.clone();
@@ -1194,7 +1374,7 @@ impl RunHook {
                         });
                         match ready_rx.recv_timeout(Duration::from_secs(30)) {
                             Ok(Ok(())) => {
-                                self.foreground.store(table.process_id(), Ordering::Release);
+                                self.activate_process(table.process_id());
                                 state.reset_foreground_input();
                                 Ok(request.process_handle)
                             }
@@ -1239,11 +1419,12 @@ impl RunHook {
             state.audio.suspend_output();
             let saved = pocket_core::suspend_host_session();
             let mut child_hook = self.child_hook();
+            if context.game.settings.windows_ce.is_some() { child_hook.inherited_namespace = Some(state.vfs.namespace_snapshot()); }
             let child_pid = state
                 .object_handles
                 .child_id(request.process_handle)
                 .unwrap();
-            self.foreground.store(child_pid, Ordering::Release);
+            self.activate_process(child_pid);
             log::info!("parent suspended; entering child {}", request.guest_path);
             let (outcome, code) = context.runner.run_process(
                 &context.library_root,
@@ -1256,7 +1437,7 @@ impl RunHook {
                 &mut child_hook,
             );
             exit_code = code;
-            self.foreground.store(self.pid, Ordering::Release);
+            self.activate_process(self.pid);
             self.input_disconnected = child_hook.input_disconnected;
             self.stopped_by_user |= child_hook.stopped_by_user;
             // run_process has dropped its child Emulator and its media first.
@@ -1322,7 +1503,11 @@ impl RunHook {
                                 _ => {}
                             }
                             // Keep Geofence's normal guest behavior for all input sources.
-                            pending.push_back(ev);
+                            if let Some(view) = &self.ce_desktop {
+                                let mut view = view.lock().unwrap_or_else(|e| e.into_inner());
+                                view.desktop.queue(ev, self.foreground.load(Ordering::Acquire));
+                                self.foreground.store(view.desktop.focused_process(), Ordering::Release);
+                            } else { pending.push_back(ev); }
                         }
 
                         Ok(InputCommand::SystemMedia(command)) => {
@@ -1343,6 +1528,9 @@ impl RunHook {
                 }
             }
         }
+        if let Some(view) = &self.ce_desktop {
+            view.lock().unwrap_or_else(|e| e.into_inner()).desktop.drain(self.pid, pending);
+        }
         self.stopped_by_user |= stop_requested || self.input_disconnected;
         if self.stopped_by_user {
             self.stop_all.store(true, Ordering::Release);
@@ -1352,6 +1540,10 @@ impl RunHook {
 
     fn child_hook(&self) -> Self {
         let mut hook = Self::new(self.frame_tx.clone(), None);
+        hook.ce_image = self.ce_image.clone();
+        hook.ce_desktop = self.ce_desktop.clone();
+        hook.parent_pid = self.pid;
+        hook.inherited_namespace = self.inherited_namespace.clone();
         hook.dependency_notice_tx = self.dependency_notice_tx.clone();
         hook.system_media = self.system_media.clone();
         hook.recording_audio = self.recording_audio.clone();
@@ -1366,7 +1558,20 @@ impl RunHook {
     }
 
     fn reap_children(&mut self) {
-        child_jobs::reap(&mut self.children);
+        let mut index = 0;
+        while index < self.children.len() {
+            if self.children[index].thread.is_finished() {
+                let job = self.children.swap_remove(index);
+                if job.thread.join().is_err() {
+                    job.table.complete_process_exit(0xc0000005);
+                    job.table.set_exit(Some(0), 0xc0000005);
+                    job.table.mark_inactive();
+                    self.retire_desktop_process(job.table.process_id(), job.table.focus_after_exit(self.pid));
+                }
+            } else {
+                index += 1;
+            }
+        }
     }
 
     fn reset_process(&mut self) {
@@ -1381,6 +1586,9 @@ impl RunHook {
         input_rx: Option<Receiver<InputCommand>>,
     ) -> Self {
         Self {
+            ce_image: None,
+            ce_desktop: None,
+            inherited_namespace: None,
             system_media: SystemMediaView::default(),
             last_system_media: None,
             media_was_foreground: false,
@@ -1398,6 +1606,7 @@ impl RunHook {
             stop_all: Arc::new(AtomicBool::new(false)),
             foreground: Arc::new(AtomicU32::new(1)),
             pid: 1,
+            parent_pid: 0,
             children: Vec::new(),
             last_frame: 0,
             frame_send_failed: false,
@@ -1467,7 +1676,7 @@ impl FrameHook for RunHook {
     fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
         self.reap_children();
         let active = self.foreground.load(Ordering::Acquire) == self.pid;
-        let mut stop_requested = if active {
+        let mut stop_requested = if active || self.ce_desktop.is_some() {
             self.sync_system_media();
             let stop = self.drain_input(&mut state.pending_input);
             if !self.media_commands.is_empty() {
@@ -1511,7 +1720,9 @@ impl FrameHook for RunHook {
         // game tick that does ~2k `BitBlt`s would generate ~2k
         // 300 KiB snapshots — the work that turned a logical 60 fps
         // game into a sub-1 fps preview in the desktop launcher.
-        if !self.frame_send_failed && self.foreground.load(Ordering::Acquire) == self.pid {
+        if !self.frame_send_failed && self.ce_desktop.is_some() {
+            self.publish_desktop(state);
+        } else if !self.frame_send_failed && self.foreground.load(Ordering::Acquire) == self.pid {
             if let Some(tx) = self.frame_tx.as_ref() {
                 let counter = state.framebuffer.frame_counter;
                 let completed = state.framebuffer.presentation_stats.completed();
@@ -1597,21 +1808,7 @@ impl FrameHook for RunHook {
                         self.last_frame = counter;
                         self.last_completed = completed;
                         self.last_emit_at = Some(phase);
-                        snapshot.text_input = state.gapi_action_key
-                            == pocket_core::kernel::gapi::VK_RETURN
-                            && state
-                                .controls
-                                .get(if state.shell_keyboard.sip {
-                                    state.shell_keyboard.target
-                                } else {
-                                    state.controls.focus
-                                })
-                                .is_some_and(|c| {
-                                    c.class == pocket_core::kernel::controls::ControlClass::Edit
-                                        && c.visible
-                                        && c.enabled
-                                        && c.style & 0x800 == 0
-                                });
+                        snapshot.text_input = state.accepts_text_input();
                         if tx.send(snapshot).is_err() {
                             // GUI thread dropped the receiver — the user
                             // closed the run screen / quit the launcher.
@@ -2176,6 +2373,7 @@ mod deferred_read_tests {
             source_path: "hook-test".into(),
             machine: pocket_core::pe::machine::ARM,
             subsystem: pocket_core::pe::subsystem::WINDOWS_CE_GUI,
+            subsystem_version: (4, 0),
             image_base: 0x10000,
             stack_reserve: 0x10000,
             size_of_image: 0x2000,
