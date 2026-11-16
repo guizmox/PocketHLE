@@ -165,6 +165,7 @@ struct EglSurfaces {
     initialized: bool,
     goforce_4500: bool,
     goforce_5500: bool,
+    intel2700g: bool,
     surface_format: EglSurfaceFormat,
     config_locked: bool,
     contexts: HashMap<u32, EglContext>,
@@ -188,7 +189,8 @@ struct EglSurfaces {
 }
 impl EglSurfaces {
     fn effective_surface_format(&self) -> EglSurfaceFormat {
-        if self.goforce_4500 {
+        if self.goforce_4500 || (self.intel2700g && self.surface_format == EglSurfaceFormat::Auto)
+        {
             EglSurfaceFormat::Rgb565Only
         } else {
             self.surface_format
@@ -215,6 +217,7 @@ impl EglSurfaces {
             initialized: false,
             goforce_4500: false,
             goforce_5500: false,
+            intel2700g: false,
             surface_format: EglSurfaceFormat::Auto,
             config_locked: false,
             contexts: HashMap::new(),
@@ -385,8 +388,9 @@ pub fn set_nv_combiner_client(enabled: bool) {
     update_stored_contexts(|c| c.nv_combiner_client = enabled);
 }
 
-/// Explicit legacy-driver compatibility, independent of CPU identity and game ID.
-pub fn set_intel2700g_depth_bias(enabled: bool) {
+/// Select Intel 2700G EGL and depth-bias behavior for the session.
+pub fn set_intel2700g_profile(enabled: bool) {
+    SURFACES.with(|s| s.borrow_mut().intel2700g = enabled);
     with_ctx(|c| c.state.intel2700g_depth_bias = enabled);
     update_stored_contexts(|c| c.state.intel2700g_depth_bias = enabled);
 }
@@ -7795,7 +7799,7 @@ mod tests {
         reset_for_test(64, 64);
         let mut cpu = fresh_cpu();
         let mut kernel = fresh_kernel();
-        set_intel2700g_depth_bias(true);
+        set_intel2700g_profile(true);
         call(
             &mut cpu,
             &mut kernel,

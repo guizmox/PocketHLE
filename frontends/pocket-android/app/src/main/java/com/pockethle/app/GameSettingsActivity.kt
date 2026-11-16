@@ -187,7 +187,7 @@ class GameSettingsActivity : HostKeyActivity() {
                     key = "egl_surface_format"
                     title = "OpenGL ES surface format"
                     isPersistent = false
-                    entries = arrayOf("Auto (RGB565 + RGBA8888)", "RGB565 only", "RGBA8888 only")
+                    entries = arrayOf("Auto", "RGB565 only", "RGBA8888 only")
                     entryValues = arrayOf("auto", "rgb565_only", "rgba8888_only")
                     value = current.eglSurfaceFormat
                     dialogTitle = title

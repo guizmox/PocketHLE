@@ -3408,7 +3408,7 @@ impl PocketLauncher {
                     ui.end_row();
                     use pocket_library::EglSurfaceFormat::{Auto, Rgb565Only, Rgba8888Only};
                     let formats = [
-                        (Auto, "Auto (RGB565 + RGBA8888)"),
+                        (Auto, "Auto"),
                         (Rgb565Only, "RGB565 only"),
                         (Rgba8888Only, "RGBA8888 only"),
                     ];

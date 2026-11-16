@@ -575,7 +575,7 @@ fn host_render_policies_apply_to_parked_contexts_and_mipmap_without_texture_is_l
     let (mut cpu, mut k) = (fresh_cpu(), fresh_kernel());
     let b = create(&mut cpu, &mut k, 0);
     set_gizmondo_goforce_driver(true);
-    set_intel2700g_depth_bias(true);
+    set_intel2700g_profile(true);
     set_internal_resolution(2);
     bind(&mut cpu, &mut k, b, SURFACE_HANDLE);
     with_ctx(|c| {

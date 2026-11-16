@@ -267,7 +267,8 @@ platforms and does not require a device profile or game-specific detection.
 
 ## EGL surfaces and shared objects
 
-On Pocket PC in Auto, configuration 1 is RGB565 and configuration 2 is RGBA8888.
+The generic Pocket PC Auto catalog includes configuration 1 (RGB565) and
+configuration 2 (RGBA8888).
 Both support windows and pbuffers; only RGB565 supports native GDI pixmaps.
 An application may request WINDOW_BIT|PBUFFER_BIT with alpha=8 while creating
 only an offscreen image. Removing RGBA8 window capability prevents such clients
@@ -281,8 +282,8 @@ Queries, configuration IDs and readback describe the actual attachments.
 Incompatible context/surface pairs return EGL_BAD_MATCH.
 
 The per-game **Graphics → OpenGL ES surface format** setting is available
-for Pocket PC on desktop and Android. **Auto** keeps the default
-catalog and ordering. **RGB565 only** limits EGL to configuration 1. **RGBA8888
+for Pocket PC on desktop and Android. **Auto** uses the selected driver
+profile's default catalog and ordering. **RGB565 only** limits EGL to configuration 1. **RGBA8888
 only** offers the RGBA configurations supported by the current profile. A
 forced format can leave some requests without a compatible configuration.
 Existing Pocket PC **RGBA8888 only** choices migrate to the new setting.
@@ -292,6 +293,12 @@ termination and reinitialization. Suspended parent sessions retain their own
 choice, and games launched by the same compilation inherit its settings.
 The setting affects the OpenGL ES 1.x EGL catalog in software and GPU modes.
 Direct GAPI/GX/GDI memory and OpenGL ES 2.0 are independent of this setting.
+
+On Intel 2700G, **Auto** advertises RGB565, the native color format of the
+emulated Pocket PC display. The original driver derives its configurations
+from the native display format. PocketHLE models the RGB565 configuration
+without adding the original multisample variants. The manual Pocket PC
+format choices still apply to this profile.
 
 The Gizmondo GoForce 4500 driver exposes RGB565 color only, independently of
 Pocket PC settings. PocketHLE keeps its existing RGB565 depth configuration.

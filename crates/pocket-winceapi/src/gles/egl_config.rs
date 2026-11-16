@@ -279,6 +279,30 @@ mod tests {
     }
 
     #[test]
+    fn intel2700g_auto_uses_native_rgb565_and_allows_manual_override() {
+        let _g = super::super::tests::guard();
+        reset_for_session();
+        set_intel2700g_profile(true);
+        assert_eq!(Config::handles(), &[CONFIG_HANDLE]);
+        assert_eq!(
+            Config::from_handle(CONFIG_HANDLE)
+                .unwrap()
+                .attribute(EGL_ALPHA_SIZE),
+            Some(0)
+        );
+        set_egl_surface_format(EglSurfaceFormat::Rgba8888Only);
+        assert_eq!(Config::handles(), &[CONFIG_RGBA_HANDLE]);
+
+        let parent = suspend();
+        reset_for_session();
+        assert_eq!(Config::handles(), &[CONFIG_HANDLE, CONFIG_RGBA_HANDLE]);
+        resume(parent);
+        set_egl_surface_format(EglSurfaceFormat::Auto);
+        assert_eq!(Config::handles(), &[CONFIG_HANDLE]);
+        reset_for_session();
+    }
+
+    #[test]
     fn goforce_5500_color_pbuffer_is_separate_from_window_configs() {
         let _g = super::super::tests::guard();
         reset_for_test(8, 8);
