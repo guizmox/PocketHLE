@@ -2,7 +2,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Status {
     pub ac: u8,
     pub flags: u8,
@@ -331,7 +331,7 @@ mod tests {
 /// CE power-manager notifications (pm.h), not desktop WM_POWERBROADCAST IDs.
 pub const PBT_POWERSTATUSCHANGE: u32 = 4;
 pub const PBT_POWERINFOCHANGE: u32 = 8;
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Notifications {
     subscriptions: std::collections::HashMap<u32, Subscription>,
     next: u32,
@@ -339,6 +339,7 @@ pub struct Notifications {
     pub requirements: Requirements,
     unattended_requests: u32,
 }
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Subscription {
     queue: u32,
     flags: u32,
@@ -531,7 +532,7 @@ mod notification_tests {
 
 /// SDK SysMessages uses BATERY (one T); the guide also spells BATTERY.
 /// Registered message notifications need no payload: the SDK ignores both params.
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GizmondoAlerts {
     low: Option<u32>,
     critical: Option<u32>,
@@ -712,12 +713,12 @@ mod gizmondo_alert_tests {
 
 /// Process-owned CE power requirements. Device drivers in PocketHLE remain
 /// powered (D0); these constraints never change host power policy.
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Requirements {
     entries: std::collections::HashMap<u32, Requirement>,
     next: u32,
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Requirement {
     pub device: String,
     pub state: u32,

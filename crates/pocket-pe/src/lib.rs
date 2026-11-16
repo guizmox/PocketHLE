@@ -62,7 +62,7 @@ pub enum LoadError {
 }
 
 /// One imported symbol from a foreign DLL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportSymbol {
     /// DLL name as written in the import directory (e.g. `COREDLL.dll`).
     pub dll: String,
@@ -73,7 +73,7 @@ pub struct ImportSymbol {
     pub iat_va: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ImportBinding {
     Name(String),
     Ordinal(u16),

@@ -214,7 +214,7 @@ impl GuestButton {
     }
 }
 
-/// Physical F7-F12 belong to the frontend, never to a guest binding.
+/// Physical F5-F12 belong to the frontend, never to a guest binding.
 /// This does not reserve guest VK_F11 (Gizmondo Power), which other host keys can send.
 pub const ROTATION_COMMAND: u16 = 0x1001;
 pub const SCREENSHOT_COMMAND: u16 = 0x1002;
@@ -224,7 +224,7 @@ pub const STYLUS_RELEASE_COMMAND: u16 = 0x1004;
 pub fn reserved_host_key(key: &str) -> bool {
     matches!(
         key.to_ascii_uppercase().as_str(),
-        "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
+        "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
     )
 }
 
@@ -383,14 +383,17 @@ mod tests {
     #[test]
     fn host_function_keys_are_never_guest_bindings_even_in_legacy_json() {
         let mut keys = super::KeyBindings::default();
-        for name in ["F7", "F8", "F9", "F10", "F11", "F12"] {
+        for name in ["F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"] {
             keys.bind(super::GuestButton::Action, name);
             assert_eq!(keys.vk_for_key(name), None);
             let raw = format!(r#"[{{"button":"action","keys":["{name}"]}}]"#);
             let old: super::KeyBindings = serde_json::from_str(&raw).unwrap();
             assert_eq!(old.vk_for_key(name), None);
         }
-        assert_eq!(keys.vk_for_key("F5"), Some(0x7a)); // Guest Power/VK_F11 remains available.
+        assert_eq!(
+            super::keyboard_button_for_profile(&keys, "5", true).map(super::GuestButton::vk),
+            Some(0x7a)
+        );
     }
     #[test]
     fn pocket_pc_buttons_do_not_steal_legacy_bindings_and_survive_settings() {
@@ -406,11 +409,11 @@ mod tests {
         for button in super::GuestButton::ALL[16..].iter() {
             assert!(bindings.keys_for(*button).is_empty());
         }
-        bindings.bind(super::GuestButton::PocketPcApp3, "F6");
+        bindings.bind(super::GuestButton::PocketPcApp3, "H");
         bindings.bind(super::GuestButton::PocketPcApp4, "J");
         let json = serde_json::to_string(&bindings).unwrap();
         let restored: super::KeyBindings = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.vk_for_key("F6"), Some(0xc3));
+        assert_eq!(restored.vk_for_key("H"), Some(0xc3));
         assert_eq!(restored.vk_for_key("J"), Some(0xc4));
         let mut pad = super::xbox_gamepad_bindings();
         pad.insert("South".into(), super::GuestButton::PocketPcApp3);
@@ -456,9 +459,6 @@ mod tests {
         assert_eq!(bindings.vk_for_key("z"), Some(0x26));
         // The arrow keys are the Gizmondo face buttons in the default layout.
         assert_eq!(bindings.vk_for_key("ArrowUp"), Some(0x11));
-        assert_eq!(bindings.vk_for_key("F3"), Some(0x72));
-        // Host F5 drives Piano 5, whose guest-side code is VK_F11.
-        assert_eq!(bindings.vk_for_key("F5"), Some(0x7A));
         assert_eq!(bindings.vk_for_key("F12"), None);
     }
 
@@ -806,6 +806,22 @@ pub fn keyboard_button_for_profile(
     use GuestButton::*;
     let button = bindings.button_for_key(key);
     if gizmondo {
+        // Older shared maps used 1/2 for the shoulders and F1–F5 for
+        // the piano keys. Keep explicit profile assignments and custom keys.
+        match (key.to_ascii_uppercase().as_str(), button) {
+            ("1", None | Some(Soft1)) => return Some(GizPiano1),
+            ("2", None | Some(Soft2)) => return Some(GizPiano2),
+            ("3", None) => return Some(GizPiano3),
+            ("4", None) => return Some(GizPiano4),
+            ("5", None) => return Some(GizPiano5),
+            ("A", None) => return Some(Soft1),
+            ("E", None) => return Some(Soft2),
+            ("F1", Some(GizPiano1))
+            | ("F2", Some(GizPiano2))
+            | ("F3", Some(GizPiano3))
+            | ("F4", Some(GizPiano4)) => return None,
+            _ => {}
+        }
         return button.filter(|b| {
             !matches!(
                 b,
@@ -861,7 +877,7 @@ mod keyboard_profile_tests {
         }
         assert_eq!(keyboard_button_for_profile(&keys, "T", true), None);
         assert_eq!(
-            keyboard_button_for_profile(&keys, "F3", true),
+            keyboard_button_for_profile(&keys, "3", true),
             Some(GuestButton::GizPiano3)
         );
         keys.bind(GuestButton::Action, "1");

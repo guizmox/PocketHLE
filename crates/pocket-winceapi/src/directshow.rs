@@ -153,8 +153,88 @@ impl Movie {
         }
     }
 }
-// Concurrent guest processes execute on separate host threads. Synchronous
-// child processes preserve this registry through suspend_session/resume_session.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct IdleGraphSnapshot {
+    visible: bool,
+    window: [i32; 4],
+    source: Option<[i32; 4]>,
+    destination: Option<[i32; 4]>,
+    window_properties: Vec<u32>,
+    objects: HashMap<String, (u32, u32)>,
+    notify: u32,
+    notify_msg: u32,
+    notify_param: u32,
+    notify_flags: u32,
+    volume: i32,
+}
+
+// Concurrent guest processes keep independent DirectShow object registries.
+pub(crate) fn capture_idle_graphs() -> Result<HashMap<u32, IdleGraphSnapshot>, String> {
+    MOVIES.with(|movies| {
+        movies
+            .lock()
+            .map_err(|_| "DirectShow registry lock poisoned")?
+            .iter()
+            .map(|(&root, graph)| {
+                if graph.path.is_some()
+                    || graph.playing
+                    || graph.worker.is_some()
+                    || graph.receiver.is_some()
+                    || !graph.completion_waits.is_empty()
+                {
+                    return Err("checkpoint contains a loaded DirectShow stream".into());
+                }
+                Ok((
+                    root,
+                    IdleGraphSnapshot {
+                        visible: graph.visible,
+                        window: graph.window,
+                        source: graph.source,
+                        destination: graph.destination,
+                        window_properties: graph.window_properties.to_vec(),
+                        objects: graph.objects.clone(),
+                        notify: graph.notify,
+                        notify_msg: graph.notify_msg,
+                        notify_param: graph.notify_param,
+                        notify_flags: graph.notify_flags,
+                        volume: graph.volume,
+                    },
+                ))
+            })
+            .collect()
+    })
+}
+
+pub(crate) fn restore_idle_graphs(saved: HashMap<u32, IdleGraphSnapshot>) -> Result<(), String> {
+    let graphs = saved
+        .into_iter()
+        .map(|(root, saved)| {
+            let mut graph = Movie::new();
+            graph.visible = saved.visible;
+            graph.window = saved.window;
+            graph.source = saved.source;
+            graph.destination = saved.destination;
+            graph.window_properties = saved
+                .window_properties
+                .try_into()
+                .map_err(|_| "invalid DirectShow window properties")?;
+            graph.objects = saved.objects;
+            graph.notify = saved.notify;
+            graph.notify_msg = saved.notify_msg;
+            graph.notify_param = saved.notify_param;
+            graph.notify_flags = saved.notify_flags;
+            graph.volume = saved.volume;
+            Ok((root, graph))
+        })
+        .collect::<Result<_, String>>()?;
+    MOVIES.with(|slot| {
+        *slot
+            .lock()
+            .map_err(|_| "DirectShow registry lock poisoned")? = graphs;
+        Ok(())
+    })
+}
+
 thread_local! { static MOVIES: Mutex<HashMap<u32, Movie>> = Mutex::new(HashMap::new()); }
 fn exports(ctx: &CallCtx<'_>, name: &str) -> u32 {
     ctx.kernel

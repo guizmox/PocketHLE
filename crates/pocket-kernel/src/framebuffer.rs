@@ -24,7 +24,7 @@ pub const FB_BPP: u32 = 16;
 pub const FB_BYTES: u32 = FB_WIDTH * FB_HEIGHT * (FB_BPP / 8);
 
 /// A single opaque DirectDraw overlay composited over the primary surface.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DirectDrawOverlay {
     pub surface: u32,
     pub source: (i64, i64, i64, i64),
@@ -227,7 +227,7 @@ impl PresentationStats {
 }
 
 /// Optional host presentation image; never mapped into guest address space.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct RenderPresentation {
     rgba: bool,
     width: u32,
@@ -1055,4 +1055,6 @@ mod presentation_stats_tests {
 
 /// Checked GPU/CPU authority facade, not yet installed in KernelState.
 pub mod deferred;
+mod snapshot;
+pub use snapshot::DisplaySnapshot;
 pub mod gapi_memory;

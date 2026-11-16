@@ -45,6 +45,13 @@ struct Inputs {
     closed: HashMap<u32, WaveOutDevice>,
 }
 // Capture handles belong to the current emulated process, not the application.
+pub(crate) fn snapshot_media_active() -> bool {
+    INPUTS.with(|inputs| {
+        let inputs = inputs.lock().unwrap_or_else(|e| e.into_inner());
+        !inputs.devices.is_empty()
+    })
+}
+
 thread_local! { static INPUTS: Mutex<Inputs> = Mutex::new(Inputs { next: 0xdead5100, devices: HashMap::new(), closed: HashMap::new() }); }
 const NAMES: [&str; 14] = [
     "waveInGetNumDevs",

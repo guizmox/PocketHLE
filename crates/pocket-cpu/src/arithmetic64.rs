@@ -1,6 +1,7 @@
 //! Register-only arithmetic matching the WinCE runtime handlers.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "unicorn", derive(serde::Serialize, serde::Deserialize))]
 pub enum Arithmetic64 {
     SingleSquareRoot,
     DoubleSquareRoot,

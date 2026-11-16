@@ -19,6 +19,7 @@ const SEEK_SET: u32 = 0;
 const SEEK_CUR: u32 = 1;
 const SEEK_END: u32 = 2;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct GzFile {
     data: Vec<u8>,
     pos: usize,
@@ -27,7 +28,7 @@ struct GzFile {
 /// All `gzopen`ed files. Handles live in their own space, far from the
 /// VFS handle range, so a guest that confuses the two cannot alias a
 /// real file.
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GzFiles {
     next_handle: u32,
     files: HashMap<u32, GzFile>,

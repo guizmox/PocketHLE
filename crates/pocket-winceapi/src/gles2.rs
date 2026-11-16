@@ -256,6 +256,66 @@ fn dispatch(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome> {
     })
 }
 
+/// Host-independent EGL descriptors. A renderer is recreated on restore.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ProgrammableSnapshot {
+    resolution_policy: u8,
+    initialized: bool,
+    window: bool,
+    owner: Option<usize>,
+    error: u32,
+    context: Option<renderer::ContextSnapshot>,
+}
+
+pub fn capture_snapshot() -> std::result::Result<Option<ProgrammableSnapshot>, String> {
+    SESSION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|session| {
+                Ok(ProgrammableSnapshot {
+                    resolution_policy: session.resolution_policy,
+                    initialized: session.initialized,
+                    window: session.window,
+                    owner: session.owner,
+                    error: session.error,
+                    context: session
+                        .renderer
+                        .as_ref()
+                        .map(Renderer::capture_context)
+                        .transpose()?,
+                })
+            })
+            .transpose()
+    })
+}
+
+pub fn restore_snapshot(saved: Option<ProgrammableSnapshot>) -> std::result::Result<(), String> {
+    let session = saved
+        .map(|saved| -> std::result::Result<Session, String> {
+            if saved.owner.is_some() && (!saved.window || saved.context.is_none())
+                || !saved.initialized && (saved.window || saved.context.is_some())
+                || !(1..=7).contains(&saved.resolution_policy)
+            {
+                return Err("invalid GLES2 EGL checkpoint".into());
+            }
+            let renderer = saved
+                .context
+                .map(|context| context.restore(saved.resolution_policy))
+                .transpose()?;
+            Ok(Session {
+                renderer,
+                resolution_policy: saved.resolution_policy,
+                initialized: saved.initialized,
+                window: saved.window,
+                owner: saved.owner,
+                error: saved.error,
+            })
+        })
+        .transpose()?;
+    restore_session(session);
+    Ok(())
+}
+
 pub(crate) struct Session {
     renderer: Option<Renderer>,
     resolution_policy: u8,
@@ -494,6 +554,74 @@ fn attributes(ctx: &mut CallCtx<'_>, index: u8) -> Result<Vec<(u32, i32)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_restores_programmable_egl_configuration_without_a_context() {
+        restore_session(Some(Session {
+            resolution_policy: 7,
+            initialized: true,
+            window: true,
+            error: EGL_BAD_MATCH,
+            ..Session::default()
+        }));
+        let saved = capture_snapshot().unwrap().unwrap();
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        set_enabled(false);
+        restore_snapshot(Some(serde_json::from_slice(&bytes).unwrap())).unwrap();
+        SESSION.with(|slot| {
+            let slot = slot.borrow();
+            let session = slot.as_ref().unwrap();
+            assert!(session.window);
+            assert!(session.initialized);
+            assert_eq!(session.resolution_policy, 7);
+            assert_eq!(session.error, EGL_BAD_MATCH);
+        });
+        set_enabled(false);
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL"]
+    fn checkpoint_recreates_used_context() {
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "libglesv2.dll".into(),
+            binding: ImportBinding::Name("glClearColor".into()),
+            friendly_name: None,
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &thunk,
+            kernel: &mut kernel,
+        };
+        let renderer = Renderer::new(16, 8, 2).unwrap();
+        let size = renderer.render_size();
+        restore_session(Some(Session {
+            renderer: Some(renderer),
+            resolution_policy: 2,
+            initialized: true,
+            window: true,
+            owner: Some(0),
+            ..Session::default()
+        }));
+        let bytes = serde_json::to_vec(&capture_snapshot().unwrap().unwrap()).unwrap();
+        set_enabled(false);
+        restore_snapshot(Some(serde_json::from_slice(&bytes).unwrap())).unwrap();
+        SESSION.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let session = slot.as_mut().unwrap();
+            assert_eq!(session.owner, Some(0));
+            let renderer = session.renderer.as_mut().unwrap();
+            assert_eq!(renderer.render_size(), size);
+            renderer.gl("glClearColor", &mut ctx).unwrap();
+        });
+        let bytes = serde_json::to_vec(&capture_snapshot().unwrap().unwrap()).unwrap();
+        set_enabled(false);
+        restore_snapshot(Some(serde_json::from_slice(&bytes).unwrap())).unwrap();
+        set_enabled(false);
+    }
+
     use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
     use pocket_kernel::Thunk;
     use pocket_pe::ImportBinding;

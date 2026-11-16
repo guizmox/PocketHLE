@@ -101,7 +101,7 @@ A = Not Now and B = Settings, independently of old widget focus. See
 
 ## Physical keyboard host keys
 
-F7–F12 are reserved for PocketHLE-Reborn, independent of guest VKs. The
+F5–F12 are reserved for PocketHLE-Reborn, independent of guest VKs. The
 [shared host-key table](FRONTENDS.md#colors-physical-feedback-and-host-shortcuts)
 owns their actions and platform differences; keyboard defaults are in
 [factory profiles](FRONTENDS.md#factory-input-profiles). F8 is shown on Library

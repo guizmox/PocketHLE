@@ -13,6 +13,51 @@ to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
 - [Stylus modes](#pocketpc-right-stick-stylus-modes) and [Center tap](#center-tap)
 - [Focus and dialogs](#desktop-focus-and-import-launch-settings-prompt)
 
+## Experimental desktop snapshots
+
+**Save Snapshot** (F5) captures one slot for the running ARM WinCE game.
+**Restore Snapshot** (F6) opens the slot for the running or selected game.
+The buttons show the saved UTC timestamp on hover. A successful save
+replaces the previous checkpoint at `games/<id>/snapshots/snapshot-01.bin`.
+The `snapshots` directory is created on the first save, alongside
+`extracted` and `saves`. Encoding and disk writes run in the background.
+
+Desktop Gizmondo and PocketPC share this path. Use the same executable, mounts,
+and emulated device configuration when restoring. The checkpoint restores the
+guest-configured split between program and storage RAM. A synchronously launched
+game on a compilation card resumes directly from its saved program.
+
+The checkpoint covers fixed-function EGL, DirectDraw display ownership and timing,
+and supported device state. It reopens idle BTH1 and VIB1 handles through the host
+services. GPS1 and CAM1 reconnect to the current providers. A camera request
+waiting for a frame must complete before capture. MAS1 retains the MP3 decoder,
+queued PCM and guest completion state. Empty DirectShow graphs retain their
+guest COM objects and settings.
+
+Programmable GLES restores textures, buffers, shaders and framebuffer state
+by replaying the calls that created and rendered them through the host driver.
+Use the same host graphics driver and settings. The experimental journal has
+a 96 MiB memory budget for the dictionary of unique calls and their execution
+order. Calls with identical arguments, guest data and results share a single
+dictionary entry. If a session exceeds the budget, saving reports the limit
+and keeps the previously saved slot. EGL's fixed-function path does not keep
+a programmable journal.
+
+HSS playback restores its speaker objects, loaded clips and mixer cursor.
+PocketPC accelerometer stream handles reconnect to the active input provider.
+Restoring sends releases for buttons and stylus presses the guest had already
+received. This lets polling and message-based games resume with neutral input.
+
+Compact Framework, loaded DirectShow media, active Bluetooth connections and
+microphone capture are outside this profile. Capture reports unsupported live
+resources. The snapshot controls are desktop-only.
+
+Checkpoints use the sectioned `PHSECT01` payload. Session metadata, ARM, the
+WinCE kernel, fixed-function EGL and media have separate version numbers.
+Programmable EGL, HSS and input releases have their own sections, present when
+used. Readers ignore unknown optional sections and report unknown required
+sections. Gizmondo and PocketPC use the same reader and restore path.
+
 ## Shared settings
 
 Windows/Linux use the same desktop source. Android mirrors the shared JSON
@@ -104,15 +149,15 @@ settings. Use the Settings toolbar group, with L3 to switch between toolbar and
 page. There is no separate Start-to-settings action.
 
 The former Game library, Settings and About dropdown hierarchy is replaced by
-direct buttons in four separated groups: Game library, Settings, Features,
-About. Each group has at most two rows; small windows scroll horizontally
+direct buttons grouped into Game library, Settings, Features, Snapshot and
+About. Snapshot is available for eligible games on desktop. Each group has at most two rows; small windows scroll horizontally
 instead of shrinking labels. Startup uses the fixed 1280x800 outer-window policy
 above; the old toolbar-overflow startup widening and its state/helpers are removed.
 Controller focus reveals the selected button.
 Directions use button geometry within the toolbar; L3 switches between toolbar
 and page, and A activates the focused button. The footer lists these controls.
-The former F6 section-switch shortcut, interception and help were removed.
-F6 remains assignable and retains the existing in-game Colors GPS action.
+F5 saves a snapshot and F6 restores it. Colors still refreshes the random GPS
+position through the Geofence button (default **4** on desktop).
 
 Features contains Upscale ×2, Filter, Rotation, Fullscreen, Screenshot and
 Recording. Filter and Rotation advance their existing carousels and display
@@ -446,12 +491,12 @@ consumed by the frontend before any guest-key dispatch.
 
 | Input | PocketPC default | Gizmondo default |
 | --- | --- | --- |
-| Keyboard 1 / 2 / 3 / 4 | P1 / P2 / P3 / P4 | L1 / R1 / unassigned / unassigned |
+| Keyboard 1 / 2 / 3 / 4 / 5 | P1 / P2 / P3 / P4 / unassigned | Home / Volume / Brightness / Geofence / Power |
+| Keyboard A / E | Unassigned | L1 / R1 |
 | Keyboard Tab | Tab | Unassigned |
 | Keyboard Escape | Escape | Unassigned |
 | Keyboard ² / grave | Center tap | Unassigned |
 | Keyboard T | TURBO | Unassigned |
-| Keyboard F1–F5 | Unassigned | Home / Volume / Brightness / Geofence / Power |
 | Keyboard P | Stylus click / mode (customizable) | Unassigned |
 | Controller L1 / R1 | P1 / P2 | Volume / Home |
 | Controller L2 / R2 | P3 / P4 | L1 / R1 |
@@ -634,12 +679,14 @@ is customizable: its short default is guest Tab on PocketPC and unassigned on
 Gizmondo. Extra/Misc1 defaults to Rotation on both profiles and is customizable.
 Neither has a default hold. Screenshot is an optional assignable command on
 desktop only, with no controller default. Extra has no standard Android key
-adapter and is marked desktop-only in that adapter's UI. Physical **F7–F12 are
+adapter and is marked desktop-only in that adapter's UI. On desktop, physical **F5–F12 are
 immutable host keys**, outlined in red
 on the keyboard skin (the red border remains during physical feedback):
 
 | Key | Host action |
 | --- | --- |
+| F5 | Save Snapshot (desktop) |
+| F6 | Restore Snapshot (desktop) |
 | F7 | Next rotation (0°, 90°, 180°, 270°) |
 | F8 | Return to the library from gameplay or another launcher page |
 | F9 | Next presentation/upscaling filter, in the same order as Menu |
@@ -650,7 +697,7 @@ on the keyboard skin (the red border remains during physical feedback):
 Host keys are removed before capture, per-game grids, stylus routes and guest
 bindings. Assignment APIs reject them; stored legacy/short/long guest mappings
 cannot override them. Reserving physical F11 does not reserve the guest's VK_F11:
-Gizmondo Power can still be sent through its normal F5 or another guest binding.
+Gizmondo Power uses **5** by default on desktop and can be reassigned.
 F8 leaves an unsaved binding draft without saving it. In menus F10/F11 stay
 reserved rather than becoming new screenshot/recording UI commands. Android game
 F12 keeps its existing game-only layout; launcher F12 hides/restores app/system
@@ -832,7 +879,7 @@ longer read or emitted; saving removes them. `speed` and keyboard direction
 bindings remain compatible. Old explicit short/long or grid assignments targeting
 reserved inputs cannot override the fixed controls.
 
-All immutable keyboard inputs (F7–F12) and controller inputs (View/Menu plus the
+All immutable desktop keyboard inputs (F5–F12) and controller inputs (View/Menu plus the
 PocketPC right stick/R3) are refused by per-game grid capture as well as the global
 assistant. A reserved-input attempt reports **This input is reserved by PocketHLE-Reborn**.
 Existing saved grid entries for these inputs are ignored at runtime.

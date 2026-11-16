@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::HashSet;
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct Es11State {
     pub auxiliary: std::collections::HashMap<u32, StateValue>,
     pub combiners: [crate::raster::Combine; MAX_TEXTURE_UNITS],
@@ -71,7 +71,7 @@ impl Default for Es11State {
 }
 /// Queries preserve the distinction between enums and numbers: GetFixedv must
 /// not scale an enum, but must scale integer, boolean and floating-point state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StateValue {
     Number(Vec<f64>),
     Enum(Vec<u32>),

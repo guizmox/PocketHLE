@@ -14,3 +14,4 @@ log.workspace = true
 goblin.workspace = true
 byteorder.workspace = true
 indexmap.workspace = true
+serde.workspace = true

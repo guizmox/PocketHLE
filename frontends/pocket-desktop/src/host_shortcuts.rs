@@ -122,6 +122,8 @@ mod tests {
         let _ = ctx.run(
             egui::RawInput {
                 events: vec![
+                    event(Key::F5, true, false),
+                    event(Key::F6, true, false),
                     event(Key::F7, true, false),
                     event(Key::F8, true, false),
                     event(Key::F9, true, false),
@@ -133,7 +135,7 @@ mod tests {
                 ..Default::default()
             },
             |ctx| {
-                assert_eq!(take(ctx), vec![Key::F7, Key::F8, Key::F9, Key::F12]);
+                assert_eq!(take(ctx), vec![Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F12]);
                 assert!(ctx.input(|i| i
                     .events
                     .iter()

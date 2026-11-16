@@ -157,6 +157,14 @@ pub struct Device {
     last_diagnostic: Option<(u32, u32, u32)>,
 }
 impl Device {
+    pub(crate) fn has_had_fix(&self) -> bool {
+        self.fixed
+    }
+
+    pub(crate) fn restore_fix_status(&mut self, fixed: bool) {
+        self.fixed = fixed;
+    }
+
     pub fn access_allowed(&self) -> bool {
         self.gate.allowed.load(Ordering::Acquire)
     }

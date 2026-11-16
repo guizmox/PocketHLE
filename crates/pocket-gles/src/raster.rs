@@ -60,7 +60,7 @@ impl Default for Vertex {
 }
 
 /// Comparison function for the depth and alpha tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompareFunc {
     Never,
     Less,
@@ -105,7 +105,7 @@ impl CompareFunc {
 }
 
 /// Source or destination blend factor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendFactor {
     Zero,
     One,
@@ -164,7 +164,7 @@ impl BlendFactor {
 }
 
 /// Which faces to discard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CullMode {
     Front,
     Back,
@@ -172,14 +172,14 @@ pub enum CullMode {
 }
 
 /// Front-face winding direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FrontFace {
     Cw,
     Ccw,
 }
 
 /// How the texture colour combines with the incoming fragment colour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TexEnvMode {
     Combine(Combine),
     Modulate,
@@ -190,7 +190,7 @@ pub enum TexEnvMode {
 }
 
 /// Fog falloff curve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FogMode {
     Linear,
     Exp,
@@ -199,7 +199,7 @@ pub enum FogMode {
 
 /// Everything the per-fragment stage needs. Assembled by the state
 /// machine once per draw call rather than read through a lock per pixel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PipelineState {
     pub viewport: (i32, i32, i32, i32),
     pub depth_range: (f32, f32),

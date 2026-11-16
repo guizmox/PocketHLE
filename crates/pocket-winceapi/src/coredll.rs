@@ -2055,17 +2055,9 @@ fn get_idle_time(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 }
 
 pub(crate) fn get_tick_count(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static START: AtomicU64 = AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    if START.load(Ordering::Relaxed) == 0 {
-        START.store(now, Ordering::Relaxed);
-    }
-    let delta = now - START.load(Ordering::Relaxed);
-    Ok(DispatchOutcome::ReturnedR0(delta as u32))
+    Ok(DispatchOutcome::ReturnedR0(
+        pocket_kernel::guest_clock::tick_ms(),
+    ))
 }
 
 fn read_guest_regs(cpu: &mut dyn pocket_cpu::Cpu) -> Result<[u32; 17], KernelError> {
@@ -14838,10 +14830,7 @@ pub(crate) fn monotonic_ms() -> u64 {
 }
 
 fn monotonic_micros() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_micros() as u64
+    pocket_kernel::guest_clock::performance_micros()
 }
 
 fn update_key_state(ctx: &mut CallCtx<'_>, ev: pocket_kernel::InputEvent) {

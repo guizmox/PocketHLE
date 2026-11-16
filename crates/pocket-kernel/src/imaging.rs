@@ -2,7 +2,7 @@
 use crate::gdi::{Bitmap, Surface};
 
 pub const MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
@@ -111,7 +111,7 @@ fn blend(s: u16, d: u16, a: u8) -> u16 {
     };
     ((f(11, 31) << 11) | (f(5, 63) << 5) | f(0, 31)) as u16
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImageList {
     pub width: u32,
     pub height: u32,

@@ -25,7 +25,7 @@ flate2.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 indexmap.workspace = true
 byteorder.workspace = true

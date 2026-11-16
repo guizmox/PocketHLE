@@ -22,13 +22,13 @@ const REGS: [ArmReg; 17] = [
     ArmReg::Pc,
     ArmReg::Cpsr,
 ];
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum DllContinuation {
     Resume(u32),
     FinishMain(u32),
     ExitProcess(u32),
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DllNotificationFrame {
     pub thread: usize,
     pub reason: u32,

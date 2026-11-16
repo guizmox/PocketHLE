@@ -17,6 +17,10 @@
 #[path = "audio_conversion.rs"]
 pub mod conversion;
 
+#[path = "audio_snapshot.rs"]
+mod snapshot;
+pub use snapshot::AudioSnapshot;
+
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -72,7 +76,7 @@ const RING_CAPACITY_SAMPLES: usize = 1 << 20; // 1048576
 
 /// Audio format last requested by the guest. We remember it so the
 /// cpal callback can decide whether to upsample or play 1:1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GuestFormat {
     pub sample_rate: u32,
     pub channels: u16,
@@ -89,7 +93,7 @@ impl Default for GuestFormat {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct AudioVoice {
     samples: Vec<i16>,
     format: GuestFormat,
@@ -174,7 +178,7 @@ impl Default for VoiceParams {
 /// One HWAVEOUT owns its PCM, format, resampling phase and completion clock.
 /// Keep complete submissions: Battlestations submits its entire menu music at
 /// once, and a bounded global ring both loses its beginning and delays SFX.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct WaveLoop {
     samples: Vec<i16>,
     start: u64,
@@ -182,7 +186,7 @@ struct WaveLoop {
     remaining: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct WaveStream {
     loop_buffer: Option<WaveLoop>,
     samples: std::collections::VecDeque<i16>,
@@ -193,6 +197,7 @@ struct WaveStream {
     consumed: u64,
     paused: bool,
     volume: u32,
+    #[serde(skip, default = "Instant::now")]
     tick: Instant,
     fraction: u128,
 }

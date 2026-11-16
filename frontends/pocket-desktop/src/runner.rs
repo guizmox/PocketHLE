@@ -127,6 +127,7 @@ impl Runner {
         gps_notice_tx: Option<Sender<(f64, f64)>>,
         dependency_notice_tx: Option<Sender<String>>,
         system_media: SystemMediaView,
+        restore_snapshot: bool,
     ) -> (RunOutcome, Option<pocket_library::session_diagnostic::Diagnostic>) {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
@@ -142,12 +143,50 @@ impl Runner {
             let diagnostic = pocket_library::session_diagnostic::startup_failure(summary.clone(), Vec::new());
             return (RunOutcome { summary, framebuffer: None }, Some(diagnostic));
         }
+        if restore_snapshot {
+            #[cfg(feature = "unicorn")]
+            {
+                let path = pocket_library::snapshot_slot::path_for(&library_root, &game);
+                let saved = pocket_library::snapshot_slot::open(&path)
+                    .and_then(|slot| slot.map(|(_, payload)| pocket_core::SessionSnapshot::read(payload)).transpose());
+                match saved {
+                    Ok(Some(snapshot)) => hook.restore_snapshot = Some(snapshot),
+                    Ok(None) => return (RunOutcome { summary: String::new(), framebuffer: None }, None),
+                    Err(error) => {
+                        let summary = format!("Cannot restore snapshot: {error}");
+                        let diagnostic = pocket_library::session_diagnostic::startup_failure(summary.clone(), Vec::new());
+                        return (RunOutcome { summary, framebuffer: None }, Some(diagnostic));
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "unicorn")]
+        let card_program = hook.restore_snapshot.as_ref().and_then(|snapshot| snapshot.card_program()).map(str::to_owned);
+        #[cfg(not(feature = "unicorn"))]
+        let card_program: Option<String> = None;
+        #[cfg(feature = "unicorn")]
+        {
+            // Saving again after a detached restore still targets the card
+            // program rather than the library entry's launcher executable.
+            hook.snapshot_detach_allowed = card_program.is_some();
+        }
+        let mut game = game;
+        if let Some(path) = card_program.as_deref() {
+            match resolve_snapshot_card_program(&card_root, path) {
+                Ok(path) => game.executable = game.child_executable_reference(&library_root, &path),
+                Err(error) => {
+                    let summary = format!("Cannot restore snapshot: {error}");
+                    let diagnostic = pocket_library::session_diagnostic::startup_failure(summary.clone(), Vec::new());
+                    return (RunOutcome { summary, framebuffer: None }, Some(diagnostic));
+                }
+            }
+        }
         let ((outcome, code), log) = pocket_library::session_diagnostic::capture(|| {
             self.run_process(
                 &library_root,
                 &game,
                 &card_root,
-                None,
+                card_program.as_deref(),
                 None,
                 None,
                 None,
@@ -247,6 +286,11 @@ impl Runner {
                 .as_ref()
                 .is_some_and(|image| image.managed_runtime.is_some())
         {
+            #[cfg(feature = "unicorn")]
+            if hook.restore_snapshot.is_some() {
+                let summary = "Cannot restore snapshot: Compact Framework sessions are unsupported.".into();
+                return (RunOutcome { summary, framebuffer: None }, 13);
+            }
             return run_compact_framework(
                 &exe,
                 game,
@@ -770,9 +814,26 @@ impl Runner {
                 emu.process_mut().unwrap().state.should_stop = true;
             }
         }
+        #[cfg(feature = "unicorn")]
+        let restored = match hook.restore_snapshot.take().map(|snapshot| emu.restore_snapshot(snapshot)).transpose() {
+            Ok(restored) => restored,
+            Err(error) => {
+                summary_lines.push(format!("Cannot restore snapshot: {error:#}"));
+                return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 13);
+            }
+        };
         emu.start_audio();
         hook.started = true;
         let started_at = std::time::Instant::now();
+        #[cfg(feature = "unicorn")]
+        let run_result = if let Some(restored) = restored {
+            hook.pid = emu.process().unwrap().state.object_handles.process_id();
+            hook.foreground.store(hook.pid, Ordering::Release);
+            emu.run_restored(restored, hook)
+        } else {
+            emu.run_with_hook(hook)
+        };
+        #[cfg(not(feature = "unicorn"))]
         let run_result = emu.run_with_hook(hook);
         hook.startup_exit = started_at.elapsed()
             < pocket_library::session_diagnostic::STARTUP_DIAGNOSTIC_WINDOW;
@@ -1012,12 +1073,13 @@ pub(crate) type SystemMediaView = Arc<Mutex<Option<SystemMediaStatus>>>;
 /// Command pushed by the GUI thread into the running emulator.
 #[derive(Debug, Clone)]
 pub enum InputCommand {
+    #[cfg(feature = "unicorn")]
+    SaveSnapshot(Sender<Result<u64, String>>),
     SystemMedia(SystemMediaCommand),
     RecordAudio(Option<Arc<pocket_core::kernel::audio::OutputRecording>>),
     /// User input (tap / D-pad / key) to forward to the guest.
     Input(InputEvent),
     /// Explicitly choose another Colors Eiffel Tower simulated fix.
-    RefreshColorsGps,
     /// "Back to library" button — ask the run loop to stop cleanly.
     Stop,
 }
@@ -1064,6 +1126,49 @@ impl LaunchContext {
     }
 }
 
+fn resolve_snapshot_card_program(root: &std::path::Path, guest: &str) -> Result<PathBuf, String> {
+    let mut components = guest.split(['\\', '/']).filter(|part| !part.is_empty());
+    let card = components.next().ok_or("missing saved card program")?;
+    if !card.eq_ignore_ascii_case("SD Card") && !card.eq_ignore_ascii_case("Storage Card") {
+        return Err("saved executable is outside the SD Card".into());
+    }
+    let mut vfs = pocket_core::kernel::vfs::Vfs::new();
+    vfs.mount_read_only(r"\SD Card\", root);
+    vfs.mount_read_only(r"\Storage Card\", root);
+    if components.clone().count() == 0 || components.any(|part| part == "." || part == ".." || part.contains(':')) {
+        return Err("invalid saved SD Card executable path".into());
+    }
+    let path = vfs.resolve(guest).ok_or("saved SD Card executable is missing")?
+        .canonicalize().map_err(|error| error.to_string())?;
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    if !path.starts_with(&root) || !path.is_file() {
+        return Err("saved SD Card executable is outside the mounted card".into());
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+mod snapshot_card_tests {
+    use super::*;
+
+    #[test]
+    fn captured_card_program_resolves_case_and_stays_inside_the_card() {
+        let owned = tempfile::tempdir().unwrap();
+        let card = owned.path();
+        let nested = card.join("SCE");
+        std::fs::create_dir_all(&nested).unwrap();
+        let executable = nested.join("sce.exe");
+        std::fs::write(&executable, b"test executable").unwrap();
+
+        assert_eq!(
+            resolve_snapshot_card_program(card, r"\SD Card\sce\SCE.EXE").unwrap(),
+            executable.canonicalize().unwrap()
+        );
+        assert!(resolve_snapshot_card_program(card, r"\SD Card\..\other.exe").is_err());
+        assert!(resolve_snapshot_card_program(card, r"\Flash Disk\sce.exe").is_err());
+    }
+}
+
 struct ProcessStartup {
     ack: Option<Sender<Result<(), u32>>>,
     table: pocket_core::kernel::handles::HandleTable,
@@ -1080,6 +1185,12 @@ impl Drop for ProcessStartup {
 
 
 struct RunHook {
+    #[cfg(feature = "unicorn")]
+    restore_snapshot: Option<pocket_core::SessionSnapshot>,
+    #[cfg(feature = "unicorn")]
+    snapshot_requests: Vec<Sender<Result<u64, String>>>,
+    #[cfg(feature = "unicorn")]
+    snapshot_detach_allowed: bool,
     system_media: SystemMediaView,
     last_system_media: Option<SystemMediaStatus>,
     media_was_foreground: bool,
@@ -1241,6 +1352,11 @@ impl RunHook {
             state.audio.suspend_output();
             let saved = pocket_core::suspend_host_session();
             let mut child_hook = self.child_hook();
+            #[cfg(feature = "unicorn")]
+            {
+                child_hook.snapshot_detach_allowed = self.children.is_empty()
+                    && (self.pid == 1 || self.snapshot_detach_allowed);
+            }
             let child_pid = state
                 .object_handles
                 .child_id(request.process_handle)
@@ -1330,11 +1446,12 @@ impl RunHook {
                         Ok(InputCommand::SystemMedia(command)) => {
                             self.media_commands.push(command);
                         }
-                        Ok(InputCommand::RefreshColorsGps) => self.refresh_colors_gps = true,
                         Ok(InputCommand::RecordAudio(recording)) => {
                             self.recording_audio = recording;
                             self.recording_audio_pending = true;
                         }
+                        #[cfg(feature = "unicorn")]
+                        Ok(InputCommand::SaveSnapshot(reply)) => self.snapshot_requests.push(reply),
                         Ok(InputCommand::Stop) => stop_requested = true,
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
@@ -1383,6 +1500,12 @@ impl RunHook {
         input_rx: Option<Receiver<InputCommand>>,
     ) -> Self {
         Self {
+            #[cfg(feature = "unicorn")]
+            restore_snapshot: None,
+            #[cfg(feature = "unicorn")]
+            snapshot_requests: Vec::new(),
+            #[cfg(feature = "unicorn")]
+            snapshot_detach_allowed: false,
             system_media: SystemMediaView::default(),
             last_system_media: None,
             media_was_foreground: false,
@@ -1444,6 +1567,10 @@ fn run_compact_framework(
         },
         |events| {
             let stop = hook.drain_input(&mut input);
+            #[cfg(feature = "unicorn")]
+            for reply in hook.snapshot_requests.drain(..) {
+                let _ = reply.send(Err("Compact Framework sessions are unsupported".into()));
+            }
             events.extend(input.drain(..));
             !stop
         },
@@ -1466,6 +1593,57 @@ fn run_compact_framework(
 }
 
 impl FrameHook for RunHook {
+    #[cfg(feature = "unicorn")]
+    fn checkpoint_requested(&mut self) -> bool {
+        !self.snapshot_requests.is_empty() && self.foreground.load(Ordering::Acquire) == self.pid
+    }
+
+    #[cfg(feature = "unicorn")]
+    fn on_checkpoint(
+        &mut self,
+        cpu: &mut dyn pocket_core::cpu::Cpu,
+        process: &mut pocket_core::kernel::Process,
+        point: pocket_core::kernel::ResumePoint,
+    ) {
+        let started = std::time::Instant::now();
+        let result = (|| {
+            let launch = self.launch_context.as_ref().ok_or("missing snapshot launch context")?;
+            let path = pocket_library::snapshot_slot::path_for(&launch.library_root, &launch.game);
+            let snapshot = if self.snapshot_detach_allowed {
+                resolve_snapshot_card_program(&launch.card_root, &process.state.module_path)?;
+                pocket_core::SessionSnapshot::capture_foreground(cpu, process, point)
+            } else {
+                pocket_core::SessionSnapshot::capture(cpu, process, point)
+            }.map_err(|error| format!("{error:#}"))?;
+            Ok::<_, String>((path, snapshot))
+        })();
+        let replies = std::mem::take(&mut self.snapshot_requests);
+        match result {
+            Ok((path, snapshot)) => {
+                log::debug!("Snapshot capture took {:?}", started.elapsed());
+                let worker_replies = replies.clone();
+                if let Err(error) = std::thread::Builder::new().name("pockethle-snapshot".into()).spawn(move || {
+                    let started = std::time::Instant::now();
+                    let result = pocket_library::snapshot_slot::save(&path, |output| snapshot.write(output))
+                        .map_err(|error| error.to_string());
+                    log::debug!("Snapshot compression and write took {:?}", started.elapsed());
+                    for reply in worker_replies {
+                        let _ = reply.send(result.clone());
+                    }
+                }) {
+                    for reply in replies {
+                        let _ = reply.send(Err(format!("cannot start snapshot writer: {error}")));
+                    }
+                }
+            }
+            Err(error) => {
+                for reply in replies {
+                    let _ = reply.send(Err(error.clone()));
+                }
+            }
+        }
+    }
+
     fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
         self.reap_children();
         let active = self.foreground.load(Ordering::Acquire) == self.pid;
@@ -2097,9 +2275,6 @@ mod geofence_refresh_tests {
             pending.iter().copied().collect::<Vec<_>>(),
             vec![down, up, down, down, up]
         );
-        tx.send(InputCommand::RefreshColorsGps).unwrap();
-        assert!(!hook.drain_input(&mut pending));
-        assert!(hook.refresh_colors_gps);
     }
 }
 

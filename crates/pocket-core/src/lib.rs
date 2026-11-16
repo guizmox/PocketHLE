@@ -29,6 +29,11 @@ pub use pocket_kernel as kernel;
 pub use pocket_pe as pe;
 pub use pocket_winceapi as winceapi;
 
+#[cfg(feature = "unicorn")]
+mod snapshot;
+#[cfg(feature = "unicorn")]
+pub use snapshot::{RestoredSession, SessionSnapshot};
+
 pub struct Emulator {
     cpu: Box<dyn Cpu>,
     process: Option<Process>,
@@ -213,6 +218,11 @@ impl Emulator {
             executable_heap,
         )
         .context("mapping image into CPU")?;
+        #[cfg(feature = "unicorn")]
+        {
+            use sha2::{Digest as _, Sha256};
+            process.executable_fingerprint = Some(Sha256::digest(&raw).into());
+        }
         process.state.gles_local_ordinals = gles_tables;
         pocket_winceapi::gles::set_nv_combiner_client(nv_combiner_client);
         self.process = Some(process);

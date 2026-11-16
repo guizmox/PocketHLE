@@ -3,7 +3,7 @@
 use super::*;
 use std::collections::HashSet;
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct ObjectNames {
     pub textures: HashMap<u32, u32>,
     pub buffers: HashMap<u32, u32>,
@@ -12,7 +12,7 @@ pub(super) struct ObjectNames {
     next_texture_id: u32,
     next_buffer_id: u32,
 }
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ObjectReferences {
     textures: HashSet<u32>,
     buffers: HashSet<u32>,
@@ -34,7 +34,62 @@ pub struct SharedObjects {
     next_texture_name: u32,
     next_buffer_name: u32,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SharedObjectsSnapshot {
+    programs: crate::combiner_program::ProgramObjectSnapshot,
+    textures: std::collections::BTreeMap<u32, crate::texture::TextureSnapshot>,
+    buffers: HashMap<u32, Buffer>,
+    names: ObjectNames,
+    texture_objects: HashSet<u32>,
+    buffer_objects: HashSet<u32>,
+    next_texture_name: u32,
+    next_buffer_name: u32,
+}
+
+impl SharedObjectsSnapshot {
+    pub fn restore(self) -> Result<SharedObjects, String> {
+        Ok(SharedObjects {
+            programs: self
+                .programs
+                .restore()
+                .map_err(|_| "invalid saved combiner namespace")?,
+            textures: self
+                .textures
+                .into_iter()
+                .map(|(id, t)| t.restore().map(|texture| (id, texture)))
+                .collect::<Result<_, _>>()?,
+            buffers: self.buffers,
+            names: self.names,
+            texture_objects: self.texture_objects,
+            buffer_objects: self.buffer_objects,
+            next_texture_name: self.next_texture_name,
+            next_buffer_name: self.next_buffer_name,
+        })
+    }
+}
+
 impl SharedObjects {
+    pub fn capture_snapshot(
+        &self,
+        reader: &mut Option<crate::gpu::SharedReadback>,
+    ) -> Result<SharedObjectsSnapshot, String> {
+        let textures = self
+            .textures
+            .iter()
+            .map(|(&id, t)| t.capture_snapshot(reader).map(|texture| (id, texture)))
+            .collect::<Result<_, _>>()?;
+        Ok(SharedObjectsSnapshot {
+            programs: self.programs.capture_snapshot(),
+            textures,
+            buffers: self.buffers.clone(),
+            names: self.names.clone(),
+            texture_objects: self.texture_objects.clone(),
+            buffer_objects: self.buffer_objects.clone(),
+            next_texture_name: self.next_texture_name,
+            next_buffer_name: self.next_buffer_name,
+        })
+    }
+
     pub fn set_goforce_profile(&mut self, enabled: bool) {
         for tex in self.textures.values_mut() {
             tex.goforce_lod = enabled;

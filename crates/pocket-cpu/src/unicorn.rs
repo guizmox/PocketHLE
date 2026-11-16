@@ -14,6 +14,19 @@ use ::unicorn_engine::{RegisterARM, RegisterMIPS, UcHookId, Unicorn};
 
 use crate::{regs::ArmReg, Arch, Cpu, CpuError, Prot, StopReason};
 
+#[path = "unicorn_arm_snapshot.rs"]
+mod arm_snapshot;
+pub use arm_snapshot::ArmRegisterSnapshot;
+
+#[path = "unicorn_execution_snapshot.rs"]
+mod execution_snapshot;
+pub use execution_snapshot::ArmExecutionSnapshot;
+use execution_snapshot::HookKind;
+
+#[path = "unicorn_memory_snapshot.rs"]
+mod memory_snapshot;
+pub use memory_snapshot::ArmMemorySnapshot;
+
 #[path = "slice_timer.rs"]
 mod slice_timer;
 
@@ -122,7 +135,7 @@ pub struct UnicornCpu {
     guest_map: Option<Rc<RefCell<GuestMap>>>,
     arch: Arch,
     mips_status: u32,
-    code_hooks: Vec<(u32, u32, UcHookId)>,
+    code_hooks: Vec<(u32, u32, UcHookId, HookKind)>,
     inline_arithmetic: std::collections::HashMap<u32, Rc<Cell<crate::arithmetic64::Arithmetic64>>>,
     inline_error: Rc<RefCell<Option<String>>>,
     #[cfg(test)]
@@ -646,7 +659,7 @@ impl Cpu for UnicornCpu {
             .uc
             .add_code_hook(va as u64, va as u64, callback)
             .map_err(|e| CpuError::Backend(format!("arithmetic code hook: {e:?}")))?;
-        self.code_hooks.push((va, va, id));
+        self.code_hooks.push((va, va, id, HookKind::Arithmetic));
         self.inline_arithmetic.insert(va, operation);
         Ok(true)
     }
@@ -818,7 +831,7 @@ impl Cpu for UnicornCpu {
             .retain(|address, _| *address < va || u64::from(*address) >= end);
         let mut index = 0;
         while index < self.code_hooks.len() {
-            let (lo, hi, id) = self.code_hooks[index];
+            let (lo, hi, id, _) = self.code_hooks[index];
             if lo >= va && u64::from(hi) < end {
                 self.uc
                     .remove_hook(id)
@@ -1089,7 +1102,7 @@ impl Cpu for UnicornCpu {
             .uc
             .add_code_hook(va as u64, va as u64, cb)
             .map_err(|e| CpuError::Backend(format!("register trace: {e:?}")))?;
-        self.code_hooks.push((va, va, id));
+        self.code_hooks.push((va, va, id, HookKind::Trace));
         Ok(())
     }
 
@@ -1112,7 +1125,7 @@ impl Cpu for UnicornCpu {
             .uc
             .add_code_hook(lo as u64, hi as u64, cb)
             .map_err(|e| CpuError::Backend(format!("add_code_hook: {e:?}")))?;
-        self.code_hooks.push((lo, hi, id));
+        self.code_hooks.push((lo, hi, id, HookKind::Dispatch));
         Ok(())
     }
 
@@ -1884,7 +1897,7 @@ mod tests {
             StopReason::Hook(0x1204)
         );
         assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 20);
-        let (_, _, id) = cpu.code_hooks.pop().unwrap();
+        let (_, _, id, _) = cpu.code_hooks.pop().unwrap();
         cpu.uc.remove_hook(id).unwrap();
         cpu.add_code_hook(0x1100).unwrap();
         assert_eq!(

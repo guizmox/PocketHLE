@@ -12,7 +12,7 @@ static HOST: OnceLock<RwLock<Option<Arc<dyn Backend>>>> = OnceLock::new();
 pub fn install_host(backend: Arc<dyn Backend>) {
     *HOST.get_or_init(|| RwLock::new(None)).write().unwrap() = Some(backend);
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub mode: u32,
     pub total: i32,
@@ -104,6 +104,14 @@ impl Service {
                 ..inner.settings
             };
         }
+        Self::apply(&mut inner, value)
+    }
+
+    pub(crate) fn restore_settings(&self, value: Settings) -> Result<()> {
+        Self::apply(&mut self.0.lock().unwrap(), value)
+    }
+
+    fn apply(inner: &mut Inner, value: Settings) -> Result<()> {
         let waveform = value.waveform()?;
         let was_closed = inner.motor.is_none();
         if was_closed && !waveform.is_empty() {

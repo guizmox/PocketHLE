@@ -21,7 +21,7 @@ pub const MODEL_AMBIENT: u32 = 0x0b53;
 pub const MODEL_TWO_SIDE: u32 = 0x0b52;
 pub const RESCALE_NORMAL: u32 = 0x803a;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Light {
     pub enabled: bool,
     pub ambient: [f32; 4],
@@ -48,7 +48,7 @@ impl Default for Light {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LightingState {
     pub enabled: bool,
     pub normalize: bool,

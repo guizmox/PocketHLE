@@ -20,6 +20,17 @@ pub struct ZlibStreams {
     streams: HashMap<u32, Stream>,
 }
 impl ZlibStreams {
+    pub(crate) fn snapshot_allocator(&self) -> Option<u32> {
+        self.streams.is_empty().then_some(self.next)
+    }
+
+    pub(crate) fn restore_allocator(next: u32) -> Self {
+        Self {
+            next,
+            streams: HashMap::new(),
+        }
+    }
+
     pub fn init(&mut self) -> Option<u32> {
         if self.streams.len() >= 1024 {
             return None;

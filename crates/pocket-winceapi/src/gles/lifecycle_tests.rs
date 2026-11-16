@@ -697,6 +697,115 @@ fn coherent_shared_images_and_local_zero(gpu: bool) {
     with_ctx(|c| c.bind_texture(GL_TEXTURE_2D, 0));
     assert_eq!(render(&mut cpu), [0, 0, 255, 255]);
 }
+fn egl_snapshot_roundtrip(gpu: bool) {
+    reset_for_test(8, 8);
+    let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+    set_gpu_renderer(gpu);
+    quad(&mut cpu);
+    with_ctx(|c| {
+        texture(c, 17, [0, 255, 0, 255]);
+        texture(c, 0, [255, 0, 0, 255]);
+    });
+    let peer = create(&mut cpu, &mut kernel, CONTEXT_HANDLE);
+    bind(&mut cpu, &mut kernel, peer, SURFACE_HANDLE);
+    with_ctx(|c| texture(c, 0, [0, 0, 255, 255]));
+    assert_eq!(render(&mut cpu), [0, 0, 255, 255]);
+    let isolated = create(&mut cpu, &mut kernel, 0);
+    bind(&mut cpu, &mut kernel, isolated, SURFACE_HANDLE);
+    with_ctx(|c| texture(c, 17, [255, 255, 0, 255]));
+    assert_eq!(render(&mut cpu), [255, 255, 0, 255]);
+    assert_eq!(with_ctx(|c| c.gpu_active()), gpu);
+
+    let payload = capture_egl_session().unwrap();
+    let bytes = serde_json::to_vec(&payload).unwrap();
+    assert_eq!(SURFACES.with(|s| s.borrow().loaded), isolated);
+    reset_for_session();
+
+    let restored: EglSessionSnapshot = serde_json::from_slice(&bytes).unwrap();
+    restored.restore().unwrap();
+    assert_eq!(SURFACES.with(|s| s.borrow().loaded), isolated);
+    assert_eq!(with_ctx(|c| c.gpu_active()), gpu);
+    assert_eq!(
+        with_ctx(|c| {
+            c.sync_gpu();
+            <[u8; 4]>::try_from(&c.target.color[..4]).unwrap()
+        }),
+        [255, 255, 0, 255]
+    );
+
+    bind(&mut cpu, &mut kernel, CONTEXT_HANDLE, SURFACE_HANDLE);
+    assert_eq!(render(&mut cpu), [255, 0, 0, 255]);
+    bind(&mut cpu, &mut kernel, peer, SURFACE_HANDLE);
+    assert_eq!(render(&mut cpu), [0, 0, 255, 255]);
+    with_ctx(|c| c.bind_texture(GL_TEXTURE_2D, 17));
+    assert_eq!(render(&mut cpu), [0, 255, 0, 255]);
+    bind(&mut cpu, &mut kernel, isolated, SURFACE_HANDLE);
+    assert_eq!(render(&mut cpu), [255, 255, 0, 255]);
+}
+
+#[test]
+fn egl_snapshot_preserves_driver_and_surface_format() {
+    let _guard = guard();
+    for (goforce, intel, format, effective) in [
+        (
+            true,
+            false,
+            EglSurfaceFormat::Rgba8888Only,
+            EglSurfaceFormat::Rgb565Only,
+        ),
+        (
+            false,
+            true,
+            EglSurfaceFormat::Auto,
+            EglSurfaceFormat::Rgb565Only,
+        ),
+        (
+            false,
+            true,
+            EglSurfaceFormat::Rgba8888Only,
+            EglSurfaceFormat::Rgba8888Only,
+        ),
+    ] {
+        reset_for_session();
+        set_gizmondo_goforce_driver(goforce);
+        set_intel2700g_profile(intel);
+        set_egl_surface_format(format);
+        let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut kernel,
+                egl_initialize,
+                &[DISPLAY_HANDLE, 0, 0]
+            ),
+            EGL_TRUE
+        );
+        let saved = capture_egl_session().unwrap();
+        reset_for_session();
+        saved.restore().unwrap();
+        SURFACES.with(|slot| {
+            let surfaces = slot.borrow();
+            assert_eq!(surfaces.goforce_4500, goforce);
+            assert_eq!(surfaces.intel2700g, intel);
+            assert_eq!(surfaces.surface_format, format);
+            assert_eq!(surfaces.effective_surface_format(), effective);
+        });
+    }
+}
+
+#[test]
+fn egl_snapshot_restores_software_contexts_and_shared_objects() {
+    let _guard = guard();
+    egl_snapshot_roundtrip(false);
+}
+
+#[test]
+#[ignore = "requires native desktop OpenGL"]
+fn egl_snapshot_restores_native_contexts_and_shared_objects() {
+    let _guard = guard();
+    egl_snapshot_roundtrip(true);
+}
+
 #[test]
 fn shared_images_update_while_texture_zero_stays_context_local_software() {
     let _g = guard();
@@ -894,7 +1003,12 @@ fn rgb565_only_catalog_rejects_alpha_requests() {
     reset_for_session();
     set_egl_surface_format(EglSurfaceFormat::Rgb565Only);
     let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
-    call(&mut cpu, &mut kernel, egl_initialize, &[DISPLAY_HANDLE, 0, 0]);
+    call(
+        &mut cpu,
+        &mut kernel,
+        egl_initialize,
+        &[DISPLAY_HANDLE, 0, 0],
+    );
     let out = SCRATCH + 0x100;
     let num = out + 8;
     let args = [DISPLAY_HANDLE, out, 2, num];

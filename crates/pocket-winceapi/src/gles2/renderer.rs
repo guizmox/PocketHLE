@@ -1,5 +1,5 @@
 //! Native GLES calls and bounded copies from the guest address space.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{c_char, c_void, CStr, CString};
 
 use pocket_gles::gpu::{
@@ -10,6 +10,11 @@ use pocket_gles::gpu::{
 use pocket_gles::GL_TEXTURE0;
 
 use super::{error, CallCtx, Result};
+
+mod journal;
+mod names;
+use journal::{GlIo, Journal, JournalSnapshot};
+use names::{Kind, ObjectNames};
 
 const FRAMEBUFFER: u32 = 0x8d40;
 const RENDERBUFFER: u32 = 0x8d41;
@@ -52,6 +57,30 @@ fn changed_range(previous: &[u8], current: &[u8]) -> Option<std::ops::Range<usiz
     Some(start..end)
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct ContextSnapshot {
+    width: u32,
+    height: u32,
+    scale: u32,
+    journal: JournalSnapshot,
+}
+
+impl ContextSnapshot {
+    pub(super) fn restore(self, resolution_policy: u8) -> std::result::Result<Renderer, String> {
+        let mut renderer = Renderer::new(self.width, self.height, resolution_policy)
+            .map_err(|error| error.to_string())?;
+        if renderer.scale != self.scale {
+            return Err("host cannot restore the saved GLES2 surface scale".into());
+        }
+        let mut names = Box::<ObjectNames>::default();
+        renderer.journal = Journal::replay(self.journal, &mut names, |name, io| {
+            renderer.gl_inner(name, io)
+        })?;
+        renderer.names = Some(names);
+        Ok(renderer)
+    }
+}
+
 pub(super) struct Renderer {
     host: ProgrammableHost,
     symbols: HashMap<String, *const c_void>,
@@ -74,7 +103,7 @@ pub(super) struct Renderer {
     client_vertices: HashMap<u32, StagedBuffer>,
     guest_buffers: HashSet<u32>,
     index_data: HashMap<u32, Vec<u8>>,
-    client_attributes: HashMap<u32, ClientAttribute>,
+    client_attributes: BTreeMap<u32, ClientAttribute>,
     enabled_attributes: HashSet<u32>,
     max_attributes: u32,
     active_texture: u32,
@@ -83,6 +112,8 @@ pub(super) struct Renderer {
     unpack: usize,
     pack: usize,
     guest_error: u32,
+    journal: Journal,
+    names: Option<Box<ObjectNames>>,
     native_compressed_formats: Vec<i32>,
     guest_textures: HashSet<u32>,
     guest_renderbuffers: HashSet<u32>,
@@ -109,8 +140,10 @@ impl Renderer {
     }
 
     pub(super) fn new(width: u32, height: u32, policy: u8) -> Result<Self> {
-        let bytes = width as usize * height as usize * 4;
-        if width == 0 || height == 0 || bytes > MAX_TRANSFER {
+        let bytes = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4));
+        if width == 0 || height == 0 || bytes.is_none_or(|bytes| bytes > MAX_TRANSFER) {
             return Err(error("Invalid GLES2 framebuffer size"));
         }
         let host = configured_shared_context_source()
@@ -145,7 +178,7 @@ impl Renderer {
             client_vertices: HashMap::new(),
             guest_buffers: HashSet::new(),
             index_data: HashMap::new(),
-            client_attributes: HashMap::new(),
+            client_attributes: BTreeMap::new(),
             enabled_attributes: HashSet::new(),
             max_attributes: 0,
             active_texture: GL_TEXTURE0,
@@ -154,6 +187,8 @@ impl Renderer {
             unpack: 4,
             pack: 4,
             guest_error: 0,
+            journal: Journal::default(),
+            names: Some(Box::default()),
             native_compressed_formats: Vec::new(),
             guest_textures: HashSet::new(),
             guest_renderbuffers: HashSet::new(),
@@ -213,6 +248,15 @@ impl Renderer {
             r.native_compressed_formats = formats;
         }
         Ok(renderer)
+    }
+
+    pub(super) fn capture_context(&self) -> std::result::Result<ContextSnapshot, String> {
+        Ok(ContextSnapshot {
+            width: self.width,
+            height: self.height,
+            scale: self.scale,
+            journal: self.journal.capture()?,
+        })
     }
 
     pub(super) fn render_size(&self) -> (u32, u32) {
@@ -514,7 +558,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn stage_attributes(&mut self, ctx: &mut CallCtx<'_>, last_vertex: usize) -> Result<()> {
+    fn stage_attributes(&mut self, ctx: &mut GlIo<'_, '_>, last_vertex: usize) -> Result<()> {
         let active: Vec<_> = self
             .client_attributes
             .iter()
@@ -539,7 +583,7 @@ impl Renderer {
                     .and_then(|offset| offset.checked_add(attribute.bytes_per_vertex))
                     .filter(|&n| n <= MAX_TRANSFER)
                     .ok_or_else(|| error("GLES2 client attribute exceeds the supported size"))?;
-                let mut data = ctx.cpu.read_mem(attribute.address, size as u32)?;
+                let mut data = ctx.read_mem(attribute.address, size as u32)?;
                 // Upload only the bytes belonging to this attribute. Guest
                 // interleaved layouts otherwise resend the same stride gaps
                 // for every enabled attribute.
@@ -586,6 +630,20 @@ impl Renderer {
     }
 
     pub(super) fn gl(&mut self, name: &str, ctx: &mut CallCtx<'_>) -> Result<u32> {
+        let mut call = self.journal.begin(name);
+        let mut names = self.names.take().expect("renderer object names");
+        let result = self.gl_inner(name, &mut GlIo::live(ctx, call.as_mut(), name, &mut names));
+        self.names = Some(names);
+        match &result {
+            Ok(value) => self.journal.commit(call, *value),
+            Err(error) => self.journal.invalidate(format!(
+                "OpenGL ES 2.0 snapshot journal could not record {name}: {error}"
+            )),
+        }
+        result
+    }
+
+    fn gl_inner(&mut self, name: &str, ctx: &mut GlIo<'_, '_>) -> Result<u32> {
         self.host.make_programmable_current().map_err(error)?;
         macro_rules! u {
             ($index:expr) => {
@@ -608,11 +666,18 @@ impl Renderer {
             };
         }
         match name {
-            "glCreateProgram" => return Ok(invoke!(self, name, (), u32)),
+            "glCreateProgram" => {
+                let host = invoke!(self, name, (), u32);
+                return ctx.created(Kind::Program, host);
+            }
+            "glCreateShader" => {
+                let host = invoke!(self, name, (u!(0) => u32), u32);
+                return ctx.created(Kind::Shader, host);
+            }
             "glIsProgram" | "glIsShader" | "glIsEnabled" => {
                 return Ok(u32::from(invoke!(self, name, (u!(0) => u32), u8)));
             }
-            "glCreateShader" | "glCheckFramebufferStatus" => {
+            "glCheckFramebufferStatus" => {
                 return Ok(invoke!(self, name, (u!(0) => u32), u32));
             }
             "glIsBuffer" | "glIsFramebuffer" | "glIsRenderbuffer" | "glIsTexture" => {
@@ -640,7 +705,7 @@ impl Renderer {
                         return Ok(0);
                     }
                 };
-                return crate::gles::intern_string(ctx, value);
+                return ctx.intern_string(value);
             }
             "glGetError" => {
                 let pending = std::mem::take(&mut self.guest_error);
@@ -822,22 +887,22 @@ impl Renderer {
                 }
                 match name {
                     "glTexParameterfv" => {
-                        let value = f32::from_bits(ctx.cpu.read_u32_le(address)?);
+                        let value = f32::from_bits(ctx.read_u32_le(address)?);
                         gl!(target => u32, pname => u32, &value => *const f32);
                     }
                     "glTexParameteriv" => {
-                        let value = ctx.cpu.read_u32_le(address)? as i32;
+                        let value = ctx.read_u32_le(address)? as i32;
                         gl!(target => u32, pname => u32, &value => *const i32);
                     }
                     "glGetTexParameterfv" => {
                         let mut value = 0.0f32;
                         gl!(target => u32, pname => u32, &mut value => *mut f32);
-                        ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                        ctx.write_mem(address, &value.to_le_bytes())?;
                     }
                     _ => {
                         let mut value = 0i32;
                         gl!(target => u32, pname => u32, &mut value => *mut i32);
-                        ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                        ctx.write_mem(address, &value.to_le_bytes())?;
                     }
                 }
             }
@@ -868,7 +933,19 @@ impl Renderer {
                 let mut value = -1i32;
                 gl!(target => u32, attachment => u32, pname => u32, &mut value => *mut i32);
                 if value >= 0 {
-                    ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                    if pname == 0x8cd1 && ctx.remapped() {
+                        let mut object_type = 0;
+                        gl!(target => u32, attachment => u32, 0x8cd0 => u32, &mut object_type => *mut i32);
+                        value = ctx.guest_name(
+                            if object_type == RENDERBUFFER as i32 {
+                                Kind::Renderbuffer
+                            } else {
+                                Kind::Texture
+                            },
+                            value as u32,
+                        ) as i32;
+                    }
+                    ctx.write_mem(address, &value.to_le_bytes())?;
                 }
             }
             "glGetRenderbufferParameteriv" => {
@@ -879,7 +956,7 @@ impl Renderer {
                 let mut value = -1i32;
                 gl!(target => u32, pname => u32, &mut value => *mut i32);
                 if value >= 0 {
-                    ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                    ctx.write_mem(address, &value.to_le_bytes())?;
                 }
             }
             "glFramebufferTexture2D" => {
@@ -899,7 +976,8 @@ impl Renderer {
                 let mut names = vec![0u32; transfer_size(count, 4)? / 4];
                 gl!(count => i32, names.as_mut_ptr() => *mut u32);
                 let out = u!(1);
-                write_words(ctx, out, &names)?;
+                let guest_names = ctx.generated(&names, Kind::generated(name).unwrap())?;
+                write_words(ctx, out, &guest_names)?;
                 let objects = match name {
                     "glGenBuffers" => &mut self.guest_buffers,
                     "glGenFramebuffers" => &mut self.guest_framebuffers,
@@ -921,6 +999,10 @@ impl Renderer {
                     "glDeleteRenderbuffers" => &mut self.guest_renderbuffers,
                     _ => &mut self.guest_textures,
                 };
+                let kind = Kind::generated(name).unwrap();
+                for id in &mut names {
+                    *id = ctx.remove_name(kind, *id);
+                }
                 names.retain(|id| objects.remove(id));
                 gl!(names.len() as i32 => i32, names.as_ptr() => *const u32);
                 if name == "glDeleteBuffers" {
@@ -975,12 +1057,12 @@ impl Renderer {
                 }
                 let mut value = 0i32;
                 gl!(target => u32, pname => u32, &mut value => *mut i32);
-                ctx.cpu.write_mem(out, &value.to_le_bytes())?;
+                ctx.write_mem(out, &value.to_le_bytes())?;
             }
             "glBufferSubData" => {
                 let (target, offset, size, address) = (u!(0), i!(1), i!(2), u!(3));
                 let bytes = transfer_size(size, 1)?;
-                let data = ctx.cpu.read_mem(address, bytes as u32)?;
+                let data = ctx.read_mem(address, bytes as u32)?;
                 gl!(target => u32, offset as isize => isize, size as isize => isize, data.as_ptr().cast() => *const c_void);
                 let index = if target == ELEMENT_BUFFER {
                     self.elements
@@ -1066,7 +1148,7 @@ impl Renderer {
                     gl!(index => u32, pname => u32, &mut pointer => *mut *mut c_void);
                     pointer as usize as u32
                 };
-                ctx.cpu.write_mem(out, &address.to_le_bytes())?;
+                ctx.write_mem(out, &address.to_le_bytes())?;
             }
             "glGetVertexAttribfv" | "glGetVertexAttribiv" => {
                 let (index, pname, out) = (u!(0), u!(1), u!(2));
@@ -1094,7 +1176,7 @@ impl Renderer {
                     } else {
                         value as u32
                     };
-                    ctx.cpu.write_mem(out, &bits.to_le_bytes())?;
+                    ctx.write_mem(out, &bits.to_le_bytes())?;
                 } else {
                     let count = if pname == 0x8626 { 4 } else { 1 };
                     let mut values = [0u32; 4];
@@ -1102,6 +1184,9 @@ impl Renderer {
                         gl!(index => u32, pname => u32, values.as_mut_ptr().cast() => *mut f32);
                     } else {
                         gl!(index => u32, pname => u32, values.as_mut_ptr().cast() => *mut i32);
+                    }
+                    if pname == 0x889f && ctx.remapped() {
+                        values[0] = translate_query_name(ctx, Kind::Buffer, values[0], float);
                     }
                     write_words(ctx, out, &values[..count])?;
                 }
@@ -1138,7 +1223,7 @@ impl Renderer {
                 }
                 let bytes = transfer_size(count, component)?;
                 let client = if self.elements == 0 {
-                    Some(ctx.cpu.read_mem(address, bytes as u32)?)
+                    Some(ctx.read_mem(address, bytes as u32)?)
                 } else {
                     None
                 };
@@ -1208,7 +1293,7 @@ impl Renderer {
                 let pixels = if bytes == 0 {
                     Vec::new()
                 } else {
-                    ctx.cpu.read_mem(address, bytes as u32)?
+                    ctx.read_mem(address, bytes as u32)?
                 };
                 gl!(u!(0) => u32, i!(1) => i32, i!(2) => i32, i!(3) => i32,
                     width => i32, height => i32, format => u32, kind => u32,
@@ -1250,7 +1335,7 @@ impl Renderer {
                 let data = if bytes == 0 {
                     Vec::new()
                 } else {
-                    ctx.cpu.read_mem(address, bytes as u32)?
+                    ctx.read_mem(address, bytes as u32)?
                 };
                 gl!(target => u32, level => i32, x => i32, y => i32, width => i32, height => i32,
                     format => u32, size => i32, data.as_ptr().cast() => *const c_void);
@@ -1314,9 +1399,9 @@ impl Renderer {
                         if size as usize > 1024 * 1024 - source.len() {
                             return Err(error("Shader source exceeds 1 MiB"));
                         }
-                        source.extend(ctx.cpu.read_mem(address, size as u32)?);
+                        source.extend(ctx.read_mem(address, size as u32)?);
                     } else {
-                        source.extend(read_string(ctx, address, 1024 * 1024)?);
+                        source.extend(ctx.read_string(address, 1024 * 1024)?);
                     }
                     if source.len() > 1024 * 1024 {
                         return Err(error("Shader source exceeds 1 MiB"));
@@ -1354,7 +1439,7 @@ impl Renderer {
                     gl!(shader => u32, precision => u32, range.as_mut_ptr() => *mut i32, &mut bits => *mut i32);
                 }
                 write_words(ctx, range_out, &range.map(|n| n as u32))?;
-                ctx.cpu.write_mem(precision_out, &bits.to_le_bytes())?;
+                ctx.write_mem(precision_out, &bits.to_le_bytes())?;
             }
             "glGetShaderSource" => {
                 let (shader, capacity, length_out, source_out) = (u!(0), i!(1), u!(2), u!(3));
@@ -1367,7 +1452,7 @@ impl Renderer {
                     gl!(shader => u32, capacity => i32, &mut length => *mut i32,
                         source.as_mut_ptr().cast() => *mut c_char);
                     if capacity > 0 {
-                        ctx.cpu.write_mem(
+                        ctx.write_mem(
                             source_out,
                             &source[..length.clamp(0, capacity - 1) as usize + 1],
                         )?;
@@ -1383,15 +1468,15 @@ impl Renderer {
                             .map_or(&[][..], Vec::as_slice);
                         let source = &source[..source.len().min((capacity - 1) as usize)];
                         length = source.len() as i32;
-                        ctx.cpu.write_mem(source_out, source)?;
+                        ctx.write_mem(source_out, source)?;
                         let terminator = source_out
                             .checked_add(length as u32)
                             .ok_or_else(|| error("Guest shader source address overflow"))?;
-                        ctx.cpu.write_mem(terminator, &[0])?;
+                        ctx.write_mem(terminator, &[0])?;
                     }
                 }
                 if length_out != 0 {
-                    ctx.cpu.write_mem(length_out, &length.to_le_bytes())?;
+                    ctx.write_mem(length_out, &length.to_le_bytes())?;
                 }
             }
             "glGetActiveAttrib" | "glGetActiveUniform" => {
@@ -1406,12 +1491,12 @@ impl Renderer {
                     &mut size => *mut i32, &mut kind => *mut u32, symbol.as_mut_ptr().cast() => *mut c_char);
                 if kind != 0 {
                     if length_out != 0 {
-                        ctx.cpu.write_mem(length_out, &length.to_le_bytes())?;
+                        ctx.write_mem(length_out, &length.to_le_bytes())?;
                     }
-                    ctx.cpu.write_mem(size_out, &size.to_le_bytes())?;
-                    ctx.cpu.write_mem(type_out, &kind.to_le_bytes())?;
+                    ctx.write_mem(size_out, &size.to_le_bytes())?;
+                    ctx.write_mem(type_out, &kind.to_le_bytes())?;
                     if capacity > 0 {
-                        ctx.cpu.write_mem(
+                        ctx.write_mem(
                             name_out,
                             &symbol[..length.clamp(0, capacity - 1) as usize + 1],
                         )?;
@@ -1454,7 +1539,7 @@ impl Renderer {
                 } else {
                     gl!(object => u32, pname => u32, &mut value => *mut i32);
                 }
-                ctx.cpu.write_mem(out, &value.to_le_bytes())?;
+                ctx.write_mem(out, &value.to_le_bytes())?;
             }
             "glGetProgramInfoLog" | "glGetShaderInfoLog" => {
                 let (object, size, length_out, log_out) = (u!(0), i!(1), u!(2), u!(3));
@@ -1462,18 +1547,18 @@ impl Renderer {
                 let mut length = 0i32;
                 gl!(object => u32, size => i32, &mut length => *mut i32, log.as_mut_ptr().cast() => *mut c_char);
                 if length_out != 0 {
-                    ctx.cpu.write_mem(length_out, &length.to_le_bytes())?;
+                    ctx.write_mem(length_out, &length.to_le_bytes())?;
                 }
                 if size > 0 {
                     let len = (length.max(0) as usize + 1).min(log.len());
-                    ctx.cpu.write_mem(log_out, &log[..len])?;
+                    ctx.write_mem(log_out, &log[..len])?;
                 }
             }
             "glGetUniformLocation" | "glBindAttribLocation" | "glGetAttribLocation" => {
                 let object = u!(0);
                 let bind = name == "glBindAttribLocation";
                 let address = u!(if bind { 2 } else { 1 });
-                let symbol = CString::new(read_string(ctx, address, 4096)?)
+                let symbol = CString::new(ctx.read_string(address, 4096)?)
                     .map_err(|_| error("Invalid shader symbol"))?;
                 if bind {
                     gl!(object => u32, u!(1) => u32, symbol.as_ptr() => *const c_char);
@@ -1493,10 +1578,13 @@ impl Renderer {
                 let mut count = 0i32;
                 gl!(program => u32, capacity => i32, &mut count => *mut i32, shaders.as_mut_ptr() => *mut u32);
                 if count_out != 0 {
-                    ctx.cpu.write_mem(count_out, &count.to_le_bytes())?;
+                    ctx.write_mem(count_out, &count.to_le_bytes())?;
                 }
                 let count = count.clamp(0, capacity) as usize;
                 if count != 0 {
+                    for shader in &mut shaders[..count] {
+                        *shader = ctx.guest_name(Kind::Shader, *shader);
+                    }
                     write_words(ctx, shaders_out, &shaders[..count])?;
                 }
             }
@@ -1533,11 +1621,11 @@ impl Renderer {
                     return Ok(self.reject(read_error));
                 }
                 if stride == row {
-                    ctx.cpu.write_mem(address, &pixels)?;
+                    ctx.write_mem(address, &pixels)?;
                 } else {
                     for (index, data) in pixels.chunks(stride).enumerate() {
                         let start = address + (index * stride) as u32;
-                        ctx.cpu.write_mem(start, &data[..row])?;
+                        ctx.write_mem(start, &data[..row])?;
                     }
                 }
             }
@@ -1552,8 +1640,7 @@ impl Renderer {
                         self.scissor
                     };
                     if boolean {
-                        ctx.cpu
-                            .write_mem(address, &rect.map(|n| u8::from(n != 0)))?;
+                        ctx.write_mem(address, &rect.map(|n| u8::from(n != 0)))?;
                     } else {
                         write_words(
                             ctx,
@@ -1578,16 +1665,16 @@ impl Renderer {
                             0x8869 => self.max_attributes,
                             0x8b9a => UNSIGNED_BYTE,
                             0x8b9b => RGBA,
-                            0x8ca6 => self.framebuffer,
+                            0x8ca6 => ctx.guest_name(Kind::Framebuffer, self.framebuffer),
                             0x8dfa => 1, // Source shaders are compiled on either host API.
                             _ => 0,      // Shader binaries are not exposed.
                         };
                         if boolean {
-                            ctx.cpu.write_mem(address, &[u8::from(value != 0)])?;
+                            ctx.write_mem(address, &[u8::from(value != 0)])?;
                         } else if float {
-                            ctx.cpu.write_mem(address, &(value as f32).to_le_bytes())?;
+                            ctx.write_mem(address, &(value as f32).to_le_bytes())?;
                         } else {
-                            ctx.cpu.write_mem(address, &value.to_le_bytes())?;
+                            ctx.write_mem(address, &value.to_le_bytes())?;
                         }
                         return Ok(0);
                     }
@@ -1637,13 +1724,23 @@ impl Renderer {
                 if count != 0 && boolean {
                     let mut values = vec![0u8; count];
                     gl!(parameter => u32, values.as_mut_ptr() => *mut u8);
-                    ctx.cpu.write_mem(address, &values)?;
+                    ctx.write_mem(address, &values)?;
                 } else if count != 0 {
                     let mut values = vec![0u32; count];
                     if float {
                         gl!(parameter => u32, values.as_mut_ptr().cast() => *mut f32);
                     } else {
                         gl!(parameter => u32, values.as_mut_ptr().cast() => *mut i32);
+                    }
+                    let object = match parameter {
+                        0x8069 | 0x8514 => Some(Kind::Texture),
+                        0x8894 | 0x8895 => Some(Kind::Buffer),
+                        0x8b8d => Some(Kind::Program),
+                        0x8ca7 => Some(Kind::Renderbuffer),
+                        _ => None,
+                    };
+                    if let Some(kind) = object.filter(|_| ctx.remapped()) {
+                        values[0] = translate_query_name(ctx, kind, values[0], float);
                     }
                     write_words(ctx, address, &values)?;
                 }
@@ -1716,6 +1813,14 @@ impl Renderer {
     }
 }
 
+fn translate_query_name(io: &GlIo<'_, '_>, kind: Kind, value: u32, float: bool) -> u32 {
+    if float {
+        (io.guest_name(kind, f32::from_bits(value) as u32) as f32).to_bits()
+    } else {
+        io.guest_name(kind, value)
+    }
+}
+
 fn transfer_size(count: i32, size: usize) -> Result<usize> {
     usize::try_from(count)
         .ok()
@@ -1724,50 +1829,33 @@ fn transfer_size(count: i32, size: usize) -> Result<usize> {
         .ok_or_else(|| error("GLES2 transfer exceeds the supported size"))
 }
 
-fn read_words(ctx: &mut CallCtx<'_>, address: u32, count: usize) -> Result<Vec<u32>> {
+fn read_words(ctx: &mut GlIo<'_, '_>, address: u32, count: usize) -> Result<Vec<u32>> {
     if count == 0 {
         return Ok(Vec::new());
     }
     Ok(ctx
-        .cpu
         .read_mem(address, (count * 4) as u32)?
         .chunks_exact(4)
         .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
         .collect())
 }
 
-fn write_words(ctx: &mut CallCtx<'_>, address: u32, values: &[u32]) -> Result<()> {
+fn write_words(ctx: &mut GlIo<'_, '_>, address: u32, values: &[u32]) -> Result<()> {
     if !values.is_empty() {
         let bytes: Vec<_> = values
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
-        ctx.cpu.write_mem(address, &bytes)?;
+        ctx.write_mem(address, &bytes)?;
     }
     Ok(())
 }
 
-fn read_string(ctx: &mut CallCtx<'_>, address: u32, max: u32) -> Result<Vec<u8>> {
-    let mut output = Vec::new();
-    for offset in 0..max {
-        let ptr = address
-            .checked_add(offset)
-            .ok_or_else(|| error("Guest string address overflow"))?;
-        let mut byte = [0u8; 1];
-        ctx.cpu.read_mem_into(ptr, &mut byte)?;
-        if byte[0] == 0 {
-            return Ok(output);
-        }
-        output.push(byte[0]);
-    }
-    Err(error("Unterminated guest GLES2 string"))
-}
-
-fn optional_bytes(ctx: &mut CallCtx<'_>, address: u32, size: usize) -> Result<Option<Vec<u8>>> {
+fn optional_bytes(ctx: &mut GlIo<'_, '_>, address: u32, size: usize) -> Result<Option<Vec<u8>>> {
     if address == 0 || size == 0 {
         Ok(None)
     } else {
-        Ok(Some(ctx.cpu.read_mem(address, size as u32)?))
+        Ok(Some(ctx.read_mem(address, size as u32)?))
     }
 }
 
@@ -1823,6 +1911,22 @@ fn desktop_shader(source: &[u8]) -> Vec<u8> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    fn read_words(ctx: &mut CallCtx<'_>, address: u32, count: usize) -> Result<Vec<u32>> {
+        super::read_words(
+            &mut GlIo::live(ctx, None, "", &mut ObjectNames::default()),
+            address,
+            count,
+        )
+    }
+
+    fn write_words(ctx: &mut CallCtx<'_>, address: u32, values: &[u32]) -> Result<()> {
+        super::write_words(
+            &mut GlIo::live(ctx, None, "", &mut ObjectNames::default()),
+            address,
+            values,
+        )
+    }
+
     use super::*;
     use pocket_gles::gpu::{with_shared_context_source, Renderer as NativeRenderer};
     use pocket_kernel::Thunk;
@@ -1837,6 +1941,154 @@ mod tests {
             desktop_shader(source),
             b"#version 120\n#define lowp\n#define mediump\n#define highp\n\nvoid main(){gl_FragColor = vec4(1.0);}\n"
         );
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL with shared contexts"]
+    fn checkpoint_replays_draw_and_preserves_guest_names_in_live_share_group() -> Result<()> {
+        use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
+        let ui = NativeRenderer::new(8, 8).map_err(error)?;
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "libglesv2.dll".into(),
+            binding: ImportBinding::Name("glDrawArrays".into()),
+            friendly_name: None,
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            thunk: &thunk,
+            kernel: &mut kernel,
+        };
+        let call = |renderer: &mut Renderer, ctx: &mut CallCtx<'_>, name, args: &[u32]| {
+            for (reg, &value) in [R0, R1, R2, R3].into_iter().zip(args) {
+                ctx.cpu.write_reg(reg, value)?;
+            }
+            write_words(ctx, 0x4000, args.get(4..).unwrap_or_default())?;
+            renderer.gl(name, ctx)
+        };
+        with_shared_context_source(Some(ui.shared_context_source()), || {
+            let mut renderer = Renderer::new(8, 8, 1)?;
+            let program = call(&mut renderer, &mut ctx, "glCreateProgram", &[])?;
+            for (kind, source) in [
+                (
+                    0x8b31,
+                    "attribute vec2 v; void main(){gl_Position=vec4(v,0.0,1.0);}",
+                ),
+                (
+                    0x8b30,
+                    "precision mediump float; uniform vec4 tint; void main(){gl_FragColor=tint;}",
+                ),
+            ] {
+                ctx.cpu.write_mem(0x2000, source.as_bytes())?;
+                write_words(&mut ctx, 0x1000, &[0x2000, source.len() as u32])?;
+                let shader = call(&mut renderer, &mut ctx, "glCreateShader", &[kind])?;
+                call(
+                    &mut renderer,
+                    &mut ctx,
+                    "glShaderSource",
+                    &[shader, 1, 0x1000, 0x1004],
+                )?;
+                call(&mut renderer, &mut ctx, "glCompileShader", &[shader])?;
+                call(
+                    &mut renderer,
+                    &mut ctx,
+                    "glGetShaderiv",
+                    &[shader, 0x8b81, 0x1010],
+                )?;
+                assert_eq!(read_words(&mut ctx, 0x1010, 1)?, [1]);
+                call(
+                    &mut renderer,
+                    &mut ctx,
+                    "glAttachShader",
+                    &[program, shader],
+                )?;
+            }
+            ctx.cpu.write_mem(0x2000, b"v\0")?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glBindAttribLocation",
+                &[program, 0, 0x2000],
+            )?;
+            call(&mut renderer, &mut ctx, "glLinkProgram", &[program])?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glGetProgramiv",
+                &[program, 0x8b82, 0x1010],
+            )?;
+            assert_eq!(read_words(&mut ctx, 0x1010, 1)?, [1]);
+            call(&mut renderer, &mut ctx, "glUseProgram", &[program])?;
+            ctx.cpu.write_mem(0x2000, b"tint\0")?;
+            let tint = call(
+                &mut renderer,
+                &mut ctx,
+                "glGetUniformLocation",
+                &[program, 0x2000],
+            )?;
+            assert_ne!(tint, u32::MAX);
+            call(&mut renderer, &mut ctx, "glGenBuffers", &[1, 0x1000])?;
+            let vertices = read_words(&mut ctx, 0x1000, 1)?[0];
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glBindBuffer",
+                &[ARRAY_BUFFER, vertices],
+            )?;
+            let points = [-1.0f32, -1.0, 3.0, -1.0, -1.0, 3.0].map(f32::to_bits);
+            write_words(&mut ctx, 0x2000, &points)?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glBufferData",
+                &[ARRAY_BUFFER, 24, 0x2000, 0x88e4],
+            )?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glVertexAttribPointer",
+                &[0, 2, 0x1406, 0, 0, 0],
+            )?;
+            call(&mut renderer, &mut ctx, "glEnableVertexAttribArray", &[0])?;
+            let one = 1f32.to_bits();
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glUniform4f",
+                &[tint, one, 0, 0, one],
+            )?;
+            call(&mut renderer, &mut ctx, "glDrawArrays", &[4, 0, 3])?;
+            assert_eq!(call(&mut renderer, &mut ctx, "glGetError", &[])?, 0);
+
+            let bytes = serde_json::to_vec(&renderer.capture_context().map_err(error)?)
+                .map_err(|err| error(err.to_string()))?;
+            let saved: ContextSnapshot =
+                serde_json::from_slice(&bytes).map_err(|err| error(err.to_string()))?;
+            // Keep the old native allocation alive. The new renderer has to
+            // remap names without changing ARM memory or displacing the old context.
+            let mut restored = saved.restore(1).map_err(error)?;
+            assert!(restored.names.as_ref().unwrap().remapped);
+            call(&mut restored, &mut ctx, "glGetIntegerv", &[0x8b8d, 0x1010])?;
+            assert_eq!(read_words(&mut ctx, 0x1010, 1)?, [program]);
+            call(&mut restored, &mut ctx, "glGetIntegerv", &[0x8894, 0x1010])?;
+            assert_eq!(read_words(&mut ctx, 0x1010, 1)?, [vertices]);
+            let read = [2, 2, 1, 1, RGBA, UNSIGNED_BYTE, 0x3000];
+            call(&mut restored, &mut ctx, "glReadPixels", &read)?;
+            assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [255, 0, 0, 255]);
+            call(
+                &mut restored,
+                &mut ctx,
+                "glUniform4f",
+                &[tint, 0, one, 0, one],
+            )?;
+            call(&mut restored, &mut ctx, "glDrawArrays", &[4, 0, 3])?;
+            call(&mut restored, &mut ctx, "glReadPixels", &read)?;
+            assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [0, 255, 0, 255]);
+            assert_eq!(call(&mut restored, &mut ctx, "glGetError", &[])?, 0);
+            Ok(())
+        })
     }
 
     #[test]

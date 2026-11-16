@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 mod contracts;
 #[path = "vfs_mapping.rs"]
 mod mapping;
-pub use contracts::{FileInfo, OpenResult, VfsShared};
+pub use contracts::{FileInfo, OpenResult, VfsFileSnapshot, VfsShared};
 pub use mapping::MappedFile;
 
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.
@@ -382,7 +382,7 @@ static NEXT_MAS_STREAM: std::sync::atomic::AtomicU32 =
 /// Cloneable open description for transfer between process namespaces.
 #[derive(Clone)]
 pub struct VfsObject(VfsObjectInner, Option<(u32, crate::audio::MasPlayback)>);
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AccelerometerStream {
     Sen0,
     Acc1,

@@ -649,10 +649,7 @@ pub fn native_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
 /// also kept running silently when its underlying clock call
 /// failed, so we preserve that behaviour.
 pub fn refresh_tick_page(cpu: &mut dyn crate::Cpu, last_written: &mut Option<u32>) {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static START: OnceLock<Instant> = OnceLock::new();
-    let delta = START.get_or_init(Instant::now).elapsed().as_millis() as u32;
+    let delta = crate::guest_clock::tick_ms();
     if *last_written == Some(delta) {
         return;
     }

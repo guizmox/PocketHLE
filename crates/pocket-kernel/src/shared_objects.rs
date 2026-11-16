@@ -30,6 +30,17 @@ impl<T> DerefMut for ObjectGuard<'_, T> {
     }
 }
 impl<T> SharedObjects<T> {
+    pub(crate) fn copy_objects(&self) -> HashMap<u32, T>
+    where
+        T: Clone,
+    {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(crate) fn from_objects(objects: HashMap<u32, T>) -> Self {
+        Self(Arc::new(Mutex::new(objects)))
+    }
+
     pub fn get(&self, key: &u32) -> Option<ObjectGuard<'_, T>> {
         let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if !map.contains_key(key) {

@@ -63,4 +63,5 @@ windows = { version = "0.54", features = ["implement", "ApplicationModel_DataTra
 winres = "0.1.12"
 
 [dev-dependencies]
+tempfile = "3"
 pocket-gles = { path = "../../crates/pocket-gles" }

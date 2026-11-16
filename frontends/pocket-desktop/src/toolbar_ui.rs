@@ -19,6 +19,8 @@ pub enum Action {
     Fullscreen,
     Screenshot,
     Recording,
+    SaveSnapshot,
+    RestoreSnapshot,
     About,
     Resume,
 }
@@ -33,6 +35,9 @@ pub struct State<'a> {
     pub frame: bool,
     pub capture: bool,
     pub recording: bool,
+    pub snapshot: bool,
+    pub restore_snapshot: bool,
+    pub snapshot_timestamp: Option<&'a str>,
     pub encoding: bool,
     pub upscale: bool,
     pub fullscreen: bool,
@@ -63,6 +68,8 @@ fn button(ui: &mut Ui, action: Action, state: &State<'_>, width: f32) -> bool {
         Recording if state.encoding => "Saving video…".into(),
         Recording => "Record video (F11)".into(),
         About => "About".into(),
+        SaveSnapshot => "Save Snapshot (F5)".into(),
+        RestoreSnapshot => "Restore Snapshot (F6)".into(),
         Resume => "Return to game".into(),
     };
     let enabled = match action {
@@ -73,6 +80,8 @@ fn button(ui: &mut Ui, action: Action, state: &State<'_>, width: f32) -> bool {
         Screenshot => state.capture,
         Recording => state.recording || (state.capture && !state.encoding),
         Resume => state.resume,
+        SaveSnapshot => state.snapshot,
+        RestoreSnapshot => state.restore_snapshot && state.snapshot_timestamp.is_some(),
         _ => true,
     };
     let active = state.selected == Some(action)
@@ -116,6 +125,13 @@ fn button(ui: &mut Ui, action: Action, state: &State<'_>, width: f32) -> bool {
             Rotation => response.on_hover_text("Next rotation: 0° → 90° → 180° → 270°"),
             Screenshot => response
                 .on_hover_text("Save the displayed game pixels, with filtering and rotation"),
+            SaveSnapshot | RestoreSnapshot => {
+                if let Some(timestamp) = state.snapshot_timestamp {
+                    response.on_hover_text(timestamp)
+                } else {
+                    response
+                }
+            }
             Recording => response
                 .on_hover_text("Record the displayed game and audio; activate again to stop"),
             _ => response,
@@ -209,11 +225,15 @@ pub fn show(ui: &mut Ui, state: &State<'_>) -> Output {
                         [Upscale, Filter, Rotation],
                         [Fullscreen, Screenshot, Recording],
                     ],
-                    164.0,
+                    134.0,
                     state,
                     &mut action,
                 );
                 separator(ui);
+                if state.snapshot || state.restore_snapshot {
+                    group(ui, "SNAPSHOT", &[[SaveSnapshot], [RestoreSnapshot]], 128.0, state, &mut action);
+                    separator(ui);
+                }
                 group(ui, "ABOUT", &[[About]], 80.0, state, &mut action);
             });
         });
@@ -237,6 +257,9 @@ mod tests {
             frame: true,
             capture: true,
             recording: false,
+            snapshot: false,
+            restore_snapshot: false,
+            snapshot_timestamp: None,
             encoding: false,
             upscale: true,
             fullscreen: false,
@@ -372,6 +395,26 @@ mod tests {
             ),
             Some(Action::Filter)
         );
+    }
+
+    #[test]
+    fn snapshot_and_about_fit_at_standard_window_width() {
+        let ctx = egui::Context::default();
+        let mut nav = Navigation::default();
+        let mut state = state();
+        state.snapshot = true;
+        state.restore_snapshot = true;
+        state.snapshot_timestamp = Some("2026-11-16 20:00:00 UTC");
+        let (output, _, _) = frame(&ctx, &mut nav, &state, 1240.0, vec![]);
+        for (label, action) in [
+            ("Save Snapshot (F5)", Action::SaveSnapshot),
+            ("Restore Snapshot (F6)", Action::RestoreSnapshot),
+            ("About", Action::About),
+        ] {
+            let rect = text_rect(&output.shapes, label);
+            assert!(rect.right() < 1240.0, "{label} is clipped");
+            assert_eq!(click(&ctx, &mut nav, &state, rect.center()), Some(action));
+        }
     }
 
     #[test]

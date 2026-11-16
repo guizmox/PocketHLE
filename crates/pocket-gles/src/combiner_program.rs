@@ -3,7 +3,7 @@
 //! Decoding a program describes its fields. Execution and capability
 //! advertisement belong to the renderer and its guest API respectively.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Architecture {
     Ar10,
     Ar11,
@@ -16,7 +16,7 @@ pub enum DecodeError {
     InvalidStageCount,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stage {
     pub alpha_output: u16,
     pub alpha_inputs: u32,
@@ -176,7 +176,7 @@ impl Stage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Program {
     pub architecture: Architecture,
     pub flags: u8,
@@ -310,6 +310,7 @@ struct CompiledStage {
 
 #[derive(Debug)]
 pub struct BasicProgram {
+    source: Program,
     id: u64,
     stages: Vec<CompiledStage>,
     texture_units: u8,
@@ -554,6 +555,7 @@ impl Program {
         }
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         Ok(BasicProgram {
+            source: self.clone(),
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             stages,
             texture_units,
@@ -914,7 +916,59 @@ pub struct ProgramObjects {
     constants: [[f32; 4]; 4],
 }
 
+/// Driver source and guest bindings, independent of native shader caches.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct ProgramObjectSnapshot {
+    sources: std::collections::BTreeMap<u32, Option<Program>>,
+    next: u32,
+    bound: u32,
+    retained: Option<Program>,
+    enabled: bool,
+    constants: [[f32; 4]; 4],
+}
+
+impl ProgramObjectSnapshot {
+    pub(crate) fn restore(self) -> Result<ProgramObjects, UnsupportedOperation> {
+        fn compile(
+            source: Option<Program>,
+        ) -> Result<Option<std::sync::Arc<BasicProgram>>, UnsupportedOperation> {
+            source
+                .map(|p| p.compile_basic().map(std::sync::Arc::new))
+                .transpose()
+        }
+
+        let programs = self
+            .sources
+            .into_iter()
+            .map(|(name, source)| Ok((name, compile(source)?)))
+            .collect::<Result<_, UnsupportedOperation>>()?;
+        Ok(ProgramObjects {
+            programs,
+            next: self.next,
+            bound: self.bound,
+            retained: compile(self.retained)?,
+            enabled: self.enabled,
+            constants: self.constants,
+        })
+    }
+}
+
 impl ProgramObjects {
+    pub(crate) fn capture_snapshot(&self) -> ProgramObjectSnapshot {
+        ProgramObjectSnapshot {
+            sources: self
+                .programs
+                .iter()
+                .map(|(&name, body)| (name, body.as_ref().map(|p| p.source.clone())))
+                .collect(),
+            next: self.next,
+            bound: self.bound,
+            retained: self.retained.as_ref().map(|p| p.source.clone()),
+            enabled: self.enabled,
+            constants: self.constants,
+        }
+    }
+
     /// Transfer the shared program namespace at EGL switches, preserving each
     /// context's enable, binding, constants and default (name-zero) program.
     pub(crate) fn exchange_namespace(&mut self, group: &mut Self) {

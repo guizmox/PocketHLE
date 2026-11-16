@@ -12,7 +12,7 @@ pub(super) struct EglContext {
     pub pack: usize,
     pub unpack: usize,
 }
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct EglThread {
     pub context: u32,
     pub draw: u32,

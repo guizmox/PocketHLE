@@ -1,6 +1,15 @@
 //! File contracts shared by all CPUs of one emulated device.
 use super::*;
 use std::sync::Weak;
+
+const BLUETOOTH_DRIVER_LEASE: &str = "bluetooth:BTH1";
+const VIBRATION_DRIVER_LEASE: &str = "vibration:VIB1";
+const GPS_DRIVER_LEASE: &str = "gps:GPS1";
+const CAMERA_DRIVER_LEASE: &str = "camera:CAM1";
+#[path = "vfs_snapshot.rs"]
+mod snapshot;
+pub use snapshot::VfsFileSnapshot;
+
 #[derive(Clone, Default)]
 pub struct VfsShared(pub(super) Arc<Mutex<Shared>>);
 #[derive(Default)]
@@ -289,7 +298,7 @@ impl Vfs {
                 return Err(87);
             }
             let mut state = self.shared.0.lock().unwrap();
-            let key = "bluetooth:BTH1";
+            let key = BLUETOOTH_DRIVER_LEASE;
             busy(&mut state, key);
             if state.leases.get(key).is_some_and(|leases| {
                 leases
@@ -330,7 +339,7 @@ impl Vfs {
                 return Err(87);
             }
             let mut state = self.shared.0.lock().unwrap();
-            let key = "vibration:VIB1";
+            let key = VIBRATION_DRIVER_LEASE;
             busy(&mut state, key);
             if state.leases.get(key).is_some_and(|leases| {
                 leases
@@ -372,7 +381,7 @@ impl Vfs {
                 return Err(87);
             }
             let mut state = self.shared.0.lock().unwrap();
-            let key = "gps:GPS1";
+            let key = GPS_DRIVER_LEASE;
             busy(&mut state, key);
             if state.leases.get(key).is_some_and(|leases| {
                 leases.iter().filter_map(Weak::upgrade).any(|l| {
@@ -415,7 +424,7 @@ impl Vfs {
                 return Err(87);
             }
             let mut state = self.shared.0.lock().unwrap();
-            let key = "camera:CAM1";
+            let key = CAMERA_DRIVER_LEASE;
             busy(&mut state, key);
             if state.leases.get(key).is_some_and(|leases| {
                 leases

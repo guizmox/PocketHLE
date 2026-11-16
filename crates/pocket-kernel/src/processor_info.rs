@@ -1,6 +1,6 @@
 //! OEM processor identity reported through WinCE IOCTL_PROCESSOR_INFORMATION.
 //! Descriptive profiles do not change the CPU backend or enable extra ISA features.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PocketPcProcessor {
     #[default]
     Pxa270,

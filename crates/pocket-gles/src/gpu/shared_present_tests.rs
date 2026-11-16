@@ -231,6 +231,92 @@ fn guest_texture_copy_survives_producer_surface_change() {
 
 #[test]
 #[ignore = "requires native shared OpenGL"]
+fn gpu_only_texture_snapshot_outlives_the_original_gl_contexts() {
+    for es in [false, true] {
+        let bytes = {
+            let root = if es {
+                Renderer::new_es_for_test(4, 4).unwrap()
+            } else {
+                Renderer::new(4, 4).unwrap()
+            };
+            with_shared_context_source(Some(root.shared_context_source()), || {
+                let mut producer = Renderer::new(4, 4).unwrap();
+                producer.set_surface_rgb565(true).unwrap();
+                producer
+                    .clear(
+                        4,
+                        4,
+                        &PipelineState::default(),
+                        [1., 0., 0., 1.],
+                        1.,
+                        GL_COLOR_BUFFER_BIT,
+                    )
+                    .unwrap();
+                let mut texture = Texture::default();
+                texture.set_level(0, 2, 2, Vec::new());
+                texture.set_format(0, GL_RGB);
+                texture.min_filter = crate::texture::Filter::Nearest;
+                texture.gpu_copy = producer.copy_guest_rgb_texture(1, 1, 2, 2).unwrap();
+                assert!(texture.gpu_copy.is_some());
+
+                assert!(with_shared_context_source(None, || {
+                    texture.capture_snapshot(&mut None).is_err()
+                }));
+
+                let mut reader = None;
+                let snapshot = texture.capture_snapshot(&mut reader).unwrap();
+                assert!(texture.gpu_copy.is_some());
+                assert!(texture.rgba.is_empty());
+                assert!(producer.readback.is_empty());
+                serde_json::to_vec(&snapshot).unwrap()
+            })
+        };
+        let texture = serde_json::from_slice::<crate::texture::TextureSnapshot>(&bytes)
+            .unwrap()
+            .restore()
+            .unwrap();
+        assert!(texture.gpu_copy.is_none());
+        assert_eq!(texture.rgba, [255, 0, 0, 255].repeat(4));
+        assert_eq!(texture.formats[&0], GL_RGB);
+
+        let mut consumer = if es {
+            Renderer::new_es_for_test(4, 4).unwrap()
+        } else {
+            Renderer::new(4, 4).unwrap()
+        };
+        let mut target = RenderTarget::new(4, 4);
+        let state = PipelineState {
+            viewport: (0, 0, 4, 4),
+            ..Default::default()
+        };
+        let vertices = [[-1., -1.], [1., -1.], [-1., 1.], [1., 1.]].map(|[x, y]| Vertex {
+            pos: [x, y, 0., 1.],
+            ..Default::default()
+        });
+        let stages = [TextureStage {
+            unit: 0,
+            env: crate::raster::TexEnvMode::Replace,
+            env_color: [0.; 4],
+            lod_bias: 0.,
+        }];
+        consumer
+            .draw(
+                &target,
+                &state,
+                GL_TRIANGLE_STRIP,
+                &vertices,
+                &stages,
+                &HashMap::from([(1, texture)]),
+                [1, 0, 0, 0, 0, 0],
+            )
+            .unwrap();
+        consumer.read(&mut target).unwrap();
+        assert_eq!(target.color, [255, 0, 0, 255].repeat(16));
+    }
+}
+
+#[test]
+#[ignore = "requires native shared OpenGL"]
 fn supersampled_guest_texture_copies_and_subimages_keep_logical_pixels() {
     for es in [false, true] {
         let root = if es {

@@ -431,8 +431,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     y += if m <= 2 { 1 } else { 0 };
     (y, m as u32, d as u32)
 }
-fn format_unix_utc(ts: u32) -> String {
-    let s = ts as i64;
+pub(crate) fn format_unix_utc(ts: u64) -> String {
+    let s = i64::try_from(ts).unwrap_or(i64::MAX);
     let days = s / 86400;
     let rem = s % 86400;
     let (y, m, d) = civil_from_days(days);
@@ -652,7 +652,7 @@ pub fn analyze_game(game: &GameEntry, root: &std::path::Path) -> GameAnalysis {
     }
     if let Some(ts) = pe_timestamp(&bytes).filter(|v| *v > 315532800 && *v < 4102444800) {
         a.executable
-            .push(("PE build timestamp".into(), format_unix_utc(ts)));
+            .push(("PE build timestamp".into(), format_unix_utc(u64::from(ts))));
     }
     if let Some(p) = game.provider.as_ref().filter(|s| !s.trim().is_empty()) {
         a.executable.push(("Provider".into(), p.clone()));

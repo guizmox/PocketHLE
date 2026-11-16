@@ -3,6 +3,8 @@ mod depth_bias;
 mod diagnostic;
 mod fixed_vertices;
 mod platform;
+mod surface_snapshot;
+pub use surface_snapshot::NativeSurfaceSnapshot;
 mod readback;
 mod resolve;
 mod shared;

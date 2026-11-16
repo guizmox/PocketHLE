@@ -170,6 +170,10 @@ impl DeferredFramebuffer {
             system_video: None,
         })
     }
+    pub(super) fn system_video_for_snapshot(&self) -> Option<&Framebuffer> {
+        self.system_video.as_ref()
+    }
+
     pub fn has_system_video(&self) -> bool {
         self.system_video.is_some()
     }

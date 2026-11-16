@@ -23,9 +23,17 @@ pub(crate) struct PendingMemory {
 }
 #[cfg(feature = "unicorn")]
 impl PendingMemory {
-    pub fn validate(&self, base: u32, size: u32) -> Result<(), CpuError> {
+    pub fn regions(&self) -> impl Iterator<Item = &Region> {
+        self.regions.values()
+    }
+
+    pub(crate) fn valid_range(base: u32, size: u32) -> bool {
         let end = u64::from(base) + u64::from(size);
-        if base % 4096 != 0 || size == 0 || size > 64 * 1024 * 1024 || end > 0x1_0000_0000 {
+        base.is_multiple_of(4096) && size != 0 && size <= 64 * 1024 * 1024 && end <= 0x1_0000_0000
+    }
+
+    pub fn validate(&self, base: u32, size: u32) -> Result<(), CpuError> {
+        if !Self::valid_range(base, size) {
             return Err(CpuError::BadMemory { va: base, size });
         }
         if self

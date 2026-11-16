@@ -17,7 +17,7 @@ pub const IDENTITY: Matrix4 = [
 ];
 
 /// Matrix targets selectable with `glMatrixMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MatrixMode {
     Modelview,
     Projection,
@@ -140,7 +140,7 @@ pub fn transform(m: &Matrix4, v: [f32; 4]) -> [f32; 4] {
 /// projection / texture stacks at least 2 deep. We use a single
 /// generous limit for all three; exceeding it must raise
 /// `GL_STACK_OVERFLOW` rather than grow without bound.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MatrixStack {
     current: Matrix4,
     saved: Vec<Matrix4>,

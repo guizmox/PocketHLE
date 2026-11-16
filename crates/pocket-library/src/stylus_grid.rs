@@ -53,13 +53,8 @@ impl HostInput {
     /// Host actions take precedence on every platform, including after config edits.
     pub fn conflict(&self, fullscreen: Option<&str>) -> Option<&'static str> {
         match self.clone().canonical() {
-            Self::Keyboard(n)
-                if matches!(
-                    n.as_str(),
-                    "ESCAPE" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
-                ) =>
-            {
-                Some("This input is reserved by PocketHLE-Reborn (Escape / F7–F12).")
+            Self::Keyboard(n) if n == "ESCAPE" || crate::keybindings::reserved_host_key(&n) => {
+                Some("This input is reserved by PocketHLE-Reborn (Escape / F5–F12).")
             }
             Self::Controller(n)
                 if matches!(n.as_str(), "Select" | "Start")
@@ -274,7 +269,7 @@ mod tests {
     #[test]
     fn conflicts_rotation_and_resize() {
         let mut g = StylusGrid::default();
-        for name in ["F7", "F8", "F9", "F10", "F11", "F12", "Escape"] {
+        for name in ["F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "Escape"] {
             assert!(g.bind(0, HostInput::Keyboard(name.into()), None).is_err());
         }
         for name in [

@@ -260,6 +260,11 @@ impl LibraryViewport {
 // Unsupported sharing and consumers requiring CPU pixels keep the CPU path.
 const SHARED_PRESENTATION_READY: bool = true;
 
+struct SnapshotSlotStatus {
+    game_id: String,
+    timestamp: Option<u64>,
+}
+
 /// Top-level egui app.
 pub struct PocketLauncher {
     icon_cache: std::collections::HashMap<String, Option<egui::TextureHandle>>,
@@ -311,7 +316,9 @@ pub struct PocketLauncher {
     library_busy: bool,
     restore_archive: Option<std::path::PathBuf>,
     file_dialog: Option<crate::file_dialog::FileDialog>,
-    pending_run: Option<GameEntry>,
+    pending_run: Option<(GameEntry, bool)>,
+    snapshot_result: Option<(String, Receiver<Result<u64, String>>)>,
+    snapshot_slot: Option<SnapshotSlotStatus>,
     colors_startup_prompt: Option<(
         GameEntry,
         Vec<pocket_library::ColorsLanguage>,
@@ -966,6 +973,8 @@ impl PocketLauncher {
             restore_archive: None,
             file_dialog: None,
             pending_run: None,
+            snapshot_result: None,
+            snapshot_slot: None,
             colors_startup_prompt: None,
             screen: Screen::Library,
             about_parent: Screen::Library,
@@ -1293,12 +1302,34 @@ impl PocketLauncher {
                 }
             }
         }
+        if let Some((game_id, receiver)) = &self.snapshot_result {
+            match receiver.try_recv() {
+                Ok(Ok(timestamp)) => {
+                    if let Some(slot) = self.snapshot_slot.as_mut() {
+                        if &slot.game_id == game_id {
+                            slot.timestamp = Some(timestamp);
+                        }
+                    }
+                    self.status = format!("Snapshot saved {}", pocket_library::snapshot_slot::format_timestamp(timestamp));
+                    self.snapshot_result = None;
+                }
+                Ok(Err(error)) => {
+                    self.status = format!("Cannot save snapshot: {error}");
+                    self.snapshot_result = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.status = "Snapshot capture was interrupted".into();
+                    self.snapshot_result = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+            }
+        }
         // A second game may be selected while the first worker is still
         // stopping. Wait for its completion event before replacing channels
         // or accepting a final snapshot under the new game's identity.
         if self.running_game.is_none() {
-            if let Some(game) = self.pending_run.take() {
-                self.spawn_run_selected(&game);
+            if let Some((game, restore_snapshot)) = self.pending_run.take() {
+                self.spawn_run_selected_with_snapshot(&game, restore_snapshot);
             }
         }
         // Drain any live preview frames the background runner may
@@ -1645,6 +1676,7 @@ impl PocketLauncher {
         match Library::open_with_profile(self.library.root(), self.library.profile()) {
             Ok(lib) => {
                 self.library = lib;
+                self.snapshot_slot = None;
                 self.analysis_cache.clear();
                 self.screen_cache.clear();
             }
@@ -1672,6 +1704,19 @@ impl PocketLauncher {
             let r = self.recording.lock().unwrap_or_else(|e| e.into_inner());
             (r.active(), r.busy())
         };
+        let snapshot_game = self.running_game_id.as_ref().or(self.selected_game.as_ref())
+            .and_then(|id| self.library.get(id));
+        if self.snapshot_slot.as_ref().map(|slot| &slot.game_id)
+            != snapshot_game.map(|game| &game.id)
+        {
+            self.snapshot_slot = snapshot_game.map(|game| {
+                let path = pocket_library::snapshot_slot::path_for(self.library.root(), game);
+                let timestamp = pocket_library::snapshot_slot::timestamp(&path).ok().flatten();
+                SnapshotSlotStatus { game_id: game.id.clone(), timestamp }
+            });
+        }
+        let timestamp = self.snapshot_slot.as_ref().and_then(|slot| slot.timestamp)
+            .map(pocket_library::snapshot_slot::format_timestamp);
         let state = State {
             version: env!("CARGO_PKG_VERSION"),
             selected,
@@ -1688,6 +1733,11 @@ impl PocketLauncher {
             recording,
             encoding,
             upscale: self.upscale_x2,
+            snapshot: self.can_save_game_snapshot(),
+            restore_snapshot: self.snapshot_result.is_none()
+                && cfg!(feature = "unicorn")
+                && snapshot_game.is_some(),
+            snapshot_timestamp: timestamp.as_deref(),
             fullscreen: ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false)),
             filter: self.upscale_filter.toolbar_label(),
             filter_help: self.upscale_filter.label(),
@@ -1756,8 +1806,48 @@ impl PocketLauncher {
             }
             Action::Screenshot => self.capture_screenshot(),
             Action::Recording => self.toggle_recording(),
+            Action::SaveSnapshot => self.save_game_snapshot(),
+            Action::RestoreSnapshot => self.restore_game_snapshot(),
         }
         ctx.request_repaint();
+    }
+
+    fn can_save_game_snapshot(&self) -> bool {
+        cfg!(feature = "unicorn")
+            && self.running_game.is_some()
+            && self.last_frame_snapshot.is_some()
+            && self.snapshot_result.is_none()
+            && self.running_game_id.as_ref().is_some_and(|id| self.library.get(id).is_some())
+    }
+
+    fn save_game_snapshot(&mut self) {
+        #[cfg(feature = "unicorn")]
+        if self.can_save_game_snapshot() {
+            let (Some(input), Some(game_id)) = (&self.input_tx, &self.running_game_id) else {
+                return;
+            };
+            let (reply, result) = mpsc::channel();
+            if input.send(InputCommand::SaveSnapshot(reply)).is_ok() {
+                self.snapshot_result = Some((game_id.clone(), result));
+                self.status = "Saving snapshot…".into();
+            }
+        }
+    }
+
+    fn restore_game_snapshot(&mut self) {
+        if !cfg!(feature = "unicorn") || self.snapshot_result.is_some() {
+            return;
+        }
+        let Some(game) = self.running_game_id.as_ref().or(self.selected_game.as_ref())
+            .and_then(|id| self.library.get(id)).cloned() else {
+            return;
+        };
+        let path = pocket_library::snapshot_slot::path_for(self.library.root(), &game);
+        match pocket_library::snapshot_slot::timestamp(&path) {
+            Ok(Some(_)) => self.spawn_run_selected_with_snapshot(&game, true),
+            Ok(None) => {}
+            Err(error) => self.status = format!("Cannot restore snapshot: {error}"),
+        }
     }
 
     fn close_about(&mut self) {
@@ -5582,6 +5672,8 @@ impl PocketLauncher {
                 ));
             }
             match key {
+                egui::Key::F5 => self.save_game_snapshot(),
+                egui::Key::F6 => self.restore_game_snapshot(),
                 egui::Key::F7 => self.cycle_rotation(ctx),
                 egui::Key::F8 => {
                     self.remove_game = None;
@@ -5681,7 +5773,6 @@ impl PocketLauncher {
                             | egui::Key::F10
                             | egui::Key::F12
                             | egui::Key::F11
-                            | egui::Key::F6
                     ) {
                         continue;
                     }
@@ -5697,23 +5788,6 @@ impl PocketLauncher {
             else {
                 continue;
             };
-            if key == egui::Key::F6
-                && self.screen == Screen::Run
-                && self.library.config().gps_fixed_enabled
-                && self.library.config().gps_fixed_random
-                && self
-                    .running_game_id
-                    .as_deref()
-                    .and_then(|id| self.library.get(id))
-                    .is_some_and(|game| pocket_library::is_colors_game(game, self.library.root()))
-            {
-                if pressed && !repeat {
-                    if let Some(tx) = self.input_tx.as_ref() {
-                        let _ = tx.send(InputCommand::RefreshColorsGps);
-                    }
-                }
-                continue;
-            }
             if key == egui::Key::Escape
                 && self.screen == Screen::Run
                 && ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
@@ -6095,7 +6169,7 @@ impl PocketLauncher {
                         crate::controller_ui::selectable_value(ui, &mut draft.gps_fixed_random, false, "Manual coordinates");
                     });
                 if draft.gps_fixed_enabled && draft.gps_fixed_random {
-                    ui.label("F6 / Geofence: choose a new random position while playing.");
+                    ui.label("Geofence (default 4): choose a new random position while playing.");
                 }
                 if !draft.gps_fixed_random {
                 ui.horizontal(|ui| {
@@ -6179,6 +6253,10 @@ impl PocketLauncher {
     }
 
     fn spawn_run_selected(&mut self, game: &GameEntry) {
+        self.spawn_run_selected_with_snapshot(game, false);
+    }
+
+    fn spawn_run_selected_with_snapshot(&mut self, game: &GameEntry, restore_snapshot: bool) {
         #[cfg(windows)]
         if self.library.config().gps_enabled
             && !(self.library.config().gps_fixed_enabled
@@ -6187,7 +6265,7 @@ impl PocketLauncher {
             pocket_core::kernel::gps::prepare_host_access();
         }
         if self.running_game.is_some() {
-            self.pending_run = Some(game.clone());
+            self.pending_run = Some((game.clone(), restore_snapshot));
             self.release_all_keys();
             if let Some(tx) = self.input_tx.as_ref() {
                 let _ = tx.send(InputCommand::Stop);
@@ -6270,6 +6348,7 @@ impl PocketLauncher {
                 Some(gps_notice_tx),
                 Some(dependency_notice_tx),
                 system_media,
+                restore_snapshot,
             );
             let _ = tx.send(UiEvent::RunFinished(outcome, diagnostic));
             repaint.request_repaint();
@@ -7302,17 +7381,16 @@ mod tests {
             (egui::Key::ArrowUp, GuestButton::ButtonA),
             (egui::Key::ArrowRight, GuestButton::ButtonB),
             (egui::Key::ArrowLeft, GuestButton::ButtonC),
-            (egui::Key::Num1, GuestButton::Soft1),
-            (egui::Key::Num2, GuestButton::Soft2),
-            (egui::Key::T, GuestButton::Turbo),
-            (egui::Key::F1, GuestButton::GizPiano1),
-            (egui::Key::F2, GuestButton::GizPiano2),
-            (egui::Key::F3, GuestButton::GizPiano3),
-            (egui::Key::F4, GuestButton::GizPiano4),
-            (egui::Key::F5, GuestButton::GizPiano5),
+            (egui::Key::A, GuestButton::Soft1),
+            (egui::Key::E, GuestButton::Soft2),
+            (egui::Key::Num1, GuestButton::GizPiano1),
+            (egui::Key::Num2, GuestButton::GizPiano2),
+            (egui::Key::Num3, GuestButton::GizPiano3),
+            (egui::Key::Num4, GuestButton::GizPiano4),
+            (egui::Key::Num5, GuestButton::GizPiano5),
         ] {
             assert_eq!(
-                bindings.vk_for_key(key.name()),
+                pocket_library::keybindings::keyboard_button_for_profile(&bindings, key.name(), true).map(GuestButton::vk),
                 Some(expected.vk()),
                 "{} should drive {:?}",
                 key.name(),

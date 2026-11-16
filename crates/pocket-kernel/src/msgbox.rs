@@ -54,7 +54,7 @@ pub mod id {
 }
 
 /// One button along the bottom of the box.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MsgBoxButton {
     pub label: String,
     /// What `MessageBoxW` returns when this one is chosen.
@@ -73,7 +73,7 @@ impl MsgBoxButton {
 }
 
 /// Which decorative glyph the box carries, from `MB_ICON*`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MsgBoxIcon {
     None,
     Stop,
@@ -105,7 +105,7 @@ impl MsgBoxIcon {
 
 /// A modal message box: geometry, text, buttons, and the answer once one
 /// has been chosen.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MessageBox {
     pub caption: String,
     /// Message text, already split into lines that fit the box.

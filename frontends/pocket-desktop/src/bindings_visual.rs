@@ -339,6 +339,8 @@ fn keyboard_assignment(config: &LauncherConfig, key: &str, gizmondo: bool) -> As
 
 fn keyboard_shortcut(key: &str) -> Option<&'static str> {
     match key.to_ascii_uppercase().as_str() {
+        "F5" => Some("Save Snapshot"),
+        "F6" => Some("Restore Snapshot"),
         "F7" => Some("Next rotation"),
         "F8" => Some("Return to library"),
         "F9" => Some("Next filter"),
@@ -352,7 +354,6 @@ fn keyboard_shortcut(key: &str) -> Option<&'static str> {
 fn keyboard_context_note(key: &str) -> Option<&'static str> {
     match key {
         "Escape" => Some("In fullscreen, Escape exits fullscreen before reaching the game."),
-        "F6" => Some("In Colors, randomized GPS can consume F6."),
         _ => None,
     }
 }
@@ -1544,6 +1545,8 @@ impl Editor {
             "Fullscreen"
         } else if shortcut.is_some() {
             match name {
+                "F5" => "Save",
+                "F6" => "Restore",
                 "F7" => "Rotate",
                 "F8" => "Library",
                 "F9" => "Filter",
@@ -1717,7 +1720,7 @@ mod tests {
             Assignment::Unbound
         ));
         assert!(matches!(
-            keyboard_assignment(&config, "F3", true),
+            keyboard_assignment(&config, "3", true),
             Assignment::Guest(GuestButton::GizPiano3)
         ));
         let key = pocket_library::input_gestures::binding_key(false, false, "1");
@@ -1929,7 +1932,7 @@ mod tests {
     fn reserved_function_keys_reject_all_assignments_and_ignore_stale_overrides() {
         let mut e = Editor::default();
         let mut c = LauncherConfig::default();
-        for key in ["F7", "F8", "F9", "F10", "F11", "F12"] {
+        for key in ["F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"] {
             let id = pocket_library::input_gestures::binding_key(false, false, key);
             c.short_press_bindings
                 .insert(id.clone(), Some(GuestButton::Action));

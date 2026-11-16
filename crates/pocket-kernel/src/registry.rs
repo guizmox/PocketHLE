@@ -87,6 +87,38 @@ pub struct Registry {
     volatile_values: Arc<Mutex<HashMap<(String, String), Option<RegistryValue>>>>,
 }
 
+/// Per-process registry handles and volatile values. Persistent values remain
+/// in the separately mounted device registry.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct RegistryProcessSnapshot {
+    handles: HashMap<u32, String>,
+    next_handle: u32,
+    volatile: Vec<((String, String), Option<RegistryValue>)>,
+}
+
+impl Registry {
+    pub fn capture_process_snapshot(&self) -> Result<RegistryProcessSnapshot, String> {
+        let volatile = self
+            .volatile_values
+            .lock()
+            .map_err(|_| "registry lock poisoned")?;
+        Ok(RegistryProcessSnapshot {
+            handles: self.handles.clone(),
+            next_handle: self.next_handle,
+            volatile: volatile
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        })
+    }
+
+    pub fn restore_process_snapshot(&mut self, snapshot: RegistryProcessSnapshot) {
+        self.handles = snapshot.handles;
+        self.next_handle = snapshot.next_handle;
+        self.volatile_values = Arc::new(Mutex::new(snapshot.volatile.into_iter().collect()));
+    }
+}
+
 /// Map a predefined `HKEY_*` constant to its canonical prefix.
 fn root_prefix(root: u32) -> Option<&'static str> {
     match root {
@@ -1465,12 +1497,13 @@ mod tests {
 }
 
 /// Windows Mobile registry subscriptions with a named message queue destination.
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueueNotifications {
     next: u32,
     entries: HashMap<u32, QueueSubscription>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct QueueSubscription {
     pub path: String,
     pub value: String,

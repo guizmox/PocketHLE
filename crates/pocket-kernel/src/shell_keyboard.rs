@@ -3,7 +3,7 @@
 use crate::{font, gdi::Surface};
 pub const HWND: u32 = 0xdead6f00;
 const KEYS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .-'";
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellKeyboard {
     pub visible: bool,
     /// WinCE SIP request, independent of the Gizmondo shell protocol.

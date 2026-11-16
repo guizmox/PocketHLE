@@ -3,7 +3,11 @@ use crate::vfs::VfsObject;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[path = "handle_snapshot.rs"]
+mod snapshot;
+pub use snapshot::HandleSnapshot;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HandleObject {
     Thread(usize),
     CurrentProcess,
@@ -20,12 +24,12 @@ pub enum HandleObject {
     RemoteFile(u32, u32),
     RemoteDevice(u32, u32),
 }
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct ThreadUpdate {
     pub suspend_count: Option<u32>,
     pub terminate: Option<u32>,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct ThreadControl {
     tid: u32,
     ce_priority: u8,
@@ -38,7 +42,7 @@ pub struct ProcessSnapshotEntry {
     pub threads: Vec<u32>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolhelpSnapshot {
     pub processes: Vec<Vec<u8>>,
     pub threads: Vec<Vec<u8>>,

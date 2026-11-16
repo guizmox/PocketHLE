@@ -5,7 +5,7 @@ use crate::{
 };
 use std::collections::HashMap;
 pub const TRACKING_HANDLE: u32 = 0xfffffff0;
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrackingMenu {
     pub thread: usize,
     pub thunk: u32,
@@ -18,20 +18,20 @@ pub struct TrackingMenu {
 }
 
 pub const HEIGHT: i32 = 26;
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Bar {
     pub owner: u32,
     pub menu: u32,
     pub sip: bool,
     pub background: u16,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Popup {
     menu: u32,
     selected: usize,
     first: usize,
 }
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellMenus {
     pub bars: HashMap<u32, Bar>,
     pub tracking: Option<TrackingMenu>,

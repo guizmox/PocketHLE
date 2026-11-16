@@ -1,5 +1,5 @@
 //! ES 1.1 fixed-function texture combiner; shared state and reference evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Combine {
     pub rgb: u32,
     pub alpha: u32,

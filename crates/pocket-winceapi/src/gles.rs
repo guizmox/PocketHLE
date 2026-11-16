@@ -6,6 +6,8 @@
 
 mod color_capture;
 mod egl_config;
+mod snapshot;
+pub use snapshot::{capture_egl_session, EglSessionSnapshot};
 mod egl_context;
 mod es11;
 #[cfg(test)]
@@ -16,7 +18,7 @@ pub(crate) use egl_context::{enter_gl_thread, enter_thread, needs_thread_switch}
 use egl_context::{EglContext, EglThread};
 use pocket_gles::context::{ObjectReferences, SharedObjects, SurfaceBuffers};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(test)]
 use std::sync::Mutex;
 
@@ -189,8 +191,7 @@ struct EglSurfaces {
 }
 impl EglSurfaces {
     fn effective_surface_format(&self) -> EglSurfaceFormat {
-        if self.goforce_4500 || (self.intel2700g && self.surface_format == EglSurfaceFormat::Auto)
-        {
+        if self.goforce_4500 || (self.intel2700g && self.surface_format == EglSurfaceFormat::Auto) {
             EglSurfaceFormat::Rgb565Only
         } else {
             self.surface_format

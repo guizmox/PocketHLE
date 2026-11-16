@@ -575,11 +575,11 @@ for ARM observations and the limits of its local HTTP/SQLite validation.
 
 ### Explicit Eiffel Tower GPS refresh
 
-In Colors only, with Fake GPS and Near Eiffel Tower selected, desktop/Deck **F6**
-chooses a new simulated position within 800 m. Holding it does not repeat.
-F12 remains the ordinary fullscreen shortcut. Geofence (guest VK 0x73) also
-requests the refresh on desktop/Deck and Android while retaining the guest key
-events. Other games and manual/host GPS modes keep their ordinary input behavior.
+In Colors, with Fake GPS and Near Eiffel Tower selected, Geofence (guest VK
+0x73, desktop default **4**) chooses a new simulated position within 800 m.
+This works on desktop, Deck and Android while retaining the guest key events.
+Holding the key does not repeat. Other games and manual or host GPS modes
+keep their ordinary input behavior.
 The new fix reaches the game on its next GPS read; no extra server request is
 introduced and stored manual coordinates are not changed.
 

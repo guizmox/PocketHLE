@@ -13,8 +13,10 @@
 mod diagnostic;
 mod es11;
 mod sharing;
+mod snapshot;
 pub use es11::StateValue;
-pub use sharing::{ObjectReferences, SharedObjects};
+pub use sharing::{ObjectReferences, SharedObjects, SharedObjectsSnapshot};
+pub use snapshot::{ContextSnapshot, SurfaceSnapshot};
 
 use crate::consts::*;
 use crate::fixed;
@@ -82,7 +84,7 @@ pub trait GuestMemory {
 }
 
 /// A `gl*Pointer` client array binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArrayPointer {
     pub enabled: bool,
     /// Components per element (2, 3 or 4).
@@ -204,7 +206,7 @@ const MAX_TEXTURE_UNITS: usize = raster::MAX_TEXTURE_STAGES;
 /// or indices (`GL_ELEMENT_ARRAY_BUFFER`). The guest uploads once and
 /// then draws from the buffer many times, so keeping the bytes on the
 /// host side means a draw does not re-read guest memory at all.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Buffer {
     pub data: Vec<u8>,
     /// The `GL_STATIC_DRAW` / `GL_DYNAMIC_DRAW` hint. Recorded for
@@ -233,7 +235,7 @@ impl Buffer {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct TextureUnitState {
     pub bound_texture: u32,
     pub texture_enabled: bool,
@@ -581,6 +583,10 @@ impl Context {
                 self.gpu_failure("surface", e);
             }
         }
+    }
+
+    pub fn render_resolution_policy(&self) -> u8 {
+        self.internal_resolution
     }
 
     /// Host-only GPU resolution policy. Guest coordinates remain logical.

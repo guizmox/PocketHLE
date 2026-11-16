@@ -13,14 +13,14 @@ use goblin::pe::PE;
 use crate::LoadError;
 
 /// Either a named or integer-keyed resource.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ResourceKey {
     Id(u32),
     Name(String),
 }
 
 /// One leaf node from the resource directory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResourceEntry {
     pub ty: ResourceKey,
     pub name: ResourceKey,
@@ -32,7 +32,7 @@ pub struct ResourceEntry {
     pub codepage: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResourceLeaf {
     pub directory_entry_rva: u32,
     pub data_rva: u32,

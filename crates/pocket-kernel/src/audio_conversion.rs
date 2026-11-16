@@ -2,7 +2,7 @@
 //! device or consume a waveOut voice, so platform voice budgets do not apply.
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Format {
     pub channels: u16,
     pub rate: u32,
@@ -34,13 +34,14 @@ impl Format {
         u32::from(self.channels) * u32::from(self.bits / 8)
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Prepared {
     pub source: u32,
     pub source_length: u32,
     pub destination: u32,
     pub destination_length: u32,
 }
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Stream {
     pub source: Format,
     pub destination: Format,
@@ -85,7 +86,7 @@ impl Stream {
         (used as u32, output)
     }
 }
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Streams {
     next: u32,
     pub entries: HashMap<u32, Stream>,

@@ -53,6 +53,7 @@ pub mod gizmondo_titles;
 pub mod keybindings;
 pub mod save_data;
 pub mod session_diagnostic;
+pub mod snapshot_slot;
 pub mod stylus;
 pub mod stylus_grid;
 pub mod updates;

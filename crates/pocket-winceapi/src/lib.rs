@@ -1114,4 +1114,21 @@ impl Drop for SuspendedSession {
     }
 }
 
+/// Guest DirectShow objects whose graphs have no native media loaded.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MediaSnapshot(std::collections::HashMap<u32, directshow::IdleGraphSnapshot>);
+
+pub fn capture_snapshot_media() -> Result<MediaSnapshot, String> {
+    if wavein::snapshot_media_active() {
+        return Err("checkpoint contains a native microphone capture stream".into());
+    }
+    directshow::capture_idle_graphs().map(MediaSnapshot)
+}
+
+impl MediaSnapshot {
+    pub fn restore(self) -> Result<(), String> {
+        directshow::restore_idle_graphs(self.0)
+    }
+}
+
 pub mod unimplemented_log;

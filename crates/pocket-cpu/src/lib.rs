@@ -142,7 +142,7 @@ pub enum StopReason {
 }
 
 /// Common interface to a CPU emulation backend.
-pub trait Cpu {
+pub trait Cpu: std::any::Any {
     fn arch(&self) -> Arch;
 
     /// Optional ARM register-only helper, handled inside the CPU run loop.

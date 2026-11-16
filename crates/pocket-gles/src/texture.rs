@@ -11,9 +11,10 @@
 //! or a partial pixel update requires it. Unsupported formats decode at upload.
 
 use crate::consts::*;
+use serde::{Deserialize, Serialize};
 
 /// Texture filtering mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Filter {
     Nearest,
     Linear,
@@ -30,7 +31,7 @@ impl Filter {
 }
 
 /// Texture coordinate wrap mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Wrap {
     Repeat,
     ClampToEdge,
@@ -73,6 +74,91 @@ pub struct Texture {
     pub wrap_t: Wrap,
 }
 
+/// Host-independent contents of one guest GLES texture. The caller records
+/// the guest object name and its EGL share group separately.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TextureSnapshot {
+    revision: u64,
+    formats: std::collections::BTreeMap<u32, u32>,
+    generate_mipmap: bool,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    mipmaps: std::collections::BTreeMap<u32, (u32, u32, Vec<u8>)>,
+    compressed: std::collections::BTreeMap<u32, CompressedSnapshotLevel>,
+    max_level: u32,
+    base_level: u32,
+    min_lod_bits: u32,
+    max_lod_bits: u32,
+    goforce_lod: bool,
+    min_filter: Filter,
+    mag_filter: Filter,
+    wrap_s: Wrap,
+    wrap_t: Wrap,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CompressedSnapshotLevel {
+    width: u32,
+    height: u32,
+    format: u32,
+    bytes: Vec<u8>,
+}
+
+impl TextureSnapshot {
+    /// Reconstructs the guest object for a fresh renderer. Uploading it is
+    /// deferred to the ordinary texture binding path.
+    pub fn restore(self) -> Result<Texture, String> {
+        let valid_rgba = |width, height, bytes| {
+            bytes == 0
+                || (width as usize)
+                    .checked_mul(height as usize)
+                    .and_then(|pixels| pixels.checked_mul(4))
+                    == Some(bytes)
+        };
+        if !valid_rgba(self.width, self.height, self.rgba.len())
+            || self
+                .mipmaps
+                .values()
+                .any(|(width, height, rgba)| !valid_rgba(*width, *height, rgba.len()))
+        {
+            return Err("invalid saved texture dimensions or pixel length".into());
+        }
+        Ok(Texture {
+            revision: self.revision,
+            gpu_copy: None,
+            formats: self.formats,
+            generate_mipmap: self.generate_mipmap,
+            width: self.width,
+            height: self.height,
+            rgba: self.rgba,
+            mipmaps: self.mipmaps,
+            compressed: self
+                .compressed
+                .into_iter()
+                .map(|(level, data)| {
+                    let data = CompressedLevel {
+                        width: data.width,
+                        height: data.height,
+                        format: data.format,
+                        bytes: data.bytes.into(),
+                    };
+                    (level, data)
+                })
+                .collect(),
+            max_level: self.max_level,
+            base_level: self.base_level,
+            min_lod: f32::from_bits(self.min_lod_bits),
+            max_lod: f32::from_bits(self.max_lod_bits),
+            goforce_lod: self.goforce_lod,
+            min_filter: self.min_filter,
+            mag_filter: self.mag_filter,
+            wrap_s: self.wrap_s,
+            wrap_t: self.wrap_t,
+        })
+    }
+}
+
 impl Default for Texture {
     fn default() -> Self {
         Self {
@@ -99,6 +185,67 @@ impl Default for Texture {
 }
 
 impl Texture {
+    /// Captures exactly the guest-visible texture, including a level produced
+    /// by a GPU-only framebuffer copy. A failed read aborts capture without
+    /// changing the original texture or its cache revision.
+    pub fn capture_snapshot(
+        &self,
+        reader: &mut Option<crate::gpu::SharedReadback>,
+    ) -> Result<TextureSnapshot, String> {
+        let rgba = match &self.gpu_copy {
+            Some(frame) => {
+                if frame.size() != (self.width, self.height) {
+                    return Err("GPU texture dimensions differ from the guest level".into());
+                }
+                Self::read_gpu_copy(frame, reader)?
+            }
+            None => self.rgba.clone(),
+        };
+        Ok(TextureSnapshot {
+            revision: self.revision,
+            formats: self.formats.clone(),
+            generate_mipmap: self.generate_mipmap,
+            width: self.width,
+            height: self.height,
+            rgba,
+            mipmaps: self.mipmaps.clone(),
+            compressed: self
+                .compressed
+                .iter()
+                .map(|(&level, data)| {
+                    let data = CompressedSnapshotLevel {
+                        width: data.width,
+                        height: data.height,
+                        format: data.format,
+                        bytes: data.bytes.to_vec(),
+                    };
+                    (level, data)
+                })
+                .collect(),
+            max_level: self.max_level,
+            base_level: self.base_level,
+            min_lod_bits: self.min_lod.to_bits(),
+            max_lod_bits: self.max_lod.to_bits(),
+            goforce_lod: self.goforce_lod,
+            min_filter: self.min_filter,
+            mag_filter: self.mag_filter,
+            wrap_s: self.wrap_s,
+            wrap_t: self.wrap_t,
+        })
+    }
+
+    fn read_gpu_copy(
+        frame: &crate::gpu::SharedFrame,
+        reader: &mut Option<crate::gpu::SharedReadback>,
+    ) -> Result<Vec<u8>, String> {
+        if reader.is_none() {
+            let source = crate::gpu::configured_shared_context_source()
+                .ok_or("GPU texture readback requires a shared context")?;
+            *reader = Some(crate::gpu::SharedReadback::new(&source)?);
+        }
+        reader.as_mut().unwrap().read_guest_rgb_texture(frame)
+    }
+
     pub fn rgba_level(&self, level: u32) -> Option<std::borrow::Cow<'_, [u8]>> {
         let pixels = if level == 0 {
             Some(self.rgba.as_slice())
@@ -110,10 +257,7 @@ impl Texture {
         }
         if level == 0 {
             if let Some(frame) = &self.gpu_copy {
-                let source = crate::gpu::configured_shared_context_source()?;
-                let mut reader = crate::gpu::SharedReadback::new(&source).ok()?;
-                return reader
-                    .read_guest_rgb_texture(frame)
+                return Self::read_gpu_copy(frame, &mut None)
                     .ok()
                     .map(std::borrow::Cow::Owned);
             }
@@ -1299,6 +1443,44 @@ pub fn decode_compressed_to_rgba(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn texture_snapshot_preserves_levels_and_sampler_state() {
+        let mut original = Texture {
+            min_filter: Filter::NearestMipmapNearest,
+            wrap_t: Wrap::GizmondoClamp,
+            min_lod: f32::from_bits(0x7fc0_1234),
+            max_lod: f32::INFINITY,
+            ..Texture::default()
+        };
+        original.set_level(0, 2, 2, [12, 34, 56, 128].repeat(4));
+        original.set_level(1, 1, 1, vec![90, 87, 65, 43]);
+        original.compressed.insert(
+            2,
+            CompressedLevel {
+                width: 1,
+                height: 1,
+                format: GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                bytes: vec![0; 8].into(),
+            },
+        );
+        let mut reader = None;
+        let snapshot = original.capture_snapshot(&mut reader).unwrap();
+        assert!(reader.is_none());
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let restored = serde_json::from_slice::<TextureSnapshot>(&bytes)
+            .unwrap()
+            .restore()
+            .unwrap();
+        assert_eq!(restored.rgba, original.rgba);
+        assert_eq!(restored.mipmaps, original.mipmaps);
+        assert_eq!(&*restored.compressed[&2].bytes, &[0; 8]);
+        assert_eq!(restored.min_filter, original.min_filter);
+        assert_eq!(restored.wrap_t, original.wrap_t);
+        assert_eq!(restored.min_lod.to_bits(), original.min_lod.to_bits());
+        assert_eq!(restored.max_lod, original.max_lod);
+        assert_eq!(restored.revision, original.revision);
+    }
 
     #[test]
     fn dxt3_explicit_alpha_and_four_colour_reverse_endpoints() {

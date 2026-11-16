@@ -96,7 +96,39 @@ pub struct Device {
     last_serial: Option<u64>,
     pub next_preview: Instant,
 }
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DeviceSnapshot {
+    format: [u32; 4],
+    frame_count: u32,
+    started: bool,
+    preview_delay: std::time::Duration,
+}
+
 impl Device {
+    pub(crate) fn capture_snapshot(&self) -> DeviceSnapshot {
+        DeviceSnapshot {
+            format: self.format,
+            frame_count: self.frame_count,
+            started: self.capture.is_some(),
+            preview_delay: self.next_preview.saturating_duration_since(Instant::now()),
+        }
+    }
+
+    pub(crate) fn restore_snapshot(&mut self, saved: DeviceSnapshot) -> Result<()> {
+        self.set_format(saved.format)?;
+        let next_preview = Instant::now()
+            .checked_add(saved.preview_delay)
+            .ok_or(87u32)?;
+        if saved.started {
+            self.start()?;
+        } else {
+            self.stop();
+        }
+        self.frame_count = saved.frame_count;
+        self.next_preview = next_preview;
+        Ok(())
+    }
+
     pub fn start(&mut self) -> Result<()> {
         if !self.service.0.allowed.load(Ordering::Acquire) {
             return Err(5);

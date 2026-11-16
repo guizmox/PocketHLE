@@ -70,7 +70,7 @@ pub fn is_stock_handle(handle: u32) -> bool {
 
 /// Whether a DC paints into the on-screen framebuffer or into an
 /// off-screen [`Bitmap`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DcSurface {
     /// Paints into [`Framebuffer`].
     Screen,
@@ -78,7 +78,7 @@ pub enum DcSurface {
     Memory,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Bitmap {
     pub width: u32,
     pub height: u32,
@@ -211,7 +211,7 @@ pub fn rgb565_to_rgb555(p: u16) -> u16 {
     (r << 10) | (g << 5) | b
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Dc {
     /// Application clipping region, copied by SelectClipRgn; None means unrestricted.
     pub clip_rects: Option<Vec<[i32; 4]>>,
@@ -254,24 +254,40 @@ impl Default for Dc {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Brush {
     pub color: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Pen {
     pub color: u32,
     pub width: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Font {
     pub height: i32,
     /// Original CE LOGFONTW, including face name, weight, charset and quality.
+    #[serde(with = "saved_logfont")]
     pub logfont: [u8; 92],
+    #[serde(skip)]
     pub resource: Option<ab_glyph::FontArc>,
 }
+mod saved_logfont {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &[u8; 92], serializer: S) -> Result<S::Ok, S::Error> {
+        value.as_slice().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 92], D::Error> {
+        Vec::<u8>::deserialize(deserializer)?
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("invalid LOGFONTW length"))
+    }
+}
+
 impl Font {
     pub fn new(height: i32) -> Self {
         let mut raw = [0; 92];
@@ -298,7 +314,7 @@ impl Font {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum GdiObject {
     Dc(Dc),
     Bitmap(Bitmap),
@@ -308,7 +324,7 @@ pub enum GdiObject {
     Palette(Vec<[u8; 4]>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnerDrawFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -316,7 +332,7 @@ pub struct OwnerDrawFrame {
     pub scratch: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ControlColorFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -326,7 +342,7 @@ pub struct ControlColorFrame {
     pub dialog: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ListPaintFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -340,7 +356,7 @@ pub struct ListPaintFrame {
     pub item_flags: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaintEraseFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -348,7 +364,7 @@ pub struct PaintEraseFrame {
 }
 
 /// A streamed IMGDECMP call suspended in a guest GETDATAFUNC callback.
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImageDecodeFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -358,7 +374,7 @@ pub struct ImageDecodeFrame {
     pub completion: Option<(u32, u32)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImageRenderer {
     pub bitmap: u32,
     pub refs: u32,
@@ -367,7 +383,7 @@ pub struct ImageRenderer {
     pub height: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FontEnumFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -379,10 +395,13 @@ pub struct FontEnumFrame {
     pub next: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GdiState {
+    #[serde(skip)]
     pub installed_fonts: Vec<crate::text::InstalledFont>,
+    #[serde(skip)]
     pub installed_font_bytes: usize,
+    #[serde(skip)]
     font_registrations: Vec<(std::path::PathBuf, usize, usize)>,
     pub font_enum_frames: Vec<FontEnumFrame>,
     pub image_decode_frames: Vec<ImageDecodeFrame>,
@@ -410,7 +429,45 @@ pub struct GdiState {
     pub owner_draw_states: HashMap<u32, (bool, bool, bool, i32, i32)>,
 }
 
+/// GDI object namespace rebuilt from guest state. Host font outlines must
+/// be supplied by a checkpoint of the font installation source.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct GdiSnapshot(GdiState);
+
+impl GdiSnapshot {
+    pub fn restore(self) -> Result<GdiState, String> {
+        for object in self.0.objects.values() {
+            if let GdiObject::Bitmap(bitmap) = object {
+                let count = (bitmap.width as usize)
+                    .checked_mul(bitmap.height as usize)
+                    .ok_or("invalid saved GDI bitmap")?;
+                if count.checked_mul(2) != Some(bitmap.pixels.len())
+                    || bitmap
+                        .painted
+                        .as_ref()
+                        .is_some_and(|pixels| pixels.len() != count)
+                {
+                    return Err("invalid saved GDI bitmap".into());
+                }
+            }
+        }
+        Ok(self.0)
+    }
+}
+
 impl GdiState {
+    pub fn capture_snapshot(&self) -> Result<GdiSnapshot, String> {
+        if !self.installed_fonts.is_empty()
+            || self
+                .objects
+                .values()
+                .any(|object| matches!(object, GdiObject::Font(font) if font.resource.is_some()))
+        {
+            return Err("snapshot contains installed host font resources".into());
+        }
+        Ok(GdiSnapshot(self.clone()))
+    }
+
     pub fn new() -> Self {
         let mut s = Self {
             installed_fonts: Vec::new(),

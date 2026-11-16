@@ -54,6 +54,13 @@ pub mod framebuffer;
 pub mod gapi;
 pub mod gdi;
 pub mod gps;
+pub mod guest_clock;
+mod hss_snapshot;
+mod kernel_snapshot;
+pub use hss_snapshot::HssSnapshot;
+pub use kernel_snapshot::KernelSnapshot;
+mod schedule_snapshot;
+pub use schedule_snapshot::ScheduleSnapshot;
 pub mod gz;
 pub mod handles;
 #[cfg(test)]
@@ -369,7 +376,7 @@ pub enum KernelError {
 /// and the synthetic message pump in `pocket-winceapi::coredll` drains
 /// the queue and converts each event into the right MSG before falling
 /// back to its synthetic timer / paint loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InputEvent {
     /// Left stick for touch steering or simulated tilt, display-relative, -1000..1000.
     TouchSteeringPosition {
@@ -429,7 +436,7 @@ pub enum InputEvent {
 /// submits two or three buffers up front and only queues the next one
 /// once it is told an old one drained. Ignoring the notification meant
 /// audio stopped after the first couple of buffers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WaveCallbackKind {
     /// `CALLBACK_NULL` -- the guest polls `WHDR_DONE` instead.
     #[default]
@@ -447,7 +454,7 @@ pub enum WaveCallbackKind {
 
 /// A `WAVEHDR` the guest handed to `waveOutWrite` that we have not
 /// reported as finished yet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct PendingWaveBuffer {
     /// Fake HWAVEOUT this buffer belongs to.
     pub handle: u32,
@@ -460,7 +467,7 @@ pub struct PendingWaveBuffer {
 
 /// Guest memory behind a single-header waveOut loop. Interstellar Flames 2
 /// keeps its SFX mixer ring here and edits it after waveOutWrite returns.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct LiveWaveLoop {
     pub hdr: u32,
     pub data: u32,
@@ -468,7 +475,7 @@ pub struct LiveWaveLoop {
 }
 
 /// One multimedia timer and its dedicated cooperative callback thread.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MultimediaTimer {
     pub worker: usize,
     pub worker_sp: u32,
@@ -483,7 +490,7 @@ pub struct MultimediaTimer {
     pub in_callback: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct WaveOutDevice {
     pub callback_kind: WaveCallbackKind,
     pub callback_target: u32,
@@ -494,7 +501,7 @@ pub struct WaveOutDevice {
 }
 
 /// State shared by all open `waveOut` handles.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WaveOutState {
     /// WinMM mixer opens have their own lifetime; never alias wave/file handles.
     pub mixer_handles: std::collections::HashSet<u32>,
@@ -550,7 +557,7 @@ pub struct WaveOutState {
 /// keyed by that same `this` pointer, because the guest-side object is
 /// opaque to us — it is whatever the real `hss.dll` would have put
 /// there, and we never run the real one.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HssClip {
     /// Decoded interleaved PCM, ready for [`AudioEngine::play_voice_with`].
     ///
@@ -570,7 +577,7 @@ pub struct HssClip {
 }
 
 /// One stable HSS playback channel, owned by its speaker and channel index.
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HssChannel {
     pub pointer: u32,
     pub group: u32,
@@ -580,6 +587,7 @@ pub struct HssChannel {
     pub format: GuestFormat,
     pub rate: u32,
     pub frames: u64,
+    #[serde(skip, default = "std::time::Instant::now")]
     pub started: std::time::Instant,
     pub offset: u64,
     pub stopped: bool,
@@ -686,7 +694,7 @@ pub const HSS_MUSIC_GROUP: u32 = 2;
 /// becomes the return value. The HLE keeps the guest parked inside the
 /// API thunk for the duration — the same technique `MessageBoxW` uses —
 /// so this records what the parked call is waiting for.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModalDialog {
     /// Modal call suspended while a nested DialogBox runs on the same thread.
     pub parent: Option<Box<ModalDialog>>,
@@ -729,7 +737,7 @@ pub struct ModalDialog {
 /// only ever sends it `SB_SETPARTS` / `SB_SETTEXT`, and never paints
 /// the text itself (Solitaire imports no text-output API at all). So
 /// the HLE has to both remember the parts and draw them.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct StatusBar {
     /// Parent window the bar is docked to the bottom of.
     pub parent: u32,
@@ -850,7 +858,7 @@ impl StatusBar {
 /// Registers of the API call we interrupted to run a guest callback
 /// (`waveOutProc`, a `WndProc` receiving `WM_CREATE`, ...), so the
 /// interrupted call can be resumed transparently afterwards.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct GuestCallFrame {
     /// R0..R3 of the interrupted call.
     pub args: [u32; 4],
@@ -863,7 +871,7 @@ pub struct GuestCallFrame {
 }
 
 /// Registers saved by the DispatchMessage guest callback boundary.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DispatchMessageFrame {
     pub args: [u32; 4],
     pub lr: u32,
@@ -915,7 +923,7 @@ impl DispatchMessageFrame {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NotifyMessageFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -924,7 +932,7 @@ pub struct NotifyMessageFrame {
 }
 
 /// A synchronous window callback belongs to the guest thread that entered it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct WindowCallbackFrame {
     pub frame: GuestCallFrame,
     pub thread: usize,
@@ -938,7 +946,7 @@ impl std::ops::Deref for WindowCallbackFrame {
 }
 
 /// Per-thread continuation for IsDialogMessage's synchronous guest callbacks.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DialogKeyFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -950,7 +958,7 @@ pub struct DialogKeyFrame {
 }
 
 /// DestroyWindow holds HWND/procedure metadata until native MFC teardown returns.
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WindowDestroyFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -960,7 +968,7 @@ pub struct WindowDestroyFrame {
 }
 
 /// Single-line EDIT notifications run synchronously while caller guards are set.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ControlNotifyFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -980,7 +988,7 @@ pub struct ControlNotifyFrame {
 /// in the `WM_SIZE` arm, so a title that draws immediately after
 /// `CreateWindowExW` — before it ever reaches its message pump — sees a
 /// zeroed layout and refuses to paint.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MenuItem {
     pub id: u32,
     pub kind: u32,
@@ -992,7 +1000,7 @@ pub struct MenuItem {
     pub bitmap: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CreateStage {
     /// No detour in flight.
     #[default]
@@ -1017,7 +1025,7 @@ pub enum CreateStage {
 /// `WAIT_OBJECT_0` made such threads quit on their first iteration —
 /// which is why Asphalt 2 3D opened its wave device and then never
 /// wrote a single buffer.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct EventObject {
     /// `bManualReset` — an auto-reset event clears itself when a wait
     /// on it succeeds.
@@ -1130,7 +1138,7 @@ impl Dispatcher for NullDispatcher {
 ///
 /// Resource satellites remain passive; native runtime DLLs have relocated
 /// code, patched imports, and exports registered in `dynamic_exports`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoadedModule {
     /// Native import edges; lifetime follows reachability from explicit loads.
     pub dependencies: Vec<u32>,
@@ -1160,7 +1168,7 @@ pub struct LoadedModule {
 }
 
 /// Pending DLL lifetime callback, returned through its loader API thunk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModuleAttachFrame {
     pub sequence: Vec<u32>,
     pub cleanup: Vec<u32>,
@@ -1210,7 +1218,7 @@ pub struct ProcessHandleContext {
     semaphores: shared_objects::SharedObjects<SemaphoreObject>,
     mutexes: shared_objects::SharedObjects<MutexObject>,
 }
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MutexObject {
     pub owner: Option<(u32, usize)>,
     pub depth: u32,
@@ -1730,7 +1738,7 @@ pub struct KernelState {
 }
 
 /// Main thread state is independent of the process and of worker return frames.
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MainThreadState {
     /// The mapping is released at thread exit; exit status outlives it.
     pub stack_region: Option<(u32, u32)>,
@@ -2916,7 +2924,7 @@ pub fn module_file_name(request: &str) -> String {
 }
 
 /// Saved register context for one cooperative guest thread.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GuestThread {
     /// Owned mapping (base, bytes, inside the pre-mapped heap arena).
     pub stack_region: Option<(u32, u32, bool)>,
@@ -3016,7 +3024,7 @@ impl GuestThread {
 /// shape for that trade-off — it needs only `O(n log n)` comparisons
 /// (each one an expensive guest round-trip) while the `O(n^2)` element
 /// moves are plain host-side `memmove`s.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct QsortFrame {
     /// `base` — start of the array, from R0 on the first call.
     pub base: u32,
@@ -3056,7 +3064,7 @@ pub struct QsortFrame {
 ///       int     nElements,
 ///       void   (__cdecl *pDtor)(void *));
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct VectorIterFrame {
     /// Pointer to element 0 (`??_L`) / element N-1 (`??_M`) of the
     /// array, captured from R0 on the very first call.
@@ -3094,7 +3102,7 @@ pub struct VectorIterFrame {
 }
 
 /// One IAT entry that has been resolved to a host-side stub.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Thunk {
     pub thunk_va: u32,
     pub iat_va: u32,
@@ -3150,6 +3158,9 @@ fn private_process_layout(image: &LoadedImage) -> Option<(u32, u32, u32)> {
     (heap_base <= 0x01ff_0000).then_some((stack_base, stack_size, heap_base))
 }
 
+mod heap_snapshot;
+pub use heap_snapshot::HeapSnapshot;
+
 #[derive(Debug)]
 pub struct Heap {
     base: u32,
@@ -3172,7 +3183,7 @@ pub struct Heap {
     virtual_blocks: HashMap<u32, VirtualBlock>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct VirtualBlock {
     size: u32,
     committed: std::collections::HashSet<u32>,
@@ -3199,7 +3210,7 @@ const HEAP_ALIGN: u32 = 8;
 const HOST_VIRTUAL_BASE: u32 = 0x5400_0000;
 const HOST_VIRTUAL_END: u32 = 0x5f00_0000;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct LiveAllocation {
     size: u32,
     cpp: bool,
@@ -4150,6 +4161,7 @@ fn build_dynamic_exports(thunks: &[Thunk]) -> HashMap<u32, HashMap<String, u32>>
 }
 pub struct Process {
     pub image: LoadedImage,
+    pub executable_fingerprint: Option<[u8; 32]>,
     pub thunks: Vec<Thunk>,
     pub thunk_by_va: HashMap<u32, usize>,
     pub stack_top: u32,
@@ -4667,6 +4679,7 @@ impl Process {
         }
         Ok(Process {
             image,
+            executable_fingerprint: None,
             thunks,
             thunk_by_va,
             stack_top,
@@ -4900,6 +4913,14 @@ pub enum FrameAction {
     Stop,
 }
 
+/// Guest continuation between dispatch slices. The CPU's native PC can
+/// still refer to the import that just returned.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ResumePoint {
+    pub main_entry: u32,
+    pub pc: u32,
+}
+
 /// Callback that observes the framebuffer between dispatch slices.
 /// Used by the host-side frontend to display the rendered frame and
 /// pump window events.
@@ -4913,6 +4934,14 @@ pub trait FrameHook {
     /// kernel state and returns whether emulation should keep
     /// running.
     fn on_frame(&mut self, state: &mut KernelState) -> FrameAction;
+
+    /// An opt-in checkpoint acquires the device execution gate only when
+    /// requested, leaving the ordinary frame and input path unchanged.
+    fn checkpoint_requested(&mut self) -> bool {
+        false
+    }
+
+    fn on_checkpoint(&mut self, _cpu: &mut dyn Cpu, _process: &mut Process, _point: ResumePoint) {}
 }
 
 impl<F: FnMut(&mut KernelState) -> FrameAction> FrameHook for F {
@@ -5104,7 +5133,7 @@ pub fn run_main_loop_with_hook(
     dispatcher: &mut dyn Dispatcher,
     instruction_budget_per_slice: u64,
     max_slices: u64,
-    mut frame_hook: Option<&mut dyn FrameHook>,
+    frame_hook: Option<&mut dyn FrameHook>,
 ) -> Result<(), KernelError> {
     let thumb_mode = image_uses_thumb_entry(cpu, &process.image)?;
     let entry = process.image.entry_va() & !1;
@@ -5121,6 +5150,29 @@ pub fn run_main_loop_with_hook(
             pc = entry;
         }
     }
+    resume_main_loop(
+        cpu,
+        process,
+        dispatcher,
+        instruction_budget_per_slice,
+        max_slices,
+        frame_hook,
+        ResumePoint { main_entry, pc },
+    )
+}
+
+/// Resume after rebuilding the CPU, kernel, and emulated devices. Startup
+/// notification callbacks have already run and must not be delivered again.
+pub fn resume_main_loop(
+    cpu: &mut dyn Cpu,
+    process: &mut Process,
+    dispatcher: &mut dyn Dispatcher,
+    instruction_budget_per_slice: u64,
+    max_slices: u64,
+    mut frame_hook: Option<&mut dyn FrameHook>,
+    point: ResumePoint,
+) -> Result<(), KernelError> {
+    let ResumePoint { main_entry, mut pc } = point;
     let mut slice = 0u64;
     // Millisecond value already sitting in the tick page; see
     // [`native_thunks::refresh_tick_page`].
@@ -5669,6 +5721,10 @@ pub fn run_main_loop_with_hook(
                 process.state.sync_backlight();
                 process.state.sync_power_notifications();
                 let action = hook.on_frame(&mut process.state);
+                if !process.state.should_stop && hook.checkpoint_requested() {
+                    let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
+                    hook.on_checkpoint(cpu, process, ResumePoint { main_entry, pc });
+                }
                 last_presented_frame = process.state.framebuffer.frame_counter;
                 match action {
                     FrameAction::Stop => {
@@ -6598,7 +6654,7 @@ mod tests {
         }
     }
 
-    fn image_based_at(image_base: u32, text_size: u32) -> LoadedImage {
+    pub(super) fn image_based_at(image_base: u32, text_size: u32) -> LoadedImage {
         LoadedImage {
             source_path: "test".into(),
             machine: pocket_pe::machine::ARM,
@@ -7028,7 +7084,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MsgQueue {
     pub name: Option<String>,
     pub max_messages: u32,
@@ -7038,7 +7094,7 @@ pub struct MsgQueue {
 }
 
 /// State for a Windows CE semaphore.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct SemaphoreObject {
     pub count: u32,
     pub max_count: u32,
@@ -7062,7 +7118,7 @@ impl Drop for KernelState {
 }
 
 /// Synchronous dialog calls belong to the calling thread, not the process.
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DialogCallbackState {
     pub frame: Option<GuestCallFrame>,
     pub hwnd: u32,

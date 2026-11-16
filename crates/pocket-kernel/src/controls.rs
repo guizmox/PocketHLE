@@ -22,7 +22,7 @@ use crate::font;
 use crate::gdi::Surface;
 
 /// Which built-in window class a control was created from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ControlClass {
     Button,
     Edit,
@@ -103,7 +103,7 @@ const WS_DISABLED: u32 = 0x0800_0000;
 /// thing afterwards, which Solitaire does: it reads the panel's width
 /// back with `GetWindowRect` and `SetWindowPos`es it against the right
 /// edge of the screen.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DialogPanel {
     pub hwnd: u32,
     /// Top-left of the *window*, in screen coordinates. Children are
@@ -361,7 +361,7 @@ impl DialogPanel {
 }
 
 /// Column metadata for a report-mode list view.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ListColumn {
     pub title: String,
     pub width: i32,
@@ -370,7 +370,7 @@ pub struct ListColumn {
 }
 
 /// One built-in control owned by the HLE rather than by the guest.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChildWindow {
     /// Handle handed back to the guest from `CreateWindowExW`.
     pub hwnd: u32,
@@ -435,7 +435,7 @@ pub struct ChildWindow {
 }
 
 /// Native tab items keep guest application data separate from their labels.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TabItem {
     pub text: String,
     pub image: i32,
@@ -443,7 +443,7 @@ pub struct TabItem {
     pub state: u32,
     pub extra: Vec<u8>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TabState {
     pub items: Vec<TabItem>,
     pub selected: Option<usize>,
@@ -470,7 +470,7 @@ impl Default for TabState {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TabNotifyFrame {
     pub thread: usize,
     pub thunk: u32,
@@ -482,7 +482,7 @@ pub struct TabNotifyFrame {
     pub modal: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolbarState {
     pub buttons: Vec<[u32; 5]>,
     pub button_size: (i32, i32),
@@ -1995,7 +1995,7 @@ pub enum ControlAction {
 }
 
 /// Shell-owned common file dialog; caller buffers change only after acceptance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileDialog {
     pub thread: usize,
     pub thunk: u32,
@@ -2018,7 +2018,7 @@ pub struct FileDialog {
 }
 
 /// Every built-in control the guest has created, plus the focus.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Controls {
     /// Latest consumed stylus position in screen coordinates.
     pub cursor_position: (i32, i32),
