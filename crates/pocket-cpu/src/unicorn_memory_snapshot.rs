@@ -87,7 +87,21 @@ impl UnicornCpu {
     /// execution gate. Any shared mappings must first be supported by a
     /// checkpoint of the underlying WinCE section objects and their aliases.
     pub fn capture_arm_memory(&self) -> Result<ArmMemorySnapshot, CpuError> {
-        if self.arch != Arch::Arm || !self.shared_regions.is_empty() {
+        self.capture_arm_memory_with_mappings(&[])
+    }
+
+    pub(crate) fn capture_arm_memory_with_mappings(
+        &self,
+        mappings: &[(u32, u32)],
+    ) -> Result<ArmMemorySnapshot, CpuError> {
+        if self.arch != Arch::Arm
+            || self.shared_regions.len() != mappings.len()
+            || mappings.iter().any(|&(base, size)| {
+                self.shared_regions
+                    .get(&base)
+                    .is_none_or(|(mapped, _)| *mapped != size)
+            })
+        {
             return Err(CpuError::Unsupported(
                 "snapshot of this guest address space",
             ));
@@ -100,6 +114,12 @@ impl UnicornCpu {
             let base = u32::try_from(region.begin).map_err(memory_snapshot_error)?;
             let size =
                 usize::try_from(region.end - region.begin + 1).map_err(memory_snapshot_error)?;
+            if self.shared_regions.contains_key(&base) {
+                if self.shared_regions[&base].0 as usize != size {
+                    return Err(memory_snapshot_error("inconsistent shared region"));
+                }
+                continue;
+            }
             let mut bytes = Vec::new();
             bytes
                 .try_reserve_exact(size)
@@ -140,13 +160,21 @@ impl UnicornCpu {
             .collect::<Result<Vec<_>, _>>()?;
         let virtual_tlb = self.guest_map.as_ref().map(|map| {
             let map = map.borrow();
-            VirtualTlb {
+            let mut map = super::GuestMap {
                 regions: map.regions.clone(),
                 promoted_exec: map.promoted_exec.clone(),
+                protected: map.protected.clone(),
+            };
+            for &(base, size) in mappings {
+                map.remove(u64::from(base), u64::from(size));
+            }
+            VirtualTlb {
+                regions: map.regions,
+                promoted_exec: map.promoted_exec,
                 protected: map
                     .protected
-                    .iter()
-                    .map(|&(lo, hi, prot)| (lo, hi, prot.bits()))
+                    .into_iter()
+                    .map(|(lo, hi, prot)| (lo, hi, prot.bits()))
                     .collect(),
             }
         });

@@ -564,6 +564,76 @@ impl HandleTable {
             .imports
             .insert((pid, handle), file);
     }
+    pub(crate) fn snapshot_mapping_bindings(
+        &self,
+    ) -> Result<
+        (
+            Vec<(u32, Arc<crate::file_mapping::FileMapping>)>,
+            Vec<(String, u32)>,
+        ),
+        String,
+    > {
+        let domain = self.domain.lock().map_err(|_| "handle domain poisoned")?;
+        if domain.active.len() != 1 && !domain.mappings.is_empty() {
+            return Err("cannot capture mappings shared across processes".into());
+        }
+        let bindings = domain
+            .mapping_refs
+            .iter()
+            .filter(|((owner, _), _)| *owner == self.pid)
+            .map(|((_, handle), mapping)| (*handle, mapping.clone()))
+            .collect();
+        let names = domain
+            .mapping_names
+            .iter()
+            .filter_map(|(name, mapping)| {
+                mapping.upgrade().map(|mapping| (name.clone(), mapping.key))
+            })
+            .collect();
+        Ok((bindings, names))
+    }
+
+    pub(crate) fn restore_mapping_bindings(
+        &mut self,
+        mappings: &HashMap<u32, Arc<crate::file_mapping::FileMapping>>,
+        handles: &[(u32, u32)],
+        names: Vec<(String, u32)>,
+    ) -> Result<(), String> {
+        let mut domain = self.domain.lock().map_err(|_| "handle domain poisoned")?;
+        let mut refs = HashMap::new();
+        for &(handle, key) in handles {
+            let slot = (self.pid, handle);
+            if domain.entries.get(&slot) != Some(&Some(HandleObject::Mapping(key))) {
+                return Err("invalid saved section handle".into());
+            }
+            let mapping = mappings.get(&key).ok_or("missing saved section backing")?;
+            if refs.insert(slot, mapping.clone()).is_some() {
+                return Err("duplicate saved section handle".into());
+            }
+        }
+        if domain.entries.iter().any(|(slot, object)| {
+            matches!(object, Some(HandleObject::Mapping(_))) && !refs.contains_key(slot)
+        }) {
+            return Err("missing saved section handle".into());
+        }
+        for (name, key) in names {
+            let mapping = mappings.get(&key).ok_or("missing named section backing")?;
+            if domain
+                .mapping_names
+                .insert(name, Arc::downgrade(mapping))
+                .is_some()
+            {
+                return Err("duplicate saved section name".into());
+            }
+        }
+        domain.mappings = mappings
+            .iter()
+            .map(|(&key, mapping)| (key, Arc::downgrade(mapping)))
+            .collect();
+        domain.mapping_refs = refs;
+        Ok(())
+    }
+
     pub fn named_mapping(&self, name: &str) -> Option<Arc<crate::file_mapping::FileMapping>> {
         self.domain
             .lock()

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct KernelSnapshot {
     heap: HeapSnapshot,
     vfs: vfs::VfsFileSnapshot,
+    mappings: Option<file_mapping::MappingSnapshot>,
     handles: handles::HandleSnapshot,
     registry: registry::RegistryProcessSnapshot,
     audio: audio::AudioSnapshot,
@@ -141,7 +142,6 @@ impl KernelState {
                     || !self.process_launch_results.is_empty(),
                 "child process",
             ),
-            (!self.mapped_views.is_empty(), "mapped file view"),
             (
                 !self.internet.handles.is_empty() || self.internet.gprs_connected,
                 "network connection",
@@ -178,14 +178,29 @@ impl KernelState {
             let ram = ram.snapshot();
             (ram.total_pages, ram.store_pages)
         });
-        let handles = self.object_handles.capture_process_handles(detached)?;
+        let mut private_files = HashMap::new();
+        let mappings = self.mapped_views.capture_snapshot(
+            &self.vfs,
+            &self.object_handles,
+            &mut private_files,
+        )?;
+        let mapping_files = mappings
+            .as_ref()
+            .map(|mapping| mapping.file_handles())
+            .unwrap_or_default();
+        let handles = self
+            .object_handles
+            .capture_process_handles_with_mappings(detached, mappings.is_some())?;
         let mut schedule = self.capture_schedule();
         if detached {
             schedule.retain_process_objects(&handles);
         }
         Ok(KernelSnapshot {
             heap: self.heap.capture_snapshot(),
-            vfs: self.vfs.capture_file_snapshot()?,
+            vfs: self
+                .vfs
+                .capture_file_snapshot_with_mappings(&mapping_files, &private_files)?,
+            mappings,
             handles,
             registry: self.registry.capture_process_snapshot()?,
             audio: self.audio.capture_snapshot()?,
@@ -352,7 +367,23 @@ impl KernelState {
 impl KernelSnapshot {
     /// The receiving state is newly configured by normal launch, including
     /// mounts and the registry backing. Discard it if restoration fails.
-    pub fn restore(self, state: &mut KernelState) -> Result<(), String> {
+    pub fn restore(
+        self,
+        state: &mut KernelState,
+    ) -> Result<Option<file_mapping::MappingSnapshot>, String> {
+        if self.mappings.is_none()
+            && self
+                .handles
+                .owned_objects()
+                .any(|object| matches!(object, handles::HandleObject::Mapping(_)))
+        {
+            return Err("checkpoint is missing its WinCE mappings".into());
+        }
+        let mapping_files = self
+            .mappings
+            .as_ref()
+            .map(|mapping| mapping.file_handles())
+            .unwrap_or_default();
         let ram = state.memory_division.clone();
         let store_pages = match (self.memory_profile, ram.as_ref()) {
             (None, None) => None,
@@ -372,7 +403,9 @@ impl KernelSnapshot {
             }
         }
         state.heap = self.heap.restore(ram).map_err(|error| error.to_string())?;
-        state.vfs.restore_file_snapshot(self.vfs)?;
+        state
+            .vfs
+            .restore_file_snapshot_with_mappings(self.vfs, &mapping_files)?;
         state.registry.restore_process_snapshot(self.registry);
         state.audio = self.audio.restore()?;
         state.object_handles = self.handles.restore(&state.vfs, &state.audio)?;
@@ -481,6 +514,6 @@ impl KernelSnapshot {
         state.window_menus = self.window_menus;
         state.next_menu_handle = self.next_menu_handle;
         state.sub_menus = self.sub_menus;
-        Ok(())
+        Ok(self.mappings)
     }
 }

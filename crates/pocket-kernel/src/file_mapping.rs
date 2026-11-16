@@ -11,6 +11,10 @@ use pocket_cpu::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
+#[path = "file_mapping_snapshot.rs"]
+mod snapshot;
+pub use snapshot::{MappingContents, MappingSnapshot};
+
 pub struct FileMapping {
     pub key: u32,
     pub size: u32,

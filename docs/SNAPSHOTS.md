@@ -29,7 +29,7 @@ the writer starts.
 | Session header | Eight-byte magic `PHSECT01`, followed by one zlib stream. |
 | Decompressed stream | Little-endian 16-bit section count, then each section's 16-bit tag, 16-bit version, 64-bit byte length and fixed-integer bincode payload. |
 
-Session identity and continuation, ARM execution, WinCE kernel, fixed-function
+Session identity and continuation, ARM execution, WinCE kernel (including mapped sections), fixed-function
 EGL and media are always present. Programmable EGL, HSS and pending input
 releases are emitted when applicable. The high bit of the tag marks a required
 section. The reader checks for duplicate tags, bounds each section read and
@@ -68,8 +68,8 @@ guest addresses, permissions, lazy image residency and deferred memory ranges.
 | Audio and media | Mixer queues and voice cursors, HSS speaker/channel/clip state, and idle DirectShow graphs. |
 
 Unsupported live resources cause capture to fail with a diagnostic. Current gaps
-include shared or transferred process handles, file mappings, VFS RAM files and
-volume handles, Bluetooth COM ports, host serial and network connections,
+include shared or transferred process handles, mappings across processes, VFS
+RAM files and volume handles, Bluetooth COM ports, host serial and network connections,
 cryptography objects, database cursors, MSXML and SDL state. Active microphone
 capture and DirectShow graphs with loaded media also block capture.
 
@@ -82,6 +82,33 @@ when the API supports duplication.
 [VFS resources](../crates/pocket-kernel/src/vfs_snapshot.rs) ·
 [Scheduler](../crates/pocket-kernel/src/schedule_snapshot.rs) ·
 [Kernel orchestration](../crates/pocket-kernel/src/kernel_snapshot.rs)
+
+## Section objects and mapped views
+
+A section can stay alive through a mapped view after the guest closes its
+section handle. PocketHLE captures each section of the saved process once and
+records its handle aliases, name and views. Views retain their exact guest
+address, file offset, length and protection. If a view alone retains the
+original file description, the VFS encodes a private description and releases
+its temporary handle after reopening the backing.
+
+ARM capture checks that the kernel accounts for each shared CPU region. The
+kernel records the backing bytes and host resource metadata in the
+WinCE section. Restore reopens the original mounted file with its saved share
+contract or recreates an anonymous allocation. Each restored view and ordinary
+file access share that backing. The restore checks the path and size of mapped
+files and checks the contents of read-only sections. A successful restore
+rewinds the captured byte range of writable mapped files on disk. PocketHLE
+copies these bytes after validating and rebuilding the rest of the session.
+The capture budget for section backing bytes is 256 MiB.
+
+Cross-process mappings and VFS RAM file mappings still prevent capture.
+Ordinary open files outside a mapping retain the existing size and timestamp
+checks. Test alias visibility, read-only protection, view lifetime after closing
+handles, and a rejected restore that leaves the mapped file content intact.
+[Mapping snapshots](../crates/pocket-kernel/src/file_mapping_snapshot.rs) ·
+[Section objects and views](../crates/pocket-kernel/src/file_mapping.rs) ·
+[VFS mapping leases](../crates/pocket-kernel/src/vfs_mapping.rs)
 
 ## Graphics and performance
 

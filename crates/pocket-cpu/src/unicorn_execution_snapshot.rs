@@ -39,9 +39,17 @@ impl UnicornCpu {
         &mut self,
         continuation: u32,
     ) -> Result<ArmExecutionSnapshot, CpuError> {
+        self.capture_arm_execution_with_mappings(continuation, &[])
+    }
+
+    pub fn capture_arm_execution_with_mappings(
+        &mut self,
+        continuation: u32,
+        mappings: &[(u32, u32)],
+    ) -> Result<ArmExecutionSnapshot, CpuError> {
         let mut registers = self.capture_arm_registers()?;
         registers.set_continuation(continuation);
-        let memory = self.capture_arm_memory()?;
+        let memory = self.capture_arm_memory_with_mappings(mappings)?;
         let hooks = self
             .code_hooks
             .iter()

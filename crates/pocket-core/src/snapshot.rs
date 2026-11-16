@@ -84,7 +84,10 @@ impl SessionSnapshot {
         let kernel_time = started.elapsed();
         let egl = pocket_winceapi::gles::capture_egl_session().map_err(anyhow::Error::msg)?;
         let graphics_time = started.elapsed() - kernel_time;
-        let cpu = cpu.capture_arm_execution(point.pc)?;
+        let cpu = cpu.capture_arm_execution_with_mappings(
+            point.pc,
+            &process.state.mapped_views.snapshot_ranges(),
+        )?;
         log::debug!(
             "Snapshot capture: kernel {kernel_time:?}, EGL {graphics_time:?}, ARM {:?}",
             started.elapsed() - kernel_time - graphics_time
@@ -198,7 +201,7 @@ impl SessionSnapshot {
             match (id, version) {
                 (SESSION, 1) => session = Some(read_section(&mut section)?),
                 (ARM, 1) => cpu = Some(read_section(&mut section)?),
-                (KERNEL, 1) => kernel = Some(read_section(&mut section)?),
+                (KERNEL, 2) => kernel = Some(read_section(&mut section)?),
                 (EGL_FIXED, 1) => egl = Some(read_section(&mut section)?),
                 (MEDIA, 1) => media = Some(read_section(&mut section)?),
                 (EGL_PROGRAMMABLE, EGL_PROGRAMMABLE_VERSION) => {
@@ -265,6 +268,8 @@ fn write_section(
     output.write_all(&id.to_le_bytes())?;
     let version = if id == EGL_PROGRAMMABLE {
         EGL_PROGRAMMABLE_VERSION
+    } else if id == KERNEL {
+        2
     } else {
         1
     };
@@ -308,12 +313,16 @@ impl Emulator {
         // Release resident bootstrap image pages before charging the restored
         // image and heap to the configured guest RAM pool.
         self.cpu = Box::new(StubCpu::new());
-        saved
+        let mappings = saved
             .kernel
             .restore(&mut process.state)
             .map_err(anyhow::Error::msg)?;
-        let (cpu, pc) = saved.cpu.restore(process.state.heap.image_page_budget())?;
+        let (mut cpu, pc) = saved.cpu.restore(process.state.heap.image_page_budget())?;
         anyhow::ensure!(pc == saved.point.pc, "snapshot continuation mismatch");
+        let contents = mappings
+            .map(|mappings| mappings.restore(&mut process.state, &mut cpu))
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
         saved.egl.restore().map_err(anyhow::Error::msg)?;
         pocket_winceapi::gles2::restore_snapshot(saved.programmable).map_err(anyhow::Error::msg)?;
         saved.media.restore().map_err(anyhow::Error::msg)?;
@@ -324,6 +333,9 @@ impl Emulator {
             .state
             .restore_snapshot_input(saved.input_releases)
             .map_err(anyhow::Error::msg)?;
+        if let Some(contents) = contents {
+            contents.install().map_err(anyhow::Error::msg)?;
+        }
         process.thunks = saved.thunks;
         process.thunk_by_va = saved.thunk_by_va;
         self.cpu = Box::new(cpu);
@@ -410,6 +422,129 @@ mod tests {
         emulator.process.as_mut().unwrap().executable_fingerprint = Some(fingerprint);
         emulator.max_slices = 8;
         emulator
+    }
+
+    #[test]
+    fn mapped_file_checkpoint_restores_aliases_and_defers_writeback_until_validated() {
+        use pocket_cpu::Prot;
+        use pocket_kernel::file_mapping::FileMapping;
+        use pocket_kernel::handles::HandleObject;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("section.bin");
+        std::fs::write(&path, vec![0u8; 8192]).unwrap();
+        let mut source = fixture(3);
+        let state = &mut source.process.as_mut().unwrap().state;
+        state.vfs.mount_save_dir("\\Game\\", directory.path());
+        let file = state
+            .vfs
+            .open_file("\\Game\\section.bin", 3, 3, 3, false, 0)
+            .unwrap()
+            .handle;
+        state.vfs.mark_for_mapping(file);
+        let handle = state.object_handles.reserve().unwrap();
+        let mapping = FileMapping::file(
+            handle,
+            8192,
+            true,
+            state.vfs.mapping_backing(file, 8192, true).unwrap(),
+        );
+        state
+            .object_handles
+            .insert_mapping(handle, Some("shared-section".into()), mapping.clone());
+        let alias = state
+            .object_handles
+            .duplicate(HandleObject::Mapping(handle))
+            .unwrap();
+        state.vfs.attach_section_file(handle, file);
+        let first = unsafe {
+            state
+                .mapped_views
+                .map(source.cpu.as_mut(), mapping.clone(), 2, 0, 0)
+        }
+        .unwrap();
+        let second = unsafe {
+            state
+                .mapped_views
+                .map(source.cpu.as_mut(), mapping, 4, 4096, 0)
+        }
+        .unwrap();
+        source.cpu.write_mem(first + 4096, b"checkpoint").unwrap();
+        let point = ResumePoint {
+            main_entry: 0x11000,
+            pc: 0x11000,
+        };
+        let snapshot =
+            SessionSnapshot::capture(source.cpu.as_mut(), source.process.as_mut().unwrap(), point)
+                .unwrap();
+        source.cpu.write_mem(first + 4096, b"later data").unwrap();
+        source
+            .process
+            .as_ref()
+            .unwrap()
+            .state
+            .mapped_views
+            .flush(first + 4096, 10)
+            .unwrap();
+        drop(source);
+
+        let mut encoded = Vec::new();
+        snapshot.write(&mut encoded).unwrap();
+        assert_eq!(&std::fs::read(&path).unwrap()[4096..4106], b"later data");
+        let mut invalid = SessionSnapshot::read(encoded.as_slice()).unwrap();
+        invalid
+            .input_releases
+            .push(pocket_kernel::InputEvent::KeyDown { vk: 0x27 });
+        let mut rejected = fixture(3);
+        rejected
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .vfs
+            .mount_save_dir("\\Game\\", directory.path());
+        assert!(rejected.restore_snapshot(invalid).is_err());
+        drop(rejected);
+        assert_eq!(&std::fs::read(&path).unwrap()[4096..4106], b"later data");
+
+        let mut destination = fixture(3);
+        destination
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .vfs
+            .mount_save_dir("\\Game\\", directory.path());
+        destination
+            .restore_snapshot(SessionSnapshot::read(encoded.as_slice()).unwrap())
+            .unwrap();
+        assert_eq!(destination.cpu.read_mem(second, 10).unwrap(), b"checkpoint");
+        assert!(destination
+            .cpu
+            .check_guest_access(second, 1, Prot::WRITE)
+            .is_err());
+        let state = &mut destination.process.as_mut().unwrap().state;
+        let mapping = state.object_handles.mapping(handle).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &mapping,
+            &state.object_handles.mapping(alias).unwrap()
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &mapping,
+            &state
+                .object_handles
+                .named_mapping("shared-section")
+                .unwrap()
+        ));
+        assert_eq!(state.vfs.take_section_file(handle), Some(file));
+        assert!(state.object_handles.close(handle).is_some());
+        assert!(state.vfs.close(file));
+        state
+            .mapped_views
+            .unmap(destination.cpu.as_mut(), first)
+            .unwrap();
+        assert_eq!(destination.cpu.read_mem(second, 10).unwrap(), b"checkpoint");
+        assert_eq!(&std::fs::read(path).unwrap()[4096..4106], b"checkpoint");
     }
 
     #[test]

@@ -155,14 +155,26 @@ struct FileDescription {
     share: u32,
     append: bool,
     text_mode: bool,
+    for_mapping: bool,
 }
 
 impl Vfs {
     /// Save a single process's regular file handles. Their backing files must
     /// remain mounted. Description identity preserves duplicate-handle cursors.
     pub fn capture_file_snapshot(&self) -> Result<VfsFileSnapshot, String> {
+        self.capture_file_snapshot_with_mappings(&HashSet::new(), &HashMap::new())
+    }
+
+    pub(crate) fn capture_file_snapshot_with_mappings(
+        &self,
+        mapping_files: &HashSet<u32>,
+        private: &HashMap<u32, Arc<Mutex<OpenFile>>>,
+    ) -> Result<VfsFileSnapshot, String> {
         for (present, kind) in [
-            (!self.section_files.is_empty(), "file mapping"),
+            (
+                mapping_files.is_empty() && !self.section_files.is_empty(),
+                "file mapping",
+            ),
             (!self.ram_handles.is_empty(), "RAM file handle"),
             (!self.volumes.is_empty(), "Vol: handle"),
             (
@@ -236,7 +248,7 @@ impl Vfs {
             );
         }
         let mut ids: HashMap<*const Mutex<OpenFile>, Vec<u32>> = HashMap::new();
-        for (&handle, description) in &self.handles {
+        for (&handle, description) in self.handles.iter().chain(private) {
             ids.entry(Arc::as_ptr(description))
                 .or_default()
                 .push(handle);
@@ -245,12 +257,16 @@ impl Vfs {
             .into_values()
             .map(|mut handles| {
                 handles.sort_unstable();
-                let mut file = self.handles[&handles[0]]
+                let mut file = self
+                    .handles
+                    .get(&handles[0])
+                    .or_else(|| private.get(&handles[0]))
+                    .ok_or("missing snapshot file description")?
                     .lock()
                     .map_err(|_| "VFS file lock poisoned")?;
                 let lease = file.lease.as_ref().ok_or("missing WinCE file lease")?;
-                if file.for_mapping || lease.mapped.load(std::sync::atomic::Ordering::Relaxed) != 0
-                {
+                let pinned = lease.mapped.load(std::sync::atomic::Ordering::Relaxed) != 0;
+                if pinned && !handles.iter().any(|id| mapping_files.contains(id)) {
                     return Err("checkpoint contains a mapped file".into());
                 }
 
@@ -281,6 +297,7 @@ impl Vfs {
                     share: lease.share,
                     append: file.append,
                     text_mode: file.text_mode,
+                    for_mapping: file.for_mapping,
                 };
                 saved.cursor = if let Some(reader) = file.stdio_reader.as_mut() {
                     reader.stream_position()
@@ -320,6 +337,14 @@ impl Vfs {
     /// Reopen without creating or truncating any host file. The destination
     /// has fresh handles and mounts configured by normal game startup.
     pub fn restore_file_snapshot(&mut self, snapshot: VfsFileSnapshot) -> Result<(), String> {
+        self.restore_file_snapshot_with_mappings(snapshot, &HashSet::new())
+    }
+
+    pub(crate) fn restore_file_snapshot_with_mappings(
+        &mut self,
+        snapshot: VfsFileSnapshot,
+        mapping_files: &HashSet<u32>,
+    ) -> Result<(), String> {
         if !self.open_handles().is_empty()
             || snapshot.next_handle < HANDLE_BASE
             || snapshot.next_handle == INVALID_HANDLE_VALUE
@@ -375,7 +400,8 @@ impl Vfs {
                 .open(&path)
                 .map_err(io_message)?;
             let meta = file.metadata().map_err(io_message)?;
-            if meta.len() != record.length || meta.modified().ok() != record.modified {
+            let mapped = record.handles.iter().any(|id| mapping_files.contains(id));
+            if meta.len() != record.length || (!mapped && meta.modified().ok() != record.modified) {
                 return Err(format!(
                     "saved file changed since checkpoint: {}",
                     path.display()
@@ -395,7 +421,7 @@ impl Vfs {
                 append: record.append,
                 text_mode: record.text_mode,
                 stdio_reader: None,
-                for_mapping: false,
+                for_mapping: record.for_mapping,
             }));
             for id in record.handles {
                 opened.insert(id, description.clone());

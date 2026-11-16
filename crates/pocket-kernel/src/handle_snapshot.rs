@@ -27,11 +27,19 @@ impl HandleTable {
     }
 
     pub(crate) fn capture_process_handles(&self, detached: bool) -> Result<HandleSnapshot, String> {
+        self.capture_process_handles_with_mappings(detached, false)
+    }
+
+    pub(crate) fn capture_process_handles_with_mappings(
+        &self,
+        detached: bool,
+        mappings: bool,
+    ) -> Result<HandleSnapshot, String> {
         let domain = self.domain.lock().map_err(|_| "handle domain poisoned")?;
         let pid = self.pid;
         if (!detached && domain.active.len() != 1)
             || !domain.active.contains(&pid)
-            || domain.mapping_refs.keys().any(|&(owner, _)| owner == pid)
+            || (!mappings && domain.mapping_refs.keys().any(|&(owner, _)| owner == pid))
             || domain.imports.keys().any(|&(owner, _)| owner == pid)
             || domain.held_start.contains(&pid)
             || domain.process_kills.contains_key(&pid)
@@ -189,6 +197,7 @@ impl HandleSnapshot {
                     | HandleObject::Mutex(_)
                     | HandleObject::File(_)
                     | HandleObject::Device(_)
+                    | HandleObject::Mapping(_)
             )
         };
         if self.pid == 0

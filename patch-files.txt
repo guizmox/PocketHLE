@@ -1,3 +1,11 @@
+crates/pocket-core/src/snapshot.rs
+crates/pocket-cpu/src/unicorn_execution_snapshot.rs
+crates/pocket-cpu/src/unicorn_memory_snapshot.rs
+crates/pocket-kernel/src/file_mapping.rs
+crates/pocket-kernel/src/file_mapping_snapshot.rs
+crates/pocket-kernel/src/handle_snapshot.rs
+crates/pocket-kernel/src/handles.rs
+crates/pocket-kernel/src/kernel_snapshot.rs
+crates/pocket-kernel/src/vfs_mapping.rs
+crates/pocket-kernel/src/vfs_snapshot.rs
 docs/SNAPSHOTS.md
-docs/FRONTENDS.md
-docs/README.md
