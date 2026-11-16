@@ -22,7 +22,7 @@ pub(super) struct Config {
 }
 impl Config {
     pub(super) fn handles() -> &'static [u32] {
-        let format = SURFACES.with(|s| s.borrow().surface_format);
+        let format = SURFACES.with(|s| s.borrow().effective_surface_format());
         match (format, goforce_5500_enabled()) {
             (EglSurfaceFormat::Rgb565Only, _) => &[CONFIG_HANDLE],
             (EglSurfaceFormat::Rgba8888Only, true) => {
@@ -255,16 +255,27 @@ pub(super) fn read_pairs(ctx: &mut CallCtx<'_>, mut ptr: u32) -> Result<Vec<(u32
 mod tests {
     use super::*;
     #[test]
-    fn goforce_driver_preserves_depth_for_both_color_configurations() {
+    fn goforce_4500_offers_only_rgb565_for_stuntcar_request() {
         let _g = super::super::tests::guard();
         reset_for_test(8, 8);
         set_gizmondo_goforce_driver(true);
-        for handle in [CONFIG_HANDLE, CONFIG_RGBA_HANDLE] {
-            let config = Config::from_handle(handle).unwrap();
-            assert_eq!(config.attribute(EGL_DEPTH_SIZE), Some(16));
-            assert_eq!(config.matches(&[(EGL_DEPTH_SIZE, 16)]), Ok(true));
-        }
+        assert_eq!(Config::handles(), &[CONFIG_HANDLE]);
+        let config = Config::from_handle(CONFIG_HANDLE).unwrap();
+        assert_eq!(config.attribute(EGL_ALPHA_SIZE), Some(0));
+        assert_eq!(
+            config.matches(&[
+                (EGL_RED_SIZE, 5),
+                (EGL_GREEN_SIZE, 6),
+                (EGL_BLUE_SIZE, 5),
+                (EGL_ALPHA_SIZE, DONT_CARE),
+                (EGL_DEPTH_SIZE, 16),
+                (EGL_STENCIL_SIZE, DONT_CARE),
+            ]),
+            Ok(true)
+        );
+        assert!(Config::from_handle(CONFIG_RGBA_HANDLE).is_none());
         set_gizmondo_goforce_driver(false);
+        assert!(Config::from_handle(CONFIG_RGBA_HANDLE).is_some());
     }
 
     #[test]

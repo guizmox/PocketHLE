@@ -267,7 +267,7 @@ platforms and does not require a device profile or game-specific detection.
 
 ## EGL surfaces and shared objects
 
-By default, configuration 1 is RGB565 and configuration 2 is RGBA8888.
+On Pocket PC in Auto, configuration 1 is RGB565 and configuration 2 is RGBA8888.
 Both support windows and pbuffers; only RGB565 supports native GDI pixmaps.
 An application may request WINDOW_BIT|PBUFFER_BIT with alpha=8 while creating
 only an offscreen image. Removing RGBA8 window capability prevents such clients
@@ -281,7 +281,7 @@ Queries, configuration IDs and readback describe the actual attachments.
 Incompatible context/surface pairs return EGL_BAD_MATCH.
 
 The per-game **Graphics → OpenGL ES surface format** setting is available
-for Pocket PC and Gizmondo on desktop and Android. **Auto** keeps the default
+for Pocket PC on desktop and Android. **Auto** keeps the default
 catalog and ordering. **RGB565 only** limits EGL to configuration 1. **RGBA8888
 only** offers the RGBA configurations supported by the current profile. A
 forced format can leave some requests without a compatible configuration.
@@ -293,10 +293,11 @@ choice, and games launched by the same compilation inherit its settings.
 The setting affects the OpenGL ES 1.x EGL catalog in software and GPU modes.
 Direct GAPI/GX/GDI memory and OpenGL ES 2.0 are independent of this setting.
 
-For Stuntcar Extreme in Fathammer Classics, **RGB565 only** makes the game
-capture its HUD from an alpha-less surface. RGBA readback reports alpha 255
-on RGB565, preserving the blue color key used to make the text background
-transparent.
+The Gizmondo GoForce 4500 driver exposes RGB565 color only, independently of
+Pocket PC settings. PocketHLE keeps its existing RGB565 depth configuration.
+Stuntcar Extreme in Fathammer Classics uses RGBA readback to build its HUD
+textures. On RGB565, readback reports alpha 255 and preserves the blue color
+key used to make the text background transparent.
 
 EGL share groups own named textures, buffers and NV program bodies. Bindings,
 constants, enables and texture object zero are local to each context. Bound

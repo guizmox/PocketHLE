@@ -563,7 +563,9 @@ impl Runner {
             game.settings.screen.resolve_image(metadata.as_ref())
         };
         emu.set_screen_size(screen_w, screen_h);
-        emu.set_egl_surface_format(game.settings.egl_surface_format);
+        if !is_gizmondo {
+            emu.set_egl_surface_format(game.settings.egl_surface_format);
+        }
         emu.set_pocketpc_gapi_columns(if is_gizmondo {
             (screen_w, screen_h) == (320, 240)
                 && metadata

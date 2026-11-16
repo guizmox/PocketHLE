@@ -183,6 +183,7 @@ class GameSettingsActivity : HostKeyActivity() {
             }
             findPreference<androidx.preference.PreferenceCategory>("graphics_category")!!
                 .addPreference(ListPreference(requireContext()).apply {
+                    isVisible = !NativeBridge.isGizmondoGame(rootDir, gameId)
                     key = "egl_surface_format"
                     title = "OpenGL ES surface format"
                     isPersistent = false

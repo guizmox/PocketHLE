@@ -163,6 +163,7 @@ struct EglImage {
 }
 struct EglSurfaces {
     initialized: bool,
+    goforce_4500: bool,
     goforce_5500: bool,
     surface_format: EglSurfaceFormat,
     config_locked: bool,
@@ -186,6 +187,14 @@ struct EglSurfaces {
     window_issued: bool,
 }
 impl EglSurfaces {
+    fn effective_surface_format(&self) -> EglSurfaceFormat {
+        if self.goforce_4500 {
+            EglSurfaceFormat::Rgb565Only
+        } else {
+            self.surface_format
+        }
+    }
+
     fn new() -> Self {
         let mut images = HashMap::new();
         images.insert(
@@ -204,6 +213,7 @@ impl EglSurfaces {
         );
         Self {
             initialized: false,
+            goforce_4500: false,
             goforce_5500: false,
             surface_format: EglSurfaceFormat::Auto,
             config_locked: false,
@@ -332,7 +342,9 @@ pub fn set_gizmondo_goforce_driver(enabled: bool) {
         }
     });
     SURFACES.with(|s| {
-        for group in s.borrow_mut().groups.values_mut() {
+        let mut s = s.borrow_mut();
+        s.goforce_4500 = enabled;
+        for group in s.groups.values_mut() {
             group.set_goforce_profile(enabled);
         }
     });
@@ -2120,7 +2132,7 @@ fn egl_initialize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         } else {
             "software"
         }),
-        SURFACES.with(|s| match s.borrow().surface_format {
+        SURFACES.with(|s| match s.borrow().effective_surface_format() {
             EglSurfaceFormat::Auto => "RGB565 + RGBA8888",
             EglSurfaceFormat::Rgb565Only => "RGB565 only",
             EglSurfaceFormat::Rgba8888Only => "RGBA8888 only",

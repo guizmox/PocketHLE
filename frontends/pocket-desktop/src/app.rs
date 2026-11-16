@@ -3406,30 +3406,30 @@ impl PocketLauncher {
                             crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_gapi_columns, true, "Rotated LCD columns");
                         }).response.on_hover_text("Changes the physical layout of direct framebuffer memory. Use columns for software designed for a rotated LCD. Applies on next launch.");
                     ui.end_row();
+                    use pocket_library::EglSurfaceFormat::{Auto, Rgb565Only, Rgba8888Only};
+                    let formats = [
+                        (Auto, "Auto (RGB565 + RGBA8888)"),
+                        (Rgb565Only, "RGB565 only"),
+                        (Rgba8888Only, "RGBA8888 only"),
+                    ];
+                    let label = formats
+                        .iter()
+                        .find(|(format, _)| *format == draft.egl_surface_format)
+                        .map_or("Auto", |(_, label)| *label);
+                    ui.label("OpenGL ES surface format");
+                    crate::controller_ui::ComboBox::from_id_source("egl_surface_format")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            for (format, label) in formats {
+                                crate::controller_ui::selectable_value(
+                                    ui, &mut draft.egl_surface_format, format, label,
+                                );
+                            }
+                        })
+                        .response
+                        .on_hover_text("Controls the formats offered to OpenGL ES 1.x games. Restart the game to apply.");
+                    ui.end_row();
                 }
-                use pocket_library::EglSurfaceFormat::{Auto, Rgb565Only, Rgba8888Only};
-                let formats = [
-                    (Auto, "Auto (RGB565 + RGBA8888)"),
-                    (Rgb565Only, "RGB565 only"),
-                    (Rgba8888Only, "RGBA8888 only"),
-                ];
-                let label = formats
-                    .iter()
-                    .find(|(format, _)| *format == draft.egl_surface_format)
-                    .map_or("Auto", |(_, label)| *label);
-                ui.label("OpenGL ES surface format");
-                crate::controller_ui::ComboBox::from_id_source("egl_surface_format")
-                    .selected_text(label)
-                    .show_ui(ui, |ui| {
-                        for (format, label) in formats {
-                            crate::controller_ui::selectable_value(
-                                ui, &mut draft.egl_surface_format, format, label,
-                            );
-                        }
-                    })
-                    .response
-                    .on_hover_text("Controls the formats offered to OpenGL ES 1.x games. Restart the game to apply.");
-                ui.end_row();
             });
         ui.add_space(10.0);
         ui.separator();
