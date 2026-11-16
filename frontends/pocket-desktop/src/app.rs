@@ -3398,20 +3398,6 @@ impl PocketLauncher {
                     ui.end_row();
                 }
                 if !is_gizmondo {
-                    ui.label("OpenGL ES surface format");
-                    crate::controller_ui::ComboBox::from_id_source("pocketpc_egl_surface_format")
-                        .selected_text(if draft.pocketpc_egl_rgba8888_only { "RGBA8888 only" } else { "Default (RGB565 + RGBA8888)" })
-                        .show_ui(ui, |ui| {
-                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_egl_rgba8888_only, false, "Default (RGB565 + RGBA8888)");
-                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_egl_rgba8888_only, true, "RGBA8888 only");
-                        });
-                    ui.end_row();
-                    ui.label("");
-                    ui.vertical(|ui| {
-                        ui.set_max_width(380.0);
-                        ui.add(egui::Label::new("Default lets the game choose 16-bit or 32-bit surfaces. Try RGBA8888 only if water or other effects show incorrect textures. Games that require 16-bit surfaces may not start. Applies to software and GPU rendering. Restart the game to apply.").wrap(true));
-                    });
-                    ui.end_row();
                     ui.label("GAPI display compatibility");
                     crate::controller_ui::ComboBox::from_id_source("pocketpc_gapi_layout")
                         .selected_text(if draft.pocketpc_gapi_columns { "Rotated LCD columns" } else { "Linear scanlines (default)" })
@@ -3421,6 +3407,29 @@ impl PocketLauncher {
                         }).response.on_hover_text("Changes the physical layout of direct framebuffer memory. Use columns for software designed for a rotated LCD. Applies on next launch.");
                     ui.end_row();
                 }
+                use pocket_library::EglSurfaceFormat::{Auto, Rgb565Only, Rgba8888Only};
+                let formats = [
+                    (Auto, "Auto (RGB565 + RGBA8888)"),
+                    (Rgb565Only, "RGB565 only"),
+                    (Rgba8888Only, "RGBA8888 only"),
+                ];
+                let label = formats
+                    .iter()
+                    .find(|(format, _)| *format == draft.egl_surface_format)
+                    .map_or("Auto", |(_, label)| *label);
+                ui.label("OpenGL ES surface format");
+                crate::controller_ui::ComboBox::from_id_source("egl_surface_format")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for (format, label) in formats {
+                            crate::controller_ui::selectable_value(
+                                ui, &mut draft.egl_surface_format, format, label,
+                            );
+                        }
+                    })
+                    .response
+                    .on_hover_text("Controls the formats offered to OpenGL ES 1.x games. Restart the game to apply.");
+                ui.end_row();
             });
         ui.add_space(10.0);
         ui.separator();

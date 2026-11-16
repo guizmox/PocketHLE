@@ -280,25 +280,23 @@ Omitted, zero and DONT_CARE components do not affect that color preference.
 Queries, configuration IDs and readback describe the actual attachments.
 Incompatible context/surface pairs return EGL_BAD_MATCH.
 
-Each PocketPC game's **Graphics → OpenGL ES surface format** offers **Default
-(RGB565 + RGBA8888)** and **RGBA8888 only** on desktop and Android. The persisted
-`pocketpc_egl_rgba8888_only` boolean defaults to false. The opt-in profile exposes
-only configuration 2 consistently through enumeration, selection, queries and
-creation; configuration 1 then returns EGL_BAD_CONFIG. It keeps RGBA8 windows
-and pbuffers available and does not advertise EGL pixmaps. This can help clients
-whose offscreen and onscreen format choices otherwise take incompatible client
-state-cache paths. It does not repair the client's cache or change AR10/AR11
-arithmetic, and is not selected by game name, executable or shader signature.
+The per-game **Graphics → OpenGL ES surface format** setting is available
+for Pocket PC and Gizmondo on desktop and Android. **Auto** keeps the default
+catalog and ordering. **RGB565 only** limits EGL to configuration 1. **RGBA8888
+only** offers the RGBA configurations supported by the current profile. A
+forced format can leave some requests without a compatible configuration.
+Existing Pocket PC **RGBA8888 only** choices migrate to the new setting.
 
-The choice is fixed before the first eglInitialize and stays fixed through
-termination/reinitialization; suspended parent sessions retain their own choice.
-A new session resets to the default. Both frontends apply it only to PocketPC,
-in software and GPU modes. CLI launches retain the default. There is no per-draw
-profile branch or pixel comparison. Games requiring an exact RGB565 EGL format
-or an EGL pixmap may fail with this option enabled; alpha-capable surfaces can
-also enable different guest rendering passes and affect performance. Keep the
-default unless needed. Direct GAPI/GX/GDI RGB565 memory and presentation are not
-changed by the EGL catalog choice.
+The format is fixed before the first eglInitialize and remains fixed across
+termination and reinitialization. Suspended parent sessions retain their own
+choice, and games launched by the same compilation inherit its settings.
+The setting affects the OpenGL ES 1.x EGL catalog in software and GPU modes.
+Direct GAPI/GX/GDI memory and OpenGL ES 2.0 are independent of this setting.
+
+For Stuntcar Extreme in Fathammer Classics, **RGB565 only** makes the game
+capture its HUD from an alpha-less surface. RGBA readback reports alpha 255
+on RGB565, preserving the blue color key used to make the text background
+transparent.
 
 EGL share groups own named textures, buffers and NV program bodies. Bindings,
 constants, enables and texture object zero are local to each context. Bound

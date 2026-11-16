@@ -161,8 +161,8 @@ impl Emulator {
     }
 
     /// Per-session EGL format profile; configure after loading, before guest execution.
-    pub fn set_egl_rgba8888_only(&mut self, enabled: bool) {
-        pocket_winceapi::gles::set_egl_rgba8888_only(enabled);
+    pub fn set_egl_surface_format(&mut self, format: pocket_kernel::EglSurfaceFormat) {
+        pocket_winceapi::gles::set_egl_surface_format(format);
     }
 
     /// Halt the emulator the first time an unimplemented API is hit.

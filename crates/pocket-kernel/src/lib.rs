@@ -50,6 +50,7 @@ pub mod dll_lifecycle;
 pub mod file_mapping;
 pub mod font;
 pub mod framebuffer;
+
 pub mod gapi;
 pub mod gdi;
 pub mod gps;
@@ -111,6 +112,16 @@ pub const DEFAULT_STACK_SIZE: u32 = 0x40000;
 /// Default top of stack — chosen so that ARM-style descending stacks
 /// stay below the thunk region.
 pub const DEFAULT_STACK_TOP: u32 = 0x6000_0000;
+
+/// Formats advertised to OpenGL ES 1.x clients by the EGL bridge.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EglSurfaceFormat {
+    #[default]
+    Auto,
+    Rgb565Only,
+    Rgba8888Only,
+}
 
 /// Base of the WinCE kernel callback / trap region. Real Pocket PC
 /// kernels publish a sea of small syscall trampolines starting at

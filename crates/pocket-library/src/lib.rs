@@ -651,6 +651,26 @@ impl TiltInput {
     }
 }
 
+pub use pocket_kernel::EglSurfaceFormat;
+
+fn deserialize_egl_surface_format<'de, D>(deserializer: D) -> Result<EglSurfaceFormat, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredFormat {
+        Format(EglSurfaceFormat),
+        Legacy(bool),
+    }
+
+    Ok(match StoredFormat::deserialize(deserializer)? {
+        StoredFormat::Format(format) => format,
+        StoredFormat::Legacy(true) => EglSurfaceFormat::Rgba8888Only,
+        StoredFormat::Legacy(false) => EglSurfaceFormat::Auto,
+    })
+}
+
 /// Runtime settings stored per game.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSettings {
@@ -698,9 +718,13 @@ pub struct GameSettings {
     /// Emulate a portrait LCD with positive column pitch and negative vertical pitch.
     #[serde(default)]
     pub pocketpc_gapi_columns: bool,
-    /// Offer only RGBA8888 EGL surfaces. Opt-in PocketPC compatibility profile.
-    #[serde(default)]
-    pub pocketpc_egl_rgba8888_only: bool,
+    /// EGL surface formats offered to the game.
+    #[serde(
+        default,
+        alias = "pocketpc_egl_rgba8888_only",
+        deserialize_with = "deserialize_egl_surface_format"
+    )]
+    pub egl_surface_format: EglSurfaceFormat,
     /// PocketPC-only vendor compatibility, independent of the host renderer.
     #[serde(default)]
     pub gpu_compatibility_profile: gpu_profile::GpuCompatibilityProfile,
@@ -896,7 +920,7 @@ impl Default for GameSettings {
             pocketpc_random_seed: String::new(),
             pocketpc_platform_type: String::new(),
             pocketpc_gapi_columns: false,
-            pocketpc_egl_rgba8888_only: false,
+            egl_surface_format: EglSurfaceFormat::Auto,
             gpu_compatibility_profile: Default::default(),
             import_executable_selected: false,
             cpu_backend: CpuBackendPref::default(),
@@ -7856,12 +7880,19 @@ fn android_directional_control_size_is_global_and_round_trips() {
 
 #[cfg(test)]
 #[test]
-fn egl_format_profile_defaults_off_and_round_trips_independently() {
+fn egl_surface_format_migrates_legacy_settings_and_round_trips() {
     let inherited: GameSettings = serde_json::from_str("{}").unwrap();
-    assert!(!inherited.pocketpc_egl_rgba8888_only);
-    for enabled in [false, true] {
+    use EglSurfaceFormat::{Auto, Rgb565Only, Rgba8888Only};
+
+    assert_eq!(inherited.egl_surface_format, Auto);
+    for (legacy, expected) in [(false, Auto), (true, Rgba8888Only)] {
+        let json = format!(r#"{{"pocketpc_egl_rgba8888_only":{legacy}}}"#);
+        let settings: GameSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(settings.egl_surface_format, expected);
+    }
+    for format in [Auto, Rgb565Only, Rgba8888Only] {
         let settings = GameSettings {
-            pocketpc_egl_rgba8888_only: enabled,
+            egl_surface_format: format,
             pocketpc_gapi_columns: true,
             ..Default::default()
         };

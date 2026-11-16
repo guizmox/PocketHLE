@@ -113,6 +113,9 @@ class GameSettingsActivity : HostKeyActivity() {
                         writeGameSettings();updateEditor();true
                     }
                 })
+                controlsCategory.addPreference(editor)
+                controlsCategory.addPreference(viewGrid)
+                updateEditor()
                 controlsCategory.addPreference(androidx.preference.SwitchPreferenceCompat(requireContext()).apply {
                     key="pocketpc_swap_button_groups"; title="Swap action / P buttons"; isPersistent=false
                     isChecked=current.pocketpcSwapButtonGroups
@@ -136,9 +139,6 @@ class GameSettingsActivity : HostKeyActivity() {
                         true
                     }
                 })
-                controlsCategory.addPreference(editor)
-                controlsCategory.addPreference(viewGrid)
-                updateEditor()
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
                     identityCategory.addPreference(androidx.preference.EditTextPreference(requireContext()).apply {
                         key = keyName; title = label; isPersistent = false; text = initial
@@ -164,16 +164,6 @@ class GameSettingsActivity : HostKeyActivity() {
                 identityField("pocketpc_oem_info", "OEM model (readable text)", current.pocketpcOemInfo) {current=current.copy(pocketpcOemInfo=it)}
                 identityField("pocketpc_platform_type", "Platform type (readable text)", current.pocketpcPlatformType) {current=current.copy(pocketpcPlatformType=it)}
                 findPreference<androidx.preference.PreferenceCategory>("graphics_category")!!.addPreference(ListPreference(requireContext()).apply {
-                    key="pocketpc_egl_rgba8888_only";title="OpenGL ES surface format";isPersistent=false
-                    entries=arrayOf("Default (RGB565 + RGBA8888)","RGBA8888 only")
-                    entryValues=arrayOf("false","true");value=current.pocketpcEglRgba8888Only.toString()
-                    summaryProvider=androidx.preference.Preference.SummaryProvider<ListPreference> { "${it.entry}\nDefault lets the game choose 16-bit or 32-bit surfaces. Try RGBA8888 only if water or other effects show incorrect textures. Games that require 16-bit surfaces may not start. Applies to software and GPU rendering. Restart the game to apply." }
-                    dialogTitle="OpenGL ES surface format"
-                    setOnPreferenceChangeListener { _, value ->
-                        current=current.copy(pocketpcEglRgba8888Only=value.toString()=="true");writeGameSettings();true
-                    }
-                })
-                findPreference<androidx.preference.PreferenceCategory>("graphics_category")!!.addPreference(ListPreference(requireContext()).apply {
                     key="pocketpc_gapi_columns";title="GAPI display compatibility";isPersistent=false
                     entries=arrayOf("Linear scanlines (default)","Columns (early portrait LCD)")
                     entryValues=arrayOf("false","true");value=current.pocketpcGapiColumns.toString()
@@ -191,6 +181,24 @@ class GameSettingsActivity : HostKeyActivity() {
                 identityField("pocketpc_preset_id", "Preset ID override (hexadecimal)", current.pocketpcPresetId) {current=current.copy(pocketpcPresetId=it)}
                 identityField("pocketpc_device_id", "PocketPC ID (Platform ID — hexadecimal)", current.pocketpcDeviceId) {current=current.copy(pocketpcDeviceId=it)}
             }
+            findPreference<androidx.preference.PreferenceCategory>("graphics_category")!!
+                .addPreference(ListPreference(requireContext()).apply {
+                    key = "egl_surface_format"
+                    title = "OpenGL ES surface format"
+                    isPersistent = false
+                    entries = arrayOf("Auto (RGB565 + RGBA8888)", "RGB565 only", "RGBA8888 only")
+                    entryValues = arrayOf("auto", "rgb565_only", "rgba8888_only")
+                    value = current.eglSurfaceFormat
+                    dialogTitle = title
+                    summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> {
+                        "${it.entry}\nControls the formats offered to OpenGL ES 1.x games. Restart the game to apply."
+                    }
+                    setOnPreferenceChangeListener { _, value ->
+                        current = current.copy(eglSurfaceFormat = value.toString())
+                        writeGameSettings()
+                        true
+                    }
+                })
             findPreference<ListPreference>("screen")?.apply {
                 summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
                     "${pref.entry}\n${getString(R.string.pref_screen_summary)}"
@@ -278,8 +286,7 @@ class GameSettingsActivity : HostKeyActivity() {
             val frameLimitSaved = saved != null && saved.has("frame_rate_limit") && (if (saved.isNull("frame_rate_limit")) null else saved.optString("frame_rate_limit")) == current.frameRateLimit
             val heapSaved = saved != null &&
                 (if (saved.isNull("executable_heap")) null else saved.optBoolean("executable_heap")) == current.executableHeap
-            val eglFormatSaved = saved != null && saved.has("pocketpc_egl_rgba8888_only") &&
-                saved.optBoolean("pocketpc_egl_rgba8888_only") == current.pocketpcEglRgba8888Only
+            val eglFormatSaved = saved?.optString("egl_surface_format") == current.eglSurfaceFormat
             if (result?.optBoolean("ok", false) != true || !frameLimitSaved || !heapSaved || !eglFormatSaved) {
                 android.widget.Toast.makeText(context, "Could not save settings. Rebuild and install the updated native libraries and APK.", android.widget.Toast.LENGTH_LONG).show()
             }

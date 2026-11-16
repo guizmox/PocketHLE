@@ -96,7 +96,7 @@ data class GameSettings(
     val pocketpcRandomSeed: String = "",
     val pocketpcPlatformType: String = "",
     val pocketpcGapiColumns: Boolean = false,
-    val pocketpcEglRgba8888Only: Boolean = false,
+    val eglSurfaceFormat: String = "auto",
     val storageCardDir: String? = null,
     val originalJson: String = "{}",
 ) {
@@ -128,7 +128,8 @@ data class GameSettings(
         put("pocketpc_random_seed", pocketpcRandomSeed)
         put("pocketpc_platform_type", pocketpcPlatformType)
         put("pocketpc_gapi_columns", pocketpcGapiColumns)
-        put("pocketpc_egl_rgba8888_only", pocketpcEglRgba8888Only)
+        remove("pocketpc_egl_rgba8888_only")
+        put("egl_surface_format", eglSurfaceFormat)
         if (storageCardDir == null) remove("storage_card_dir") else put("storage_card_dir", storageCardDir)
     }
 
@@ -170,7 +171,9 @@ data class GameSettings(
             pocketpcRandomSeed = obj.optString("pocketpc_random_seed", ""),
             pocketpcPlatformType = obj.optString("pocketpc_platform_type", ""),
             pocketpcGapiColumns = obj.optBoolean("pocketpc_gapi_columns", false),
-            pocketpcEglRgba8888Only = obj.optBoolean("pocketpc_egl_rgba8888_only", false),
+            eglSurfaceFormat = obj.optString("egl_surface_format").ifEmpty {
+                if (obj.optBoolean("pocketpc_egl_rgba8888_only")) "rgba8888_only" else "auto"
+            },
             gpuCompatibilityProfile = when (val profile = obj.optString("gpu_compatibility_profile", "generic")) {
                 "generic", "nvidia_goforce5500", "intel2700g", "adreno200" -> profile
                 "qualcomm_snapdragon" -> "adreno200"

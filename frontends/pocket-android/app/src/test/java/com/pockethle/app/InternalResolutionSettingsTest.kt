@@ -24,13 +24,16 @@ class InternalResolutionSettingsTest {
         assertEquals("generic", GameSettings.fromJson(legacy).gpuCompatibilityProfile)
     }
 
-    @Test fun eglFormatProfileDefaultsOffAndRoundTripsWithoutChangingOtherSettings() {
-        assertFalse(GameSettings.fromJson(JSONObject()).pocketpcEglRgba8888Only)
+    @Test fun eglFormatProfileMigratesAndRoundTripsWithoutChangingOtherSettings() {
+        assertEquals("auto", GameSettings.fromJson(JSONObject()).eglSurfaceFormat)
+        val legacy = JSONObject().put("pocketpc_egl_rgba8888_only", true)
+        assertEquals("rgba8888_only", GameSettings.fromJson(legacy).eglSurfaceFormat)
+        assertFalse(GameSettings.fromJson(legacy).toJson().has("pocketpc_egl_rgba8888_only"))
         val original=JSONObject().put("pocketpc_gapi_columns",true).put("gpu_renderer",false).put("future_setting","kept")
-        for (enabled in listOf(false,true)) {
-            val saved=GameSettings.fromJson(original).copy(pocketpcEglRgba8888Only=enabled).toJson()
+        for (format in listOf("auto", "rgb565_only", "rgba8888_only")) {
+            val saved=GameSettings.fromJson(original).copy(eglSurfaceFormat=format).toJson()
             val restored=GameSettings.fromJson(saved)
-            assertEquals(enabled,restored.pocketpcEglRgba8888Only)
+            assertEquals(format, restored.eglSurfaceFormat)
             assertTrue(restored.pocketpcGapiColumns)
             assertFalse(saved.has("gpu_renderer"))
             assertEquals("kept",saved.getString("future_setting"))

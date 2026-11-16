@@ -872,8 +872,10 @@ Native touch Start/Move/End/Cancel events and held pointer gestures also suspend
 navigation focus repair, including when no mouse-button edge accompanies the
 touch event. Each swipe continues from the existing scroll offset.
 
-In a Pocket PC game's settings, **View Grid** shows the saved grid and its
-assignments without starting the game. **Configure Grid** starts the game with
+In a Pocket PC game's settings, select **Touch zone mapping** under **Control
+mode** to show **Configure Grid** and **View Grid** directly below it on Android.
+**View Grid** shows the saved assignments without starting the game.
+**Configure Grid** starts the game with
 the grid over the live image. The size selector and **Configure Grid** are below
 the image. During this session, **L1 + R1** cycles sizes, **L2 + R2** toggles
 editing, and **L3 + R3** clears the selected assignment.

@@ -40,7 +40,7 @@ use pocket_gles::{
     EGL_BLUE_SIZE, EGL_BUFFER_SIZE, EGL_DEPTH_SIZE, EGL_GREEN_SIZE, EGL_NONE, EGL_RED_SIZE,
 };
 
-use pocket_kernel::{DispatchOutcome, KernelError};
+use pocket_kernel::{DispatchOutcome, EglSurfaceFormat, KernelError};
 
 use crate::{CallCtx, WinCeDispatcher};
 
@@ -164,7 +164,7 @@ struct EglImage {
 struct EglSurfaces {
     initialized: bool,
     goforce_5500: bool,
-    rgba8888_only: bool,
+    surface_format: EglSurfaceFormat,
     config_locked: bool,
     contexts: HashMap<u32, EglContext>,
     groups: HashMap<u32, SharedObjects>,
@@ -205,7 +205,7 @@ impl EglSurfaces {
         Self {
             initialized: false,
             goforce_5500: false,
-            rgba8888_only: false,
+            surface_format: EglSurfaceFormat::Auto,
             config_locked: false,
             contexts: HashMap::new(),
             groups: HashMap::new(),
@@ -388,14 +388,14 @@ pub fn set_internal_resolution(scale: u8) {
 /// Select the advertised EGL formats before the first eglInitialize of a session.
 /// Keep the catalog stable even across eglTerminate/reinitialize, while pending
 /// contexts may still refer to it. Session reset and parent suspension own it.
-pub fn set_egl_rgba8888_only(enabled: bool) {
+pub fn set_egl_surface_format(format: EglSurfaceFormat) {
     SURFACES.with(|s| {
         let mut s = s.borrow_mut();
-        if s.config_locked && s.rgba8888_only != enabled {
+        if s.config_locked && s.surface_format != format {
             log::warn!("EGL surface format changes require a new session");
             return;
         }
-        s.rgba8888_only = enabled;
+        s.surface_format = format;
     });
 }
 
@@ -2120,10 +2120,10 @@ fn egl_initialize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         } else {
             "software"
         }),
-        SURFACES.with(|s| if s.borrow().rgba8888_only {
-            "RGBA8888 only"
-        } else {
-            "RGB565 + RGBA8888"
+        SURFACES.with(|s| match s.borrow().surface_format {
+            EglSurfaceFormat::Auto => "RGB565 + RGBA8888",
+            EglSurfaceFormat::Rgb565Only => "RGB565 only",
+            EglSurfaceFormat::Rgba8888Only => "RGBA8888 only",
         })
     );
     Ok(DispatchOutcome::ReturnedR0(EGL_TRUE))

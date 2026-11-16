@@ -800,7 +800,7 @@ fn rgba_only_catalog_is_consistent_and_scoped_to_the_session() {
     let _g = guard();
     reset_for_session();
     let (mut cpu, mut k) = (fresh_cpu(), fresh_kernel());
-    set_egl_rgba8888_only(true);
+    set_egl_surface_format(EglSurfaceFormat::Rgba8888Only);
     call(&mut cpu, &mut k, egl_initialize, &[DISPLAY_HANDLE, 0, 0]);
     let out = SCRATCH + 0x100;
     let num = out + 8;
@@ -858,10 +858,10 @@ fn rgba_only_catalog_is_consistent_and_scoped_to_the_session() {
         );
         assert_eq!(call(&mut cpu, &mut k, egl_get_error, &[]), EGL_BAD_CONFIG);
     }
-    set_egl_rgba8888_only(false);
+    set_egl_surface_format(EglSurfaceFormat::Auto);
     assert_eq!(egl_config::Config::handles(), &[CONFIG_RGBA_HANDLE]);
     call(&mut cpu, &mut k, egl_terminate, &[DISPLAY_HANDLE]);
-    set_egl_rgba8888_only(false);
+    set_egl_surface_format(EglSurfaceFormat::Auto);
     call(&mut cpu, &mut k, egl_initialize, &[DISPLAY_HANDLE, 0, 0]);
     assert_eq!(egl_config::Config::handles(), &[CONFIG_RGBA_HANDLE]);
 
@@ -888,9 +888,38 @@ fn rgba_only_catalog_is_consistent_and_scoped_to_the_session() {
     assert_eq!(cpu.read_u32_le(out).unwrap(), CONFIG_HANDLE);
 }
 
+#[test]
+fn rgb565_only_catalog_rejects_alpha_requests() {
+    let _g = guard();
+    reset_for_session();
+    set_egl_surface_format(EglSurfaceFormat::Rgb565Only);
+    let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+    call(&mut cpu, &mut kernel, egl_initialize, &[DISPLAY_HANDLE, 0, 0]);
+    let out = SCRATCH + 0x100;
+    let num = out + 8;
+    let args = [DISPLAY_HANDLE, out, 2, num];
+    assert_eq!(
+        call(&mut cpu, &mut kernel, egl_get_configs, &args),
+        EGL_TRUE
+    );
+    assert_eq!(cpu.read_u32_le(num).unwrap(), 1);
+    assert_eq!(cpu.read_u32_le(out).unwrap(), CONFIG_HANDLE);
+    super::tests::write_egl_attributes(&mut cpu, &[(EGL_ALPHA_SIZE, 8)]);
+    assert_eq!(
+        call(
+            &mut cpu,
+            &mut kernel,
+            egl_choose_config,
+            &[DISPLAY_HANDLE, SCRATCH, out, 2, num],
+        ),
+        EGL_TRUE
+    );
+    assert_eq!(cpu.read_u32_le(num).unwrap(), 0);
+}
+
 fn rgba_profile_window_and_pbuffer(gpu: bool) {
     reset_for_session();
-    set_egl_rgba8888_only(true);
+    set_egl_surface_format(EglSurfaceFormat::Rgba8888Only);
     let (mut cpu, mut k) = (fresh_cpu(), fresh_kernel());
     k.framebuffer.resize(8, 8);
     set_gpu_renderer(gpu);
