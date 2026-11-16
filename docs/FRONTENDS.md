@@ -4,6 +4,7 @@ Current settings and input policy for desktop, Deck and Android. Build/signing
 instructions belong to [Build and release](BUILD.md); Deck installation belongs
 to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
 
+- [Experimental desktop snapshots](#experimental-desktop-snapshots)
 - [Launch profiles](#desktop-runtime-launch-profiles) and [toolbar](#desktop-button-toolbar)
 - [Library data](#adding-data-to-an-installed-game), [removal](#removing-library-games) and [captures](#desktop-capture-gallery)
 - [Image fitting](#image-geometry-and-input) and [Android touch controls](#android-controls)
@@ -15,12 +16,17 @@ to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
 
 ## Experimental desktop snapshots
 
-**Save Snapshot** (F5) captures one slot for the running ARM WinCE game.
-**Restore Snapshot** (F6) opens the slot for the running or selected game.
-The buttons show the saved UTC timestamp on hover. A successful save
-replaces the previous checkpoint at `games/<id>/snapshots/snapshot-01.bin`.
-The `snapshots` directory is created on the first save, alongside
-`extracted` and `saves`. Encoding and disk writes run in the background.
+Snapshots are available on Windows and Linux desktop builds with the Unicorn
+ARM backend. Each game has one slot.
+
+- **Save Snapshot** (F5) is available after the running game produces a frame.
+- **Restore Snapshot** (F6) loads the slot for the running or selected game.
+  If the game has no snapshot, F6 leaves the session as it is.
+
+Hover over the snapshot buttons to see the saved UTC timestamp. PocketHLE
+creates `games/<id>/snapshots/snapshot-01.bin` on the first successful save,
+alongside the game's `extracted` and `saves` directories. Encoding and disk
+writes run in the background. A successful save replaces the previous slot.
 
 Desktop Gizmondo and PocketPC share this path. Use the same executable, mounts,
 and emulated device configuration when restoring. The checkpoint restores the
@@ -52,11 +58,8 @@ Compact Framework, loaded DirectShow media, active Bluetooth connections and
 microphone capture are outside this profile. Capture reports unsupported live
 resources. The snapshot controls are desktop-only.
 
-Checkpoints use the sectioned `PHSECT01` payload. Session metadata, ARM, the
-WinCE kernel, fixed-function EGL and media have separate version numbers.
-Programmable EGL, HSS and input releases have their own sections, present when
-used. Readers ignore unknown optional sections and report unknown required
-sections. Gizmondo and PocketPC use the same reader and restore path.
+See [Desktop snapshot internals](SNAPSHOTS.md) for the file layout, ARM block
+reads, handle coverage and graphics restore path.
 
 ## Shared settings
 

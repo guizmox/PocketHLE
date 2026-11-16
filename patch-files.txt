@@ -1,4 +1,3 @@
-crates/pocket-core/src/snapshot.rs
-crates/pocket-winceapi/src/gles2/renderer.rs
-crates/pocket-winceapi/src/gles2/renderer/journal.rs
+docs/SNAPSHOTS.md
 docs/FRONTENDS.md
+docs/README.md

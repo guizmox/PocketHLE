@@ -23,6 +23,7 @@ retain their spelling.
 | --- | --- |
 | Architecture, ABI/memory/scheduler contracts, CPU optimizations and primary sources | [Architecture](AGENTS.md) |
 | Rendering, EGL/NV execution, pixel ownership, resolution, filters and pacing | [Graphics](GPU.md) |
+| Desktop snapshot format, restore pipeline and handle coverage | [Snapshot internals](SNAPSHOTS.md) |
 
 The root [README](../README.md) is the project overview. Contributor entry points
 remain [AGENTS.md](../AGENTS.md) and [CLAUDE.md](../CLAUDE.md); neither is another
