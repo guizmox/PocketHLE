@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 mod contracts;
 #[path = "vfs_mapping.rs"]
 mod mapping;
-pub use contracts::{FileInfo, OpenResult, VfsFileSnapshot, VfsShared};
+pub use contracts::{FileInfo, OpenResult, SnapshotFileCommit, VfsFileSnapshot, VfsShared};
 pub use mapping::MappedFile;
 
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.
@@ -382,7 +382,7 @@ static NEXT_MAS_STREAM: std::sync::atomic::AtomicU32 =
 /// Cloneable open description for transfer between process namespaces.
 #[derive(Clone)]
 pub struct VfsObject(VfsObjectInner, Option<(u32, crate::audio::MasPlayback)>);
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AccelerometerStream {
     Sen0,
     Acc1,
@@ -402,7 +402,76 @@ enum VfsObjectInner {
     HtcSensor(AccelerometerStream),
     Decoder(Arc<Mutex<Mp3DecoderState>>),
 }
+/// Opaque checkpoint identity; never dereferenced as a host address on restore.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SnapshotObjectId {
+    Shared(u64),
+    Registration,
+    Accelerometer(AccelerometerStream),
+    Volume(PathBuf, String, bool),
+}
+
+/// Temporary reconstruction cache shared by all stopped CPUs on one device.
+#[derive(Default)]
+pub struct SnapshotRestoreDomain {
+    restore_gate: Arc<Mutex<()>>,
+    objects: HashMap<SnapshotObjectId, VfsObject>,
+    ram_files: HashMap<u64, Arc<Mutex<RamFile>>>,
+    ram_store_loaded: bool,
+    rewound_paths: std::collections::HashSet<PathBuf>,
+    pending_files: contracts::SnapshotFileWrites,
+}
+impl SnapshotRestoreDomain {
+    pub(crate) fn release_objects(&mut self) {
+        self.objects.clear();
+        self.ram_files.clear();
+    }
+    pub(crate) fn attach_mas_transports(
+        &mut self,
+        streams: &std::collections::BTreeMap<u32, crate::audio::MasPlayback>,
+    ) -> Result<(), String> {
+        for object in self.objects.values_mut() {
+            if let VfsObjectInner::Decoder(decoder) = &object.0 {
+                let key = decoder
+                    .lock()
+                    .map_err(|_| "MAS decoder poisoned")?
+                    .stream_key;
+                object.1 = Some((
+                    key,
+                    streams
+                        .get(&key)
+                        .ok_or("missing shared MAS transport")?
+                        .clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+    pub fn object(&self, id: &SnapshotObjectId) -> Option<VfsObject> {
+        self.objects.get(id).cloned()
+    }
+}
+
 impl VfsObject {
+    pub fn snapshot_identity(&self) -> SnapshotObjectId {
+        use SnapshotObjectId::*;
+        let id = match &self.0 {
+            VfsObjectInner::Bluetooth(v) => Arc::as_ptr(v) as usize,
+            VfsObjectInner::BluetoothDriver(v) => Arc::as_ptr(v) as usize,
+            VfsObjectInner::Camera(v) => Arc::as_ptr(v) as usize,
+            VfsObjectInner::Gps(v) => Arc::as_ptr(v) as usize,
+            VfsObjectInner::Vibration(v) => Arc::as_ptr(v) as usize,
+            VfsObjectInner::File(v) => Arc::as_ptr(v) as usize,
+            VfsObjectInner::Ram(v) => Arc::as_ptr(v) as usize,
+            VfsObjectInner::Decoder(v) => Arc::as_ptr(v) as usize,
+            VfsObjectInner::Registration => return Registration,
+            VfsObjectInner::HtcSensor(stream) => return Accelerometer(*stream),
+            VfsObjectInner::Volume(v) => {
+                return Volume(v.host_dir.clone(), v.prefix.clone(), v.read_only)
+            }
+        };
+        Shared(id as u64)
+    }
     pub fn with_mas(mut self, key: u32, playback: crate::audio::MasPlayback) -> Self {
         self.1 = Some((key, playback));
         self
@@ -441,6 +510,9 @@ pub struct BluetoothOpen {
 
 /// Mount-point + open-handle table.
 pub struct Vfs {
+    snapshot_files: contracts::SnapshotFileWrites,
+    snapshot_restore_domain: Option<Arc<Mutex<SnapshotRestoreDomain>>>,
+    snapshot_hidden_handles: Vec<u32>,
     pub stdio_text_modes: [bool; 3],
     pub bluetooth: crate::bluetooth::State,
     bluetooth_handles: HashMap<u32, Arc<BluetoothOpen>>,
@@ -496,6 +568,9 @@ impl Vfs {
             vibration_handles: HashMap::new(),
             camera_deadlines: HashMap::new(),
             mounts: Vec::new(),
+            snapshot_files: Default::default(),
+            snapshot_restore_domain: None,
+            snapshot_hidden_handles: Vec::new(),
             section_files: HashMap::new(),
             shared: VfsShared::default(),
             ram: None,
@@ -513,6 +588,49 @@ impl Vfs {
         vfs
     }
 
+    pub fn defer_device_snapshot_files(&mut self) -> Result<(), String> {
+        let domain = self
+            .snapshot_restore_domain
+            .as_ref()
+            .ok_or("missing VFS device reconstruction domain")?;
+        domain
+            .lock()
+            .map_err(|_| "VFS restore domain poisoned")?
+            .pending_files
+            .0
+            .extend(std::mem::take(&mut self.snapshot_files).0);
+        Ok(())
+    }
+    pub fn install_device_snapshot_files(
+        &mut self,
+        domain: &Arc<Mutex<SnapshotRestoreDomain>>,
+    ) -> Result<SnapshotFileCommit, String> {
+        self.snapshot_files.0.extend(
+            std::mem::take(
+                &mut domain
+                    .lock()
+                    .map_err(|_| "VFS restore domain poisoned")?
+                    .pending_files,
+            )
+            .0,
+        );
+        self.install_snapshot_files()
+    }
+    pub fn finish_snapshot_restore(&mut self) -> Result<(), String> {
+        for handle in std::mem::take(&mut self.snapshot_hidden_handles) {
+            if self.is_handle(handle) && !self.close(handle) {
+                return Err("could not release temporary checkpoint backing handle".into());
+            }
+        }
+        self.snapshot_restore_domain = None;
+        Ok(())
+    }
+    pub fn attach_snapshot_restore_domain(
+        &mut self,
+        domain: Option<Arc<Mutex<SnapshotRestoreDomain>>>,
+    ) {
+        self.snapshot_restore_domain = domain;
+    }
     pub fn attach_ram(&mut self, ram: Option<crate::memory_division::MemoryDivision>) {
         self.ram = ram;
     }

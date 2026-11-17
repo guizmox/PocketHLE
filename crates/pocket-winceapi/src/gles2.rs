@@ -269,8 +269,8 @@ pub struct ProgrammableSnapshot {
 
 pub fn capture_snapshot() -> std::result::Result<Option<ProgrammableSnapshot>, String> {
     SESSION.with(|slot| {
-        slot.borrow()
-            .as_ref()
+        slot.borrow_mut()
+            .as_mut()
             .map(|session| {
                 Ok(ProgrammableSnapshot {
                     resolution_policy: session.resolution_policy,
@@ -280,7 +280,7 @@ pub fn capture_snapshot() -> std::result::Result<Option<ProgrammableSnapshot>, S
                     error: session.error,
                     context: session
                         .renderer
-                        .as_ref()
+                        .as_mut()
                         .map(Renderer::capture_context)
                         .transpose()?,
                 })

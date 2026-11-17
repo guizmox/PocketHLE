@@ -32,7 +32,9 @@ pub use pocket_winceapi as winceapi;
 #[cfg(feature = "unicorn")]
 mod snapshot;
 #[cfg(feature = "unicorn")]
-pub use snapshot::{RestoredSession, SessionSnapshot};
+pub use snapshot::{
+    DeviceArchive, DeviceRestoreGroup, ProcessCheckpoint, RestoredSession, SessionSnapshot,
+};
 
 pub struct Emulator {
     cpu: Box<dyn Cpu>,
@@ -792,6 +794,8 @@ pub fn suspend_host_session() -> pocket_winceapi::SuspendedSession {
     pocket_winceapi::suspend_session()
 }
 
+#[cfg(feature = "unicorn")]
+pub mod checkpoint_domain;
 pub mod child_jobs;
 pub mod dependencies;
 mod pocketpc_storage;

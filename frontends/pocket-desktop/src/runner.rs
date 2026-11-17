@@ -16,6 +16,15 @@ use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry};
 
 /// Dirty GDI operations have no completed-frame boundary. Bound their snapshots
 /// independently of Unlimited, rather than converting every intermediate blit.
+#[cfg(feature = "unicorn")]
+#[path = "runner/snapshots.rs"]
+mod snapshots;
+#[cfg(feature = "unicorn")]
+use snapshots::resolve_snapshot_program;
+#[cfg(all(test, feature = "unicorn"))]
+#[path = "runner/snapshot_tests.rs"]
+mod snapshot_tests;
+
 const IMPLICIT_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
 fn frame_interval(limit: Option<u32>) -> Option<Duration> {
@@ -128,7 +137,10 @@ impl Runner {
         dependency_notice_tx: Option<Sender<String>>,
         system_media: SystemMediaView,
         restore_snapshot: bool,
-    ) -> (RunOutcome, Option<pocket_library::session_diagnostic::Diagnostic>) {
+    ) -> (
+        RunOutcome,
+        Option<pocket_library::session_diagnostic::Diagnostic>,
+    ) {
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
         hook.system_media = system_media;
@@ -140,44 +152,93 @@ impl Runner {
             && !card_root.is_dir()
         {
             let summary = format!("SD Card folder does not exist: {}", card_root.display());
-            let diagnostic = pocket_library::session_diagnostic::startup_failure(summary.clone(), Vec::new());
-            return (RunOutcome { summary, framebuffer: None }, Some(diagnostic));
+            let diagnostic =
+                pocket_library::session_diagnostic::startup_failure(summary.clone(), Vec::new());
+            return (
+                RunOutcome {
+                    summary,
+                    framebuffer: None,
+                },
+                Some(diagnostic),
+            );
         }
         if restore_snapshot {
             #[cfg(feature = "unicorn")]
             {
                 let path = pocket_library::snapshot_slot::path_for(&library_root, &game);
-                let saved = pocket_library::snapshot_slot::open(&path)
-                    .and_then(|slot| slot.map(|(_, payload)| pocket_core::SessionSnapshot::read(payload)).transpose());
+                let saved = pocket_library::snapshot_slot::open(&path).and_then(|slot| {
+                    slot.map(|(_, payload)| pocket_core::SessionSnapshot::read(payload))
+                        .transpose()
+                });
                 match saved {
                     Ok(Some(snapshot)) => hook.restore_snapshot = Some(snapshot),
-                    Ok(None) => return (RunOutcome { summary: String::new(), framebuffer: None }, None),
+                    Ok(None) => {
+                        return (
+                            RunOutcome {
+                                summary: String::new(),
+                                framebuffer: None,
+                            },
+                            None,
+                        )
+                    }
                     Err(error) => {
                         let summary = format!("Cannot restore snapshot: {error}");
-                        let diagnostic = pocket_library::session_diagnostic::startup_failure(summary.clone(), Vec::new());
-                        return (RunOutcome { summary, framebuffer: None }, Some(diagnostic));
+                        let diagnostic = pocket_library::session_diagnostic::startup_failure(
+                            summary.clone(),
+                            Vec::new(),
+                        );
+                        return (
+                            RunOutcome {
+                                summary,
+                                framebuffer: None,
+                            },
+                            Some(diagnostic),
+                        );
                     }
                 }
             }
         }
         #[cfg(feature = "unicorn")]
-        let card_program = hook.restore_snapshot.as_ref().and_then(|snapshot| snapshot.card_program()).map(str::to_owned);
+        let card_program = hook
+            .restore_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                if snapshot.has_device() {
+                    Some(snapshot.program_path())
+                } else {
+                    snapshot.card_program()
+                }
+            })
+            .map(str::to_owned);
         #[cfg(not(feature = "unicorn"))]
         let card_program: Option<String> = None;
         #[cfg(feature = "unicorn")]
         {
             // Saving again after a detached restore still targets the card
             // program rather than the library entry's launcher executable.
-            hook.snapshot_detach_allowed = card_program.is_some();
+            hook.snapshot_detach_allowed = card_program.is_some()
+                && hook
+                    .restore_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| !snapshot.has_device());
         }
         let mut game = game;
         if let Some(path) = card_program.as_deref() {
-            match resolve_snapshot_card_program(&card_root, path) {
+            match resolve_snapshot_program(&library_root, &game, &card_root, path) {
                 Ok(path) => game.executable = game.child_executable_reference(&library_root, &path),
                 Err(error) => {
                     let summary = format!("Cannot restore snapshot: {error}");
-                    let diagnostic = pocket_library::session_diagnostic::startup_failure(summary.clone(), Vec::new());
-                    return (RunOutcome { summary, framebuffer: None }, Some(diagnostic));
+                    let diagnostic = pocket_library::session_diagnostic::startup_failure(
+                        summary.clone(),
+                        Vec::new(),
+                    );
+                    return (
+                        RunOutcome {
+                            summary,
+                            framebuffer: None,
+                        },
+                        Some(diagnostic),
+                    );
                 }
             }
         }
@@ -221,7 +282,7 @@ impl Runner {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        pocket_core::winceapi::gles::with_shared_context_source(source, || {
+        let result = pocket_core::winceapi::gles::with_shared_context_source(source, || {
             pocket_core::winceapi::gles::with_shared_frame_export(
                 self.shared_export.clone(),
                 || {
@@ -237,7 +298,15 @@ impl Runner {
                     )
                 },
             )
-        })
+        });
+        #[cfg(feature = "unicorn")]
+        if let Some(group) = &hook.restore_group {
+            group.cancel(format!(
+                "process stopped before device restore completed: {}",
+                result.0.summary
+            ));
+        }
+        result
     }
 
     fn run_process_inner(
@@ -288,8 +357,15 @@ impl Runner {
         {
             #[cfg(feature = "unicorn")]
             if hook.restore_snapshot.is_some() {
-                let summary = "Cannot restore snapshot: Compact Framework sessions are unsupported.".into();
-                return (RunOutcome { summary, framebuffer: None }, 13);
+                let summary =
+                    "Cannot restore snapshot: Compact Framework sessions are unsupported.".into();
+                return (
+                    RunOutcome {
+                        summary,
+                        framebuffer: None,
+                    },
+                    13,
+                );
             }
             return run_compact_framework(
                 &exe,
@@ -331,14 +407,16 @@ impl Runner {
         hook.frame_interval = frame_interval(fps_limit);
         log::info!("PRESENTATION_LIMIT={} (completed frames; unbounded intermediate GDI updates remain coalesced)",
             fps_limit.filter(|fps| *fps != 0).map(|fps| format!("{fps} FPS")).unwrap_or_else(|| if fps_limit == Some(0) { "UNLIMITED".into() } else { "NATIVE".into() }));
-        emu.set_unimplemented_api_sink(Box::new(pocket_core::winceapi::unimplemented_log::UnimplementedLog::new(
-            library_root.join("pockethle-unimplemented-apis.log"),
-            game.display_name.clone(),
-            guest_path
-                .map(str::to_owned)
-                .unwrap_or_else(|| exe.display().to_string()),
-            Arc::clone(&self.missing_api_logging),
-        )));
+        emu.set_unimplemented_api_sink(Box::new(
+            pocket_core::winceapi::unimplemented_log::UnimplementedLog::new(
+                library_root.join("pockethle-unimplemented-apis.log"),
+                game.display_name.clone(),
+                guest_path
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| exe.display().to_string()),
+                Arc::clone(&self.missing_api_logging),
+            ),
+        ));
         emu.max_slices = game.settings.max_slices;
         emu.instruction_budget_per_slice = game.settings.instructions_per_slice;
 
@@ -815,28 +893,63 @@ impl Runner {
             }
         }
         #[cfg(feature = "unicorn")]
-        let restored = match hook.restore_snapshot.take().map(|snapshot| emu.restore_snapshot(snapshot)).transpose() {
+        let restored = match hook
+            .restore_snapshot
+            .take()
+            .map(|snapshot| hook.restore_checkpoint(&mut emu, snapshot))
+            .transpose()
+        {
             Ok(restored) => restored,
             Err(error) => {
                 summary_lines.push(format!("Cannot restore snapshot: {error:#}"));
-                return (RunOutcome { summary: summary_lines.join("\n"), framebuffer: None }, 13);
+                if let Some(group) = &hook.restore_group {
+                    group.cancel(format!("{error:#}"));
+                }
+                hook.stop_all.store(true, Ordering::Release);
+                hook.finish_children();
+                return (
+                    RunOutcome {
+                        summary: summary_lines.join("\n"),
+                        framebuffer: None,
+                    },
+                    13,
+                );
             }
         };
+        #[cfg(feature = "unicorn")]
+        {
+            hook.pid = emu.process().unwrap().state.object_handles.process_id();
+            match hook.checkpoint_domain.register(hook.pid) {
+                Ok(participant) => hook.checkpoint_participant = Some(participant),
+                Err(error) => {
+                    hook.runtime_error = Some(error.clone());
+                    return (
+                        RunOutcome {
+                            summary: error,
+                            framebuffer: None,
+                        },
+                        13,
+                    );
+                }
+            }
+        }
         emu.start_audio();
         hook.started = true;
         let started_at = std::time::Instant::now();
         #[cfg(feature = "unicorn")]
         let run_result = if let Some(restored) = restored {
             hook.pid = emu.process().unwrap().state.object_handles.process_id();
-            hook.foreground.store(hook.pid, Ordering::Release);
+            if hook.restore_group.is_none() {
+                hook.foreground.store(hook.pid, Ordering::Release);
+            }
             emu.run_restored(restored, hook)
         } else {
             emu.run_with_hook(hook)
         };
         #[cfg(not(feature = "unicorn"))]
         let run_result = emu.run_with_hook(hook);
-        hook.startup_exit = started_at.elapsed()
-            < pocket_library::session_diagnostic::STARTUP_DIAGNOSTIC_WINDOW;
+        hook.startup_exit =
+            started_at.elapsed() < pocket_library::session_diagnostic::STARTUP_DIAGNOSTIC_WINDOW;
         if let Err(error) = &run_result {
             hook.runtime_error = Some(format!("{error:#}"));
         }
@@ -877,6 +990,10 @@ impl Runner {
         pocket_core::winceapi::gles::deferred_frame::release_reader();
         if let Some(table) = table {
             table.complete_process_exit(exit_code);
+        }
+        #[cfg(feature = "unicorn")]
+        {
+            hook.checkpoint_participant = None;
         }
         hook.finish_children();
         (
@@ -1135,11 +1252,16 @@ fn resolve_snapshot_card_program(root: &std::path::Path, guest: &str) -> Result<
     let mut vfs = pocket_core::kernel::vfs::Vfs::new();
     vfs.mount_read_only(r"\SD Card\", root);
     vfs.mount_read_only(r"\Storage Card\", root);
-    if components.clone().count() == 0 || components.any(|part| part == "." || part == ".." || part.contains(':')) {
+    if components.clone().count() == 0
+        || components.any(|part| part == "." || part == ".." || part.contains(':'))
+    {
         return Err("invalid saved SD Card executable path".into());
     }
-    let path = vfs.resolve(guest).ok_or("saved SD Card executable is missing")?
-        .canonicalize().map_err(|error| error.to_string())?;
+    let path = vfs
+        .resolve(guest)
+        .ok_or("saved SD Card executable is missing")?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let root = root.canonicalize().map_err(|error| error.to_string())?;
     if !path.starts_with(&root) || !path.is_file() {
         return Err("saved SD Card executable is outside the mounted card".into());
@@ -1183,8 +1305,15 @@ impl Drop for ProcessStartup {
     }
 }
 
-
 struct RunHook {
+    #[cfg(feature = "unicorn")]
+    checkpoint_domain:
+        pocket_core::checkpoint_domain::CheckpointDomain<pocket_core::ProcessCheckpoint>,
+    #[cfg(feature = "unicorn")]
+    checkpoint_participant:
+        Option<pocket_core::checkpoint_domain::Participant<pocket_core::ProcessCheckpoint>>,
+    #[cfg(feature = "unicorn")]
+    restore_group: Option<Arc<pocket_core::DeviceRestoreGroup>>,
     #[cfg(feature = "unicorn")]
     restore_snapshot: Option<pocket_core::SessionSnapshot>,
     #[cfg(feature = "unicorn")]
@@ -1269,19 +1398,23 @@ impl RunHook {
                     command_line,
                     error: 193,
                 };
+                let clock = pocket_core::kernel::guest_clock::GuestClockSnapshot::capture();
+                let clock_at = Instant::now();
                 let spawned = std::thread::Builder::new()
                     .name(format!("pockethle-process-{}", table.process_id()))
                     .spawn(move || {
-                        let result = context.runner.run_process(
-                            &context.library_root,
-                            &child_game,
-                            &context.card_root,
-                            Some(&guest_path),
-                            ram,
-                            Some(handle_context),
-                            Some(startup),
-                            &mut child_hook,
-                        );
+                        let result = clock.run_at(clock_at, || {
+                            context.runner.run_process(
+                                &context.library_root,
+                                &child_game,
+                                &context.card_root,
+                                Some(&guest_path),
+                                ram,
+                                Some(handle_context),
+                                Some(startup),
+                                &mut child_hook,
+                            )
+                        });
                         child_table.complete_process_exit(result.1);
                         if child_table
                             .exit_code(child_table.process_id(), Some(0))
@@ -1354,8 +1487,8 @@ impl RunHook {
             let mut child_hook = self.child_hook();
             #[cfg(feature = "unicorn")]
             {
-                child_hook.snapshot_detach_allowed = self.children.is_empty()
-                    && (self.pid == 1 || self.snapshot_detach_allowed);
+                child_hook.snapshot_detach_allowed =
+                    self.children.is_empty() && (self.pid == 1 || self.snapshot_detach_allowed);
             }
             let child_pid = state
                 .object_handles
@@ -1363,6 +1496,10 @@ impl RunHook {
                 .unwrap();
             self.foreground.store(child_pid, Ordering::Release);
             log::info!("parent suspended; entering child {}", request.guest_path);
+            #[cfg(feature = "unicorn")]
+            {
+                self.checkpoint_participant = None;
+            }
             let (outcome, code) = context.runner.run_process(
                 &context.library_root,
                 &child_game,
@@ -1374,6 +1511,14 @@ impl RunHook {
                 &mut child_hook,
             );
             exit_code = code;
+            #[cfg(feature = "unicorn")]
+            match self.checkpoint_domain.register(self.pid) {
+                Ok(participant) => self.checkpoint_participant = Some(participant),
+                Err(error) => {
+                    self.runtime_error = Some(error);
+                    self.stop_all.store(true, Ordering::Release);
+                }
+            }
             self.foreground.store(self.pid, Ordering::Release);
             self.input_disconnected = child_hook.input_disconnected;
             self.stopped_by_user |= child_hook.stopped_by_user;
@@ -1478,6 +1623,10 @@ impl RunHook {
         hook.input_rx = self.input_rx.clone();
         hook.stop_all = self.stop_all.clone();
         hook.foreground = self.foreground.clone();
+        #[cfg(feature = "unicorn")]
+        {
+            hook.checkpoint_domain = self.checkpoint_domain.clone();
+        }
         hook
     }
     fn finish_children(&mut self) {
@@ -1500,6 +1649,12 @@ impl RunHook {
         input_rx: Option<Receiver<InputCommand>>,
     ) -> Self {
         Self {
+            #[cfg(feature = "unicorn")]
+            checkpoint_domain: Default::default(),
+            #[cfg(feature = "unicorn")]
+            checkpoint_participant: None,
+            #[cfg(feature = "unicorn")]
+            restore_group: None,
             #[cfg(feature = "unicorn")]
             restore_snapshot: None,
             #[cfg(feature = "unicorn")]
@@ -1549,7 +1704,6 @@ fn run_compact_framework(
     config: &pocket_library::LauncherConfig,
     hook: &mut RunHook,
 ) -> (RunOutcome, u32) {
-
     let tilt = game.settings.effective_tilt_axes(config);
     let mut input = std::collections::VecDeque::new();
     let sender = hook.frame_tx.clone();
@@ -1559,7 +1713,9 @@ fn run_compact_framework(
         pocket_netcf::host::Options {
             size: game.settings.screen.resolve_image(image),
             save_root: Some(game.save_dir(library_root)),
-            guest_path: game.guest_launch_paths(library_root).map(|paths| paths.module_path),
+            guest_path: game
+                .guest_launch_paths(library_root)
+                .map(|paths| paths.module_path),
             tilt,
             gpu_renderer: config.gpu_renderer,
             gles_internal_resolution: config.gles_internal_resolution,
@@ -1589,13 +1745,26 @@ fn run_compact_framework(
         Ok(()) => ("Compact Framework session ended.".into(), 0),
         Err(error) => (error, 0xc0000135),
     };
-    (RunOutcome { summary, framebuffer }, code)
+    (
+        RunOutcome {
+            summary,
+            framebuffer,
+        },
+        code,
+    )
 }
 
 impl FrameHook for RunHook {
     #[cfg(feature = "unicorn")]
     fn checkpoint_requested(&mut self) -> bool {
-        !self.snapshot_requests.is_empty() && self.foreground.load(Ordering::Acquire) == self.pid
+        self.checkpoint_domain.requested(self.pid)
+            || (!self.snapshot_requests.is_empty()
+                && self.foreground.load(Ordering::Acquire) == self.pid)
+    }
+
+    #[cfg(feature = "unicorn")]
+    fn checkpoint_requires_execution_gate(&self) -> bool {
+        false // The callback acquires the gate only for a standalone capture.
     }
 
     #[cfg(feature = "unicorn")]
@@ -1605,43 +1774,7 @@ impl FrameHook for RunHook {
         process: &mut pocket_core::kernel::Process,
         point: pocket_core::kernel::ResumePoint,
     ) {
-        let started = std::time::Instant::now();
-        let result = (|| {
-            let launch = self.launch_context.as_ref().ok_or("missing snapshot launch context")?;
-            let path = pocket_library::snapshot_slot::path_for(&launch.library_root, &launch.game);
-            let snapshot = if self.snapshot_detach_allowed {
-                resolve_snapshot_card_program(&launch.card_root, &process.state.module_path)?;
-                pocket_core::SessionSnapshot::capture_foreground(cpu, process, point)
-            } else {
-                pocket_core::SessionSnapshot::capture(cpu, process, point)
-            }.map_err(|error| format!("{error:#}"))?;
-            Ok::<_, String>((path, snapshot))
-        })();
-        let replies = std::mem::take(&mut self.snapshot_requests);
-        match result {
-            Ok((path, snapshot)) => {
-                log::debug!("Snapshot capture took {:?}", started.elapsed());
-                let worker_replies = replies.clone();
-                if let Err(error) = std::thread::Builder::new().name("pockethle-snapshot".into()).spawn(move || {
-                    let started = std::time::Instant::now();
-                    let result = pocket_library::snapshot_slot::save(&path, |output| snapshot.write(output))
-                        .map_err(|error| error.to_string());
-                    log::debug!("Snapshot compression and write took {:?}", started.elapsed());
-                    for reply in worker_replies {
-                        let _ = reply.send(result.clone());
-                    }
-                }) {
-                    for reply in replies {
-                        let _ = reply.send(Err(format!("cannot start snapshot writer: {error}")));
-                    }
-                }
-            }
-            Err(error) => {
-                for reply in replies {
-                    let _ = reply.send(Err(error.clone()));
-                }
-            }
-        }
+        self.capture_checkpoint(cpu, process, point);
     }
 
     fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
@@ -1661,6 +1794,24 @@ impl FrameHook for RunHook {
             self.media_was_foreground = false;
             self.stop_all.load(Ordering::Acquire)
         };
+        #[cfg(feature = "unicorn")]
+        if active
+            && !self.snapshot_requests.is_empty()
+            && !self.snapshot_detach_allowed
+            && !self.checkpoint_domain.requested(self.pid)
+        {
+            let processes = state.object_handles.checkpoint_process_ids();
+            if processes.len() > 1 || self.pid != 1 {
+                if let Err(error) =
+                    self.checkpoint_domain
+                        .request(self.pid, processes, Duration::from_secs(10))
+                {
+                    for reply in self.snapshot_requests.drain(..) {
+                        let _ = reply.send(Err(error.clone()));
+                    }
+                }
+            }
+        }
         if std::mem::take(&mut self.recording_audio_pending) {
             state.audio.record_output(self.recording_audio.clone());
         }
@@ -1733,7 +1884,8 @@ impl FrameHook for RunHook {
                                 Ok(frame) => frame,
                                 Err(error) => {
                                     log::error!("GPU snapshot failed: {error}");
-                                    self.runtime_error = Some(format!("GPU snapshot failed: {error}"));
+                                    self.runtime_error =
+                                        Some(format!("GPU snapshot failed: {error}"));
                                     state.should_stop = true;
                                     return FrameAction::Stop;
                                 }
@@ -1743,7 +1895,8 @@ impl FrameHook for RunHook {
                                 Ok(frame) => frame.is_all_black(),
                                 Err(error) => {
                                     log::error!("framebuffer read failed: {error}");
-                                    self.runtime_error = Some(format!("framebuffer read failed: {error}"));
+                                    self.runtime_error =
+                                        Some(format!("framebuffer read failed: {error}"));
                                     state.should_stop = true;
                                     return FrameAction::Stop;
                                 }
@@ -1764,7 +1917,8 @@ impl FrameHook for RunHook {
                                 Ok(frame) => frame,
                                 Err(error) => {
                                     log::error!("presentation read failed: {error}");
-                                    self.runtime_error = Some(format!("presentation read failed: {error}"));
+                                    self.runtime_error =
+                                        Some(format!("presentation read failed: {error}"));
                                     state.should_stop = true;
                                     return FrameAction::Stop;
                                 }

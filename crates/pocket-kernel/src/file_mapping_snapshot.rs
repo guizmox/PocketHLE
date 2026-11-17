@@ -1,12 +1,10 @@
 //! Snapshot packing for CE section objects, views and their VFS leases.
 
 use super::*;
-use crate::vfs::OpenFile;
+use crate::vfs::VfsObject;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Mutex,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 #[derive(Serialize, Deserialize)]
 pub struct MappingSnapshot {
@@ -24,6 +22,7 @@ struct SavedSection {
     size: u32,
     writable: bool,
     file: Option<u32>,
+    #[serde(with = "serde_bytes")]
     bytes: Vec<u8>,
 }
 
@@ -34,6 +33,27 @@ struct SavedView {
     offset: u32,
     len: u32,
     prot: u32,
+}
+
+#[derive(Default)]
+pub struct MappingRestoreDomain {
+    objects: HashMap<u32, RestoredMapping>,
+}
+struct RestoredMapping {
+    object: Arc<FileMapping>,
+    digest: [u8; 20],
+    file: Option<crate::vfs::SnapshotObjectId>,
+}
+impl MappingRestoreDomain {
+    pub(crate) fn release_objects(&mut self) {
+        self.objects.clear();
+    }
+    pub fn objects(&self) -> HashMap<u32, Arc<FileMapping>> {
+        self.objects
+            .iter()
+            .map(|(&key, record)| (key, record.object.clone()))
+            .collect()
+    }
 }
 
 /// Validated data to apply after the rest of the session has been restored.
@@ -63,9 +83,10 @@ impl MappedViews {
         &self,
         vfs: &crate::vfs::Vfs,
         table: &crate::handles::HandleTable,
-        private: &mut HashMap<u32, Arc<Mutex<OpenFile>>>,
+        private: &mut HashMap<u32, VfsObject>,
+        coordinated: bool,
     ) -> Result<Option<MappingSnapshot>, String> {
-        let (bindings, names) = table.snapshot_mapping_bindings()?;
+        let (bindings, names) = table.snapshot_mapping_bindings(coordinated)?;
         if bindings.is_empty() && self.views.is_empty() {
             return Ok(None);
         }
@@ -137,6 +158,23 @@ impl MappingSnapshot {
         state: &mut crate::KernelState,
         cpu: &mut dyn Cpu,
     ) -> Result<MappingContents, String> {
+        self.restore_with_domain(state, cpu, None)
+    }
+
+    pub fn restore_with_domain(
+        self,
+        state: &mut crate::KernelState,
+        cpu: &mut dyn Cpu,
+        shared: Option<&Mutex<MappingRestoreDomain>>,
+    ) -> Result<MappingContents, String> {
+        use sha1::{Digest as _, Sha1};
+        let mut shared = shared
+            .map(|registry| {
+                registry
+                    .lock()
+                    .map_err(|_| "section reconstruction domain poisoned")
+            })
+            .transpose()?;
         let private_backings = self.file_handles();
         let mut objects = HashMap::new();
         let mut contents = MappingContents::default();
@@ -146,6 +184,31 @@ impl MappingSnapshot {
                 || objects.contains_key(&section.key)
             {
                 return Err("invalid saved section backing".into());
+            }
+            let digest: [u8; 20] = Sha1::digest(&section.bytes).into();
+            let backing = section
+                .file
+                .map(|file| {
+                    state
+                        .vfs
+                        .export_handle(file)
+                        .map(|file| file.snapshot_identity())
+                        .ok_or("missing shared section file")
+                })
+                .transpose()?;
+            if let Some(previous) = shared
+                .as_ref()
+                .and_then(|registry| registry.objects.get(&section.key))
+            {
+                if previous.object.size != section.size
+                    || previous.object.writable != section.writable
+                    || previous.digest != digest
+                    || previous.file != backing
+                {
+                    return Err("inconsistent shared section backing".into());
+                }
+                objects.insert(section.key, previous.object.clone());
+                continue;
             }
             let object = if let Some(file) = section.file {
                 if state
@@ -171,6 +234,16 @@ impl MappingSnapshot {
                         format!("cannot recreate anonymous section: WinCE error {error}")
                     })?
             };
+            if let Some(registry) = shared.as_mut() {
+                registry.objects.insert(
+                    section.key,
+                    RestoredMapping {
+                        object: object.clone(),
+                        digest,
+                        file: backing,
+                    },
+                );
+            }
             if section.writable {
                 contents.0.push((object.clone(), section.bytes));
             } else {
@@ -182,6 +255,7 @@ impl MappingSnapshot {
             }
             objects.insert(section.key, object);
         }
+        drop(shared);
         for view in self.views {
             let object = objects
                 .get(&view.key)

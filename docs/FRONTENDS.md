@@ -36,26 +36,38 @@ game on a compilation card resumes directly from its saved program.
 The checkpoint covers fixed-function EGL, DirectDraw display ownership and timing,
 and supported device state. It reopens idle BTH1 and VIB1 handles through the host
 services. GPS1 and CAM1 reconnect to the current providers. A camera request
-waiting for a frame must complete before capture. MAS1 retains the MP3 decoder,
-queued PCM and guest completion state. Empty DirectShow graphs retain their
-guest COM objects and settings.
+waiting for a frame retains its remaining timeout. MAS1 retains the MP3 decoder,
+queued PCM and guest completion state. DirectShow graphs retain their guest COM objects, settings, last frame and
+playhead. Loaded files reopen through the real decoder at that position.
+Microphone capture restores guest queues and reopens the current real backend;
+missing devices fail restore.
 
-Programmable GLES restores textures, buffers, shaders and framebuffer state
-by replaying the calls that created and rendered them through the host driver.
-Use the same host graphics driver and settings. The experimental journal has
-a 96 MiB memory budget for the dictionary of unique calls and their execution
-order. Calls with identical arguments, guest data and results share a single
-dictionary entry. If a session exceeds the budget, saving reports the limit
-and keeps the previously saved slot. EGL's fixed-function path does not keep
-a programmable journal.
+Programmable GLES on a desktop OpenGL host captures live GPU resources and draw
+state, then reconstructs them without replaying the session's draw history.
+Use the same host graphics driver and settings. Host OpenGL ES contexts retain
+the bounded 96 MiB programmable journal fallback. Unsupported resource states
+report a capture failure and keep the previous slot. Fixed-function EGL uses
+its own resource checkpoint path.
+
+Files open for writing or appending at capture return to their captured contents
+on successful restore. Files already closed at capture are not rolled back.
+Read-only files must remain unchanged unless a captured writable description
+restores the same backing. RAM object-store files, open descriptions and mapped
+aliases are captured with their storage accounting.
 
 HSS playback restores its speaker objects, loaded clips and mixer cursor.
 PocketPC accelerometer stream handles reconnect to the active input provider.
 Restoring sends releases for buttons and stylus presses the guest had already
 received. This lets polling and message-based games resume with neutral input.
 
-Compact Framework, loaded DirectShow media, active Bluetooth connections and
-microphone capture are outside this profile. Capture reports unsupported live
+Concurrent PocketPC processes restore as a coordinated group, including their
+shared handles, sections and RAM files. A process still being started or stopped
+cannot be captured. CEDB open cursors, cryptography, MSXML, SDL, volume handles
+and GPS serial state are included. Logical WinINet sessions and unsent requests
+reconnect to the current native backend without resending requests.
+
+Compact Framework, active Bluetooth connections/HTTP transfers and live zlib streams
+remain outside this profile. Capture reports unsupported live
 resources. The snapshot controls are desktop-only.
 
 See [Desktop snapshot internals](SNAPSHOTS.md) for the file layout, ARM block

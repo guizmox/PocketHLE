@@ -1077,6 +1077,11 @@ children, while shared handles/RAM remain alive through child references.
 The desktop session shares stop/input but only its foreground process submits
 frames. All process jobs must finish before completing the session. API state
 is per process; thread-local multimedia stays on the owning host thread.
+Coordinated desktop checkpoints rendezvous every participating CPU without
+holding the execution gate. Capture/restore each graphics/media runtime on its
+owning host thread. Rebuild shared handle/VFS/section identity before releasing
+any continuation, then use one resume-clock epoch for the device. See
+[Snapshot internals](SNAPSHOTS.md) for the shared codec and commit barrier.
 ARM v7 verifies all 132 RAM checks plus the separate process/orphan reports in
 three exit variants; the real desktop runner executes the same process probes.
 No temporary instrumentation or game-specific exception is introduced.

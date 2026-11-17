@@ -2,6 +2,7 @@
 //! Documents remain alive while any returned node/list still refers to them.
 
 use quick_xml::{events::Event, Reader};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const NODE_ELEMENT: i32 = 1;
@@ -15,7 +16,7 @@ pub const MAX_XML_BYTES: usize = 8 * 1024 * 1024;
 const MAX_NODES: usize = 65536;
 const MAX_DEPTH: usize = 256;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomNode {
     pub node_type: i32,
     pub name: String,
@@ -25,6 +26,7 @@ pub struct DomNode {
     pub parent: Option<usize>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Document {
     pub nodes: Vec<DomNode>,
     pub root_element: Option<usize>,
@@ -81,7 +83,7 @@ impl Document {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComKind {
     Document,
     Node(usize),
@@ -89,7 +91,7 @@ pub enum ComKind {
     AttrList(usize),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ComObject {
     pub doc: u32,
     pub kind: ComKind,
@@ -98,7 +100,7 @@ pub struct ComObject {
     pub preserve_whitespace: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct MsxmlState {
     pub doc_vtable: u32,
     pub node_vtable: u32,
@@ -368,5 +370,66 @@ mod tests {
         state.objects.remove(&200);
         state.collect_document(doc);
         assert!(state.doc(doc).is_none());
+    }
+}
+
+impl MsxmlState {
+    pub(crate) fn validate_snapshot(&self) -> Result<(), String> {
+        let invalid = || "invalid saved MSXML document graph".to_string();
+        for (&id, document) in &self.documents {
+            if id == 0
+                || id > self.next_document
+                || document.nodes.is_empty()
+                || document.nodes.len() > MAX_NODES
+                || document.nodes[0].parent.is_some()
+                || document.nodes[0].node_type != NODE_DOCUMENT
+                || document.root_element.is_some_and(|root| {
+                    root >= document.nodes.len()
+                        || document.nodes[root].parent != Some(0)
+                        || document.nodes[root].node_type != NODE_ELEMENT
+                })
+            {
+                return Err(invalid());
+            }
+            let mut seen = vec![false; document.nodes.len()];
+            let mut pending = vec![(0, 0)];
+            let mut budget = MAX_XML_BYTES + 1024;
+            while let Some((index, depth)) = pending.pop() {
+                if index >= seen.len()
+                    || std::mem::replace(&mut seen[index], true)
+                    || depth > MAX_DEPTH
+                {
+                    return Err(invalid());
+                }
+                let node = &document.nodes[index];
+                budget = budget
+                    .checked_sub(node.name.len() + node.value.len())
+                    .ok_or_else(invalid)?;
+                for &child in node.children.iter().chain(&node.attributes) {
+                    if document
+                        .nodes
+                        .get(child)
+                        .is_none_or(|child| child.parent != Some(index))
+                    {
+                        return Err(invalid());
+                    }
+                    pending.push((child, depth + 1));
+                }
+            }
+            if seen.iter().any(|seen| !seen) {
+                return Err(invalid());
+            }
+        }
+        for (&address, object) in &self.objects {
+            let document = self.documents.get(&object.doc).ok_or_else(invalid)?;
+            let node = match object.kind {
+                ComKind::Document => 0,
+                ComKind::Node(n) | ComKind::ChildList(n) | ComKind::AttrList(n) => n,
+            };
+            if address == 0 || object.refs == 0 || node >= document.nodes.len() {
+                return Err(invalid());
+            }
+        }
+        Ok(())
     }
 }

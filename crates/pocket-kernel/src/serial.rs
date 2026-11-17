@@ -173,6 +173,49 @@ mod tests {
         assert!(nofix.lines().nth(2).unwrap().contains(",V,"));
     }
     #[test]
+    fn snapshot_reconnects_serial_provider_and_preserves_aliases_and_pending_bytes() {
+        use std::collections::HashMap;
+        let source = crate::vfs::Vfs::new();
+        source.gps_service().set_allowed(true);
+        source
+            .gps_service()
+            .set_fixed_position(Some((44., -123.)))
+            .unwrap();
+        let device = source.gps_service().open().unwrap();
+        let mut first = Port::new(device.clone(), 1, 3);
+        first.poll().unwrap();
+        let pending = first.queue.clone();
+        let second = Port::new(device, 1, 3);
+        let ports = HashMap::from([(0xdead8800, first), (0xdead8801, second)]);
+        let saved = SerialSnapshot::capture(&ports, Instant::now()).unwrap();
+        drop(ports);
+        let destination = crate::vfs::Vfs::new();
+        destination
+            .gps_service()
+            .set_fixed_position(Some((48., 2.)))
+            .unwrap();
+        destination.gps_service().set_allowed(true);
+        let mut restored = saved.restore(&destination).unwrap();
+        assert_eq!(restored[&0xdead8800].queue, pending);
+        assert!(Arc::ptr_eq(
+            &restored[&0xdead8800].device,
+            &restored[&0xdead8801].device
+        ));
+        assert!(!Arc::ptr_eq(
+            &restored[&0xdead8800].device,
+            &source.gps_service().open().unwrap()
+        ));
+        destination.gps_service().set_allowed(false);
+        assert_eq!(restored.get_mut(&0xdead8800).unwrap().poll(), Err(5));
+        assert!(restored[&0xdead8800].queue.is_empty());
+        let saved = SerialSnapshot::capture(&restored, Instant::now()).unwrap();
+        assert!(saved
+            .restore(&destination)
+            .err()
+            .unwrap()
+            .contains("WinCE error 5"));
+    }
+    #[test]
     fn serial_fix_uses_existing_permission_and_nmea_checksum() {
         let service = crate::gps::Service::default();
         assert!(service.open().is_err());
@@ -196,5 +239,117 @@ mod tests {
         service.set_allowed(false);
         assert_eq!(port.poll(), Err(5));
         assert!(port.queue.is_empty());
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct SerialSnapshot {
+    ports: Vec<SavedPort>,
+    devices: Vec<bool>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedPort {
+    handle: u32,
+    device: usize,
+    queue: VecDeque<u8>,
+    delay: Duration,
+    dcb: [u8; 28],
+    timeouts: [u8; 20],
+    mask: u32,
+    access: u32,
+    share: u32,
+}
+impl SerialSnapshot {
+    pub(crate) fn capture(
+        ports: &std::collections::HashMap<u32, Port>,
+        now: Instant,
+    ) -> Result<Self, String> {
+        let mut devices = Vec::new();
+        let mut identities = std::collections::HashMap::new();
+        let mut saved = Vec::new();
+        for (&handle, port) in ports {
+            let identity = Arc::as_ptr(&port.device);
+            let device = match identities.get(&identity) {
+                Some(&index) => index,
+                None => {
+                    let index = devices.len();
+                    devices.push(
+                        port.device
+                            .lock()
+                            .map_err(|_| "GPS serial device lock poisoned")?
+                            .has_had_fix(),
+                    );
+                    identities.insert(identity, index);
+                    index
+                }
+            };
+            saved.push(SavedPort {
+                handle,
+                device,
+                queue: port.queue.clone(),
+                delay: port.next.saturating_duration_since(now),
+                dcb: port.dcb,
+                timeouts: port.timeouts,
+                mask: port.mask,
+                access: port.access,
+                share: port.share,
+            });
+        }
+        Ok(Self {
+            ports: saved,
+            devices,
+        })
+    }
+
+    pub(crate) fn restore(
+        self,
+        vfs: &crate::vfs::Vfs,
+    ) -> Result<std::collections::HashMap<u32, Port>, String> {
+        if self.ports.len() > 256 || self.devices.len() > self.ports.len() {
+            return Err("invalid saved GPS serial provider count".into());
+        }
+        let mut ports = std::collections::HashMap::new();
+        let mut devices = Vec::new();
+        for fixed in self.devices {
+            let device = vfs
+                .gps_service()
+                .open()
+                .map_err(|code| format!("cannot reopen GPS serial provider: WinCE error {code}"))?;
+            device
+                .lock()
+                .map_err(|_| "GPS serial device lock poisoned")?
+                .restore_fix_status(fixed);
+            devices.push(device);
+        }
+        for record in self.ports {
+            if !(0xdead8800..0xdead8900).contains(&record.handle)
+                || !(1..=3).contains(&record.access)
+                || record.share & !3 != 0
+                || record.device >= devices.len()
+                || record.queue.len() > 65536
+                || record.delay > Duration::from_secs(1)
+                || u32::from_le_bytes(record.dcb[..4].try_into().unwrap()) != 28
+                || ports.contains_key(&record.handle)
+                || ports
+                    .values()
+                    .any(|p: &Port| p.access & !record.share != 0 || record.access & !p.share != 0)
+            {
+                return Err("invalid saved GPS serial port".into());
+            }
+            ports.insert(
+                record.handle,
+                Port {
+                    device: devices[record.device].clone(),
+                    queue: record.queue,
+                    next: Instant::now() + record.delay,
+                    dcb: record.dcb,
+                    timeouts: record.timeouts,
+                    mask: record.mask,
+                    access: record.access,
+                    share: record.share,
+                },
+            );
+        }
+        Ok(ports)
     }
 }

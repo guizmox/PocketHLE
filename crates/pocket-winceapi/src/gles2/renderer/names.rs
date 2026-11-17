@@ -2,7 +2,7 @@
 //! different native names.
 use std::collections::{hash_map::Entry, HashMap};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {
     Buffer,
     Texture,
@@ -77,6 +77,16 @@ pub(super) struct ObjectNames {
 }
 
 impl ObjectNames {
+    pub(super) fn pairs(&self, kind: Kind) -> Vec<(u32, u32)> {
+        let mut pairs: Vec<_> = self.namespaces[kind as usize]
+            .guest_to_host
+            .iter()
+            .map(|(&guest, &host)| (guest, host))
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
     pub(super) fn assign(&mut self, kind: Kind, host: u32, saved: Option<u32>) -> Option<u32> {
         if host == 0 || saved == Some(0) {
             return (saved.is_none_or(|saved| saved == host)).then_some(0);

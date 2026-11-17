@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct HandleSnapshot {
+    coordinated: bool,
     pid: u32,
     next: u32,
     next_pid: u32,
@@ -27,17 +28,19 @@ impl HandleTable {
     }
 
     pub(crate) fn capture_process_handles(&self, detached: bool) -> Result<HandleSnapshot, String> {
-        self.capture_process_handles_with_mappings(detached, false)
+        self.capture_process_handles_with_mappings(detached, false, false)
     }
 
     pub(crate) fn capture_process_handles_with_mappings(
         &self,
         detached: bool,
         mappings: bool,
+        coordinated: bool,
     ) -> Result<HandleSnapshot, String> {
         let domain = self.domain.lock().map_err(|_| "handle domain poisoned")?;
         let pid = self.pid;
-        if (!detached && domain.active.len() != 1)
+        if !coordinated
+            && ((!detached && domain.active.len() != 1)
             || !domain.active.contains(&pid)
             || (!mappings && domain.mapping_refs.keys().any(|&(owner, _)| owner == pid))
             || domain.imports.keys().any(|&(owner, _)| owner == pid)
@@ -45,7 +48,7 @@ impl HandleTable {
             || domain.process_kills.contains_key(&pid)
             // A suspended caller owns this exit notification. It is not part
             // of the foreground process when restoring it in a new domain.
-            || (!detached && domain.deferred_process_exits.contains(&pid))
+            || (!detached && domain.deferred_process_exits.contains(&pid)))
         {
             return Err("handle snapshot contains a live child process or mapping".into());
         }
@@ -56,6 +59,7 @@ impl HandleTable {
             .filter_map(|(_, &object)| object)
             .collect();
         let snapshot = HandleSnapshot {
+            coordinated,
             pid,
             next: domain.next,
             next_pid: domain.next_pid,
@@ -76,14 +80,34 @@ impl HandleTable {
                 .entries
                 .iter()
                 .filter_map(|(&(owner, id), entry)| {
-                    (owner == pid).then(|| (id, entry.map(|object| self.local(object))))
+                    (owner == pid).then(|| {
+                        (
+                            id,
+                            entry.map(|object| {
+                                if coordinated {
+                                    object
+                                } else {
+                                    self.local(object)
+                                }
+                            }),
+                        )
+                    })
                 })
                 .collect(),
             names: domain
                 .names
                 .iter()
                 .filter(|(_, object)| objects.contains(object))
-                .map(|(name, &object)| (name.clone(), self.local(object)))
+                .map(|(name, &object)| {
+                    (
+                        name.clone(),
+                        if coordinated {
+                            object
+                        } else {
+                            self.local(object)
+                        },
+                    )
+                })
                 .collect(),
             process_image: domain.process_images.get(&pid).cloned(),
             toolhelp: domain
@@ -98,12 +122,16 @@ impl HandleTable {
                 .iter()
                 .filter_map(|(&(owner, index), &exit)| (owner == pid).then_some((index, exit)))
                 .collect(),
-            file_objects: domain
-                .files
-                .keys()
-                .filter(|object| objects.contains(object))
-                .map(|&object| self.local(object))
-                .collect(),
+            file_objects: if coordinated {
+                HashSet::new()
+            } else {
+                domain
+                    .files
+                    .keys()
+                    .filter(|object| objects.contains(object))
+                    .map(|&object| self.local(object))
+                    .collect()
+            },
         };
         snapshot.validate()?;
         Ok(snapshot)
@@ -111,6 +139,12 @@ impl HandleTable {
 }
 
 impl HandleSnapshot {
+    pub(crate) fn is_device_process(&self) -> bool {
+        self.coordinated
+    }
+    pub fn process_id(&self) -> u32 {
+        self.pid
+    }
     pub(crate) fn owned_objects(&self) -> impl Iterator<Item = HandleObject> + '_ {
         self.entries.values().copied().flatten()
     }
@@ -160,11 +194,21 @@ impl HandleSnapshot {
             domain: Default::default(),
         };
         for (id, object) in self.entries {
-            let value = object.map(|object| table.canonical(object, &domain));
+            let value = object.map(|object| {
+                if self.coordinated {
+                    object
+                } else {
+                    table.canonical(object, &domain)
+                }
+            });
             domain.entries.insert((self.pid, id), value);
         }
         for (name, object) in self.names {
-            let value = table.canonical(object, &domain);
+            let value = if self.coordinated {
+                object
+            } else {
+                table.canonical(object, &domain)
+            };
             domain.names.insert(name, value);
         }
         for object in self.file_objects {
@@ -188,17 +232,18 @@ impl HandleSnapshot {
 
     fn validate(&self) -> Result<(), String> {
         let supported = |object: HandleObject| {
-            matches!(
-                object,
-                HandleObject::Thread(_)
-                    | HandleObject::CurrentProcess
-                    | HandleObject::Event(_)
-                    | HandleObject::Semaphore(_)
-                    | HandleObject::Mutex(_)
-                    | HandleObject::File(_)
-                    | HandleObject::Device(_)
-                    | HandleObject::Mapping(_)
-            )
+            self.coordinated
+                || matches!(
+                    object,
+                    HandleObject::Thread(_)
+                        | HandleObject::CurrentProcess
+                        | HandleObject::Event(_)
+                        | HandleObject::Semaphore(_)
+                        | HandleObject::Mutex(_)
+                        | HandleObject::File(_)
+                        | HandleObject::Device(_)
+                        | HandleObject::Mapping(_)
+                )
         };
         if self.pid == 0
             || self.next_pid <= self.pid

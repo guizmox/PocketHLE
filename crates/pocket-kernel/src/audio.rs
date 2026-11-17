@@ -19,7 +19,7 @@ pub mod conversion;
 
 #[path = "audio_snapshot.rs"]
 mod snapshot;
-pub use snapshot::AudioSnapshot;
+pub use snapshot::{AudioSnapshot, MasSnapshot};
 
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
@@ -220,12 +220,15 @@ impl WaveStream {
     }
 
     fn advance_virtual(&mut self, active: bool) {
-        let now = Instant::now();
+        self.advance_virtual_at(active, Instant::now());
+    }
+    fn advance_virtual_at(&mut self, active: bool, now: Instant) {
         if !active && !self.paused && self.consumed < self.written {
             const Q16_NANOSECONDS_PER_SECOND: u128 = 1_000_000_000 << 16;
             let rate =
                 u128::from(self.format.sample_rate.max(1)) * u128::from(self.playback_rate_q16);
-            let elapsed = now.duration_since(self.tick).as_nanos() * rate + self.fraction;
+            let elapsed =
+                now.saturating_duration_since(self.tick).as_nanos() * rate + self.fraction;
             let frames = elapsed / Q16_NANOSECONDS_PER_SECOND;
             self.fraction = elapsed % Q16_NANOSECONDS_PER_SECOND;
             self.consume(
@@ -430,6 +433,9 @@ impl Shared {
     /// what the guest actually submitted, so a game that stops
     /// feeding buffers doesn't see phantom progress.
     fn cursor(&mut self) -> u64 {
+        self.cursor_at(Instant::now())
+    }
+    fn cursor_at(&mut self, now: Instant) -> u64 {
         if self.paused {
             // Reset the wall-clock reference so a long pause doesn't
             // release a burst of buffers the moment playback resumes.
@@ -445,7 +451,6 @@ impl Shared {
         }
         let rate =
             self.guest_format.sample_rate.max(1) as u64 * self.guest_format.channels.max(1) as u64;
-        let now = Instant::now();
         let last = *self.virtual_tick.get_or_insert(now);
         let elapsed_us = now.saturating_duration_since(last).as_micros() as u64;
         if elapsed_us > 0 {

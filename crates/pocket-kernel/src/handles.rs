@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 mod snapshot;
 pub use snapshot::HandleSnapshot;
 
+#[path = "device_handle_snapshot.rs"]
+mod device_snapshot;
+pub use device_snapshot::DeviceHandleSnapshot;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HandleObject {
     Thread(usize),
@@ -566,6 +570,7 @@ impl HandleTable {
     }
     pub(crate) fn snapshot_mapping_bindings(
         &self,
+        coordinated: bool,
     ) -> Result<
         (
             Vec<(u32, Arc<crate::file_mapping::FileMapping>)>,
@@ -574,7 +579,7 @@ impl HandleTable {
         String,
     > {
         let domain = self.domain.lock().map_err(|_| "handle domain poisoned")?;
-        if domain.active.len() != 1 && !domain.mappings.is_empty() {
+        if !coordinated && domain.active.len() != 1 && !domain.mappings.is_empty() {
             return Err("cannot capture mappings shared across processes".into());
         }
         let bindings = domain
@@ -587,7 +592,15 @@ impl HandleTable {
             .mapping_names
             .iter()
             .filter_map(|(name, mapping)| {
-                mapping.upgrade().map(|mapping| (name.clone(), mapping.key))
+                mapping
+                    .upgrade()
+                    .filter(|mapping| {
+                        !coordinated
+                            || domain.mapping_refs.iter().any(|(&(owner, _), object)| {
+                                owner == self.pid && object.key == mapping.key
+                            })
+                    })
+                    .map(|mapping| (name.clone(), mapping.key))
             })
             .collect();
         Ok((bindings, names))

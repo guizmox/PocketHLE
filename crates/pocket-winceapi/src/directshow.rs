@@ -62,7 +62,7 @@ enum Packet {
     End,
     Error(String),
 }
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 struct Info {
     duration: f64,
     width: u32,
@@ -71,6 +71,10 @@ struct Info {
     bitrate: i64,
 }
 struct Movie {
+    guest_path: Option<String>,
+    snapshot_waits: Option<Vec<(usize, Duration)>>,
+    snapshot_resume_clock: bool,
+    completion_delay: Option<Duration>,
     path: Option<std::path::PathBuf>,
     info: Info,
     offset: f64,
@@ -110,6 +114,10 @@ struct Movie {
 impl Movie {
     fn new() -> Self {
         Self {
+            guest_path: None,
+            snapshot_waits: None,
+            snapshot_resume_clock: false,
+            completion_delay: None,
             path: None,
             info: Info::default(),
             offset: 0.0,
@@ -153,87 +161,9 @@ impl Movie {
         }
     }
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct IdleGraphSnapshot {
-    visible: bool,
-    window: [i32; 4],
-    source: Option<[i32; 4]>,
-    destination: Option<[i32; 4]>,
-    window_properties: Vec<u32>,
-    objects: HashMap<String, (u32, u32)>,
-    notify: u32,
-    notify_msg: u32,
-    notify_param: u32,
-    notify_flags: u32,
-    volume: i32,
-}
-
-// Concurrent guest processes keep independent DirectShow object registries.
-pub(crate) fn capture_idle_graphs() -> Result<HashMap<u32, IdleGraphSnapshot>, String> {
-    MOVIES.with(|movies| {
-        movies
-            .lock()
-            .map_err(|_| "DirectShow registry lock poisoned")?
-            .iter()
-            .map(|(&root, graph)| {
-                if graph.path.is_some()
-                    || graph.playing
-                    || graph.worker.is_some()
-                    || graph.receiver.is_some()
-                    || !graph.completion_waits.is_empty()
-                {
-                    return Err("checkpoint contains a loaded DirectShow stream".into());
-                }
-                Ok((
-                    root,
-                    IdleGraphSnapshot {
-                        visible: graph.visible,
-                        window: graph.window,
-                        source: graph.source,
-                        destination: graph.destination,
-                        window_properties: graph.window_properties.to_vec(),
-                        objects: graph.objects.clone(),
-                        notify: graph.notify,
-                        notify_msg: graph.notify_msg,
-                        notify_param: graph.notify_param,
-                        notify_flags: graph.notify_flags,
-                        volume: graph.volume,
-                    },
-                ))
-            })
-            .collect()
-    })
-}
-
-pub(crate) fn restore_idle_graphs(saved: HashMap<u32, IdleGraphSnapshot>) -> Result<(), String> {
-    let graphs = saved
-        .into_iter()
-        .map(|(root, saved)| {
-            let mut graph = Movie::new();
-            graph.visible = saved.visible;
-            graph.window = saved.window;
-            graph.source = saved.source;
-            graph.destination = saved.destination;
-            graph.window_properties = saved
-                .window_properties
-                .try_into()
-                .map_err(|_| "invalid DirectShow window properties")?;
-            graph.objects = saved.objects;
-            graph.notify = saved.notify;
-            graph.notify_msg = saved.notify_msg;
-            graph.notify_param = saved.notify_param;
-            graph.notify_flags = saved.notify_flags;
-            graph.volume = saved.volume;
-            Ok((root, graph))
-        })
-        .collect::<Result<_, String>>()?;
-    MOVIES.with(|slot| {
-        *slot
-            .lock()
-            .map_err(|_| "DirectShow registry lock poisoned")? = graphs;
-        Ok(())
-    })
-}
+#[path = "directshow_snapshot.rs"]
+mod snapshot;
+pub(crate) use snapshot::{capture_graphs, restore_graphs, GraphSnapshot};
 
 thread_local! { static MOVIES: Mutex<HashMap<u32, Movie>> = Mutex::new(HashMap::new()); }
 fn exports(ctx: &CallCtx<'_>, name: &str) -> u32 {
@@ -503,6 +433,9 @@ fn restart(
     m.audio_queued = false;
     m.audio_end = 0;
     m.completion_waits.clear();
+    m.snapshot_waits = None;
+    m.snapshot_resume_clock = false;
+    m.completion_delay = None;
     Ok(0)
 }
 fn write_output(ctx: &mut CallCtx<'_>, pointer: u32, bytes: &[u8]) -> Result<u32, KernelError> {
@@ -541,6 +474,16 @@ fn auto_show(m: &mut Movie) {
 }
 
 fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelError> {
+    if let Some(waits) = m.snapshot_waits.take() {
+        let now = Instant::now();
+        m.completion_waits = waits
+            .into_iter()
+            .map(|(thread, elapsed)| (thread, now.checked_sub(elapsed).unwrap_or(now)))
+            .collect();
+    }
+    if std::mem::take(&mut m.snapshot_resume_clock) && m.playing {
+        m.start = Some(Instant::now());
+    }
     let preview = id == SYSTEM_PLAYER && m.is_paused && m.frame.is_none() && !m.ended;
     if !m.playing && !preview {
         return Ok(());
@@ -673,7 +616,9 @@ fn update(ctx: &mut CallCtx<'_>, id: u32, m: &mut Movie) -> Result<(), KernelErr
     if !preview
         && m.ended
         && m.pending.is_none()
-        && elapsed(m) >= Duration::from_secs_f64(m.frame_number as f64 / 30.0)
+        && elapsed(m)
+            >= m.completion_delay
+                .unwrap_or_else(|| Duration::from_secs_f64(m.frame_number as f64 / 30.0))
         && ctx.kernel.audio.mas_playback_cursor(id) >= m.audio_end
         && !m.completed
     {
@@ -852,6 +797,7 @@ pub(crate) fn play_system_media(ctx: &mut CallCtx<'_>, path: &str) -> Result<(),
         })?;
     let mut movie = Movie::new();
     movie.path = Some(host);
+    movie.guest_path = Some(path.to_owned());
     movie.info = info;
     movie.stop = info.duration;
     movie.receiver = Some(receiver);
@@ -982,6 +928,7 @@ fn method(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
                     Ok((rx, info, cancel, worker)) => {
                         m.cancel_decode();
                         m.path = Some(host);
+                        m.guest_path = Some(path.clone());
                         m.info = info;
                         m.offset = 0.0;
                         m.stop = info.duration;

@@ -8,6 +8,10 @@ use pocket_winceapi::gles::EglSessionSnapshot;
 use serde::Serialize;
 use std::io::{BufReader, BufWriter, Read, Write};
 
+#[path = "device_snapshot.rs"]
+mod device;
+pub use device::{DeviceArchive, DeviceRestoreGroup, ProcessCheckpoint};
+
 const SECTION_MAGIC: &[u8; 8] = b"PHSECT01";
 const SECTION_REQUIRED: u16 = 1 << 15;
 const SESSION: u16 = SECTION_REQUIRED | 1;
@@ -16,14 +20,16 @@ const KERNEL: u16 = SECTION_REQUIRED | 3;
 const EGL_FIXED: u16 = SECTION_REQUIRED | 4;
 const MEDIA: u16 = SECTION_REQUIRED | 5;
 const EGL_PROGRAMMABLE: u16 = SECTION_REQUIRED | 6;
-const EGL_PROGRAMMABLE_VERSION: u16 = 3;
+const EGL_PROGRAMMABLE_VERSION: u16 = 5;
 const HSS: u16 = SECTION_REQUIRED | 7;
 const INPUT_RELEASES: u16 = SECTION_REQUIRED | 8;
+const DEVICE: u16 = SECTION_REQUIRED | 9;
 const SECTION_HEADER_SIZE: u64 = 12;
 const IO_BUFFER_SIZE: usize = 64 * 1024;
 const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;
 
 pub struct SessionSnapshot {
+    device: Option<DeviceArchive>,
     executable: [u8; 32],
     card_program: Option<String>,
     cpu: ArmExecutionSnapshot,
@@ -41,6 +47,7 @@ pub struct SessionSnapshot {
 
 #[derive(Clone, Copy)]
 pub struct RestoredSession {
+    pub(super) resumed: Option<std::time::Instant>,
     clock: GuestClockSnapshot,
     point: ResumePoint,
 }
@@ -48,7 +55,14 @@ pub struct RestoredSession {
 impl SessionSnapshot {
     /// Called by a frame hook at an explicitly requested kernel boundary.
     pub fn capture(cpu: &mut dyn Cpu, process: &mut Process, point: ResumePoint) -> Result<Self> {
-        Self::capture_process(cpu, process, point, false)
+        Self::capture_process(
+            cpu,
+            process,
+            point,
+            false,
+            false,
+            crate::checkpoint_domain::CheckpointTime::now(),
+        )
     }
 
     pub fn capture_foreground(
@@ -56,7 +70,14 @@ impl SessionSnapshot {
         process: &mut Process,
         point: ResumePoint,
     ) -> Result<Self> {
-        Self::capture_process(cpu, process, point, true)
+        Self::capture_process(
+            cpu,
+            process,
+            point,
+            true,
+            false,
+            crate::checkpoint_domain::CheckpointTime::now(),
+        )
     }
 
     fn capture_process(
@@ -64,23 +85,27 @@ impl SessionSnapshot {
         process: &mut Process,
         point: ResumePoint,
         detached: bool,
+        coordinated: bool,
+        at: crate::checkpoint_domain::CheckpointTime,
     ) -> Result<Self> {
         let cpu = (cpu as &mut dyn std::any::Any)
             .downcast_mut::<UnicornCpu>()
             .context("snapshot requires the Unicorn ARM backend")?;
-        let media = pocket_winceapi::capture_snapshot_media().map_err(anyhow::Error::msg)?;
+        let media = pocket_winceapi::capture_snapshot_media(at.host).map_err(anyhow::Error::msg)?;
         let programmable =
             pocket_winceapi::gles2::capture_snapshot().map_err(anyhow::Error::msg)?;
         let executable = process
             .executable_fingerprint
             .context("missing executable identity")?;
-        let clock = GuestClockSnapshot::capture();
+        let clock = at.clock;
         let hss = process.state.hss.capture_snapshot();
         let started = std::time::Instant::now();
-        let kernel = process
-            .state
-            .capture_snapshot_with_suspended_parents(detached)
-            .map_err(anyhow::Error::msg)?;
+        let kernel = if coordinated {
+            process.state.capture_device_process(at.host)
+        } else {
+            process.state.capture_checkpoint_at(detached, at.host)
+        }
+        .map_err(anyhow::Error::msg)?;
         let kernel_time = started.elapsed();
         let egl = pocket_winceapi::gles::capture_egl_session().map_err(anyhow::Error::msg)?;
         let graphics_time = started.elapsed() - kernel_time;
@@ -93,6 +118,7 @@ impl SessionSnapshot {
             started.elapsed() - kernel_time - graphics_time
         );
         Ok(Self {
+            device: None,
             executable,
             card_program: detached.then(|| process.state.module_path.clone()),
             cpu,
@@ -117,10 +143,17 @@ impl SessionSnapshot {
         output.write_all(SECTION_MAGIC)?;
         let compressed = flate2::write::ZlibEncoder::new(output, flate2::Compression::fast());
         let mut buffered = BufWriter::with_capacity(IO_BUFFER_SIZE, compressed);
+        self.write_sections(&mut buffered)?;
+        buffered.into_inner()?.finish()?;
+        Ok(())
+    }
+
+    fn write_sections(&self, mut buffered: &mut impl Write) -> std::io::Result<()> {
         let count = 5
             + u16::from(self.programmable.is_some())
             + u16::from(self.hss.is_some())
-            + u16::from(!self.input_releases.is_empty());
+            + u16::from(!self.input_releases.is_empty())
+            + u16::from(self.device.is_some());
         buffered.write_all(&count.to_le_bytes())?;
         let mut remaining = PAYLOAD_LIMIT;
         write_section(
@@ -159,7 +192,9 @@ impl SessionSnapshot {
                 &self.input_releases,
             )?;
         }
-        buffered.into_inner()?.finish()?;
+        if let Some(device) = &self.device {
+            write_section(&mut buffered, &mut remaining, DEVICE, device)?;
+        }
         Ok(())
     }
 
@@ -179,11 +214,16 @@ impl SessionSnapshot {
     }
 
     fn read_sections(input: &mut impl Read) -> std::io::Result<Self> {
+        Self::read_sections_mode(input, true)
+    }
+
+    fn read_sections_mode(input: &mut impl Read, allow_device: bool) -> std::io::Result<Self> {
         let mut count = [0; 2];
         input.read_exact(&mut count)?;
         let mut remaining = PAYLOAD_LIMIT;
         let (mut session, mut cpu, mut kernel, mut egl, mut media) = (None, None, None, None, None);
         let mut programmable = None;
+        let mut device = None;
         let mut hss = None;
         let mut input_releases = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -201,12 +241,13 @@ impl SessionSnapshot {
             match (id, version) {
                 (SESSION, 1) => session = Some(read_section(&mut section)?),
                 (ARM, 1) => cpu = Some(read_section(&mut section)?),
-                (KERNEL, 2) => kernel = Some(read_section(&mut section)?),
+                (KERNEL, 6) => kernel = Some(read_section(&mut section)?),
                 (EGL_FIXED, 1) => egl = Some(read_section(&mut section)?),
-                (MEDIA, 1) => media = Some(read_section(&mut section)?),
+                (MEDIA, 2) => media = Some(read_section(&mut section)?),
                 (EGL_PROGRAMMABLE, EGL_PROGRAMMABLE_VERSION) => {
                     programmable = Some(read_section(&mut section)?)
                 }
+                (DEVICE, 1) if allow_device => device = Some(read_section(&mut section)?),
                 (HSS, 1) => hss = Some(read_section(&mut section)?),
                 (INPUT_RELEASES, 1) => input_releases = read_section(&mut section)?,
                 _ if id & SECTION_REQUIRED == 0 => {
@@ -225,7 +266,8 @@ impl SessionSnapshot {
         }
         let (executable, card_program, clock, point, thunks, thunk_by_va) =
             session.ok_or_else(|| invalid("missing session section"))?;
-        Ok(Self {
+        let snapshot = Self {
+            device,
             executable,
             card_program,
             clock,
@@ -239,7 +281,14 @@ impl SessionSnapshot {
             media: media.ok_or_else(|| invalid("missing media section"))?,
             hss,
             input_releases,
-        })
+        };
+        if allow_device && snapshot.kernel.is_device_process() != snapshot.device.is_some() {
+            return Err(invalid("process checkpoint is missing its device domain"));
+        }
+        if let Some(device) = &snapshot.device {
+            device.validate(&snapshot).map_err(invalid)?;
+        }
+        Ok(snapshot)
     }
 }
 
@@ -269,6 +318,8 @@ fn write_section(
     let version = if id == EGL_PROGRAMMABLE {
         EGL_PROGRAMMABLE_VERSION
     } else if id == KERNEL {
+        6
+    } else if id == MEDIA {
         2
     } else {
         1
@@ -294,6 +345,39 @@ impl Emulator {
     /// Restore in a fresh, normally configured launch. The old session is
     /// separate from this emulator. Discard this launch on any failure.
     pub fn restore_snapshot(&mut self, saved: SessionSnapshot) -> Result<RestoredSession> {
+        anyhow::ensure!(
+            !saved.has_device() && !saved.kernel.is_device_process(),
+            "device checkpoint requires the coordinated restore path"
+        );
+        let (restored, contents) = self.restore_snapshot_parts(saved, None)?;
+        let state = &mut self
+            .process
+            .as_mut()
+            .context("missing restored process")?
+            .state;
+        state
+            .vfs
+            .finish_snapshot_restore()
+            .map_err(anyhow::Error::msg)?;
+        let files = state
+            .vfs
+            .install_snapshot_files()
+            .map_err(anyhow::Error::msg)?;
+        if let Some(contents) = contents {
+            contents.install().map_err(anyhow::Error::msg)?;
+        }
+        files.commit();
+        Ok(restored)
+    }
+
+    fn restore_snapshot_parts(
+        &mut self,
+        saved: SessionSnapshot,
+        domain: Option<&pocket_kernel::DeviceRestoreDomain>,
+    ) -> Result<(
+        RestoredSession,
+        Option<pocket_kernel::file_mapping::MappingContents>,
+    )> {
         let process = self
             .process
             .as_mut()
@@ -313,19 +397,31 @@ impl Emulator {
         // Release resident bootstrap image pages before charging the restored
         // image and heap to the configured guest RAM pool.
         self.cpu = Box::new(StubCpu::new());
+        if let Some(domain) = domain {
+            domain.prepare_process(&mut process.state);
+        }
         let mappings = saved
             .kernel
-            .restore(&mut process.state)
+            .restore_with_domain(&mut process.state, domain)
             .map_err(anyhow::Error::msg)?;
         let (mut cpu, pc) = saved.cpu.restore(process.state.heap.image_page_budget())?;
         anyhow::ensure!(pc == saved.point.pc, "snapshot continuation mismatch");
         let contents = mappings
-            .map(|mappings| mappings.restore(&mut process.state, &mut cpu))
+            .map(|mappings| {
+                mappings.restore_with_domain(
+                    &mut process.state,
+                    &mut cpu,
+                    domain.map(|domain| &domain.sections),
+                )
+            })
             .transpose()
             .map_err(anyhow::Error::msg)?;
         saved.egl.restore().map_err(anyhow::Error::msg)?;
         pocket_winceapi::gles2::restore_snapshot(saved.programmable).map_err(anyhow::Error::msg)?;
-        saved.media.restore().map_err(anyhow::Error::msg)?;
+        saved
+            .media
+            .restore(&mut process.state)
+            .map_err(anyhow::Error::msg)?;
         if let Some(hss) = saved.hss {
             process.state.hss = hss.restore().map_err(anyhow::Error::msg)?;
         }
@@ -333,16 +429,20 @@ impl Emulator {
             .state
             .restore_snapshot_input(saved.input_releases)
             .map_err(anyhow::Error::msg)?;
-        if let Some(contents) = contents {
-            contents.install().map_err(anyhow::Error::msg)?;
+        if process.state.sdl.key_ptr != 0 {
+            cpu.write_mem(process.state.sdl.key_ptr, &process.state.sdl.keys)?;
         }
         process.thunks = saved.thunks;
         process.thunk_by_va = saved.thunk_by_va;
         self.cpu = Box::new(cpu);
-        Ok(RestoredSession {
-            clock: saved.clock,
-            point: saved.point,
-        })
+        Ok((
+            RestoredSession {
+                resumed: None,
+                clock: saved.clock,
+                point: saved.point,
+            },
+            contents,
+        ))
     }
 
     pub fn run_restored(
@@ -353,17 +453,20 @@ impl Emulator {
         let process = self.process.as_mut().context("no restored process")?;
         restored
             .clock
-            .run(|| {
-                pocket_kernel::resume_main_loop(
-                    self.cpu.as_mut(),
-                    process,
-                    &mut self.dispatcher,
-                    self.instruction_budget_per_slice,
-                    self.max_slices,
-                    Some(hook),
-                    restored.point,
-                )
-            })
+            .run_at(
+                restored.resumed.unwrap_or_else(std::time::Instant::now),
+                || {
+                    pocket_kernel::resume_main_loop(
+                        self.cpu.as_mut(),
+                        process,
+                        &mut self.dispatcher,
+                        self.instruction_budget_per_slice,
+                        self.max_slices,
+                        Some(hook),
+                        restored.point,
+                    )
+                },
+            )
             .context("restored emulator loop")
     }
 }
@@ -422,6 +525,229 @@ mod tests {
         emulator.process.as_mut().unwrap().executable_fingerprint = Some(fingerprint);
         emulator.max_slices = 8;
         emulator
+    }
+
+    #[test]
+    fn device_checkpoint_cold_restores_shared_sections_and_wait_objects() {
+        use pocket_kernel::{file_mapping::FileMapping, handles::HandleObject, EventObject};
+        use std::sync::{Arc, Barrier};
+        let mut parent = fixture(3);
+        let mut child = fixture(3);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("open.bin");
+        std::fs::write(&path, b"saved").unwrap();
+        let state = &mut parent.process.as_mut().unwrap().state;
+        state.vfs.mount_save_dir(r"\Data\", directory.path());
+        state
+            .vfs
+            .open_file(r"\Data\open.bin", 3, 3, 3, false, 0)
+            .unwrap();
+        let (child_handle, _) = state.object_handles.new_child().unwrap();
+        child
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .attach_handle_context(state.child_handle_context(child_handle).unwrap());
+        let section_handle = state.object_handles.reserve().unwrap();
+        let section = FileMapping::anonymous(section_handle, 4096, None).unwrap();
+        state.object_handles.insert_mapping(
+            section_handle,
+            Some("device-section".into()),
+            section.clone(),
+        );
+        let event_handle = state.object_handles.reserve().unwrap();
+        state
+            .object_handles
+            .bind(event_handle, HandleObject::Event(event_handle));
+        state.events.insert(
+            event_handle,
+            EventObject {
+                manual_reset: true,
+                signalled: false,
+            },
+        );
+        let parent_address = unsafe {
+            state
+                .mapped_views
+                .map(parent.cpu.as_mut(), section.clone(), 2, 0, 0)
+        }
+        .unwrap();
+        let child_state = &mut child.process.as_mut().unwrap().state;
+        let child_section_handle = child_state.object_handles.reserve().unwrap();
+        child_state
+            .object_handles
+            .insert_mapping(child_section_handle, None, section);
+        let child_address = unsafe {
+            child_state.mapped_views.map(
+                child.cpu.as_mut(),
+                child_state
+                    .object_handles
+                    .mapping(child_section_handle)
+                    .unwrap(),
+                2,
+                0,
+                0,
+            )
+        }
+        .unwrap();
+        parent.cpu.write_mem(parent_address, b"saved").unwrap();
+        for emulator in [&mut parent, &mut child] {
+            emulator.process.as_mut().unwrap().state.publish_handles();
+        }
+        let at = crate::checkpoint_domain::CheckpointTime::now();
+        let point = ResumePoint {
+            main_entry: 0x11000,
+            pc: 0x11000,
+        };
+        let first = SessionSnapshot::capture_device_process(
+            parent.cpu.as_mut(),
+            parent.process.as_mut().unwrap(),
+            point,
+            true,
+            at,
+        )
+        .unwrap();
+        let second = SessionSnapshot::capture_device_process(
+            child.cpu.as_mut(),
+            child.process.as_mut().unwrap(),
+            point,
+            false,
+            at,
+        )
+        .unwrap();
+        let saved = SessionSnapshot::assemble_device(vec![(1, first), (2, second)], 2).unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(parent);
+        drop(child);
+        std::fs::write(&path, b"later").unwrap();
+        let mut rejected = SessionSnapshot::read(bytes.as_slice()).unwrap();
+        let (shared, foreground, mut others) = rejected.take_device().unwrap().into_parts();
+        let mut destination = fixture(3);
+        destination
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .vfs
+            .mount_save_dir(r"\Data\", directory.path());
+        let failed_group = Arc::new(
+            DeviceRestoreGroup::new(
+                shared,
+                foreground,
+                &destination.process.as_ref().unwrap().state,
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap(),
+        );
+        let remote_group = failed_group.clone();
+        let remote = std::thread::spawn(move || {
+            let mut wrong_executable = fixture(4);
+            remote_group
+                .restore_process(&mut wrong_executable, others.remove(0))
+                .err()
+                .unwrap()
+        });
+        assert!(failed_group
+            .restore_process(&mut destination, rejected)
+            .is_err());
+        assert!(remote
+            .join()
+            .unwrap()
+            .to_string()
+            .contains("different executable"));
+        drop(destination);
+        drop(failed_group);
+        assert_eq!(std::fs::read(&path).unwrap(), b"later");
+        let mut root = SessionSnapshot::read(bytes.as_slice()).unwrap();
+        assert!(root.has_device());
+        let (shared, foreground, mut children) = root.take_device().unwrap().into_parts();
+        let reference = fixture(3);
+        let group = Arc::new(
+            DeviceRestoreGroup::new(
+                shared,
+                foreground,
+                &reference.process.as_ref().unwrap().state,
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap(),
+        );
+        drop(reference);
+        let barrier = Arc::new(Barrier::new(2));
+        let peer_group = group.clone();
+        let peer_barrier = barrier.clone();
+        let (epoch_tx, epoch_rx) = std::sync::mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let mut child = fixture(3);
+            let restored = peer_group
+                .restore_process(&mut child, children.remove(0))
+                .unwrap();
+            epoch_tx.send(restored.resumed.unwrap()).unwrap();
+            assert_eq!(child.cpu.read_mem(child_address, 5).unwrap(), b"saved");
+            peer_barrier.wait();
+            peer_barrier.wait();
+            assert_eq!(child.cpu.read_mem(child_address, 5).unwrap(), b"again");
+            assert!(
+                child
+                    .process
+                    .as_ref()
+                    .unwrap()
+                    .state
+                    .events
+                    .get(&event_handle)
+                    .unwrap()
+                    .signalled
+            );
+            child
+                .run_restored(restored, &mut StopAfterOneFrame)
+                .unwrap();
+        });
+        let mut parent = fixture(3);
+        parent
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .vfs
+            .mount_save_dir(r"\Data\", directory.path());
+        let restored = group.restore_process(&mut parent, root).unwrap();
+        assert_eq!(epoch_rx.recv().unwrap(), restored.resumed.unwrap());
+        assert_eq!(
+            parent
+                .process
+                .as_ref()
+                .unwrap()
+                .state
+                .object_handles
+                .process_id(),
+            1
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"saved");
+        barrier.wait();
+        parent.cpu.write_mem(parent_address, b"again").unwrap();
+        parent
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .events
+            .get_mut(&event_handle)
+            .unwrap()
+            .signalled = true;
+        barrier.wait();
+        peer.join().unwrap();
+        parent
+            .run_restored(restored, &mut StopAfterOneFrame)
+            .unwrap();
+    }
+
+    struct StopAfterOneFrame;
+    impl FrameHook for StopAfterOneFrame {
+        fn on_frame(&mut self, _: &mut KernelState) -> FrameAction {
+            FrameAction::Stop
+        }
     }
 
     #[test]
@@ -545,6 +871,228 @@ mod tests {
             .unwrap();
         assert_eq!(destination.cpu.read_mem(second, 10).unwrap(), b"checkpoint");
         assert_eq!(&std::fs::read(path).unwrap()[4096..4106], b"checkpoint");
+    }
+
+    #[test]
+    fn ram_mapped_checkpoint_preserves_orphan_backing_and_store_accounting() {
+        use pocket_kernel::{file_mapping::FileMapping, memory_division::MemoryDivision};
+        let mut source = fixture(3);
+        source.set_memory_division(Some(MemoryDivision::new(64 * 1024 * 1024, 4096).unwrap()));
+        let state = &mut source.process.as_mut().unwrap().state;
+        assert!(state.vfs.create_dir(r"\RAM"));
+        let file = state
+            .vfs
+            .open_file(r"\RAM\section", 3, 3, 2, false, 0)
+            .unwrap()
+            .handle;
+        state.vfs.write(file, &vec![0; 8192]).unwrap();
+        state.vfs.mark_for_mapping(file);
+        let handle = state.object_handles.reserve().unwrap();
+        let mapping = FileMapping::file(
+            handle,
+            8192,
+            true,
+            state.vfs.mapping_backing(file, 8192, true).unwrap(),
+        );
+        state
+            .object_handles
+            .insert_mapping(handle, Some("ram-section".into()), mapping.clone());
+        let first = unsafe {
+            state
+                .mapped_views
+                .map(source.cpu.as_mut(), mapping.clone(), 2, 0, 0)
+        }
+        .unwrap();
+        let second = unsafe {
+            state
+                .mapped_views
+                .map(source.cpu.as_mut(), mapping, 4, 4096, 0)
+        }
+        .unwrap();
+        // A mapped file description remains alive even after CloseHandle.
+        assert!(state.vfs.close(file));
+        source
+            .cpu
+            .write_mem(first + 4096, b"RAM checkpoint")
+            .unwrap();
+        let point = ResumePoint {
+            main_entry: 0x11000,
+            pc: 0x11000,
+        };
+        let saved =
+            SessionSnapshot::capture(source.cpu.as_mut(), source.process.as_mut().unwrap(), point)
+                .unwrap();
+        let used = source
+            .process
+            .as_ref()
+            .unwrap()
+            .state
+            .memory_division
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .store_used;
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut restored = fixture(3);
+        restored.set_memory_division(Some(MemoryDivision::new(64 * 1024 * 1024, 4096).unwrap()));
+        restored
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        assert_eq!(
+            restored.cpu.read_mem(second, 14).unwrap(),
+            b"RAM checkpoint"
+        );
+        restored.cpu.write_mem(second, b"same").unwrap();
+        assert_eq!(restored.cpu.read_mem(first + 4096, 4).unwrap(), b"same");
+        let state = &mut restored.process.as_mut().unwrap().state;
+        assert_eq!(
+            state
+                .memory_division
+                .as_ref()
+                .unwrap()
+                .snapshot()
+                .store_used,
+            used
+        );
+        let file = state
+            .vfs
+            .open_file(r"\RAM\section", 1, 3, 3, false, 0)
+            .unwrap()
+            .handle;
+        state
+            .vfs
+            .seek(file, 4096, pocket_kernel::vfs::SeekKind::Begin);
+        let mut data = [0; 4];
+        state.vfs.read(file, &mut data).unwrap();
+        assert_eq!(&data, b"same");
+    }
+
+    #[test]
+    fn checkpoint_restores_incremental_crypto_dom_aliases_and_sdl_surfaces() {
+        use pocket_kernel::crypto::{Digest as _, Sha1};
+        use pocket_kernel::{
+            crypto::{CryptoHash, CryptoKey},
+            msxml::{ComKind, ComObject},
+            sdl::Surface,
+        };
+        let mut source = fixture(3);
+        let state = &mut source.process.as_mut().unwrap().state;
+        let provider = state.crypto.allocate().unwrap();
+        state.crypto.providers.insert(provider);
+        let hash = state.crypto.allocate().unwrap();
+        let mut digest = Sha1::new();
+        digest.update([0x37; 127]);
+        state.crypto.hashes.insert(
+            hash,
+            CryptoHash {
+                provider,
+                digest,
+                finished: false,
+                value: None,
+            },
+        );
+        let key = state.crypto.allocate().unwrap();
+        state.crypto.keys.insert(
+            key,
+            CryptoKey {
+                provider,
+                bytes: [7; 8],
+                ecb: true,
+            },
+        );
+        let document = state
+            .msxml
+            .insert_document(
+                pocket_kernel::msxml::parse("<root><child>saved text</child></root>", false)
+                    .unwrap(),
+            )
+            .unwrap();
+        let root = state.msxml.doc(document).unwrap().root_element.unwrap();
+        for (address, kind) in [
+            (0x500800, ComKind::Document),
+            (0x500820, ComKind::Node(root)),
+            (0x500840, ComKind::ChildList(root)),
+        ] {
+            state.msxml.objects.insert(
+                address,
+                ComObject {
+                    doc: document,
+                    kind,
+                    iter_pos: 0,
+                    refs: 1,
+                    preserve_whitespace: false,
+                },
+            );
+        }
+        state.sdl.initialized = 0x20;
+        state.sdl.screen = 0x500700;
+        state.sdl.key_ptr = 0x500000;
+        state.sdl.keys[273] = 1;
+        state.sdl.events.push_back([24; 20]);
+        state.sdl.surfaces.insert(
+            0x500700,
+            Surface {
+                width: 4,
+                height: 4,
+                pitch: 8,
+                bytes: 2,
+                pixels: 0x500400,
+                format: 0x500600,
+                masks: [0xf800, 0x7e0, 0x1f, 0],
+            },
+        );
+        source.cpu.write_mem(0x500000, &state.sdl.keys).unwrap();
+        source.cpu.write_mem(0x500400, &[0x37; 32]).unwrap();
+        let point = ResumePoint {
+            main_entry: 0x11000,
+            pc: 0x11000,
+        };
+        let saved =
+            SessionSnapshot::capture(source.cpu.as_mut(), source.process.as_mut().unwrap(), point)
+                .unwrap();
+        assert_eq!(source.process.as_ref().unwrap().state.sdl.keys[273], 1);
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        let state = &mut destination.process.as_mut().unwrap().state;
+        let digest = &mut state.crypto.hashes.get_mut(&hash).unwrap().digest;
+        digest.update(b" continued");
+        let mut expected = Sha1::new();
+        expected.update([0x37; 127]);
+        expected.update(b" continued");
+        assert_eq!(digest.clone().finalize(), expected.finalize());
+        assert_eq!(state.crypto.keys[&key].bytes, [7; 8]);
+        assert_eq!(state.msxml.text_of(document, root), "saved text");
+        state.msxml.objects.remove(&0x500800);
+        state.msxml.collect_document(document);
+        assert!(state.msxml.doc(document).is_some());
+        state.msxml.objects.remove(&0x500820);
+        state.msxml.objects.remove(&0x500840);
+        state.msxml.collect_document(document);
+        assert!(state.msxml.doc(document).is_none());
+        assert_eq!(state.sdl.surfaces[&state.sdl.screen].pixels, 0x500400);
+        assert_eq!(destination.cpu.read_mem(0x500400, 32).unwrap(), [0x37; 32]);
+        assert!(destination
+            .cpu
+            .read_mem(0x500000, 323)
+            .unwrap()
+            .iter()
+            .all(|&v| v == 0));
+        assert_eq!(state.sdl.events[0], [24; 20]);
+        assert!(state
+            .sdl
+            .events
+            .iter()
+            .any(|event| event[0] == 3
+                && u32::from_le_bytes(event[8..12].try_into().unwrap()) == 273));
     }
 
     #[test]

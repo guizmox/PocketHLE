@@ -105,12 +105,12 @@ pub(crate) struct DeviceSnapshot {
 }
 
 impl Device {
-    pub(crate) fn capture_snapshot(&self) -> DeviceSnapshot {
+    pub(crate) fn capture_snapshot(&self, at: Instant) -> DeviceSnapshot {
         DeviceSnapshot {
             format: self.format,
             frame_count: self.frame_count,
             started: self.capture.is_some(),
-            preview_delay: self.next_preview.saturating_duration_since(Instant::now()),
+            preview_delay: self.next_preview.saturating_duration_since(at),
         }
     }
 

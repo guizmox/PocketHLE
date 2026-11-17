@@ -61,6 +61,12 @@ impl GuestClockSnapshot {
     /// Appropriate for the run loop's execution thread. A nested guest
     /// session can install its own clock while retaining the parent epoch.
     pub fn run<R>(self, resume: impl FnOnce() -> R) -> R {
+        self.run_at(Instant::now(), resume)
+    }
+
+    /// Restored CPUs use one device epoch even if host scheduling or audio
+    /// initialization lets them enter their run loops at different instants.
+    pub fn run_at<R>(self, resumed: Instant, resume: impl FnOnce() -> R) -> R {
         struct Restore(Option<RestoredEpoch>);
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -70,7 +76,7 @@ impl GuestClockSnapshot {
 
         let epoch = RestoredEpoch {
             snapshot: self,
-            resumed: Instant::now(),
+            resumed,
         };
         let previous = RESTORED.with(|slot| slot.replace(Some(epoch)));
         let _restore = Restore(previous);
@@ -82,6 +88,26 @@ impl GuestClockSnapshot {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shared_resume_epoch_counts_time_before_a_late_cpu_starts() {
+        let snapshot = GuestClockSnapshot {
+            tick_ms: 500_000,
+            performance_us: 4_000_000_000,
+        };
+        let resumed = Instant::now() - std::time::Duration::from_millis(30);
+        snapshot.run_at(resumed, || {
+            assert!(tick_ms() >= 500_030);
+            assert!(performance_micros() >= 4_000_030_000);
+        });
+        std::thread::spawn(move || {
+            snapshot.run_at(resumed, || {
+                assert!(tick_ms() >= 500_030);
+                assert!(performance_micros() >= 4_000_030_000);
+            })
+        })
+        .join()
+        .unwrap();
+    }
     #[test]
     fn restored_guest_clock_rebases_both_counters_on_this_thread() {
         let snapshot = GuestClockSnapshot {

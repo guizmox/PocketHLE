@@ -11,7 +11,7 @@ description = "PocketHLE top-level Emulator: glues loader, CPU, kernel and API s
 # Explicitly opt in to executable HARDWARE DIAG integration tests.
 arm-diagnostics = ["unicorn"]
 default = []
-unicorn = ["pocket-cpu/unicorn", "dep:serde", "dep:bincode", "dep:flate2"]
+unicorn = ["pocket-cpu/unicorn", "dep:serde", "dep:bincode", "dep:flate2", "dep:serde_bytes"]
 # Real-time audio output via cpal. Forwards to the same feature on
 # the kernel + winceapi crates so that pulling it in here is enough
 # to activate the cpal stack across the whole stack. Off by default
@@ -27,6 +27,7 @@ log.workspace = true
 thiserror.workspace = true
 sha2 = "0.11"
 serde = { workspace = true, optional = true }
+serde_bytes = { workspace = true, optional = true }
 bincode = { version = "1.3", optional = true }
 flate2 = { workspace = true, optional = true }
 

@@ -14,13 +14,14 @@ description = "ARM and MIPS CPU emulation backends for PocketHLE."
 default = []
 # Enable to compile against `unicorn-engine`. This requires cmake and a
 # C compiler at build time.
-unicorn = ["dep:unicorn-engine", "dep:serde"]
+unicorn = ["dep:unicorn-engine", "dep:serde", "dep:serde_bytes"]
 
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
 serde = { workspace = true, optional = true }
+serde_bytes = { workspace = true, optional = true }
 bitflags = "2"
 memmap2 = "=0.9.10"
 unicorn-engine = { workspace = true, optional = true }

@@ -8,7 +8,7 @@ const GPS_DRIVER_LEASE: &str = "gps:GPS1";
 const CAMERA_DRIVER_LEASE: &str = "camera:CAM1";
 #[path = "vfs_snapshot.rs"]
 mod snapshot;
-pub use snapshot::VfsFileSnapshot;
+pub use snapshot::{SnapshotFileCommit, SnapshotFileWrites, VfsFileSnapshot};
 
 #[derive(Clone, Default)]
 pub struct VfsShared(pub(super) Arc<Mutex<Shared>>);

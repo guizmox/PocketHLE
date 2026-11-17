@@ -14,6 +14,7 @@ use std::{
 const DONE: u32 = 1;
 const PREPARED: u32 = 2;
 const INQUEUE: u32 = 16;
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Buffer {
     hdr: u32,
     data: u32,
@@ -23,6 +24,7 @@ struct Buffer {
 struct Capture {
     meta: WaveOutDevice,
     active: Arc<AtomicBool>,
+    resume_active: Option<bool>,
     rx: mpsc::Receiver<Vec<i16>>,
     quit: mpsc::Sender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -44,13 +46,9 @@ struct Inputs {
     devices: HashMap<u32, Capture>,
     closed: HashMap<u32, WaveOutDevice>,
 }
-// Capture handles belong to the current emulated process, not the application.
-pub(crate) fn snapshot_media_active() -> bool {
-    INPUTS.with(|inputs| {
-        let inputs = inputs.lock().unwrap_or_else(|e| e.into_inner());
-        !inputs.devices.is_empty()
-    })
-}
+#[path = "wavein_snapshot.rs"]
+mod snapshot;
+pub(crate) use snapshot::InputSnapshot;
 
 thread_local! { static INPUTS: Mutex<Inputs> = Mutex::new(Inputs { next: 0xdead5100, devices: HashMap::new(), closed: HashMap::new() }); }
 const NAMES: [&str; 14] = [
@@ -135,6 +133,9 @@ pub(crate) fn service(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
     INPUTS.with(|registry| {
         let mut inputs = registry.lock().unwrap();
         for (&h, c) in inputs.devices.iter_mut() {
+            if let Some(active) = c.resume_active.take() {
+                c.active.store(active, Ordering::Release);
+            }
             if !c.active.load(Ordering::Relaxed) {
                 continue;
             }
@@ -402,6 +403,7 @@ fn dispatch(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             inputs.devices.insert(
                 handle,
                 Capture {
+                    resume_active: None,
                     meta,
                     active,
                     rx,
@@ -631,6 +633,7 @@ mod tests {
             registry.lock().unwrap().devices.insert(
                 h,
                 Capture {
+                    resume_active: None,
                     meta,
                     active: Arc::new(AtomicBool::new(true)),
                     rx,
@@ -713,6 +716,7 @@ mod session_cleanup_tests {
         });
         let active = Arc::new(AtomicBool::new(true));
         let capture = Capture {
+            resume_active: None,
             meta: WaveOutDevice {
                 callback_kind: WaveCallbackKind::None,
                 callback_target: 0,

@@ -51,12 +51,14 @@ pub mod file_mapping;
 pub mod font;
 pub mod framebuffer;
 
+mod device_snapshot;
 pub mod gapi;
 pub mod gdi;
 pub mod gps;
 pub mod guest_clock;
 mod hss_snapshot;
 mod kernel_snapshot;
+pub use device_snapshot::{DeviceRestoreDomain, DeviceSnapshot};
 pub use hss_snapshot::HssSnapshot;
 pub use kernel_snapshot::KernelSnapshot;
 mod schedule_snapshot;
@@ -1187,7 +1189,7 @@ pub struct ModuleAttachFrame {
 /// out by `&mut` without conflicting with the immutable parts of
 /// [`Process`] (image bytes, thunk table) that the run loop uses.
 /// Foreground process handoff requested by a guest launcher.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcessLaunch {
     pub concurrent: bool,
     pub command_line: String,
@@ -1199,7 +1201,7 @@ pub struct ProcessLaunch {
     pub thread_handle: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChildProcess {
     pub thread_handle: u32,
     pub process_handle_closed: bool,
@@ -4941,6 +4943,12 @@ pub trait FrameHook {
         false
     }
 
+    /// Coordinated device capture parks peers before acquiring resource locks.
+    /// Waiting for peers while holding this gate would deadlock their API exits.
+    fn checkpoint_requires_execution_gate(&self) -> bool {
+        true
+    }
+
     fn on_checkpoint(&mut self, _cpu: &mut dyn Cpu, _process: &mut Process, _point: ResumePoint) {}
 }
 
@@ -5722,7 +5730,9 @@ pub fn resume_main_loop(
                 process.state.sync_power_notifications();
                 let action = hook.on_frame(&mut process.state);
                 if !process.state.should_stop && hook.checkpoint_requested() {
-                    let _guard = process_gate.lock().unwrap_or_else(|e| e.into_inner());
+                    let _guard = hook
+                        .checkpoint_requires_execution_gate()
+                        .then(|| process_gate.lock().unwrap_or_else(|e| e.into_inner()));
                     hook.on_checkpoint(cpu, process, ResumePoint { main_entry, pc });
                 }
                 last_presented_frame = process.state.framebuffer.frame_counter;

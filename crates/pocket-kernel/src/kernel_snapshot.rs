@@ -1,7 +1,15 @@
-//! Process-owned WinCE data for a detached ARM checkpoint.
+//! Process-owned WinCE checkpoint data; shared domains are coordinated separately.
 
 use super::*;
 use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct ProcessFamily {
+    children: HashMap<u32, ChildProcess>,
+    pending: Option<ProcessLaunch>,
+    scheduled: HashMap<String, (std::time::SystemTime, String)>,
+    results: HashMap<(usize, u32, u32), Result<u32, u32>>,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct KernelSnapshot {
@@ -10,6 +18,12 @@ pub struct KernelSnapshot {
     mappings: Option<file_mapping::MappingSnapshot>,
     handles: handles::HandleSnapshot,
     registry: registry::RegistryProcessSnapshot,
+    crypto: crypto::CryptoState,
+    msxml: msxml::MsxmlState,
+    sdl: sdl::SdlState,
+    serial: serial::SerialSnapshot,
+    cedb: cedb::ContactSnapshot,
+    internet: internet::InternetSnapshot,
     audio: audio::AudioSnapshot,
     gdi: gdi::GdiSnapshot,
     display: framebuffer::DisplaySnapshot,
@@ -18,6 +32,7 @@ pub struct KernelSnapshot {
     memory_profile: Option<(u32, u32)>,
     module_path: String,
     process_launch_enabled: bool,
+    family: ProcessFamily,
     command_line_cache: Option<u32>,
     command_line: Option<String>,
     next_process_id: u32,
@@ -130,38 +145,38 @@ impl KernelState {
         &mut self,
         detached: bool,
     ) -> Result<KernelSnapshot, String> {
+        self.capture_snapshot_inner(detached, false, Instant::now())
+    }
+
+    pub fn capture_device_process(&mut self, at: Instant) -> Result<KernelSnapshot, String> {
+        self.capture_snapshot_inner(false, true, at)
+    }
+
+    pub fn capture_checkpoint_at(
+        &mut self,
+        detached: bool,
+        at: Instant,
+    ) -> Result<KernelSnapshot, String> {
+        self.capture_snapshot_inner(detached, false, at)
+    }
+    fn capture_snapshot_inner(
+        &mut self,
+        detached: bool,
+        coordinated: bool,
+        at: Instant,
+    ) -> Result<KernelSnapshot, String> {
         for (active, resource) in [
             (
                 self.process_exit_code.is_some() || self.should_stop,
                 "process shutdown",
             ),
             (
-                self.pending_process_launch.is_some()
-                    || !self.child_processes.is_empty()
-                    || !self.scheduled_process_launches.is_empty()
-                    || !self.process_launch_results.is_empty(),
+                !coordinated
+                    && (self.pending_process_launch.is_some()
+                        || !self.child_processes.is_empty()
+                        || !self.scheduled_process_launches.is_empty()
+                        || !self.process_launch_results.is_empty()),
                 "child process",
-            ),
-            (
-                !self.internet.handles.is_empty() || self.internet.gprs_connected,
-                "network connection",
-            ),
-            (!self.serial_ports.is_empty(), "serial port"),
-            (
-                !self.crypto.providers.is_empty()
-                    || !self.crypto.hashes.is_empty()
-                    || !self.crypto.keys.is_empty()
-                    || !self.crypto.public_keys.is_empty(),
-                "cryptography object",
-            ),
-            (!self.cedb.cursors.is_empty(), "WinCE database cursor"),
-            (
-                !self.msxml.objects.is_empty() || !self.msxml.documents.is_empty(),
-                "MSXML object",
-            ),
-            (
-                self.sdl.initialized != 0 || !self.sdl.surfaces.is_empty(),
-                "SDL state",
             ),
         ] {
             if active {
@@ -170,6 +185,9 @@ impl KernelState {
                 ));
             }
         }
+        self.crypto.validate_snapshot()?;
+        self.msxml.validate_snapshot()?;
+        self.sdl.validate_snapshot()?;
         let zlib_allocator = self
             .zlib_streams
             .snapshot_allocator()
@@ -183,27 +201,45 @@ impl KernelState {
             &self.vfs,
             &self.object_handles,
             &mut private_files,
+            coordinated,
         )?;
+        if coordinated {
+            for object in self.object_handles.checkpoint_owned_backings() {
+                self.vfs
+                    .snapshot_object_handle(&object, &mut private_files)?;
+            }
+        }
         let mapping_files = mappings
             .as_ref()
             .map(|mapping| mapping.file_handles())
             .unwrap_or_default();
-        let handles = self
-            .object_handles
-            .capture_process_handles_with_mappings(detached, mappings.is_some())?;
+        let handles = self.object_handles.capture_process_handles_with_mappings(
+            detached,
+            mappings.is_some(),
+            coordinated,
+        )?;
         let mut schedule = self.capture_schedule();
         if detached {
             schedule.retain_process_objects(&handles);
         }
         Ok(KernelSnapshot {
             heap: self.heap.capture_snapshot(),
-            vfs: self
-                .vfs
-                .capture_file_snapshot_with_mappings(&mapping_files, &private_files)?,
+            vfs: self.vfs.capture_file_snapshot_with_mappings(
+                &mapping_files,
+                &private_files,
+                coordinated,
+                at,
+            )?,
             mappings,
             handles,
             registry: self.registry.capture_process_snapshot()?,
-            audio: self.audio.capture_snapshot()?,
+            cedb: self.cedb.capture_checkpoint()?,
+            internet: self.internet.capture_checkpoint()?,
+            crypto: self.crypto.clone(),
+            msxml: self.msxml.clone(),
+            sdl: self.sdl.clone(),
+            serial: serial::SerialSnapshot::capture(&self.serial_ports, at)?,
+            audio: self.audio.capture_snapshot_at(at)?,
             gdi: self.gdi.capture_snapshot()?,
             display: self.framebuffer.capture_snapshot()?,
             schedule,
@@ -211,6 +247,12 @@ impl KernelState {
             memory_profile,
             module_path: self.module_path.clone(),
             process_launch_enabled: self.process_launch_enabled,
+            family: ProcessFamily {
+                children: self.child_processes.clone(),
+                pending: self.pending_process_launch.clone(),
+                scheduled: self.scheduled_process_launches.clone(),
+                results: self.process_launch_results.clone(),
+            },
             command_line_cache: self.command_line_cache,
             command_line: self.command_line.clone(),
             next_process_id: self.next_process_id,
@@ -360,17 +402,55 @@ impl KernelState {
         }
         self.reset_foreground_input();
         self.pending_input.extend(releases);
+        self.sdl.release_snapshot_inputs();
         Ok(())
     }
 }
 
 impl KernelSnapshot {
+    pub fn prime_device_restore(
+        &self,
+        vfs: &vfs::Vfs,
+        domain: &DeviceRestoreDomain,
+    ) -> Result<(), String> {
+        self.vfs.prime_device_restore(vfs, &domain.files)
+    }
+    pub fn take_device_audio(
+        &mut self,
+        keys: &std::collections::BTreeSet<u32>,
+    ) -> std::collections::BTreeMap<u32, audio::MasSnapshot> {
+        self.audio.take_device_mas(keys)
+    }
+    pub fn omit_device_wait_objects(&mut self) {
+        self.schedule.omit_device_objects();
+    }
+    pub fn is_device_process(&self) -> bool {
+        self.handles.is_device_process()
+    }
+    pub fn program_path(&self) -> &str {
+        &self.module_path
+    }
+    pub fn process_id(&self) -> u32 {
+        self.handles.process_id()
+    }
+
     /// The receiving state is newly configured by normal launch, including
     /// mounts and the registry backing. Discard it if restoration fails.
     pub fn restore(
         self,
         state: &mut KernelState,
     ) -> Result<Option<file_mapping::MappingSnapshot>, String> {
+        self.restore_with_domain(state, None)
+    }
+
+    pub fn restore_with_domain(
+        self,
+        state: &mut KernelState,
+        domain: Option<&DeviceRestoreDomain>,
+    ) -> Result<Option<file_mapping::MappingSnapshot>, String> {
+        self.crypto.validate_snapshot()?;
+        self.msxml.validate_snapshot()?;
+        self.sdl.validate_snapshot()?;
         if self.mappings.is_none()
             && self
                 .handles
@@ -406,8 +486,16 @@ impl KernelSnapshot {
         state
             .vfs
             .restore_file_snapshot_with_mappings(self.vfs, &mapping_files)?;
+        self.cedb.restore(&mut state.cedb, &mut state.vfs)?;
+        self.internet.restore(&mut state.internet)?;
         state.registry.restore_process_snapshot(self.registry);
-        state.audio = self.audio.restore()?;
+        state.crypto = self.crypto;
+        state.msxml = self.msxml;
+        state.sdl = self.sdl;
+        state.serial_ports = self.serial.restore(&state.vfs)?;
+        state.audio = self
+            .audio
+            .restore_with_shared_mas(domain.map(|domain| &domain.mas))?;
         state.object_handles = self.handles.restore(&state.vfs, &state.audio)?;
         state.gdi = self.gdi.restore()?;
         state.framebuffer = self.display.restore()?;
@@ -417,6 +505,16 @@ impl KernelSnapshot {
         state.zlib_streams = zlib::ZlibStreams::restore_allocator(self.zlib_allocator);
         state.module_path = self.module_path;
         state.process_launch_enabled = self.process_launch_enabled;
+        state.child_processes = self.family.children;
+        state.pending_process_launch = self.family.pending;
+        if let Some(request) = &mut state.pending_process_launch {
+            request.executable = state
+                .vfs
+                .resolve(&request.guest_path)
+                .ok_or("saved pending process executable is missing")?;
+        }
+        state.scheduled_process_launches = self.family.scheduled;
+        state.process_launch_results = self.family.results;
         state.command_line_cache = self.command_line_cache;
         state.command_line = self.command_line;
         state.next_process_id = self.next_process_id;

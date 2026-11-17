@@ -114,6 +114,11 @@ impl KernelState {
 }
 
 impl ScheduleSnapshot {
+    pub(crate) fn omit_device_objects(&mut self) {
+        self.events.clear();
+        self.semaphores.clear();
+        self.mutexes.clear();
+    }
     pub(crate) fn retain_process_objects(&mut self, handles: &crate::handles::HandleSnapshot) {
         use crate::handles::HandleObject;
         use std::collections::HashSet;

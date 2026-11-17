@@ -64,6 +64,7 @@ pub struct Session {
     pub spec: SessionSpec,
     pub client: Arc<dyn Client>,
 }
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Connection {
     pub parent: u32,
     pub server: String,
@@ -542,3 +543,7 @@ mod tests {
         assert_eq!(t.read(&mut [0; 1]), Ok(Some(0)));
     }
 }
+
+#[path = "internet_snapshot.rs"]
+mod snapshot;
+pub(crate) use snapshot::InternetSnapshot;

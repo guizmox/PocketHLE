@@ -33,7 +33,10 @@ macro_rules! invoke {
     }};
 }
 
-#[derive(Clone, Copy)]
+mod checkpoint;
+mod retained;
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct ClientAttribute {
     address: u32,
     size: i32,
@@ -41,6 +44,12 @@ struct ClientAttribute {
     normalized: u8,
     stride: i32,
     bytes_per_vertex: usize,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct CompiledShader {
+    kind: u32,
+    source: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -62,7 +71,8 @@ pub(super) struct ContextSnapshot {
     width: u32,
     height: u32,
     scale: u32,
-    journal: JournalSnapshot,
+    journal: Option<JournalSnapshot>,
+    native: Option<checkpoint::NativeCheckpoint>,
 }
 
 impl ContextSnapshot {
@@ -72,11 +82,16 @@ impl ContextSnapshot {
         if renderer.scale != self.scale {
             return Err("host cannot restore the saved GLES2 surface scale".into());
         }
-        let mut names = Box::<ObjectNames>::default();
-        renderer.journal = Journal::replay(self.journal, &mut names, |name, io| {
-            renderer.gl_inner(name, io)
-        })?;
-        renderer.names = Some(names);
+        match (self.native, self.journal) {
+            (Some(native), None) => native.restore(&mut renderer)?,
+            (None, Some(journal)) => {
+                let mut names = Box::<ObjectNames>::default();
+                renderer.journal =
+                    Journal::replay(journal, &mut names, |name, io| renderer.gl_inner(name, io))?;
+                renderer.names = Some(names);
+            }
+            _ => return Err("invalid GLES2 snapshot resource encoding".into()),
+        }
         Ok(renderer)
     }
 }
@@ -105,6 +120,7 @@ pub(super) struct Renderer {
     index_data: HashMap<u32, Vec<u8>>,
     client_attributes: BTreeMap<u32, ClientAttribute>,
     enabled_attributes: HashSet<u32>,
+    attribute_zero: [f32; 4],
     max_attributes: u32,
     active_texture: u32,
     texture_units: u32,
@@ -113,12 +129,16 @@ pub(super) struct Renderer {
     pack: usize,
     guest_error: u32,
     journal: Journal,
+    retained: retained::RetainedImages,
     names: Option<Box<ObjectNames>>,
     native_compressed_formats: Vec<i32>,
     guest_textures: HashSet<u32>,
     guest_renderbuffers: HashSet<u32>,
     guest_framebuffers: HashSet<u32>,
     desktop_shader_sources: HashMap<u32, Vec<u8>>,
+    compiled_shaders: HashMap<u32, CompiledShader>,
+    linked_programs: HashMap<u32, Vec<CompiledShader>>,
+    deleted_programs: HashSet<u32>,
     deleted_shaders: HashSet<u32>,
     export: Option<ProgrammableFrameExport>,
     export_failed: bool,
@@ -180,6 +200,7 @@ impl Renderer {
             index_data: HashMap::new(),
             client_attributes: BTreeMap::new(),
             enabled_attributes: HashSet::new(),
+            attribute_zero: [0., 0., 0., 1.],
             max_attributes: 0,
             active_texture: GL_TEXTURE0,
             texture_units: 0,
@@ -188,12 +209,16 @@ impl Renderer {
             pack: 4,
             guest_error: 0,
             journal: Journal::default(),
+            retained: Default::default(),
             names: Some(Box::default()),
             native_compressed_formats: Vec::new(),
             guest_textures: HashSet::new(),
             guest_renderbuffers: HashSet::new(),
             guest_framebuffers: HashSet::new(),
             desktop_shader_sources: HashMap::new(),
+            compiled_shaders: HashMap::new(),
+            linked_programs: HashMap::new(),
+            deleted_programs: HashSet::new(),
             deleted_shaders: HashSet::new(),
             export: None,
             export_failed: false,
@@ -250,12 +275,24 @@ impl Renderer {
         Ok(renderer)
     }
 
-    pub(super) fn capture_context(&self) -> std::result::Result<ContextSnapshot, String> {
+    pub(super) fn capture_context(&mut self) -> std::result::Result<ContextSnapshot, String> {
         Ok(ContextSnapshot {
             width: self.width,
             height: self.height,
             scale: self.scale,
-            journal: self.journal.capture()?,
+            native: if self.host.es {
+                None
+            } else {
+                Some(
+                    checkpoint::NativeCheckpoint::capture(self)
+                        .map_err(|error| error.to_string())?,
+                )
+            },
+            journal: if self.host.es {
+                Some(self.journal.capture()?)
+            } else {
+                None
+            },
         })
     }
 
@@ -630,7 +667,7 @@ impl Renderer {
     }
 
     pub(super) fn gl(&mut self, name: &str, ctx: &mut CallCtx<'_>) -> Result<u32> {
-        let mut call = self.journal.begin(name);
+        let mut call = self.host.es.then(|| self.journal.begin(name)).flatten();
         let mut names = self.names.take().expect("renderer object names");
         let result = self.gl_inner(name, &mut GlIo::live(ctx, call.as_mut(), name, &mut names));
         self.names = Some(names);
@@ -716,10 +753,24 @@ impl Renderer {
                 });
             }
             "glFinish" | "glFlush" => gl!(),
-            "glClear" | "glGenerateMipmap" | "glCompileShader" | "glCullFace" | "glDepthFunc"
-            | "glDisable" | "glEnable" | "glLinkProgram" | "glValidateProgram" | "glFrontFace"
-            | "glBlendEquation" | "glStencilMask" => {
+            "glClear" | "glGenerateMipmap" | "glCullFace" | "glDepthFunc" | "glDisable"
+            | "glEnable" | "glValidateProgram" | "glFrontFace" | "glBlendEquation"
+            | "glStencilMask" => {
                 gl!(u!(0) => u32)
+            }
+            "glCompileShader" => {
+                let shader = u!(0);
+                gl!(shader => u32);
+                if !self.host.es {
+                    self.remember_compiled_shader(shader)?;
+                }
+            }
+            "glLinkProgram" => {
+                let program = u!(0);
+                gl!(program => u32);
+                if !self.host.es {
+                    self.remember_linked_program(program)?;
+                }
             }
             "glActiveTexture" => {
                 let unit = u!(0);
@@ -760,7 +811,11 @@ impl Renderer {
                 }
             }
             "glDeleteProgram" | "glUseProgram" => {
-                gl!(u!(0) => u32);
+                let program = u!(0);
+                gl!(program => u32);
+                if name == "glDeleteProgram" {
+                    self.deleted_programs.insert(program);
+                }
                 self.reap_shader_sources()?;
             }
             "glDetachShader" => {
@@ -933,7 +988,15 @@ impl Renderer {
                 let mut value = -1i32;
                 gl!(target => u32, attachment => u32, pname => u32, &mut value => *mut i32);
                 if value >= 0 {
-                    if pname == 0x8cd1 && ctx.remapped() {
+                    if pname == 0x8cd1
+                        && self
+                            .retained
+                            .attachments
+                            .contains_key(&(self.framebuffer, attachment))
+                    {
+                        let id = self.retained.attachments[&(self.framebuffer, attachment)];
+                        value = self.retained.images[&id].guest as i32;
+                    } else if pname == 0x8cd1 && ctx.remapped() {
                         let mut object_type = 0;
                         gl!(target => u32, attachment => u32, 0x8cd0 => u32, &mut object_type => *mut i32);
                         value = ctx.guest_name(
@@ -963,13 +1026,45 @@ impl Renderer {
                 if self.framebuffer == 0 {
                     return Ok(self.reject(0x0502));
                 }
-                gl!(u!(0) => u32, u!(1) => u32, u!(2) => u32, u!(3) => u32, i!(4) => i32);
+                let (target, point, face, texture, level) = (u!(0), u!(1), u!(2), u!(3), i!(4));
+                let tracked = self
+                    .retained
+                    .attachments
+                    .contains_key(&(self.framebuffer, point));
+                if tracked {
+                    self.preserve_native_errors()?;
+                }
+                gl!(target => u32, point => u32, face => u32, texture => u32, level => i32);
+                if tracked {
+                    let pending = invoke!(self, "glGetError", (), u32);
+                    if pending == 0 {
+                        self.attachment_changed(point)?;
+                    } else {
+                        self.reject(pending);
+                    }
+                }
             }
             "glFramebufferRenderbuffer" => {
                 if self.framebuffer == 0 {
                     return Ok(self.reject(0x0502));
                 }
-                gl!(u!(0) => u32, u!(1) => u32, u!(2) => u32, u!(3) => u32);
+                let (target, point, kind, buffer) = (u!(0), u!(1), u!(2), u!(3));
+                let tracked = self
+                    .retained
+                    .attachments
+                    .contains_key(&(self.framebuffer, point));
+                if tracked {
+                    self.preserve_native_errors()?;
+                }
+                gl!(target => u32, point => u32, kind => u32, buffer => u32);
+                if tracked {
+                    let pending = invoke!(self, "glGetError", (), u32);
+                    if pending == 0 {
+                        self.attachment_changed(point)?;
+                    } else {
+                        self.reject(pending);
+                    }
+                }
             }
             "glGenBuffers" | "glGenFramebuffers" | "glGenRenderbuffers" | "glGenTextures" => {
                 let count = i!(0);
@@ -993,16 +1088,24 @@ impl Renderer {
                 let count = i!(0);
                 let address = u!(1);
                 let mut names = read_words(ctx, address, transfer_size(count, 4)? / 4)?;
+                let kind = Kind::generated(name).unwrap();
+                let mut deleted = Vec::new();
+                for id in &mut names {
+                    let guest = *id;
+                    *id = ctx.remove_name(kind, *id);
+                    deleted.push((*id, guest));
+                }
+                if matches!(kind, Kind::Texture | Kind::Renderbuffer) {
+                    if let Err(error) = self.retain_deleted_images(kind, &deleted) {
+                        self.retained.failure = Some(error.to_string());
+                    }
+                }
                 let objects = match name {
                     "glDeleteBuffers" => &mut self.guest_buffers,
                     "glDeleteFramebuffers" => &mut self.guest_framebuffers,
                     "glDeleteRenderbuffers" => &mut self.guest_renderbuffers,
                     _ => &mut self.guest_textures,
                 };
-                let kind = Kind::generated(name).unwrap();
-                for id in &mut names {
-                    *id = ctx.remove_name(kind, *id);
-                }
                 names.retain(|id| objects.remove(id));
                 gl!(names.len() as i32 => i32, names.as_ptr() => *const u32);
                 if name == "glDeleteBuffers" {
@@ -1015,6 +1118,12 @@ impl Renderer {
                     if names.contains(&self.elements) {
                         self.elements = 0;
                     }
+                }
+                if name == "glDeleteFramebuffers" {
+                    self.retained
+                        .attachments
+                        .retain(|(framebuffer, _), _| !names.contains(framebuffer));
+                    self.collect_retained_images()?;
                 }
                 if name == "glDeleteFramebuffers" && names.contains(&self.framebuffer) {
                     self.framebuffer = 0;
@@ -1079,10 +1188,28 @@ impl Renderer {
                     }
                 }
             }
-            "glVertexAttrib1f" => gl!(u!(0) => u32, f!(1) => f32),
-            "glVertexAttrib2f" => gl!(u!(0) => u32, f!(1) => f32, f!(2) => f32),
-            "glVertexAttrib3f" => gl!(u!(0) => u32, f!(1) => f32, f!(2) => f32, f!(3) => f32),
+            "glVertexAttrib1f" => {
+                if u!(0) == 0 {
+                    self.attribute_zero = [f!(1), 0., 0., 1.];
+                }
+                gl!(u!(0) => u32, f!(1) => f32);
+            }
+            "glVertexAttrib2f" => {
+                if u!(0) == 0 {
+                    self.attribute_zero = [f!(1), f!(2), 0., 1.];
+                }
+                gl!(u!(0) => u32, f!(1) => f32, f!(2) => f32);
+            }
+            "glVertexAttrib3f" => {
+                if u!(0) == 0 {
+                    self.attribute_zero = [f!(1), f!(2), f!(3), 1.];
+                }
+                gl!(u!(0) => u32, f!(1) => f32, f!(2) => f32, f!(3) => f32);
+            }
             "glVertexAttrib4f" => {
+                if u!(0) == 0 {
+                    self.attribute_zero = [f!(1), f!(2), f!(3), f!(4)];
+                }
                 gl!(u!(0) => u32, f!(1) => f32, f!(2) => f32, f!(3) => f32, f!(4) => f32);
             }
             "glVertexAttrib1fv" | "glVertexAttrib2fv" | "glVertexAttrib3fv"
@@ -1098,6 +1225,12 @@ impl Renderer {
                     _ => 1,
                 };
                 let values = read_words(ctx, address, components)?;
+                if index == 0 {
+                    self.attribute_zero = [0., 0., 0., 1.];
+                    for (out, &value) in self.attribute_zero.iter_mut().zip(&values) {
+                        *out = f32::from_bits(value);
+                    }
+                }
                 gl!(index => u32, values.as_ptr().cast() => *const f32);
             }
             "glVertexAttribPointer" => {
@@ -1792,14 +1925,19 @@ impl Renderer {
     }
 
     fn reap_shader_sources(&mut self) -> Result<()> {
-        if self.deleted_shaders.is_empty() {
-            return Ok(());
-        }
         for shader in std::mem::take(&mut self.deleted_shaders) {
             if invoke!(self, "glIsShader", (shader => u32), u8) == 0 {
                 self.desktop_shader_sources.remove(&shader);
+                self.compiled_shaders.remove(&shader);
             } else {
                 self.deleted_shaders.insert(shader);
+            }
+        }
+        for program in std::mem::take(&mut self.deleted_programs) {
+            if invoke!(self, "glIsProgram", (program => u32), u8) == 0 {
+                self.linked_programs.remove(&program);
+            } else {
+                self.deleted_programs.insert(program);
             }
         }
         Ok(())
@@ -1945,7 +2083,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires native OpenGL with shared contexts"]
-    fn checkpoint_replays_draw_and_preserves_guest_names_in_live_share_group() -> Result<()> {
+    fn checkpoint_restores_resources_and_preserves_guest_names_in_live_share_group() -> Result<()> {
         use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
         let ui = NativeRenderer::new(8, 8).map_err(error)?;
         let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
@@ -2020,6 +2158,25 @@ mod tests {
                 &[program, 0x8b82, 0x1010],
             )?;
             assert_eq!(read_words(&mut ctx, 0x1010, 1)?, [1]);
+            // Linking retains an executable even when the application detaches
+            // and deletes every shader afterwards. Snapshot must retain that
+            // executable, rather than relinking an empty attachment list.
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glGetAttachedShaders",
+                &[program, 2, 0x1010, 0x1020],
+            )?;
+            let attached = read_words(&mut ctx, 0x1020, 2)?;
+            for shader in attached {
+                call(
+                    &mut renderer,
+                    &mut ctx,
+                    "glDetachShader",
+                    &[program, shader],
+                )?;
+                call(&mut renderer, &mut ctx, "glDeleteShader", &[shader])?;
+            }
             call(&mut renderer, &mut ctx, "glUseProgram", &[program])?;
             ctx.cpu.write_mem(0x2000, b"tint\0")?;
             let tint = call(
@@ -2062,6 +2219,77 @@ mod tests {
             call(&mut renderer, &mut ctx, "glDrawArrays", &[4, 0, 3])?;
             assert_eq!(call(&mut renderer, &mut ctx, "glGetError", &[])?, 0);
 
+            // Retain a render-produced texture and depth buffer, with an FBO
+            // selected at capture. The restored depth must reject z=0.5.
+            call(&mut renderer, &mut ctx, "glGenTextures", &[1, 0x1100])?;
+            let color = read_words(&mut ctx, 0x1100, 1)?[0];
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glBindTexture",
+                &[TEXTURE_2D, color],
+            )?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glTexImage2D",
+                &[TEXTURE_2D, 0, RGBA, 4, 4, 0, RGBA, UNSIGNED_BYTE, 0],
+            )?;
+            call(&mut renderer, &mut ctx, "glGenRenderbuffers", &[1, 0x1104])?;
+            let depth = read_words(&mut ctx, 0x1104, 1)?[0];
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glBindRenderbuffer",
+                &[RENDERBUFFER, depth],
+            )?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glRenderbufferStorage",
+                &[RENDERBUFFER, 0x81a5, 4, 4],
+            )?;
+            call(&mut renderer, &mut ctx, "glGenFramebuffers", &[1, 0x1108])?;
+            let framebuffer = read_words(&mut ctx, 0x1108, 1)?[0];
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glBindFramebuffer",
+                &[FRAMEBUFFER, framebuffer],
+            )?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glFramebufferTexture2D",
+                &[FRAMEBUFFER, 0x8ce0, TEXTURE_2D, color, 0],
+            )?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glFramebufferRenderbuffer",
+                &[FRAMEBUFFER, 0x8d00, RENDERBUFFER, depth],
+            )?;
+            assert_eq!(
+                call(
+                    &mut renderer,
+                    &mut ctx,
+                    "glCheckFramebufferStatus",
+                    &[FRAMEBUFFER]
+                )?,
+                0x8cd5
+            );
+            call(&mut renderer, &mut ctx, "glViewport", &[0, 0, 4, 4])?;
+            call(&mut renderer, &mut ctx, "glEnable", &[0x0b71])?;
+            call(&mut renderer, &mut ctx, "glClearColor", &[0, 0, one, one])?;
+            call(
+                &mut renderer,
+                &mut ctx,
+                "glClearDepthf",
+                &[0.25f32.to_bits()],
+            )?;
+            call(&mut renderer, &mut ctx, "glClear", &[0x4100])?;
+            assert_eq!(call(&mut renderer, &mut ctx, "glGetError", &[])?, 0);
+
             let bytes = serde_json::to_vec(&renderer.capture_context().map_err(error)?)
                 .map_err(|err| error(err.to_string()))?;
             let saved: ContextSnapshot =
@@ -2076,7 +2304,19 @@ mod tests {
             assert_eq!(read_words(&mut ctx, 0x1010, 1)?, [vertices]);
             let read = [2, 2, 1, 1, RGBA, UNSIGNED_BYTE, 0x3000];
             call(&mut restored, &mut ctx, "glReadPixels", &read)?;
+            assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [0, 0, 255, 255]);
+            call(&mut restored, &mut ctx, "glDrawArrays", &[4, 0, 3])?;
+            call(&mut restored, &mut ctx, "glReadPixels", &read)?;
+            assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [0, 0, 255, 255]);
+            call(
+                &mut restored,
+                &mut ctx,
+                "glBindFramebuffer",
+                &[FRAMEBUFFER, 0],
+            )?;
+            call(&mut restored, &mut ctx, "glReadPixels", &read)?;
             assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [255, 0, 0, 255]);
+            call(&mut restored, &mut ctx, "glDisable", &[0x0b71])?;
             call(
                 &mut restored,
                 &mut ctx,
@@ -2087,6 +2327,210 @@ mod tests {
             call(&mut restored, &mut ctx, "glReadPixels", &read)?;
             assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [0, 255, 0, 255]);
             assert_eq!(call(&mut restored, &mut ctx, "glGetError", &[])?, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[ignore = "requires native desktop OpenGL with shared contexts"]
+    fn checkpoint_retains_deleted_images_and_distinguishes_reused_texture_names() -> Result<()> {
+        use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
+        let ui = NativeRenderer::new(4, 4).map_err(error)?;
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "libglesv2.dll".into(),
+            binding: ImportBinding::Name("glReadPixels".into()),
+            friendly_name: None,
+        };
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        let call = |renderer: &mut Renderer, ctx: &mut CallCtx<'_>, name, args: &[u32]| {
+            for (reg, &value) in [R0, R1, R2, R3].into_iter().zip(args) {
+                ctx.cpu.write_reg(reg, value)?;
+            }
+            write_words(ctx, 0x4000, args.get(4..).unwrap_or_default())?;
+            renderer.gl(name, ctx)
+        };
+        with_shared_context_source(Some(ui.shared_context_source()), || {
+            let mut source = Renderer::new(4, 4, 1)?;
+            call(&mut source, &mut ctx, "glGenTextures", &[1, 0x1000])?;
+            let texture = read_words(&mut ctx, 0x1000, 1)?[0];
+            call(
+                &mut source,
+                &mut ctx,
+                "glBindTexture",
+                &[TEXTURE_2D, texture],
+            )?;
+            call(
+                &mut source,
+                &mut ctx,
+                "glTexImage2D",
+                &[TEXTURE_2D, 0, RGBA, 4, 4, 0, RGBA, UNSIGNED_BYTE, 0],
+            )?;
+            call(&mut source, &mut ctx, "glGenRenderbuffers", &[1, 0x1004])?;
+            let depth = read_words(&mut ctx, 0x1004, 1)?[0];
+            call(
+                &mut source,
+                &mut ctx,
+                "glBindRenderbuffer",
+                &[RENDERBUFFER, depth],
+            )?;
+            call(
+                &mut source,
+                &mut ctx,
+                "glRenderbufferStorage",
+                &[RENDERBUFFER, 0x81a5, 4, 4],
+            )?;
+            call(&mut source, &mut ctx, "glGenFramebuffers", &[3, 0x1010])?;
+            let fbos = read_words(&mut ctx, 0x1010, 3)?;
+            for &fbo in &fbos[..2] {
+                call(
+                    &mut source,
+                    &mut ctx,
+                    "glBindFramebuffer",
+                    &[FRAMEBUFFER, fbo],
+                )?;
+                call(
+                    &mut source,
+                    &mut ctx,
+                    "glFramebufferTexture2D",
+                    &[FRAMEBUFFER, 0x8ce0, TEXTURE_2D, texture, 0],
+                )?;
+                call(
+                    &mut source,
+                    &mut ctx,
+                    "glFramebufferRenderbuffer",
+                    &[FRAMEBUFFER, 0x8d00, RENDERBUFFER, depth],
+                )?;
+            }
+            let one = 1f32.to_bits();
+            call(&mut source, &mut ctx, "glClearColor", &[0, 0, one, one])?;
+            call(&mut source, &mut ctx, "glClearDepthf", &[0.25f32.to_bits()])?;
+            call(&mut source, &mut ctx, "glClear", &[0x4100])?;
+            call(
+                &mut source,
+                &mut ctx,
+                "glBindFramebuffer",
+                &[FRAMEBUFFER, 0],
+            )?;
+            call(&mut source, &mut ctx, "glDeleteTextures", &[1, 0x1000])?;
+            call(&mut source, &mut ctx, "glDeleteRenderbuffers", &[1, 0x1004])?;
+            assert_eq!(call(&mut source, &mut ctx, "glIsTexture", &[texture])?, 0);
+            assert_eq!(
+                call(&mut source, &mut ctx, "glIsRenderbuffer", &[depth])?,
+                0
+            );
+            assert_eq!(source.retained.images.len(), 2);
+            // Reuse the deleted guest name for an independent live image. The
+            // old FBO attachments still refer to the previous generation.
+            call(
+                &mut source,
+                &mut ctx,
+                "glBindTexture",
+                &[TEXTURE_2D, texture],
+            )?;
+            call(
+                &mut source,
+                &mut ctx,
+                "glTexImage2D",
+                &[TEXTURE_2D, 0, RGBA, 4, 4, 0, RGBA, UNSIGNED_BYTE, 0],
+            )?;
+            call(
+                &mut source,
+                &mut ctx,
+                "glBindFramebuffer",
+                &[FRAMEBUFFER, fbos[2]],
+            )?;
+            call(
+                &mut source,
+                &mut ctx,
+                "glFramebufferTexture2D",
+                &[FRAMEBUFFER, 0x8ce0, TEXTURE_2D, texture, 0],
+            )?;
+            call(&mut source, &mut ctx, "glClearColor", &[one, 0, 0, one])?;
+            call(&mut source, &mut ctx, "glClear", &[0x4000])?;
+            call(
+                &mut source,
+                &mut ctx,
+                "glBindFramebuffer",
+                &[FRAMEBUFFER, fbos[0]],
+            )?;
+            assert_eq!(call(&mut source, &mut ctx, "glGetError", &[])?, 0);
+            let saved = source.capture_context().map_err(error)?;
+            let mut restored = saved.restore(1).map_err(error)?;
+            assert_eq!(call(&mut restored, &mut ctx, "glIsTexture", &[texture])?, 1);
+            assert_eq!(
+                call(&mut restored, &mut ctx, "glIsRenderbuffer", &[depth])?,
+                0
+            );
+            let read = [0, 0, 1, 1, RGBA, UNSIGNED_BYTE, 0x3000];
+            call(&mut restored, &mut ctx, "glReadPixels", &read)?;
+            assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [0, 0, 255, 255]);
+            let mut z = 0f32;
+            invoke!(&mut restored,"glReadPixels",(0=>i32,0=>i32,1=>i32,1=>i32,0x1902=>u32,0x1406=>u32,&mut z as *mut f32 as *mut c_void=>*mut c_void),());
+            assert!((z - 0.25).abs() < 0.0001, "depth={z}");
+            call(
+                &mut restored,
+                &mut ctx,
+                "glGetFramebufferAttachmentParameteriv",
+                &[FRAMEBUFFER, 0x8ce0, 0x8cd1, 0x3020],
+            )?;
+            assert_eq!(read_words(&mut ctx, 0x3020, 1)?, [texture]);
+            call(&mut restored, &mut ctx, "glClearColor", &[0, one, 0, one])?;
+            call(&mut restored, &mut ctx, "glClear", &[0x4000])?;
+            call(
+                &mut restored,
+                &mut ctx,
+                "glBindFramebuffer",
+                &[FRAMEBUFFER, fbos[1]],
+            )?;
+            call(&mut restored, &mut ctx, "glReadPixels", &read)?;
+            assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [0, 255, 0, 255]);
+            call(
+                &mut restored,
+                &mut ctx,
+                "glBindFramebuffer",
+                &[FRAMEBUFFER, fbos[2]],
+            )?;
+            call(&mut restored, &mut ctx, "glReadPixels", &read)?;
+            assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [255, 0, 0, 255]);
+            let saved = restored.capture_context().map_err(error)?;
+            let mut twice = saved.restore(1).map_err(error)?;
+            call(
+                &mut twice,
+                &mut ctx,
+                "glBindFramebuffer",
+                &[FRAMEBUFFER, fbos[1]],
+            )?;
+            call(&mut twice, &mut ctx, "glReadPixels", &read)?;
+            assert_eq!(ctx.cpu.read_mem(0x3000, 4)?, [0, 255, 0, 255]);
+            for &fbo in &fbos[..2] {
+                call(
+                    &mut twice,
+                    &mut ctx,
+                    "glBindFramebuffer",
+                    &[FRAMEBUFFER, fbo],
+                )?;
+                call(
+                    &mut twice,
+                    &mut ctx,
+                    "glFramebufferTexture2D",
+                    &[FRAMEBUFFER, 0x8ce0, TEXTURE_2D, 0, 0],
+                )?;
+                call(
+                    &mut twice,
+                    &mut ctx,
+                    "glFramebufferRenderbuffer",
+                    &[FRAMEBUFFER, 0x8d00, RENDERBUFFER, 0],
+                )?;
+            }
+            assert!(twice.retained.images.is_empty());
+            assert_eq!(call(&mut twice, &mut ctx, "glGetError", &[])?, 0);
             Ok(())
         })
     }

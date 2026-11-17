@@ -18,26 +18,34 @@ impl Vfs {
     pub(crate) fn snapshot_mapping_file(
         &self,
         mapping: &MappedFile,
-        private: &mut HashMap<u32, Arc<Mutex<OpenFile>>>,
+        private: &mut HashMap<u32, VfsObject>,
     ) -> Result<u32, String> {
-        let VfsObjectInner::File(source) = &mapping._file.0 else {
-            return Err("checkpoint contains a mapped RAM file".into());
-        };
-        if let Some(handle) = self
-            .handles
+        self.snapshot_object_handle(&mapping._file, private)
+    }
+
+    pub(crate) fn snapshot_object_handle(
+        &self,
+        object: &VfsObject,
+        private: &mut HashMap<u32, VfsObject>,
+    ) -> Result<u32, String> {
+        let identity = object.snapshot_identity();
+        let open = self.open_handles();
+        if let Some(handle) = open.iter().copied().find(|&handle| {
+            self.export_handle(handle)
+                .is_some_and(|file| file.snapshot_identity() == identity)
+        }) {
+            return Ok(handle);
+        }
+        if let Some((&handle, _)) = private
             .iter()
-            .chain(private.iter())
-            .filter(|(_, file)| Arc::ptr_eq(file, source))
-            .map(|(&handle, _)| handle)
-            .min()
+            .find(|(_, file)| file.snapshot_identity() == identity)
         {
             return Ok(handle);
         }
-        let open = self.open_handles();
         let handle = (self.next_handle..INVALID_HANDLE_VALUE)
             .find(|id| !private.contains_key(id) && !open.contains(id))
-            .ok_or("no private snapshot file identifiers available")?;
-        private.insert(handle, source.clone());
+            .ok_or("no checkpoint backing identifiers available")?;
+        private.insert(handle, object.clone());
         Ok(handle)
     }
 

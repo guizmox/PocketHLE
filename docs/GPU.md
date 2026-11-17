@@ -763,3 +763,16 @@ The fixture now uploads in the actual attachment format, checks the GL error,
 and also covers 320x240 at 2x on desktop GL and GLES. No RGB565 production
 reduction arithmetic was changed to make this test pass. The corrected fixture
 also passes against the unmodified production code of commit 9bebfb5b.
+
+
+## Persistent programmable checkpoints
+
+Desktop OpenGL hosts capture GLES2 resources and state at an explicit checkpoint;
+ordinary drawing does not accumulate a lifetime replay history. Deleted images
+retained by an unbound FBO keep private FBO references to the same GPU storage,
+without copying or reading pixels during play. Preserve image generation identity
+when native or guest names are reused, and release keepers after the last guest
+attachment disappears. Readback belongs to explicit snapshot capture, not to
+ordinary deletion or drawing. Rebuild resources on their owning context thread.
+See [Snapshot internals](SNAPSHOTS.md#graphics-and-performance) for format, restore
+ordering and the remaining host-OpenGL-ES journal fallback.

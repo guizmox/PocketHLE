@@ -20,7 +20,7 @@ pub struct ArmMemorySnapshot {
 struct Mapping {
     base: u32,
     permissions: u32,
-    #[serde(deserialize_with = "read_byte_buffer")]
+    #[serde(with = "serde_bytes")]
     bytes: Vec<u8>,
 }
 
@@ -29,41 +29,8 @@ struct Image {
     base: u32,
     permissions: u32,
     resident: bool,
-    #[serde(deserialize_with = "read_byte_buffer")]
+    #[serde(with = "serde_bytes")]
     bytes: Vec<u8>,
-}
-
-// With bincode's fixed-integer encoding, a Vec<u8> and a byte buffer have
-// the same length-prefixed layout. Request the bulk read on decode only.
-fn read_byte_buffer<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<u8>, D::Error> {
-    struct ByteBuffer;
-
-    impl<'de> serde::de::Visitor<'de> for ByteBuffer {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("an ARM memory byte buffer")
-        }
-
-        fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Self::Value, E> {
-            Ok(bytes)
-        }
-
-        fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
-            Ok(bytes.to_vec())
-        }
-
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            sequence: A,
-        ) -> Result<Self::Value, A::Error> {
-            Vec::deserialize(serde::de::value::SeqAccessDeserializer::new(sequence))
-        }
-    }
-
-    deserializer.deserialize_byte_buf(ByteBuffer)
 }
 
 #[derive(Serialize, Deserialize)]

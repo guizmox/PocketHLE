@@ -1114,20 +1114,24 @@ impl Drop for SuspendedSession {
     }
 }
 
-/// Guest DirectShow objects whose graphs have no native media loaded.
+/// Process-local media objects; native capture devices are reopened on restore.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct MediaSnapshot(std::collections::HashMap<u32, directshow::IdleGraphSnapshot>);
+pub struct MediaSnapshot {
+    graphs: std::collections::HashMap<u32, directshow::GraphSnapshot>,
+    inputs: wavein::InputSnapshot,
+}
 
-pub fn capture_snapshot_media() -> Result<MediaSnapshot, String> {
-    if wavein::snapshot_media_active() {
-        return Err("checkpoint contains a native microphone capture stream".into());
-    }
-    directshow::capture_idle_graphs().map(MediaSnapshot)
+pub fn capture_snapshot_media(at: std::time::Instant) -> Result<MediaSnapshot, String> {
+    Ok(MediaSnapshot {
+        graphs: directshow::capture_graphs(at)?,
+        inputs: wavein::InputSnapshot::capture()?,
+    })
 }
 
 impl MediaSnapshot {
-    pub fn restore(self) -> Result<(), String> {
-        directshow::restore_idle_graphs(self.0)
+    pub fn restore(self, kernel: &mut pocket_kernel::KernelState) -> Result<(), String> {
+        directshow::restore_graphs(self.graphs, kernel)?;
+        self.inputs.restore()
     }
 }
 

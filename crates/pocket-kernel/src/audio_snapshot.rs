@@ -6,10 +6,51 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize)]
+pub struct MasSnapshot {
+    stream: Option<WaveStream>,
+    volume: u32,
+}
+fn valid_format(format: GuestFormat) -> bool {
+    format.sample_rate != 0 && format.channels != 0
+}
+fn invalid_wave(wave: &WaveStream) -> bool {
+    !valid_format(wave.format)
+        || wave.consumed > wave.written
+        || wave.loop_buffer.as_ref().is_some_and(|looping| {
+            looping.samples.is_empty()
+                || looping.index >= looping.samples.len()
+                || looping.remaining == 0
+        })
+}
+impl MasPlayback {
+    pub fn capture_checkpoint(&self) -> Result<MasSnapshot, String> {
+        Ok(MasSnapshot {
+            stream: self.0.lock().map_err(|_| "MAS transport poisoned")?.clone(),
+            volume: *self.1.lock().map_err(|_| "MAS volume poisoned")?,
+        })
+    }
+}
+impl MasSnapshot {
+    pub fn restore(mut self) -> Result<MasPlayback, String> {
+        if self.stream.as_ref().is_some_and(invalid_wave) {
+            return Err("invalid shared MAS transport".into());
+        }
+        if let Some(stream) = self.stream.as_mut() {
+            stream.tick = Instant::now();
+        }
+        Ok(MasPlayback(
+            Arc::new(Mutex::new(self.stream)),
+            Arc::new(Mutex::new(self.volume)),
+        ))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct AudioSnapshot {
     device_volume: u32,
     wave_streams: BTreeMap<u32, WaveStream>,
     mas_streams: BTreeMap<u32, (Option<WaveStream>, u32)>,
+    shared_mas_keys: Vec<u32>,
     ring: Vec<i16>,
     guest_format: GuestFormat,
     mix_format: GuestFormat,
@@ -28,6 +69,9 @@ impl AudioEngine {
     /// Copy queue data and cursors under the mixer lock so a host audio
     /// callback cannot finish half of a saved submission during capture.
     pub fn capture_snapshot(&self) -> Result<AudioSnapshot, String> {
+        self.capture_snapshot_at(Instant::now())
+    }
+    pub fn capture_snapshot_at(&self, at: Instant) -> Result<AudioSnapshot, String> {
         let mut shared = self
             .shared
             .lock()
@@ -38,20 +82,21 @@ impl AudioEngine {
             .map(|(&key, playback)| {
                 let mut stream = playback.0.lock().unwrap().clone();
                 if let Some(stream) = stream.as_mut() {
-                    stream.advance_virtual(shared.device_active);
+                    stream.advance_virtual_at(shared.device_active, at);
                 }
                 (key, (stream, *playback.1.lock().unwrap()))
             })
             .collect();
         let mut wave_streams = shared.wave_streams.clone();
         for stream in wave_streams.values_mut() {
-            stream.advance_virtual(shared.device_active);
+            stream.advance_virtual_at(shared.device_active, at);
         }
-        let virtual_cursor = shared.cursor();
+        let virtual_cursor = shared.cursor_at(at);
         Ok(AudioSnapshot {
             device_volume: shared.device_volume,
             wave_streams,
             mas_streams,
+            shared_mas_keys: Vec::new(),
             ring: (0..shared.len)
                 .map(|index| shared.ring[(shared.read + index) % shared.ring.len()])
                 .collect(),
@@ -72,16 +117,30 @@ impl AudioEngine {
 
 impl AudioSnapshot {
     pub fn restore(self) -> Result<AudioEngine, String> {
-        let valid_format = |format: GuestFormat| format.sample_rate != 0 && format.channels != 0;
-        let invalid_wave = |wave: &WaveStream| {
-            !valid_format(wave.format)
-                || wave.consumed > wave.written
-                || wave.loop_buffer.as_ref().is_some_and(|looping| {
-                    looping.samples.is_empty()
-                        || looping.index >= looping.samples.len()
-                        || looping.remaining == 0
-                })
-        };
+        self.restore_with_shared_mas(None)
+    }
+
+    pub fn take_device_mas(
+        &mut self,
+        keys: &std::collections::BTreeSet<u32>,
+    ) -> BTreeMap<u32, MasSnapshot> {
+        let mut shared = BTreeMap::new();
+        for &key in keys {
+            if let Some((stream, volume)) = self.mas_streams.remove(&key) {
+                self.shared_mas_keys.push(key);
+                shared.insert(key, MasSnapshot { stream, volume });
+            }
+        }
+        shared
+    }
+
+    pub fn restore_with_shared_mas(
+        self,
+        device: Option<&BTreeMap<u32, MasPlayback>>,
+    ) -> Result<AudioEngine, String> {
+        if !self.shared_mas_keys.is_empty() && device.is_none() {
+            return Err("shared MAS streams require a device checkpoint".into());
+        }
         if self.ring.len() > RING_CAPACITY_SAMPLES
             || self.virtual_cursor > self.written
             || !valid_format(self.guest_format)
@@ -121,6 +180,14 @@ impl AudioSnapshot {
                     )
                 })
                 .collect();
+            for key in self.shared_mas_keys {
+                let stream = device
+                    .and_then(|device| device.get(&key))
+                    .ok_or("missing shared MAS transport")?;
+                if shared.mas_streams.insert(key, stream.clone()).is_some() {
+                    return Err("duplicate saved MAS stream binding".into());
+                }
+            }
             shared.len = self.ring.len();
             shared.write = shared.len % shared.ring.len();
             shared.ring[..self.ring.len()].copy_from_slice(&self.ring);
@@ -143,6 +210,32 @@ impl AudioSnapshot {
 mod tests {
     use super::*;
 
+    #[test]
+    fn device_audio_keeps_process_local_media_streams_private() {
+        let engine = AudioEngine::new();
+        let format = GuestFormat {
+            sample_rate: 8000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
+        engine.queue_mas_samples(0x00130000, format, &[100, 200]);
+        engine.queue_mas_samples(0xd3000001, format, &[300, 400]);
+        let mut saved = engine.capture_snapshot().unwrap();
+        let shared = saved.take_device_mas(&[0xd3000001].into());
+        assert_eq!(shared.keys().copied().collect::<Vec<_>>(), vec![0xd3000001]);
+        assert!(saved.mas_streams.contains_key(&0x00130000));
+        assert_eq!(saved.shared_mas_keys, vec![0xd3000001]);
+        let transports = shared
+            .into_iter()
+            .map(|(key, stream)| (key, stream.restore().unwrap()))
+            .collect();
+        let restored = saved.restore_with_shared_mas(Some(&transports)).unwrap();
+        assert!(restored
+            .capture_snapshot()
+            .unwrap()
+            .mas_streams
+            .contains_key(&0x00130000));
+    }
     #[test]
     fn audio_snapshot_resumes_mas_pcm_and_its_completion_cursor() {
         const STREAM: u32 = 0xd3000000;
