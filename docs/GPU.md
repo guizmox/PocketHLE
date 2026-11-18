@@ -611,15 +611,17 @@ Genuine Thumb entries and other first-word lookalikes retain Thumb mode.
 
 The guest zlib ABI includes named `crc32` (incremental seed, null/empty buffer
 semantics) and `inflateReset` (same stream handle, reset decoder/totals/adler).
-Streaming decompression uses flate2's pure Rust zlib-rs backend. The former
-miniz backend can consume all compressed input while buffering output beyond
-the caller's available output space. Older native libpng clients that process
-IDAT only while avail_in is nonzero then report "Not enough image data".
-A synthetic small-row regression covers that client contract without game data.
-Cargo feature unification also selects this backend for other flate2 consumers;
-archive imports, backup compression/restoration and existing guest zlib streams
-must be included in regression checks. This is a semantic compatibility change,
-not a measured performance guarantee.
+The guest streaming decoder uses the checkpointable miniz_oxide core through
+an exact-output-boundary adapter. It retains only decoder state and a bounded
+sliding window. This differs from the old flate2 miniz wrapper, which could consume
+all compressed input while staging rows beyond the caller's output space. Older
+native libpng clients that process IDAT only while avail_in is nonzero then
+reported "Not enough image data". The small-row regression remains in place;
+fragmented headers, long Huffman matches, window rollover and cold continuation
+are also tested. General flate2 consumers (imports, backup/snapshot compression
+and image codecs) retain the workspace zlib-rs backend. See
+[Snapshot internals](SNAPSHOTS.md#live-decompressor-checkpoints) for the saved
+state and ABI checks. This is not a universal decoder performance guarantee.
 
 EverQuest Episode I reproduced the original black framebuffer with its supplied
 native MFC runtime while GapiDraw calls returned zero after dependency-load
@@ -776,3 +778,9 @@ attachment disappears. Readback belongs to explicit snapshot capture, not to
 ordinary deletion or drawing. Rebuild resources on their owning context thread.
 See [Snapshot internals](SNAPSHOTS.md#graphics-and-performance) for format, restore
 ordering and the remaining host-OpenGL-ES journal fallback.
+
+Native programmable restore also remaps saved guest uniform locations to newly
+linked native locations by name. Queries and typed/array updates use the same
+per-program correspondence, including after repeated checkpoints. A successful
+guest relink resets it; final program release frees it. Ordinary rendering adds
+no uniform-state readback or GPU/CPU synchronization for this mapping.

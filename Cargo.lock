@@ -2437,6 +2437,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+ "serde",
  "simd-adler32",
 ]
 
@@ -3118,6 +3119,7 @@ dependencies = [
  "indexmap",
  "libc",
  "log",
+ "miniz_oxide",
  "png 0.17.16",
  "pocket-cpu",
  "pocket-pe",

@@ -28,7 +28,7 @@ pub struct KernelSnapshot {
     gdi: gdi::GdiSnapshot,
     display: framebuffer::DisplaySnapshot,
     schedule: ScheduleSnapshot,
-    zlib_allocator: u32,
+    zlib: zlib::ZlibStreams,
     memory_profile: Option<(u32, u32)>,
     module_path: String,
     process_launch_enabled: bool,
@@ -133,8 +133,8 @@ pub struct KernelSnapshot {
 }
 
 impl KernelState {
-    /// The first checkpoint profile supports a single ARM process using
-    /// regular files and the fixed-function graphics runtime.
+    /// Capture one process; device captures coordinate shared resources before
+    /// invoking the same process-owned serializer.
     pub fn capture_snapshot(&mut self) -> Result<KernelSnapshot, String> {
         self.capture_snapshot_with_suspended_parents(false)
     }
@@ -188,10 +188,6 @@ impl KernelState {
         self.crypto.validate_snapshot()?;
         self.msxml.validate_snapshot()?;
         self.sdl.validate_snapshot()?;
-        let zlib_allocator = self
-            .zlib_streams
-            .snapshot_allocator()
-            .ok_or("checkpoint contains a live decompressor")?;
         let memory_profile = self.memory_division.as_ref().map(|ram| {
             let ram = ram.snapshot();
             (ram.total_pages, ram.store_pages)
@@ -243,7 +239,7 @@ impl KernelState {
             gdi: self.gdi.capture_snapshot()?,
             display: self.framebuffer.capture_snapshot()?,
             schedule,
-            zlib_allocator,
+            zlib: self.zlib_streams.capture_snapshot(),
             memory_profile,
             module_path: self.module_path.clone(),
             process_launch_enabled: self.process_launch_enabled,
@@ -502,7 +498,7 @@ impl KernelSnapshot {
         self.schedule
             .restore(state)
             .map_err(|error| error.to_string())?;
-        state.zlib_streams = zlib::ZlibStreams::restore_allocator(self.zlib_allocator);
+        state.zlib_streams = self.zlib.restore_snapshot()?;
         state.module_path = self.module_path;
         state.process_launch_enabled = self.process_launch_enabled;
         state.child_processes = self.family.children;

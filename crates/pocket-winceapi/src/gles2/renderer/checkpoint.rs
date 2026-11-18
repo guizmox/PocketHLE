@@ -49,6 +49,7 @@ struct Program {
 #[derive(Serialize, Deserialize)]
 struct Uniform {
     name: Vec<u8>,
+    // The guest keeps this location in ARM memory across native relinking.
     location: i32,
     kind: u32,
     values: Vec<u32>,
@@ -286,6 +287,9 @@ impl Renderer {
         if program_parameter(self, program, 0x8b82)? == 0 {
             return Ok(());
         }
+        // Only a successful guest relink invalidates the old locations. A
+        // failed link can leave the previous executable installed in GL.
+        self.uniform_locations.remove(&program);
         let count = program_parameter(self, program, 0x8b85)?;
         let mut shaders = vec![0; transfer_size(count, 4)? / 4];
         invoke!(self, "glGetAttachedShaders", (program => u32, count => i32, std::ptr::null_mut() => *mut i32, shaders.as_mut_ptr() => *mut u32), ());
@@ -484,7 +488,9 @@ impl NativeCheckpoint {
                             }
                             saved.uniforms.push(Uniform {
                                 name: element_name,
-                                location,
+                                location: renderer.uniform_guest(program, location).ok_or_else(
+                                    || error("cannot capture an untracked programmable uniform"),
+                                )?,
                                 kind,
                                 values,
                             });
@@ -1106,13 +1112,14 @@ impl NativeCheckpoint {
                     return Err(error("saved programmable program could not link"));
                 }
                 invoke!(renderer, "glUseProgram", (name => u32), ());
+                let mut locations = Vec::with_capacity(program.uniforms.len());
                 for uniform in &program.uniforms {
                     let symbol = CString::new(uniform.name.as_slice())
                         .map_err(|_| error("invalid saved uniform name"))?;
                     let location = invoke!(renderer, "glGetUniformLocation", (name => u32, symbol.as_ptr() => *const c_char), i32);
-                    if location != uniform.location {
-                        return Err(error("host changed a saved programmable uniform location"));
-                    }
+                    // Resolve by name; never rewrite the guest's saved memory
+                    // or ask a new host executable to use the old host location.
+                    locations.push((uniform.location, location));
                     let (count, integer) = uniform_components(uniform.kind)?;
                     if uniform.values.len() != count {
                         return Err(error("invalid saved uniform data"));
@@ -1143,6 +1150,9 @@ impl NativeCheckpoint {
                             invoke!(renderer, function, (location => i32, 1 => i32, pointer.cast() => *const c_void), ());
                         }
                     }
+                }
+                if let Some(locations) = UniformLocations::restored(locations)? {
+                    renderer.uniform_locations.insert(name, locations);
                 }
             }
             for shader in executables {
@@ -1379,8 +1389,11 @@ impl NativeCheckpoint {
         renderer.viewport = logical(0x0ba2)?;
         renderer.scissor = logical(0x0c10)?;
         self.state.apply(renderer)?;
+        renderer.uniform_program = host(renderer, Kind::Program, self.state.int(0x8b8d)? as u32);
         for program in self.programs.iter().filter(|program| program.deleted) {
-            invoke!(renderer, "glDeleteProgram", (host(renderer, Kind::Program, program.guest) => u32), ());
+            let name = host(renderer, Kind::Program, program.guest);
+            invoke!(renderer, "glDeleteProgram", (name => u32), ());
+            renderer.deleted_programs.insert(name);
         }
         for shader in self.shaders.iter().filter(|shader| shader.deleted) {
             let name = host(renderer, Kind::Shader, shader.guest);

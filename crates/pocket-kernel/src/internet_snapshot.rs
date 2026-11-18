@@ -12,7 +12,12 @@ pub(crate) struct InternetSnapshot {
 enum SavedHandle {
     Session(SessionSpec),
     Connection(Connection),
-    Request { parent: u32, spec: RequestSpec },
+    Request {
+        parent: u32,
+        spec: RequestSpec,
+        transfer: Option<CompletedTransfer>,
+        sending: Option<(usize, u32, u32)>,
+    },
 }
 impl State {
     pub(crate) fn capture_checkpoint(&self) -> std::result::Result<InternetSnapshot, String> {
@@ -21,10 +26,11 @@ impl State {
                 Handle::Session(session)=>SavedHandle::Session(session.spec.clone()),
                 Handle::Connection(connection)=>SavedHandle::Connection(connection.clone()),
                 Handle::Request(request)=> {
-                    if request.transfer.is_some() || request.sending.is_some() {
+                    let transfer = request.transfer.as_ref().map(|transfer| transfer.capture_completed()).transpose()?;
+                    if request.sending.is_some() && transfer.is_none() {
                         return Err("checkpoint contains an HTTP transfer; remote requests cannot be replayed safely".into());
                     }
-                    SavedHandle::Request {parent:request.parent,spec:request.spec.clone()}
+                    SavedHandle::Request {parent:request.parent,spec:request.spec.clone(),transfer,sending:request.sending}
                 }
             }))
         }).collect::<std::result::Result<_,String>>()?;
@@ -55,6 +61,17 @@ impl InternetSnapshot {
             return Err("invalid saved WinINet handle namespace".into());
         }
         for handle in self.handles.values() {
+            if let SavedHandle::Request {
+                transfer, sending, ..
+            } = handle
+            {
+                if sending.is_some() && transfer.is_none() {
+                    return Err("saved HTTP send has no completed response".into());
+                }
+                if let Some(transfer) = transfer {
+                    transfer.validate()?;
+                }
+            }
             match handle {
                 SavedHandle::Connection(connection)
                     if !matches!(
@@ -110,7 +127,12 @@ impl InternetSnapshot {
                 SavedHandle::Connection(connection) => {
                     handles.insert(*id, Handle::Connection(connection.clone()));
                 }
-                SavedHandle::Request { parent, spec } => {
+                SavedHandle::Request {
+                    parent,
+                    spec,
+                    transfer,
+                    sending,
+                } => {
                     let session = match self.handles.get(parent).unwrap() {
                         SavedHandle::Session(_) => *parent,
                         SavedHandle::Connection(connection) => connection.parent,
@@ -122,8 +144,11 @@ impl InternetSnapshot {
                             parent: *parent,
                             client: sessions[&session].clone(),
                             spec: spec.clone(),
-                            transfer: None,
-                            sending: None,
+                            transfer: transfer
+                                .clone()
+                                .map(CompletedTransfer::restore)
+                                .transpose()?,
+                            sending: *sending,
                         }),
                     );
                 }
@@ -271,5 +296,93 @@ mod tests {
         let mut destination = State::with_backend(backend);
         assert!(saved.restore(&mut destination).is_err());
         assert_eq!(opens.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn completed_post_response_restores_unread_bytes_and_late_error_without_resending() {
+        for ending in [Ok(()), Err(12030)] {
+            let (mut source, session, request) = fixture();
+            let channel = Channel::default();
+            channel.publish(ResponseHead {
+                status: 201,
+                version: "HTTP/1.1".into(),
+                reason: "Created".into(),
+                headers: vec![("X-Receipt".into(), "already-received".into())],
+            });
+            channel.push(b"first remaining response").unwrap();
+            channel.finish(ending);
+            let transfer = source.request(request).unwrap();
+            transfer.sending = Some((3, 0x70001234, 0x10000));
+            transfer.transfer = Some(channel.transfer(|| {}));
+            let mut first = [0; 6];
+            assert_eq!(
+                transfer.transfer.as_mut().unwrap().read(&mut first),
+                Ok(Some(6))
+            );
+            assert_eq!(&first, b"first ");
+            let bytes = serde_json::to_vec(&source.capture_checkpoint().unwrap()).unwrap();
+            drop(source);
+            let saved: InternetSnapshot = serde_json::from_slice(&bytes).unwrap();
+            let (backend, opens) = provider(false);
+            let mut destination = State::with_backend(backend);
+            saved.restore(&mut destination).unwrap();
+            assert_eq!(opens.load(Ordering::SeqCst), 1);
+            let request_object = destination.request(request).unwrap();
+            assert_eq!(request_object.sending, Some((3, 0x70001234, 0x10000)));
+            let stream = request_object.transfer.as_mut().unwrap();
+            assert_eq!(stream.head().unwrap().unwrap().status, 201);
+            assert_eq!(stream.available(), Ok((18, true)));
+            let mut tail = [0; 32];
+            assert_eq!(stream.read(&mut tail), Ok(Some(18)));
+            assert_eq!(&tail[..18], b"remaining response");
+            assert_eq!(stream.read(&mut tail), ending.map(|_| Some(0)));
+            // A second save can retain terminal success/error too. The test
+            // client's start() panics, proving neither restore submits a POST.
+            let saved = destination.capture_checkpoint().unwrap();
+            let (backend, _) = provider(false);
+            let mut again = State::with_backend(backend);
+            saved.restore(&mut again).unwrap();
+            assert_eq!(
+                again
+                    .request(request)
+                    .unwrap()
+                    .transfer
+                    .as_mut()
+                    .unwrap()
+                    .read(&mut tail),
+                ending.map(|_| Some(0))
+            );
+            assert!(again.close(session));
+            assert!(again.handles.is_empty());
+        }
+    }
+
+    #[test]
+    fn active_http_capture_does_not_drain_buffered_data() {
+        let (mut source, _, request) = fixture();
+        let channel = Channel::default();
+        channel.publish(ResponseHead {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            reason: "OK".into(),
+            headers: vec![],
+        });
+        channel.push(b"not consumed by failed capture").unwrap();
+        source.request(request).unwrap().transfer = Some(channel.transfer(|| {}));
+        assert!(source
+            .capture_checkpoint()
+            .err()
+            .unwrap()
+            .contains("HTTP transfer"));
+        let mut out = [0; 64];
+        let n = source
+            .request(request)
+            .unwrap()
+            .transfer
+            .as_mut()
+            .unwrap()
+            .read(&mut out)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&out[..n], b"not consumed by failed capture");
     }
 }

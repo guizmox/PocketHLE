@@ -44,7 +44,8 @@ missing devices fail restore.
 
 Programmable GLES on a desktop OpenGL host captures live GPU resources and draw
 state, then reconstructs them without replaying the session's draw history.
-Use the same host graphics driver and settings. Host OpenGL ES contexts retain
+Use the same host graphics driver and settings. Owned Desktop contexts prefer
+desktop OpenGL; an explicitly shared ES source or ES-only Linux fallback retains
 the bounded 96 MiB programmable journal fallback. Unsupported resource states
 report a capture failure and keep the previous slot. Fixed-function EGL uses
 its own resource checkpoint path.
@@ -54,6 +55,10 @@ on successful restore. Files already closed at capture are not rolled back.
 Read-only files must remain unchanged unless a captured writable description
 restores the same backing. RAM object-store files, open descriptions and mapped
 aliases are captured with their storage accounting.
+
+HLE zlib streams retain their decoder state without replaying their input history.
+Completed native-channel HTTP responses retain unread data and EOF/errors without
+resending the old request. Unfinished transfers remain unsupported.
 
 HSS playback restores its speaker objects, loaded clips and mixer cursor.
 PocketPC accelerometer stream handles reconnect to the active input provider.
@@ -66,7 +71,7 @@ cannot be captured. CEDB open cursors, cryptography, MSXML, SDL, volume handles
 and GPS serial state are included. Logical WinINet sessions and unsent requests
 reconnect to the current native backend without resending requests.
 
-Compact Framework, active Bluetooth connections/HTTP transfers and live zlib streams
+Compact Framework, active Bluetooth connections and unfinished HTTP transfers
 remain outside this profile. Capture reports unsupported live
 resources. The snapshot controls are desktop-only.
 

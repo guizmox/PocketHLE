@@ -101,6 +101,11 @@ impl Journal {
     }
 
     pub(super) fn capture(&self) -> std::result::Result<JournalSnapshot, String> {
+        if cfg!(target_os = "android") {
+            return Err(
+                "programmable snapshots are unavailable on Android host OpenGL ES contexts".into(),
+            );
+        }
         if let Some(reason) = &self.failure {
             return Err(reason.clone());
         }

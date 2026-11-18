@@ -241,7 +241,7 @@ impl SessionSnapshot {
             match (id, version) {
                 (SESSION, 1) => session = Some(read_section(&mut section)?),
                 (ARM, 1) => cpu = Some(read_section(&mut section)?),
-                (KERNEL, 6) => kernel = Some(read_section(&mut section)?),
+                (KERNEL, 7) => kernel = Some(read_section(&mut section)?),
                 (EGL_FIXED, 1) => egl = Some(read_section(&mut section)?),
                 (MEDIA, 2) => media = Some(read_section(&mut section)?),
                 (EGL_PROGRAMMABLE, EGL_PROGRAMMABLE_VERSION) => {
@@ -318,7 +318,7 @@ fn write_section(
     let version = if id == EGL_PROGRAMMABLE {
         EGL_PROGRAMMABLE_VERSION
     } else if id == KERNEL {
-        6
+        7
     } else if id == MEDIA {
         2
     } else {
@@ -1201,6 +1201,70 @@ mod tests {
         );
         destination
             .run_restored(restored, &mut |_state: &mut KernelState| {
+                FrameAction::Continue
+            })
+            .unwrap();
+        assert_eq!(
+            destination
+                .process
+                .as_ref()
+                .unwrap()
+                .state
+                .process_exit_code,
+            Some(42)
+        );
+    }
+    #[test]
+    fn checkpoint_cold_restores_an_active_decompressor_without_input_replay() {
+        let payload: Vec<u8> = (0..200_000).map(|i| ((i / 7) % 251) as u8).collect();
+        let encoded = pocket_kernel::zlib::ZlibStreams::compress(&payload).unwrap();
+        let mut source = fixture(3);
+        source.cpu.write_reg(ArmReg::R0, 40).unwrap();
+        let streams = &mut source.process.as_mut().unwrap().state.zlib_streams;
+        let handle = streams.init().unwrap();
+        let mut prefix = [0; 17];
+        let first = streams.inflate(handle, &encoded, &mut prefix, 0).unwrap();
+        assert_eq!(first.status, 0);
+        let checkpoint = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11004,
+            },
+        )
+        .unwrap();
+        let mut file = Vec::new();
+        checkpoint.write(&mut file).unwrap();
+        drop(checkpoint);
+        drop(source);
+
+        let mut destination = fixture(3);
+        let resumed = destination
+            .restore_snapshot(SessionSnapshot::read(file.as_slice()).unwrap())
+            .unwrap();
+        let streams = &mut destination.process.as_mut().unwrap().state.zlib_streams;
+        let mut input = first.consumed;
+        let mut decoded = prefix[..first.written].to_vec();
+        loop {
+            let mut row = [0; 94];
+            let step = streams
+                .inflate(handle, &encoded[input..], &mut row, 0)
+                .unwrap();
+            input += step.consumed;
+            decoded.extend_from_slice(&row[..step.written]);
+            if step.status == 1 {
+                break;
+            }
+            assert_eq!(step.status, 0);
+        }
+        assert_eq!(input, encoded.len());
+        assert_eq!(decoded, payload);
+        assert!(streams.end(handle));
+        assert!(!streams.contains(handle));
+        assert_ne!(streams.init().unwrap(), handle);
+        destination
+            .run_restored(resumed, &mut |_state: &mut KernelState| {
                 FrameAction::Continue
             })
             .unwrap();

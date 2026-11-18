@@ -4,6 +4,9 @@ use super::*;
 #[test]
 #[ignore = "requires an installed ARM game and native OpenGL"]
 fn external_game_device_snapshot_cold_restore() {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
     let root =
         PathBuf::from(std::env::var_os("POCKETHLE_SNAPSHOT_TEST_LIBRARY").expect("test library"));
     let id = std::env::var("POCKETHLE_SNAPSHOT_TEST_GAME").expect("game id");
@@ -15,7 +18,15 @@ fn external_game_device_snapshot_cold_restore() {
     game.settings.max_slices = 0;
     let ui = pocket_gles::gpu::Renderer::new(800, 800).unwrap();
     let runner = Runner::default();
-    runner.set_shared_context_source(Some(ui.shared_context_source()));
+    runner
+        .shared_export_policy()
+        .store(true, std::sync::atomic::Ordering::Release);
+    let owned_context = std::env::var_os("POCKETHLE_SNAPSHOT_TEST_OWNED_CONTEXT").is_some();
+    runner.set_shared_context_source((!owned_context).then(|| ui.shared_context_source()));
+    eprintln!(
+        "probe uses {} context",
+        if owned_context { "owned" } else { "shared" }
+    );
     let capture_after = std::env::var("POCKETHLE_SNAPSHOT_TEST_CAPTURE_AFTER")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -31,6 +42,15 @@ fn external_game_device_snapshot_cold_restore() {
                 words[1].parse().unwrap(),
                 words[2].parse().unwrap(),
             )
+        })
+        .collect();
+    let keys: Vec<(u64, u16)> = std::env::var("POCKETHLE_SNAPSHOT_TEST_KEYS")
+        .unwrap_or_default()
+        .split(';')
+        .filter(|key| !key.is_empty())
+        .map(|key| {
+            let (at, vk) = key.split_once(':').unwrap();
+            (at.parse().unwrap(), vk.parse().unwrap())
         })
         .collect();
     for restore in [false, true] {
@@ -58,11 +78,19 @@ fn external_game_device_snapshot_cold_restore() {
         let mut sent_taps = 0;
         let mut held_tap = None;
         let mut capture_error = None;
+        let mut first_frame = false;
+        let mut request_at = None;
+        let mut sent_keys = 0;
+        let mut held_key = None;
         while start.elapsed() < Duration::from_secs(if restore { 8 } else { capture_after + 9 })
             && !worker.is_finished()
         {
             if let Ok(frame) = images.try_recv() {
                 displayed += 1;
+                if !first_frame {
+                    eprintln!("first frame (restore={restore}): {:?}", start.elapsed());
+                    first_frame = true;
+                }
                 if displayed % 60 == 0 {
                     if let Ok(rgba) = frame.cpu_rgba() {
                         let mut ppm = format!(
@@ -79,6 +107,22 @@ fn external_game_device_snapshot_cold_restore() {
                 }
             }
             if !restore {
+                if let Some((at, vk)) = held_key {
+                    if start.elapsed().as_millis() >= u128::from(at + 150) {
+                        input
+                            .send(InputCommand::Input(InputEvent::KeyUp { vk }))
+                            .unwrap();
+                        held_key = None;
+                    }
+                } else if let Some(&(at, vk)) = keys.get(sent_keys) {
+                    if start.elapsed().as_millis() >= u128::from(at) {
+                        input
+                            .send(InputCommand::Input(InputEvent::KeyDown { vk }))
+                            .unwrap();
+                        held_key = Some((at, vk));
+                        sent_keys += 1;
+                    }
+                }
                 if let Some((at, x, y)) = held_tap {
                     if start.elapsed().as_millis() >= u128::from(at + 150) {
                         input
@@ -98,13 +142,17 @@ fn external_game_device_snapshot_cold_restore() {
             }
             if !requested && start.elapsed() > Duration::from_secs(capture_after) {
                 let (tx, rx) = std::sync::mpsc::channel();
+                request_at = Some(Instant::now());
                 input.send(InputCommand::SaveSnapshot(tx)).unwrap();
                 reply = Some(rx);
                 requested = true;
             }
             if let Some(rx) = reply.as_ref() {
                 if let Ok(result) = rx.try_recv() {
-                    eprintln!("snapshot result: {result:?}");
+                    eprintln!(
+                        "snapshot capture/write response after {:?}: {result:?}",
+                        request_at.unwrap().elapsed()
+                    );
                     capture_error = result.err();
                     reply = None;
                     if capture_error.is_some() {

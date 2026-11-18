@@ -22,6 +22,8 @@ ab_glyph = "=0.2.32"
 ttf-parser = "=0.25.1"
 png = "0.17"
 flate2.workspace = true
+# Guest inflate state is portable checkpoint data, not a lifetime input journal.
+miniz_oxide = { version = "=0.8.9", features = ["serde"] }
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true

@@ -38,6 +38,58 @@ pub trait Transfer: Send {
     fn head(&mut self) -> Result<Option<ResponseHead>>;
     fn available(&mut self) -> Result<(usize, bool)>;
     fn read(&mut self, out: &mut [u8]) -> Result<Option<usize>>;
+    /// Only terminal, locally buffered responses can be rewound. Native
+    /// providers that cannot prove completion must reject capture explicitly.
+    fn capture_completed(&self) -> std::result::Result<CompletedTransfer, String> {
+        Err(
+            "checkpoint contains an HTTP transfer; remote requests cannot be replayed safely"
+                .into(),
+        )
+    }
+}
+/// Received network data, not a recipe for resending a request. A producer has
+/// already supplied its terminal status before this value can be constructed.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CompletedTransfer {
+    head: Result<ResponseHead>,
+    #[serde(with = "serde_bytes")]
+    bytes: Vec<u8>,
+    end: Result<()>,
+}
+impl CompletedTransfer {
+    /// Native adapters may call this only after their producer has terminated.
+    /// `bytes` contains the unread suffix, never a body to send to the server.
+    pub fn new(
+        head: Result<ResponseHead>,
+        bytes: Vec<u8>,
+        end: Result<()>,
+    ) -> std::result::Result<Self, String> {
+        let saved = Self { head, bytes, end };
+        saved.validate()?;
+        Ok(saved)
+    }
+    pub(crate) fn validate(&self) -> std::result::Result<(), String> {
+        if self.bytes.len() > BUFFER_LIMIT {
+            return Err("saved HTTP response exceeds the unread-buffer limit".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn restore(self) -> std::result::Result<Box<dyn Transfer>, String> {
+        self.validate()?;
+        let channel = Channel(Arc::new((
+            Mutex::new(Mailbox {
+                head: Some(self.head),
+                bytes: self.bytes.into(),
+                end: Some(self.end),
+                cancelled: false,
+            }),
+            Condvar::new(),
+        )));
+        Ok(Box::new(ChannelTransfer {
+            channel,
+            cancel: None,
+        }))
+    }
 }
 pub trait Client: Send + Sync {
     fn start(&self, spec: RequestSpec, body: Vec<u8>) -> Result<Box<dyn Transfer>>;
@@ -300,7 +352,7 @@ impl Channel {
     }
     pub fn publish(&self, head: ResponseHead) {
         let mut m = self.0 .0.lock().unwrap();
-        if !m.cancelled {
+        if !m.cancelled && m.end.is_none() && m.head.is_none() {
             m.head = Some(Ok(head));
             self.0 .1.notify_all();
         }
@@ -309,11 +361,14 @@ impl Channel {
         let (m, c) = (&self.0 .0, &self.0 .1);
         let mut guard = m.lock().unwrap();
         while !bytes.is_empty() {
-            while guard.bytes.len() >= BUFFER_LIMIT && !guard.cancelled {
+            while guard.bytes.len() >= BUFFER_LIMIT && !guard.cancelled && guard.end.is_none() {
                 guard = c.wait(guard).unwrap();
             }
             if guard.cancelled {
                 return Err(12017);
+            }
+            if guard.end.is_some() {
+                return Err(12019);
             }
             let n = bytes.len().min(BUFFER_LIMIT - guard.bytes.len());
             guard.bytes.extend(&bytes[..n]);
@@ -324,6 +379,11 @@ impl Channel {
     }
     pub fn finish(&self, result: Result<()>) {
         let mut m = self.0 .0.lock().unwrap();
+        // Completion is immutable. A cancelled/failed response must not become
+        // successful if a native worker reports its final result later.
+        if m.cancelled || m.end.is_some() {
+            return;
+        }
         if m.head.is_none() {
             m.head = Some(Err(result.as_ref().err().copied().unwrap_or(12019)));
         }
@@ -334,7 +394,7 @@ impl Channel {
         let mut m = self.0 .0.lock().unwrap();
         m.cancelled = true;
         m.bytes.clear();
-        m.head = None;
+        m.head = Some(Err(12017));
         m.end = Some(Err(12017));
         self.0 .1.notify_all();
     }
@@ -350,6 +410,25 @@ struct ChannelTransfer {
     cancel: Option<Box<dyn FnOnce() + Send>>,
 }
 impl Transfer for ChannelTransfer {
+    fn capture_completed(&self) -> std::result::Result<CompletedTransfer, String> {
+        let mailbox = self
+            .channel
+            .0
+             .0
+            .lock()
+            .map_err(|_| "HTTP response channel poisoned")?;
+        let end = mailbox.end.ok_or(
+            "checkpoint contains an HTTP transfer; remote requests cannot be replayed safely",
+        )?;
+        CompletedTransfer::new(
+            mailbox
+                .head
+                .clone()
+                .ok_or("completed HTTP transfer has no response status")?,
+            mailbox.bytes.iter().copied().collect(),
+            end,
+        )
+    }
     fn head(&mut self) -> Result<Option<ResponseHead>> {
         let m = self.channel.0 .0.lock().unwrap();
         match &m.head {
@@ -541,6 +620,46 @@ mod tests {
         c.finish(Ok(()));
         assert_eq!(t.available(), Ok((0, true)));
         assert_eq!(t.read(&mut [0; 1]), Ok(Some(0)));
+    }
+    #[test]
+    fn completed_channel_cannot_be_extended_or_overwritten_by_a_late_worker() {
+        let channel = Channel::default();
+        let mut transfer = channel.transfer(|| {});
+        channel.publish(head());
+        channel.push(b"received").unwrap();
+        channel.finish(Err(12030));
+        assert_eq!(channel.push(b"too late"), Err(12019));
+        let mut replacement = head();
+        replacement.status = 200;
+        channel.publish(replacement);
+        channel.finish(Ok(()));
+        assert_eq!(transfer.head().unwrap().unwrap().status, 404);
+        let mut out = [0; 16];
+        assert_eq!(transfer.read(&mut out), Ok(Some(8)));
+        assert_eq!(&out[..8], b"received");
+        assert_eq!(transfer.read(&mut out), Err(12030));
+        channel.cancel();
+        channel.finish(Ok(()));
+        assert_eq!(transfer.head().err(), Some(12017));
+        assert_eq!(transfer.read(&mut out), Err(12017));
+    }
+    #[test]
+    fn completion_wakes_a_producer_blocked_by_a_full_response_buffer() {
+        let channel = Channel::default();
+        channel.publish(head());
+        channel.push(&vec![7; BUFFER_LIMIT]).unwrap();
+        let producer = channel.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || tx.send(producer.push(b"too late")).unwrap());
+        channel.finish(Ok(()));
+        let result = rx.recv_timeout(std::time::Duration::from_secs(2));
+        if result.is_err() {
+            channel.cancel();
+        }
+        worker.join().unwrap();
+        assert_eq!(result.unwrap(), Err(12019));
+        let mut transfer = channel.transfer(|| {});
+        assert_eq!(transfer.available(), Ok((BUFFER_LIMIT, true)));
     }
 }
 

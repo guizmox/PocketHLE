@@ -4,7 +4,10 @@
 //! process may need that gate to finish its current API and reach a boundary.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -25,6 +28,7 @@ impl CheckpointTime {
 pub struct CheckpointDomain<T>(Arc<Inner<T>>);
 struct Inner<T> {
     state: Mutex<State<T>>,
+    requested: AtomicBool,
     changed: Condvar,
 }
 struct State<T> {
@@ -61,6 +65,7 @@ impl<T> Default for CheckpointDomain<T> {
                 next: 0,
                 request: None,
             }),
+            requested: AtomicBool::new(false),
             changed: Condvar::new(),
         }))
     }
@@ -81,6 +86,7 @@ impl<T> CheckpointDomain<T> {
                 .get_or_insert_with(|| "process started during checkpoint rendezvous".into());
             if request.arrived.is_empty() {
                 state.request = None;
+                self.0.requested.store(false, Ordering::Release);
             }
             self.0.changed.notify_all();
             // Do not start a new CPU while a cancelled capture is still reading
@@ -136,11 +142,18 @@ impl<T> CheckpointDomain<T> {
             deadline: Instant::now() + timeout,
             departed: BTreeSet::new(),
         });
+        self.0.requested.store(true, Ordering::Release);
         self.0.changed.notify_all();
         Ok(())
     }
 
     pub fn requested(&self, pid: u32) -> bool {
+        // Ordinary frame/input polls do not need the domain mutex. The flag
+        // only skips the locked lookup; the mutex remains authoritative while
+        // a capture is live, including cancellation and participant departure.
+        if !self.0.requested.load(Ordering::Acquire) {
+            return false;
+        }
         self.0
             .state
             .lock()
@@ -256,6 +269,7 @@ impl<T> Participant<T> {
         request.departed.insert(self.pid);
         if request.departed == request.arrived {
             state.request = None;
+            inner.requested.store(false, Ordering::Release);
         }
         inner.changed.notify_all();
         result
@@ -343,5 +357,18 @@ mod tests {
             .capture(|_| panic!("must not capture a running child"))
             .is_err());
         assert!(!domain.requested(1));
+    }
+    #[test]
+    fn idle_frame_poll_does_not_wait_for_the_checkpoint_mutex() {
+        let domain = CheckpointDomain::<u32>::default();
+        let _participant = domain.register(1).unwrap();
+        let guard = domain.0.state.lock().unwrap();
+        let remote = domain.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || tx.send(remote.requested(1)).unwrap());
+        let result = rx.recv_timeout(Duration::from_secs(1));
+        drop(guard);
+        worker.join().unwrap();
+        assert!(!result.unwrap());
     }
 }

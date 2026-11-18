@@ -39,6 +39,8 @@ fn init(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if version == 0 || size != 56 || ctx.cpu.read_mem(version, 1)?[0] != b'1' {
         return result(-6);
     }
+    ctx.cpu
+        .check_guest_access(ptr, 56, pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE)?;
     let mut data = ctx.cpu.read_mem(ptr, 56)?;
     let Some(handle) = ctx.kernel.zlib_streams.init() else {
         return result(-4);
@@ -61,6 +63,8 @@ fn inflate(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ptr == 0 {
         return result(-2);
     }
+    ctx.cpu
+        .check_guest_access(ptr, 56, pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE)?;
     let mut data = ctx.cpu.read_mem(ptr, 56)?;
     let handle = word(&data, 28);
     let next_in = word(&data, 0);
@@ -88,10 +92,15 @@ fn inflate(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let input = if avail_in == 0 {
         Vec::new()
     } else {
+        ctx.cpu
+            .check_guest_access(next_in, avail_in as u32, pocket_cpu::Prot::READ)?;
         ctx.cpu.read_mem(next_in, avail_in as u32)?
     };
-    // Validate the full destination before advancing the host stream.
-    let mut output = ctx.cpu.read_mem(next_out, avail_out as u32)?;
+    // Permission checks must precede decoder progress: read_mem intentionally
+    // bypasses guest protection for loader access and is not a write probe.
+    ctx.cpu
+        .check_guest_access(next_out, avail_out as u32, pocket_cpu::Prot::WRITE)?;
+    let mut output = vec![0; avail_out];
     let step = match ctx
         .kernel
         .zlib_streams
@@ -157,6 +166,8 @@ fn end(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if ptr == 0 {
         return result(-2);
     }
+    ctx.cpu
+        .check_guest_access(ptr, 56, pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE)?;
     let mut data = ctx.cpu.read_mem(ptr, 56)?;
     if !ctx.kernel.zlib_streams.end(word(&data, 28)) {
         return result(-2);
@@ -343,5 +354,63 @@ mod tests {
             ),
             (-5i32) as u32
         );
+    }
+    #[test]
+    fn protected_outputs_do_not_advance_or_close_the_native_decoder() {
+        use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x1000, 0x2000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.map_region(0x4000, 0x1000, Prot::READ).unwrap();
+        let mut kernel = crate::gx::tests::fresh_kernel();
+        cpu.write_mem(0x1100, b"1.1.3\0").unwrap();
+        cpu.write_mem(0x1000, &[0; 56]).unwrap();
+        assert_eq!(call(&mut cpu, &mut kernel, init, &[0x1000, 0x1100, 56]), 0);
+        let bytes = pocket_kernel::zlib::ZlibStreams::compress(b"not consumed on failure").unwrap();
+        cpu.write_mem(0x2000, &bytes).unwrap();
+        let mut data = cpu.read_mem(0x1000, 56).unwrap();
+        let handle = word(&data, 28);
+        put(&mut data, 0, 0x2000);
+        put(&mut data, 4, bytes.len() as u32);
+        put(&mut data, 12, 0x4000);
+        put(&mut data, 16, 64);
+        cpu.write_mem(0x1000, &data).unwrap();
+        let thunk = pocket_kernel::Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "zlib.dll".into(),
+            binding: pocket_pe::ImportBinding::Name("inflate".into()),
+            friendly_name: None,
+        };
+        for (register, value) in [(R0, 0x1000), (R1, 0), (R2, 0), (R3, 0)] {
+            cpu.write_reg(register, value).unwrap();
+        }
+        assert!(inflate(&mut CallCtx {
+            cpu: &mut cpu,
+            thunk: &thunk,
+            kernel: &mut kernel
+        })
+        .is_err());
+        assert_eq!(cpu.read_mem(0x1000, 56).unwrap(), data);
+        put(&mut data, 12, 0x2800);
+        cpu.write_mem(0x1000, &data).unwrap();
+        assert_eq!(call(&mut cpu, &mut kernel, inflate, &[0x1000, 4]), 1);
+        assert_eq!(
+            cpu.read_mem(0x2800, 23).unwrap(),
+            b"not consumed on failure"
+        );
+        // Loader writes intentionally bypass permissions; create a read-only
+        // z_stream alias without changing the native stream being tested.
+        let finished = cpu.read_mem(0x1000, 56).unwrap();
+        cpu.write_mem(0x4000, &finished).unwrap();
+        cpu.write_reg(R0, 0x4000).unwrap();
+        assert!(end(&mut CallCtx {
+            cpu: &mut cpu,
+            thunk: &thunk,
+            kernel: &mut kernel
+        })
+        .is_err());
+        assert!(kernel.zlib_streams.contains(handle));
+        assert_eq!(call(&mut cpu, &mut kernel, end, &[0x1000]), 0);
     }
 }

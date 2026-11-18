@@ -35,6 +35,8 @@ macro_rules! invoke {
 
 mod checkpoint;
 mod retained;
+mod uniforms;
+use uniforms::UniformLocations;
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct ClientAttribute {
@@ -139,6 +141,9 @@ pub(super) struct Renderer {
     compiled_shaders: HashMap<u32, CompiledShader>,
     linked_programs: HashMap<u32, Vec<CompiledShader>>,
     deleted_programs: HashSet<u32>,
+    uniform_locations: HashMap<u32, UniformLocations>,
+    // Used only while a restored program needs uniform relocation.
+    uniform_program: u32,
     deleted_shaders: HashSet<u32>,
     export: Option<ProgrammableFrameExport>,
     export_failed: bool,
@@ -174,7 +179,26 @@ impl Renderer {
                     None
                 }
             })
-            .map_or_else(ProgrammableHost::new_programmable, Ok)
+            // Match the UI's native API even without a share source: desktop
+            // OpenGL on desktop, OpenGL ES on Android. Forcing ES here would
+            // retain a lifetime journal on Linux's otherwise native path.
+            .map_or_else(
+                || {
+                    ProgrammableHost::new().or_else(|reason| {
+                        if cfg!(all(unix, not(target_os = "android"))) {
+                            // Keep rendering on hosts which expose only ES. Their
+                            // existing bounded checkpoint fallback stays explicit.
+                            log::debug!(
+                                "Owned desktop OpenGL unavailable ({reason}); trying OpenGL ES"
+                            );
+                            ProgrammableHost::new_programmable()
+                        } else {
+                            Err(reason)
+                        }
+                    })
+                },
+                Ok,
+            )
             .map_err(error)?;
         let mut renderer = Self {
             host,
@@ -219,6 +243,8 @@ impl Renderer {
             compiled_shaders: HashMap::new(),
             linked_programs: HashMap::new(),
             deleted_programs: HashSet::new(),
+            uniform_locations: HashMap::new(),
+            uniform_program: 0,
             deleted_shaders: HashSet::new(),
             export: None,
             export_failed: false,
@@ -702,9 +728,20 @@ impl Renderer {
                 invoke!(self, name, ($($arg => $ty),*), ())
             };
         }
+        // Ordinary sessions retain the native-location fast path. Only a
+        // restored program whose linker changed locations needs a table lookup.
+        let uniform_location = if name.starts_with("glUniform") {
+            match self.uniform_host(self.uniform_program, i!(0)) {
+                Some(location) => location,
+                None => return Ok(self.reject(0x0502)),
+            }
+        } else {
+            0
+        };
         match name {
             "glCreateProgram" => {
                 let host = invoke!(self, name, (), u32);
+                self.uniform_locations.remove(&host);
                 return ctx.created(Kind::Program, host);
             }
             "glCreateShader" => {
@@ -815,6 +852,12 @@ impl Renderer {
                 gl!(program => u32);
                 if name == "glDeleteProgram" {
                     self.deleted_programs.insert(program);
+                } else if !self.uniform_locations.is_empty() {
+                    // A rejected UseProgram must not redirect later uniforms.
+                    // Query only after relocation, never on the ordinary path.
+                    let mut current = 0;
+                    invoke!(self, "glGetIntegerv", (0x8b8d => u32, &mut current => *mut i32), ());
+                    self.uniform_program = current as u32;
                 }
                 self.reap_shader_sources()?;
             }
@@ -1638,6 +1681,9 @@ impl Renderer {
             }
             "glGetUniformfv" | "glGetUniformiv" => {
                 let (program, location, out) = (u!(0), i!(1), u!(2));
+                let Some(location) = self.uniform_host(program, location) else {
+                    return Ok(self.reject(0x0502));
+                };
                 // ES2 writes one uniform element, with up to 16 components.
                 // Different initial bit patterns identify the written prefix even
                 // when a legitimate value matches one of the patterns.
@@ -1696,10 +1742,16 @@ impl Renderer {
                 if bind {
                     gl!(object => u32, u!(1) => u32, symbol.as_ptr() => *const c_char);
                 } else {
-                    return Ok(
-                        invoke!(self, name, (object => u32, symbol.as_ptr() => *const c_char), i32)
-                            as u32,
-                    );
+                    let location =
+                        invoke!(self, name, (object => u32, symbol.as_ptr() => *const c_char), i32);
+                    let location = if name == "glGetUniformLocation" {
+                        self.uniform_guest(object, location).ok_or_else(|| {
+                            error("restored program has an untracked uniform location")
+                        })?
+                    } else {
+                        location
+                    };
+                    return Ok(location as u32);
                 }
             }
             "glGetAttachedShaders" => {
@@ -1878,21 +1930,21 @@ impl Renderer {
                     write_words(ctx, address, &values)?;
                 }
             }
-            "glUniform1i" => gl!(i!(0) => i32, i!(1) => i32),
-            "glUniform2i" => gl!(i!(0) => i32, i!(1) => i32, i!(2) => i32),
-            "glUniform3i" => gl!(i!(0) => i32, i!(1) => i32, i!(2) => i32, i!(3) => i32),
+            "glUniform1i" => gl!(uniform_location => i32, i!(1) => i32),
+            "glUniform2i" => gl!(uniform_location => i32, i!(1) => i32, i!(2) => i32),
+            "glUniform3i" => gl!(uniform_location => i32, i!(1) => i32, i!(2) => i32, i!(3) => i32),
             "glUniform4i" => {
-                gl!(i!(0) => i32, i!(1) => i32, i!(2) => i32, i!(3) => i32, i!(4) => i32)
+                gl!(uniform_location => i32, i!(1) => i32, i!(2) => i32, i!(3) => i32, i!(4) => i32)
             }
-            "glUniform1f" => gl!(i!(0) => i32, f!(1) => f32),
-            "glUniform2f" => gl!(i!(0) => i32, f!(1) => f32, f!(2) => f32),
-            "glUniform3f" => gl!(i!(0) => i32, f!(1) => f32, f!(2) => f32, f!(3) => f32),
+            "glUniform1f" => gl!(uniform_location => i32, f!(1) => f32),
+            "glUniform2f" => gl!(uniform_location => i32, f!(1) => f32, f!(2) => f32),
+            "glUniform3f" => gl!(uniform_location => i32, f!(1) => f32, f!(2) => f32, f!(3) => f32),
             "glUniform4f" => {
-                gl!(i!(0) => i32, f!(1) => f32, f!(2) => f32, f!(3) => f32, f!(4) => f32)
+                gl!(uniform_location => i32, f!(1) => f32, f!(2) => f32, f!(3) => f32, f!(4) => f32)
             }
             "glUniform1fv" | "glUniform2fv" | "glUniform3fv" | "glUniform4fv" | "glUniform1iv"
             | "glUniform2iv" | "glUniform3iv" | "glUniform4iv" => {
-                let (location, count, address) = (i!(0), i!(1), u!(2));
+                let (location, count, address) = (uniform_location, i!(1), u!(2));
                 let components = match name {
                     "glUniform2fv" | "glUniform2iv" => 2,
                     "glUniform3fv" | "glUniform3iv" => 3,
@@ -1907,7 +1959,7 @@ impl Renderer {
                 }
             }
             "glUniformMatrix2fv" | "glUniformMatrix3fv" | "glUniformMatrix4fv" => {
-                let (location, count, transpose, address) = (i!(0), i!(1), u!(2), u!(3));
+                let (location, count, transpose, address) = (uniform_location, i!(1), u!(2), u!(3));
                 let components = match name {
                     "glUniformMatrix2fv" => 4,
                     "glUniformMatrix3fv" => 9,
@@ -1924,6 +1976,18 @@ impl Renderer {
         Ok(0)
     }
 
+    fn uniform_host(&self, program: u32, location: i32) -> Option<i32> {
+        self.uniform_locations
+            .get(&program)
+            .map_or(Some(location), |locations| locations.host(location))
+    }
+
+    fn uniform_guest(&self, program: u32, location: i32) -> Option<i32> {
+        self.uniform_locations
+            .get(&program)
+            .map_or(Some(location), |locations| locations.guest(location))
+    }
+
     fn reap_shader_sources(&mut self) -> Result<()> {
         for shader in std::mem::take(&mut self.deleted_shaders) {
             if invoke!(self, "glIsShader", (shader => u32), u8) == 0 {
@@ -1936,6 +2000,7 @@ impl Renderer {
         for program in std::mem::take(&mut self.deleted_programs) {
             if invoke!(self, "glIsProgram", (program => u32), u8) == 0 {
                 self.linked_programs.remove(&program);
+                self.uniform_locations.remove(&program);
             } else {
                 self.deleted_programs.insert(program);
             }
@@ -2531,6 +2596,42 @@ mod tests {
             }
             assert!(twice.retained.images.is_empty());
             assert_eq!(call(&mut twice, &mut ctx, "glGetError", &[])?, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[cfg(not(target_os = "android"))]
+    #[ignore = "requires native desktop OpenGL"]
+    fn owned_desktop_context_cold_restores_color_depth_and_stencil_without_a_journal() -> Result<()>
+    {
+        with_shared_context_source(None, || {
+            let mut source = Renderer::new(8, 8, 1)?;
+            assert!(
+                !source.host.es,
+                "owned Desktop contexts must match the UI OpenGL API"
+            );
+            invoke!(&mut source,"glClearColor",(1.0=>f32,0.0=>f32,1.0=>f32,1.0=>f32),());
+            invoke!(&mut source,"glClearDepth",(0.375=>f64),());
+            invoke!(&mut source,"glClearStencil",(93=>i32),());
+            invoke!(&mut source,"glClear",(0x4000u32|0x0100|0x0400=>u32),());
+            let saved = source.capture_context().map_err(error)?;
+            assert!(saved.native.is_some());
+            assert!(saved.journal.is_none());
+            let bytes = serde_json::to_vec(&saved).map_err(|e| error(e.to_string()))?;
+            drop(saved);
+            drop(source);
+            let saved: ContextSnapshot =
+                serde_json::from_slice(&bytes).map_err(|e| error(e.to_string()))?;
+            let mut restored = saved.restore(1).map_err(error)?;
+            let mut color = [0u8; 4];
+            invoke!(&mut restored,"glReadPixels",(0=>i32,0=>i32,1=>i32,1=>i32,RGBA=>u32,UNSIGNED_BYTE=>u32,color.as_mut_ptr().cast()=>*mut c_void),());
+            assert_eq!(color, [255, 0, 255, 255]);
+            let mut packed = 0u32;
+            invoke!(&mut restored,"glReadPixels",(0=>i32,0=>i32,1=>i32,1=>i32,0x84f9=>u32,0x84fa=>u32,(&mut packed as *mut u32).cast()=>*mut c_void),());
+            assert_eq!(packed & 255, 93);
+            assert!(((packed >> 8) as f64 / 16777215.0 - 0.375).abs() < 1e-6);
+            assert_eq!(invoke!(&mut restored, "glGetError", (), u32), 0);
             Ok(())
         })
     }

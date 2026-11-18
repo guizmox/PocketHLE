@@ -75,12 +75,14 @@ guest addresses, permissions, lazy image residency and deferred memory ranges.
 | Cryptography | Providers, keys, incremental SHA-1 state and ownership graph. No plaintext input history is retained. |
 | MSXML | DOM documents/nodes, attributes and COM aliases, with ownership/cycle/reference validation. |
 | SDL | Surfaces and guest pixel addresses, event queues and keyboard buffer. Restore neutralizes held keyboard/mouse input and emits matching releases. |
-| Logical WinINet | Sessions, connection metadata and unsent requests reopen the current native HTTP client and retain guest handle/parent identity. No request is sent during restore. In-flight transfers are refused. |
+| WinINet | Sessions, connection metadata and unsent requests reopen the current native HTTP client. Completed native channel transfers retain response status/headers, unread bytes, terminal success/error and a pending guest send continuation. Restore never sends the old request. Active transfers remain unsupported. |
+| zlib.dll HLE streams | Decoder state, bounded sliding output window, partial header/dictionary negotiation, checksum, terminal status and handle allocator. Restore resumes the stream at its saved input/output position without replaying consumed input. |
 | CEDB | Open Contacts Database cursors, allocator and database contents. Persistent backing is queued into the common file transaction using the current launch path. Closed persistent databases are not rewound. |
 
 Unsupported live resources cause capture to fail with a diagnostic. Remaining
-gaps include active Bluetooth ports/sockets, HTTP transfers and a live
-zlib decompressor. Physical hardware and remote services are not serialized;
+gaps include active Bluetooth ports/sockets and unfinished HTTP transfers.
+Native HTTP adapters must explicitly prove completion before capturing their
+unread response buffer; adapters without this capability remain unsupported. Physical hardware and remote services are not serialized;
 restore must reacquire the configured provider instead of fabricating data.
 
 When adding a handle type, check both the guest handle table and the backing
@@ -198,19 +200,42 @@ renderbuffer and FBO names created implicitly by binding are also enumerated.
 Compiled shader sources and each successfully linked program's shader sources
 are retained separately from current attachments. Detaching/deleting a shader or
 changing its source after linking therefore does not destroy the saved executable.
-Restoration still checks that the host assigns the saved uniform locations.
-Use the same driver, graphics settings and emulated device configuration.
+Native restore resolves each active uniform element by name and preserves its
+saved guest location through a per-program guest/native bijection when the new
+linker assigns different locations. Scalar, vector, matrix and array updates,
+`glGetUniformLocation` and both value queries use that correspondence. Repeated
+capture saves guest locations again, not the current host numbers. An invalid
+guest location cannot accidentally refer to another valid native uniform.
+A successful guest relink discards the old correspondence; a failed link keeps
+it for the executable still installed in the context. Capturing an active
+program whose latest link failed remains explicitly unsupported. Delete-pending
+current programs retain their table until GL releases them; final release removes
+it. No shader source or guest memory is rewritten to force linker assignments.
+
+Identity-linked programs need no location table. Ordinary sessions add no GL
+queries/readbacks for this feature; a relocated session refreshes its cached
+current program only at `glUseProgram`, including failed calls. Drawing and
+uniform storage stay on the native renderer. This removes one linker-identity
+restriction, not the other configuration, API and native-driver compatibility
+requirements. Use the same graphics settings and emulated device configuration.
 
 The direct resource path requires desktop OpenGL queries and depth/stencil
-transfers. Host OpenGL ES contexts retain the previous bounded journal fallback:
+transfers. Owned Desktop GLES2 contexts now select the same native API as the UI:
+desktop OpenGL on Linux/Windows and OpenGL ES on Android. A missing share source
+therefore no longer forces Linux through the lifetime journal. If a Linux host
+cannot create desktop OpenGL, initialization can still use its existing ES path.
+That fallback, or a Desktop context explicitly shared with an OpenGL ES source,
+retains the bounded journal fallback:
 96 MiB for unique calls and chronological indices, with exact call replay.
-Desktop snapshot controls do not imply Android snapshot integration. Unsupported
-resource states fail explicitly and keep the previous slot.
+Android does not record that journal and explicitly rejects programmable capture;
+it must never return a successful but empty graphics checkpoint. Desktop controls
+do not imply Android snapshot integration. Unsupported resource states fail
+explicitly and keep the previous slot.
 
 Large ARM, mapped-file, RAM-store and native GLES2 byte arrays use `serde_bytes`
 with bincode's length-prefixed byte representation. This requests bulk writes
 and reads through the buffered zlib stream instead of visiting each byte.
-The WinCE section is version 6, media section version 2 and programmable EGL
+The WinCE section is version 7, media section version 2 and programmable EGL
 section version 5; development snapshots using earlier section versions must be recreated.
 
 [Fixed-function EGL](../crates/pocket-winceapi/src/gles/snapshot.rs) ·
@@ -225,3 +250,50 @@ development run over saved GLBenchmark 2.0, Street Duel and HTC Teeter sessions
 measured approximately 0.9–1.0 seconds saved in read and decode with block reads.
 The comparison used the same zlib files, with five measured restores per
 variant after warm-up. Graphics replay dominated the sampled GLBenchmark restore.
+
+
+## Live decompressor checkpoints
+
+Only guest HLE `zlib.dll` streams use the dedicated miniz_oxide 0.8.9 core with
+its upstream Serde state representation. Archive imports, snapshot zlib encoding,
+PNG/image libraries and other flate2 users keep the workspace zlib-rs backend.
+No native pointers, compressed-input history or lifetime output archive is saved.
+The decoder retains its bit/Huffman/checksum state and at most 64 KiB of sliding
+output history. Its caller-visible output boundary is exact: it does not stage
+future PNG rows in an internal 32 KiB output queue or consume the zlib trailer
+before those rows have been returned. Window compaction is batched, not repeated
+for every small row. The saved allocator preserves live handles and avoids
+reusing closed IDs merely because a restore occurred.
+
+An undersized `Z_FINISH` can be retried after restore. Reset, terminal checksum
+errors and the `Z_NEED_DICT` negotiation state survive too; this does not add
+an `inflateSetDictionary` API. Guest output/state permissions are checked before
+decoder progress or destruction, so an invalid output cannot silently consume
+input. Dependency changes which alter the serialized decoder layout require a
+WinCE section version change. No compatibility reader for development version 6
+is retained.
+
+A supplied native `zlib.dll` remains native ARM code, as described in
+[Graphics](GPU.md#native-image-decoder-dependencies-and-zlib-streams). Its state
+is already part of ARM memory. Do not remove or replace game DLLs to manufacture
+HLE coverage. Native-game validation and synthetic HLE continuation tests are
+distinct evidence.
+
+## Idle and terminal resource behavior
+
+The process rendezvous keeps an atomic idle flag. With no capture pending,
+ordinary frame/input polls skip the domain mutex. Once requested, the locked
+membership and rendezvous state remain authoritative, including cancellation
+and timeout. This does not make capture itself asynchronous: native resource
+capture still happens at the coordinated boundary; encoding/writing follows on
+the existing background worker.
+
+Completed HTTP responses are received data, not requests to replay. The channel
+copies its unread bounded suffix only when the native producer has finished.
+Its terminal status cannot be overwritten by late completion callbacks, headers
+or body writes. Reading the restored suffix yields the recorded EOF or error;
+a pending guest `HttpSendRequest` continuation can finish without submitting
+another POST. Restore still reacquires the configured native client and honors
+current provider permissions. Streaming transfers and external server state are
+not rewound. See the [phase 3 validation note](testing/SNAPSHOT-PHASE3-2026-11-18.md)
+for exercised configurations and the remaining work.
