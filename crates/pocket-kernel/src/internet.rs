@@ -38,27 +38,29 @@ pub trait Transfer: Send {
     fn head(&mut self) -> Result<Option<ResponseHead>>;
     fn available(&mut self) -> Result<(usize, bool)>;
     fn read(&mut self, out: &mut [u8]) -> Result<Option<usize>>;
-    /// Only terminal, locally buffered responses can be rewound. Native
-    /// providers that cannot prove completion must reject capture explicitly.
-    fn capture_completed(&self) -> std::result::Result<CompletedTransfer, String> {
+    /// Capture a locally buffered response without consuming it or resending
+    /// any request. In-flight transports restore as interrupted after their
+    /// saved unread bytes; adapters must expose a consistent buffer boundary.
+    fn capture_checkpoint(&self) -> std::result::Result<BufferedTransfer, String> {
         Err(
             "checkpoint contains an HTTP transfer; remote requests cannot be replayed safely"
                 .into(),
         )
     }
 }
-/// Received network data, not a recipe for resending a request. A producer has
-/// already supplied its terminal status before this value can be constructed.
+/// Received network data, not a recipe for resending a request. The terminal
+/// result is either the real completion or CONNECTION_ABORTED for a transfer
+/// that was still active when captured.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct CompletedTransfer {
+pub struct BufferedTransfer {
     head: Result<ResponseHead>,
     #[serde(with = "serde_bytes")]
     bytes: Vec<u8>,
     end: Result<()>,
 }
-impl CompletedTransfer {
-    /// Native adapters may call this only after their producer has terminated.
-    /// `bytes` contains the unread suffix, never a body to send to the server.
+impl BufferedTransfer {
+    /// `bytes` contains only the unread received suffix, never a request body.
+    /// An active provider supplies its interruption error as the terminal state.
     pub fn new(
         head: Result<ResponseHead>,
         bytes: Vec<u8>,
@@ -410,21 +412,19 @@ struct ChannelTransfer {
     cancel: Option<Box<dyn FnOnce() + Send>>,
 }
 impl Transfer for ChannelTransfer {
-    fn capture_completed(&self) -> std::result::Result<CompletedTransfer, String> {
+    fn capture_checkpoint(&self) -> std::result::Result<BufferedTransfer, String> {
         let mailbox = self
             .channel
             .0
              .0
             .lock()
             .map_err(|_| "HTTP response channel poisoned")?;
-        let end = mailbox.end.ok_or(
-            "checkpoint contains an HTTP transfer; remote requests cannot be replayed safely",
-        )?;
-        CompletedTransfer::new(
-            mailbox
-                .head
-                .clone()
-                .ok_or("completed HTTP transfer has no response status")?,
+        // A remote connection cannot be rewound. Preserve exactly the bytes
+        // received at this boundary; after restore the remaining transfer ends
+        // with CONNECTION_ABORTED, never a fabricated EOF or a replayed POST.
+        let end = mailbox.end.unwrap_or(Err(12030));
+        BufferedTransfer::new(
+            mailbox.head.clone().unwrap_or(Err(12030)),
             mailbox.bytes.iter().copied().collect(),
             end,
         )

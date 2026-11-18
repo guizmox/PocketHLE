@@ -279,6 +279,9 @@ impl HandleTable {
         d.process_kills.entry(pid).or_insert(code);
         true
     }
+    pub fn take_process_termination(&self) -> Option<u32> {
+        self.domain.lock().unwrap().process_kills.remove(&self.pid)
+    }
     pub fn take_controls(&self) -> (Option<u32>, Vec<(usize, ThreadUpdate)>) {
         let mut d = self.domain.lock().unwrap();
         let code = d.process_kills.remove(&self.pid);

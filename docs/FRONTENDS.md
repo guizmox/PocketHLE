@@ -31,7 +31,8 @@ writes run in the background. A successful save replaces the previous slot.
 Desktop Gizmondo and PocketPC share this path. Use the same executable, mounts,
 and emulated device configuration when restoring. The checkpoint restores the
 guest-configured split between program and storage RAM. A synchronously launched
-game on a compilation card resumes directly from its saved program.
+game on a compilation card resumes with its suspended launcher. Quitting the
+child returns to the caller through the game's normal launch/exit flow.
 
 The checkpoint covers fixed-function EGL, DirectDraw display ownership and timing,
 and supported device state. It reopens idle BTH1 and VIB1 handles through the host
@@ -57,8 +58,9 @@ restores the same backing. RAM object-store files, open descriptions and mapped
 aliases are captured with their storage accounting.
 
 HLE zlib streams retain their decoder state without replaying their input history.
-Completed native-channel HTTP responses retain unread data and EOF/errors without
-resending the old request. Unfinished transfers remain unsupported.
+Native-channel HTTP responses retain received headers and unread data without
+resending the old request. A transfer still active at save restores as connection
+aborted after those bytes; external server state cannot be rewound.
 
 HSS playback restores its speaker objects, loaded clips and mixer cursor.
 PocketPC accelerometer stream handles reconnect to the active input provider.
@@ -71,9 +73,12 @@ cannot be captured. CEDB open cursors, cryptography, MSXML, SDL, volume handles
 and GPS serial state are included. Logical WinINet sessions and unsent requests
 reconnect to the current native backend without resending requests.
 
-Compact Framework, active Bluetooth connections and unfinished HTTP transfers
-remain outside this profile. Capture reports unsupported live
-resources. The snapshot controls are desktop-only.
+Windows Bluetooth Classic ports and sockets retain received data, then report
+a disconnected transport after restore. Pending discovery is cancelled and
+outbound writes are never replayed. New connections use the current real service.
+This does not restore a live radio/network peer. Providers without receive
+checkpoint support and Compact Framework remain outside this profile; capture
+reports unsupported live resources. The snapshot controls are desktop-only.
 
 See [Desktop snapshot internals](SNAPSHOTS.md) for the file layout, ARM block
 reads, handle coverage and graphics restore path.

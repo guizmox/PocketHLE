@@ -15,25 +15,38 @@ enum SavedHandle {
     Request {
         parent: u32,
         spec: RequestSpec,
-        transfer: Option<CompletedTransfer>,
+        transfer: Option<BufferedTransfer>,
         sending: Option<(usize, u32, u32)>,
     },
 }
 impl State {
     pub(crate) fn capture_checkpoint(&self) -> std::result::Result<InternetSnapshot, String> {
-        let handles=self.handles.iter().map(|(&id,handle)| {
-            Ok((id,match handle {
-                Handle::Session(session)=>SavedHandle::Session(session.spec.clone()),
-                Handle::Connection(connection)=>SavedHandle::Connection(connection.clone()),
-                Handle::Request(request)=> {
-                    let transfer = request.transfer.as_ref().map(|transfer| transfer.capture_completed()).transpose()?;
+        let mut handles = HashMap::new();
+        for (&id, handle) in &self.handles {
+            let saved = match handle {
+                Handle::Session(session) => SavedHandle::Session(session.spec.clone()),
+                Handle::Connection(connection) => SavedHandle::Connection(connection.clone()),
+                Handle::Request(request) => {
+                    let transfer = request
+                        .transfer
+                        .as_ref()
+                        .map(|transfer| transfer.capture_checkpoint())
+                        .transpose()?;
                     if request.sending.is_some() && transfer.is_none() {
-                        return Err("checkpoint contains an HTTP transfer; remote requests cannot be replayed safely".into());
+                        return Err(
+                            "HTTP send has no receive checkpoint; resending is unsafe".into()
+                        );
                     }
-                    SavedHandle::Request {parent:request.parent,spec:request.spec.clone(),transfer,sending:request.sending}
+                    SavedHandle::Request {
+                        parent: request.parent,
+                        spec: request.spec.clone(),
+                        transfer,
+                        sending: request.sending,
+                    }
                 }
-            }))
-        }).collect::<std::result::Result<_,String>>()?;
+            };
+            handles.insert(id, saved);
+        }
         let saved = InternetSnapshot {
             handles,
             next: self.next,
@@ -66,7 +79,7 @@ impl InternetSnapshot {
             } = handle
             {
                 if sending.is_some() && transfer.is_none() {
-                    return Err("saved HTTP send has no completed response".into());
+                    return Err("saved HTTP send has no receive checkpoint".into());
                 }
                 if let Some(transfer) = transfer {
                     transfer.validate()?;
@@ -146,7 +159,7 @@ impl InternetSnapshot {
                             spec: spec.clone(),
                             transfer: transfer
                                 .clone()
-                                .map(CompletedTransfer::restore)
+                                .map(BufferedTransfer::restore)
                                 .transpose()?,
                             sending: *sending,
                         }),
@@ -272,7 +285,7 @@ mod tests {
             .capture_checkpoint()
             .err()
             .unwrap()
-            .contains("HTTP transfer"));
+            .contains("no receive checkpoint"));
         source.request(request).unwrap().sending = None;
         let saved = source.capture_checkpoint().unwrap();
         let (backend, opens) = provider(true);
@@ -368,11 +381,29 @@ mod tests {
         });
         channel.push(b"not consumed by failed capture").unwrap();
         source.request(request).unwrap().transfer = Some(channel.transfer(|| {}));
-        assert!(source
-            .capture_checkpoint()
-            .err()
+        let saved = source.capture_checkpoint().unwrap();
+        let (backend, _) = provider(false);
+        let mut restored = State::with_backend(backend);
+        saved.restore(&mut restored).unwrap();
+        let mut tail = [0; 64];
+        let stream = restored
+            .request(request)
             .unwrap()
-            .contains("HTTP transfer"));
+            .transfer
+            .as_mut()
+            .unwrap();
+        assert_eq!(
+            stream.read(&mut tail),
+            Ok(Some(b"not consumed by failed capture".len()))
+        );
+        assert_eq!(
+            &tail[..b"not consumed by failed capture".len()],
+            b"not consumed by failed capture"
+        );
+        assert_eq!(stream.read(&mut tail), Err(12030));
+        // Capturing did not cancel the producer or consume its original queue.
+        channel.push(b" future").unwrap();
+        channel.finish(Ok(()));
         let mut out = [0; 64];
         let n = source
             .request(request)
@@ -383,6 +414,44 @@ mod tests {
             .read(&mut out)
             .unwrap()
             .unwrap();
-        assert_eq!(&out[..n], b"not consumed by failed capture");
+        assert_eq!(&out[..n], b"not consumed by failed capture future");
+    }
+    #[test]
+    fn active_send_without_response_headers_restores_as_aborted_without_resending() {
+        let (mut source, _, request) = fixture();
+        let channel = Channel::default();
+        let r = source.request(request).unwrap();
+        r.sending = Some((2, 0x70003456, 0x10000));
+        r.transfer = Some(channel.transfer(|| {}));
+        let saved = source.capture_checkpoint().unwrap();
+        let (backend, _) = provider(false);
+        let mut restored = State::with_backend(backend);
+        saved.restore(&mut restored).unwrap();
+        let r = restored.request(request).unwrap();
+        assert_eq!(r.sending, Some((2, 0x70003456, 0x10000)));
+        assert_eq!(r.transfer.as_mut().unwrap().head().unwrap_err(), 12030);
+        channel.publish(ResponseHead {
+            status: 200,
+            version: "HTTP/1.1".into(),
+            reason: "OK".into(),
+            headers: vec![],
+        });
+        assert_eq!(
+            source
+                .request(request)
+                .unwrap()
+                .transfer
+                .as_mut()
+                .unwrap()
+                .head()
+                .unwrap()
+                .unwrap()
+                .status,
+            200
+        );
     }
 }
+
+#[cfg(test)]
+#[path = "internet_snapshot_io_tests.rs"]
+mod io_tests;

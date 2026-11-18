@@ -119,18 +119,6 @@ impl ScheduleSnapshot {
         self.semaphores.clear();
         self.mutexes.clear();
     }
-    pub(crate) fn retain_process_objects(&mut self, handles: &crate::handles::HandleSnapshot) {
-        use crate::handles::HandleObject;
-        use std::collections::HashSet;
-        let owned: HashSet<_> = handles.owned_objects().collect();
-        self.events
-            .retain(|&id, _| owned.contains(&HandleObject::Event(id)));
-        self.semaphores
-            .retain(|&id, _| owned.contains(&HandleObject::Semaphore(id)));
-        self.mutexes
-            .retain(|&id, _| owned.contains(&HandleObject::Mutex(id)));
-    }
-
     /// Reconstruct the scheduler and waitable objects in a detached kernel.
     /// The receiving process uses the saved GuestClockSnapshot epoch.
     pub fn restore(self, state: &mut KernelState) -> Result<(), KernelError> {

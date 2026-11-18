@@ -1084,33 +1084,67 @@ pub fn reset_media_backends() {
 }
 
 /// Owns the host-only state of a suspended parent. Keep this guard alive
-/// while running the child on the same host thread; drop the child first.
-/// It intentionally cannot be sent to another execution thread.
+/// while its CPU is parked. A legacy same-thread child must be dropped first.
+/// The guard and temporary capture access stay on the owning execution thread.
 pub struct SuspendedSession {
     gles: Option<gles::SuspendedGles>,
     movies: Option<directshow::SuspendedMovies>,
     inputs: Option<wavein::SuspendedInputs>,
-    tokenizer: u32,
+    tokenizer: Option<u32>,
     same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 pub fn suspend_session() -> SuspendedSession {
+    suspend_session_at(std::time::Instant::now())
+}
+fn suspend_session_at(at: std::time::Instant) -> SuspendedSession {
     SuspendedSession {
         gles: Some(gles::suspend()),
-        movies: Some(directshow::suspend()),
+        movies: Some(directshow::suspend_at(at)),
         inputs: Some(wavein::suspend()),
-        tokenizer: coredll::suspend_tokenizer(),
+        tokenizer: Some(coredll::suspend_tokenizer()),
         same_thread: std::marker::PhantomData,
     }
 }
 
+impl SuspendedSession {
+    fn resume_at(&mut self, at: std::time::Instant) {
+        if let Some(gles) = self.gles.take() {
+            gles::resume(gles);
+        }
+        if let Some(movies) = self.movies.take() {
+            directshow::resume_at(movies, at);
+        }
+        if let Some(inputs) = self.inputs.take() {
+            wavein::resume(inputs);
+        }
+        if let Some(tokenizer) = self.tokenizer.take() {
+            coredll::resume_tokenizer(tokenizer);
+        }
+    }
+    /// Inspect/capture a suspended owner on its own thread, then put its native
+    /// resources back even if capture panics. Media time stays frozen at `at`.
+    pub fn with_current_at<T>(
+        slot: &mut Option<Self>,
+        at: std::time::Instant,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        if let Some(mut saved) = slot.take() {
+            saved.resume_at(at);
+        }
+        struct Resuspend<'a>(&'a mut Option<SuspendedSession>, std::time::Instant);
+        impl Drop for Resuspend<'_> {
+            fn drop(&mut self) {
+                *self.0 = Some(suspend_session_at(self.1));
+            }
+        }
+        let _guard = Resuspend(slot, at);
+        f()
+    }
+}
 impl Drop for SuspendedSession {
     fn drop(&mut self) {
-        // Child resources have been dropped before the guard is released.
-        gles::resume(self.gles.take().unwrap());
-        directshow::resume(self.movies.take().unwrap());
-        wavein::resume(self.inputs.take().unwrap());
-        coredll::resume_tokenizer(self.tokenizer);
+        self.resume_at(std::time::Instant::now());
     }
 }
 

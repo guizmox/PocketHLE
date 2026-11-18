@@ -21,6 +21,9 @@ impl DeviceSnapshot {
     pub fn shared_audio_keys(&self) -> std::collections::BTreeSet<u32> {
         self.mas.keys().copied().collect()
     }
+    pub fn child_process_id(&self, parent: u32, handle: u32) -> Option<u32> {
+        self.handles.child_process_id(parent, handle)
+    }
     pub fn process_ids(&self) -> Vec<u32> {
         self.handles.process_ids()
     }

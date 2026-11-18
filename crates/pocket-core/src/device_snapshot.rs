@@ -71,6 +71,26 @@ impl DeviceArchive {
         {
             return Err("device checkpoint process manifest is inconsistent".into());
         }
+        let mut waits = std::collections::BTreeMap::new();
+        for session in std::iter::once(root).chain(self.others.iter().map(|child| &child.session)) {
+            if let Some(handle) = session.kernel.suspended_child_handle()? {
+                let child = self
+                    .shared
+                    .child_process_id(session.process_id(), handle)
+                    .ok_or("suspended caller references a missing active child")?;
+                waits.insert(session.process_id(), child);
+            }
+        }
+        for &pid in waits.keys() {
+            let mut visited = std::collections::BTreeSet::new();
+            let mut next = pid;
+            while let Some(&child) = waits.get(&next) {
+                if !visited.insert(next) {
+                    return Err("cyclic suspended launcher chain".into());
+                }
+                next = child;
+            }
+        }
         Ok(())
     }
     pub fn into_parts(self) -> (pocket_kernel::DeviceSnapshot, u32, Vec<SessionSnapshot>) {
@@ -101,7 +121,7 @@ impl SessionSnapshot {
         leader: bool,
         at: crate::checkpoint_domain::CheckpointTime,
     ) -> Result<ProcessCheckpoint> {
-        let session = Self::capture_process(cpu, process, point, false, true, at)?;
+        let session = Self::capture_process(cpu, process, point, true, at)?;
         let shared = leader
             .then(|| process.state.capture_device_objects())
             .transpose()

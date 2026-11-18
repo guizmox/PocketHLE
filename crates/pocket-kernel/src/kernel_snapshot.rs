@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 struct ProcessFamily {
     children: HashMap<u32, ChildProcess>,
     pending: Option<ProcessLaunch>,
+    suspended: Option<ProcessLaunch>,
     scheduled: HashMap<String, (std::time::SystemTime, String)>,
     results: HashMap<(usize, u32, u32), Result<u32, u32>>,
 }
@@ -136,32 +137,18 @@ impl KernelState {
     /// Capture one process; device captures coordinate shared resources before
     /// invoking the same process-owned serializer.
     pub fn capture_snapshot(&mut self) -> Result<KernelSnapshot, String> {
-        self.capture_snapshot_with_suspended_parents(false)
-    }
-
-    /// The launcher may detach an isolated foreground program while its
-    /// callers are synchronously suspended. Cross-process handles are rejected.
-    pub fn capture_snapshot_with_suspended_parents(
-        &mut self,
-        detached: bool,
-    ) -> Result<KernelSnapshot, String> {
-        self.capture_snapshot_inner(detached, false, Instant::now())
+        self.capture_snapshot_inner(false, Instant::now())
     }
 
     pub fn capture_device_process(&mut self, at: Instant) -> Result<KernelSnapshot, String> {
-        self.capture_snapshot_inner(false, true, at)
+        self.capture_snapshot_inner(true, at)
     }
 
-    pub fn capture_checkpoint_at(
-        &mut self,
-        detached: bool,
-        at: Instant,
-    ) -> Result<KernelSnapshot, String> {
-        self.capture_snapshot_inner(detached, false, at)
+    pub fn capture_checkpoint_at(&mut self, at: Instant) -> Result<KernelSnapshot, String> {
+        self.capture_snapshot_inner(false, at)
     }
     fn capture_snapshot_inner(
         &mut self,
-        detached: bool,
         coordinated: bool,
         at: Instant,
     ) -> Result<KernelSnapshot, String> {
@@ -173,6 +160,7 @@ impl KernelState {
             (
                 !coordinated
                     && (self.pending_process_launch.is_some()
+                        || self.suspended_process_launch.is_some()
                         || !self.child_processes.is_empty()
                         || !self.scheduled_process_launches.is_empty()
                         || !self.process_launch_results.is_empty()),
@@ -209,15 +197,10 @@ impl KernelState {
             .as_ref()
             .map(|mapping| mapping.file_handles())
             .unwrap_or_default();
-        let handles = self.object_handles.capture_process_handles_with_mappings(
-            detached,
-            mappings.is_some(),
-            coordinated,
-        )?;
-        let mut schedule = self.capture_schedule();
-        if detached {
-            schedule.retain_process_objects(&handles);
-        }
+        let handles = self
+            .object_handles
+            .capture_process_handles_with_mappings(mappings.is_some(), coordinated)?;
+        let schedule = self.capture_schedule();
         Ok(KernelSnapshot {
             heap: self.heap.capture_snapshot(),
             vfs: self.vfs.capture_file_snapshot_with_mappings(
@@ -246,6 +229,7 @@ impl KernelState {
             family: ProcessFamily {
                 children: self.child_processes.clone(),
                 pending: self.pending_process_launch.clone(),
+                suspended: self.suspended_process_launch.clone(),
                 scheduled: self.scheduled_process_launches.clone(),
                 results: self.process_launch_results.clone(),
             },
@@ -503,7 +487,12 @@ impl KernelSnapshot {
         state.process_launch_enabled = self.process_launch_enabled;
         state.child_processes = self.family.children;
         state.pending_process_launch = self.family.pending;
-        if let Some(request) = &mut state.pending_process_launch {
+        state.suspended_process_launch = self.family.suspended;
+        for request in state
+            .pending_process_launch
+            .iter_mut()
+            .chain(state.suspended_process_launch.iter_mut())
+        {
             request.executable = state
                 .vfs
                 .resolve(&request.guest_path)
@@ -609,5 +598,27 @@ impl KernelSnapshot {
         state.next_menu_handle = self.next_menu_handle;
         state.sub_menus = self.sub_menus;
         Ok(self.mappings)
+    }
+}
+
+impl KernelSnapshot {
+    pub fn suspended_child_handle(&self) -> Result<Option<u32>, String> {
+        let Some(request) = &self.family.suspended else {
+            return Ok(None);
+        };
+        let child = self
+            .family
+            .children
+            .get(&request.process_handle)
+            .ok_or("suspended caller has no child record")?;
+        if request.concurrent
+            || request.creation_flags != 0
+            || child.exit_code.is_some()
+            || child.thread_handle != request.thread_handle
+            || self.family.pending.is_some()
+        {
+            return Err("invalid suspended caller continuation".into());
+        }
+        Ok(Some(request.process_handle))
     }
 }

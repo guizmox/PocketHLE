@@ -3754,8 +3754,8 @@ fn sd_create_process(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     log::info!(
         "SDCreateProcess(application={name:?}, command_line={arguments:?}, flags=0x{flags:x})"
     );
-    if flags != 0 || !arguments.trim().is_empty() {
-        log::warn!("SDCreateProcess: flags and nonempty command lines are not supported by foreground handoff yet");
+    if flags != 0 {
+        log::warn!("SDCreateProcess: unsupported creation flags");
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let Some(path) = ctx.kernel.vfs.resolve(&name).filter(|path| path.is_file()) else {
@@ -32867,6 +32867,7 @@ mod tests {
             module_path: "\\Program Files\\Game\\Game.exe".to_string(),
             process_launch_enabled: false,
             pending_process_launch: None,
+            suspended_process_launch: None,
             scheduled_process_launches: Default::default(),
             command_line_cache: None,
             command_line: None,
@@ -35962,7 +35963,7 @@ mod tests {
         kernel.vfs.mount_read_only("\\SD Card\\", &root);
         let mut cpu = scanf_cpu();
         write_wide_str(&mut cpu, 0x1000, 200, "\\SD Card\\Agaju\\autorun.exe").unwrap();
-        write_wide_str(&mut cpu, 0x1800, 20, "").unwrap();
+        write_wide_str(&mut cpu, 0x1800, 20, "resume menu").unwrap();
         let thunk = dummy_thunk();
         let mut invoke = |kernel: &mut KernelState, flags: u32, output: u32| {
             cpu.write_reg(ArmReg::R0, 0x1000).unwrap();
@@ -35993,7 +35994,9 @@ mod tests {
         );
         // Compare the actual file, not the string representation of its path:
         // Windows treats Agaju and agaju (and / vs. \) as the same directory.
-        let queued_executable = kernel.pending_process_launch.take().unwrap().executable;
+        let queued = kernel.pending_process_launch.take().unwrap();
+        assert_eq!(queued.command_line, "resume menu");
+        let queued_executable = queued.executable;
         assert_eq!(
             std::fs::canonicalize(&queued_executable).unwrap(),
             std::fs::canonicalize(&executable).unwrap()

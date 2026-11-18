@@ -24,31 +24,24 @@ impl HandleTable {
     /// Capture under the device execution gate. Capturing several guest
     /// processes requires a shared checkpoint of the whole device.
     pub fn capture_snapshot(&self) -> Result<HandleSnapshot, String> {
-        self.capture_process_handles(false)
-    }
-
-    pub(crate) fn capture_process_handles(&self, detached: bool) -> Result<HandleSnapshot, String> {
-        self.capture_process_handles_with_mappings(detached, false, false)
+        self.capture_process_handles_with_mappings(false, false)
     }
 
     pub(crate) fn capture_process_handles_with_mappings(
         &self,
-        detached: bool,
         mappings: bool,
         coordinated: bool,
     ) -> Result<HandleSnapshot, String> {
         let domain = self.domain.lock().map_err(|_| "handle domain poisoned")?;
         let pid = self.pid;
         if !coordinated
-            && ((!detached && domain.active.len() != 1)
-            || !domain.active.contains(&pid)
-            || (!mappings && domain.mapping_refs.keys().any(|&(owner, _)| owner == pid))
-            || domain.imports.keys().any(|&(owner, _)| owner == pid)
-            || domain.held_start.contains(&pid)
-            || domain.process_kills.contains_key(&pid)
-            // A suspended caller owns this exit notification. It is not part
-            // of the foreground process when restoring it in a new domain.
-            || (!detached && domain.deferred_process_exits.contains(&pid)))
+            && (domain.active.len() != 1
+                || !domain.active.contains(&pid)
+                || (!mappings && domain.mapping_refs.keys().any(|&(owner, _)| owner == pid))
+                || domain.imports.keys().any(|&(owner, _)| owner == pid)
+                || domain.held_start.contains(&pid)
+                || domain.process_kills.contains_key(&pid)
+                || domain.deferred_process_exits.contains(&pid))
         {
             return Err("handle snapshot contains a live child process or mapping".into());
         }
@@ -273,34 +266,6 @@ impl HandleSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detached_snapshot_excludes_callers_and_rejects_foreign_handles() {
-        let mut parent = HandleTable::default();
-        let parent_event = HandleObject::Event(91);
-        parent.duplicate(parent_event).unwrap();
-        parent.name("parent event".into(), parent_event);
-        let (_, mut child) = parent.new_child().unwrap();
-        child.defer_process_exit();
-        let child_event = HandleObject::Event(92);
-        let event = child.duplicate(child_event).unwrap();
-        child.name("child event".into(), child_event);
-        assert!(child.capture_snapshot().is_err());
-
-        let restored = child
-            .capture_process_handles(true)
-            .unwrap()
-            .restore(&crate::vfs::Vfs::new(), &crate::audio::AudioEngine::new())
-            .unwrap();
-        assert_eq!(restored.get(event), Some(child_event));
-        assert_eq!(restored.named("child event"), Some(child_event));
-        assert_eq!(restored.named("parent event"), None);
-        restored.set_exit(None, 13);
-        assert_eq!(restored.exit_code(restored.process_id(), None), Some(13));
-
-        child.duplicate(HandleObject::RemoteProcess(1)).unwrap();
-        assert!(child.capture_process_handles(true).is_err());
-    }
 
     #[test]
     fn handle_snapshot_keeps_aliases_tombstones_and_named_objects() {

@@ -137,6 +137,16 @@ impl RunHook {
         process: &mut pocket_core::kernel::Process,
         point: pocket_core::kernel::ResumePoint,
     ) {
+        self.capture_checkpoint_with_runtime(cpu, process, point, None);
+    }
+
+    fn capture_checkpoint_with_runtime(
+        &mut self,
+        cpu: &mut dyn pocket_core::cpu::Cpu,
+        process: &mut pocket_core::kernel::Process,
+        point: pocket_core::kernel::ResumePoint,
+        mut suspended: Option<&mut Option<pocket_core::winceapi::SuspendedSession>>,
+    ) {
         let started = std::time::Instant::now();
         let gate = process.state.object_handles.execution_gate();
         let _gate = (!self.checkpoint_domain.requested(self.pid))
@@ -155,10 +165,18 @@ impl RunHook {
                     .ok_or("missing checkpoint participant")?;
                 let leader = !self.snapshot_requests.is_empty();
                 let captured = participant.capture(|at| {
-                    pocket_core::SessionSnapshot::capture_device_process(
-                        cpu, process, point, leader, at,
-                    )
-                    .map_err(|error| format!("{error:#}"))
+                    let mut capture = || {
+                        pocket_core::SessionSnapshot::capture_device_process(
+                            cpu, process, point, leader, at,
+                        )
+                        .map_err(|error| format!("{error:#}"))
+                    };
+                    match suspended.as_mut() {
+                        Some(slot) => pocket_core::winceapi::SuspendedSession::with_current_at(
+                            slot, at.host, capture,
+                        ),
+                        None => capture(),
+                    }
                 })?;
                 let Some(captured) = captured else {
                     return Ok(None);
@@ -167,9 +185,6 @@ impl RunHook {
                     captured,
                     self.foreground.load(Ordering::Acquire),
                 )
-            } else if self.snapshot_detach_allowed {
-                resolve_snapshot_card_program(&launch.card_root, &process.state.module_path)?;
-                pocket_core::SessionSnapshot::capture_foreground(cpu, process, point)
             } else {
                 pocket_core::SessionSnapshot::capture(cpu, process, point)
             }
@@ -209,6 +224,199 @@ impl RunHook {
                     let _ = reply.send(Err(error.clone()));
                 }
             }
+        }
+    }
+}
+
+impl RunHook {
+    /// The launcher remains on its owning thread, with its CPU stopped at the
+    /// actual launch continuation. A child has its own native TLS/GL context.
+    /// This also services future captures of the parent while the child runs.
+    pub(super) fn run_suspended_child(
+        &mut self,
+        cpu: &mut dyn pocket_core::cpu::Cpu,
+        process: &mut pocket_core::kernel::Process,
+        point: pocket_core::kernel::ResumePoint,
+    ) {
+        self.synchronous_launch = false;
+        let restoring = process.state.suspended_process_launch.is_some();
+        if !restoring {
+            process.state.suspended_process_launch = process.state.pending_process_launch.take();
+        }
+        let Some(request) = process.state.suspended_process_launch.clone() else {
+            return;
+        };
+        let Some(table) = process.state.object_handles.child(request.process_handle) else {
+            self.runtime_error = Some("suspended launch has no child process".into());
+            self.stop_all.store(true, Ordering::Release);
+            process.state.should_stop = true;
+            return;
+        };
+        let child_pid = table.process_id();
+        process.state.audio.suspend_output();
+        let mut suspended = Some(pocket_core::suspend_host_session());
+        if !restoring {
+            let spawn = (|| {
+                let context = self
+                    .launch_context
+                    .clone()
+                    .ok_or("missing launcher context")?;
+                let reference = context.child_executable_reference(&request)?;
+                let mut game = context.game.clone();
+                game.executable = reference;
+                let handles = process
+                    .state
+                    .child_handle_context(request.process_handle)
+                    .ok_or("missing synchronous child handle context")?;
+                let ram = process.state.memory_division.clone();
+                let mut hook = self.child_hook();
+                let child_table = table.clone();
+                let foreground = self.foreground.clone();
+                let parent = self.pid;
+                let guest = request.guest_path.clone();
+                let command_line = request.command_line.clone();
+                let clock = pocket_core::kernel::guest_clock::GuestClockSnapshot::capture();
+                let at = Instant::now();
+                let thread = std::thread::Builder::new()
+                    .name(format!("pockethle-foreground-{child_pid}"))
+                    .spawn(move || {
+                        let result = clock.run_at(at, || {
+                            context.runner.run_process(
+                                &context.library_root,
+                                &game,
+                                &context.card_root,
+                                Some(&guest),
+                                ram,
+                                Some(handles),
+                                Some(ProcessStartup {
+                                    ack: None,
+                                    table: child_table.clone(),
+                                    command_line,
+                                    error: 193,
+                                }),
+                                &mut hook,
+                            )
+                        });
+                        child_table.complete_process_exit(result.1);
+                        child_table.set_exit(Some(0), result.1);
+                        child_table.mark_inactive();
+                        let next = child_table.focus_after_exit(parent);
+                        let _ = foreground.compare_exchange(
+                            child_pid,
+                            next,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
+                        result
+                    })
+                    .map_err(|error| error.to_string())?;
+                self.children.push(ChildJob {
+                    table: table.clone(),
+                    thread,
+                });
+                Ok::<_, String>(())
+            })();
+            if let Err(error) = spawn {
+                log::warn!("cannot start synchronous child: {error}");
+                table.complete_process_exit(0xc0000135);
+                table.set_exit(Some(0), 0xc0000135);
+                table.mark_inactive();
+            } else {
+                self.foreground.store(child_pid, Ordering::Release);
+            }
+        }
+        loop {
+            self.reap_children();
+            let gate = process.state.object_handles.execution_gate();
+            let termination = {
+                let _guard = gate.lock().unwrap_or_else(|error| error.into_inner());
+                process.state.apply_suspended_process_termination(cpu)
+            };
+            match termination {
+                Ok(true) => {
+                    process.state.should_stop = true;
+                    break;
+                }
+                Err(error) => {
+                    self.runtime_error = Some(format!("suspended process control failed: {error}"));
+                    self.stop_all.store(true, Ordering::Release);
+                    process.state.should_stop = true;
+                    break;
+                }
+                Ok(false) => {}
+            }
+            if self.checkpoint_domain.requested(self.pid) {
+                self.capture_checkpoint_with_runtime(cpu, process, point, Some(&mut suspended));
+            }
+            if table.exit_code(child_pid, None).is_some() {
+                break;
+            }
+            if self.stop_all.load(Ordering::Acquire) {
+                process.state.should_stop = true;
+                break;
+            }
+            // Orphan/background completion can focus an active ancestor. A
+            // suspended caller redirects that focus down its still-live chain.
+            if table.is_active(child_pid) {
+                let _ = self.foreground.compare_exchange(
+                    self.pid,
+                    child_pid,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            // No WinCE execution gate is held while a suspended owner waits.
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(suspended);
+        let state = &mut process.state;
+        if state.should_stop {
+            return;
+        }
+        if let Some(code) = table.exit_code(child_pid, None) {
+            state.sync_transferred_handles();
+            if let Some(child) = state.child_processes.get_mut(&request.process_handle) {
+                child.exit_code = Some(code);
+            }
+            for handle in [request.process_handle, request.thread_handle] {
+                if let Some(mut event) = state.events.get_mut(&handle) {
+                    event.signalled = true;
+                }
+            }
+            state.suspended_process_launch = None;
+            let current = self.foreground.load(Ordering::Acquire);
+            if current == child_pid || !table.is_active(current) {
+                let _ = self.foreground.compare_exchange(
+                    current,
+                    self.pid,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            self.reset_process();
+            state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
+            let mut releases = state.snapshot_input_releases();
+            for &event in &state.pending_input {
+                if matches!(
+                    event,
+                    InputEvent::KeyUp { .. }
+                        | InputEvent::PointerUp { .. }
+                        | InputEvent::MouseMessage {
+                            message: 0x205 | 0x208,
+                            ..
+                        }
+                ) && !releases.contains(&event)
+                {
+                    releases.push(event);
+                }
+            }
+            if let Err(error) = state.restore_snapshot_input(releases) {
+                self.runtime_error = Some(error);
+                self.stop_all.store(true, Ordering::Release);
+                state.should_stop = true;
+            }
+            state.audio.resume_output();
+            log::info!("foreground child exited with 0x{code:08x}; resuming suspended caller");
         }
     }
 }

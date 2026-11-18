@@ -117,6 +117,15 @@ impl HandleTable {
     }
 }
 impl DeviceHandleSnapshot {
+    pub fn child_process_id(&self, parent: u32, handle: u32) -> Option<u32> {
+        let child = match self.entries.get(&(parent, handle))? {
+            Some(HandleObject::RemoteProcess(pid)) => *pid,
+            Some(HandleObject::ChildProcess(key)) => *self.child_ids.get(key)?,
+            None => *self.child_ids.get(&handle)?, // closed alias, live wait
+            _ => return None,
+        };
+        self.active.contains(&child).then_some(child)
+    }
     pub fn process_ids(&self) -> Vec<u32> {
         let mut ids: Vec<_> = self.active.iter().copied().collect();
         ids.sort_unstable();

@@ -1131,15 +1131,15 @@ pub(crate) struct SuspendedMovies {
     movies: HashMap<u32, Movie>,
     at: Instant,
 }
-pub(crate) fn suspend() -> SuspendedMovies {
+pub(crate) fn suspend_at(at: Instant) -> SuspendedMovies {
     MOVIES.with(|registry| SuspendedMovies {
         movies: std::mem::take(&mut *registry.lock().unwrap()),
-        at: Instant::now(),
+        at,
     })
 }
-pub(crate) fn resume(mut saved: SuspendedMovies) {
+pub(crate) fn resume_at(mut saved: SuspendedMovies, at: Instant) {
     MOVIES.with(|registry| {
-        let duration = saved.at.elapsed();
+        let duration = at.saturating_duration_since(saved.at);
         for movie in saved.movies.values_mut() {
             if let Some(start) = movie.start.as_mut() {
                 *start += duration;
@@ -1283,7 +1283,7 @@ mod tests {
             movie.playing = true;
             movie.start = Some(Instant::now() - Duration::from_secs(2));
             registry.lock().unwrap().insert(0x50001100, movie);
-            let mut saved = suspend();
+            let mut saved = suspend_at(Instant::now());
             assert!(registry.lock().unwrap().is_empty());
             // Simulate a long child lifetime without slowing the test.
             saved.at -= Duration::from_secs(30);
@@ -1292,7 +1292,7 @@ mod tests {
             }
             registry.lock().unwrap().insert(0x50001100, Movie::new());
             reset(); // Child Emulator Drop must not erase the detached parent.
-            resume(saved);
+            resume_at(saved, Instant::now());
             let movies = registry.lock().unwrap();
             let parent = movies.get(&0x50001100).unwrap();
             assert!(parent.playing);
@@ -1855,10 +1855,57 @@ mod session_cleanup_tests {
         .join()
         .unwrap();
         MOVIES.with(|r| assert!(r.lock().unwrap().contains_key(&42)));
-        let parent = suspend();
+        let parent = suspend_at(Instant::now());
         reset();
-        resume(parent);
+        resume_at(parent, Instant::now());
         MOVIES.with(|r| assert!(r.lock().unwrap().contains_key(&42)));
+        reset();
+    }
+}
+
+#[cfg(test)]
+mod suspended_checkpoint_tests {
+    use super::*;
+    #[test]
+    fn suspended_runtime_capture_freezes_media_time_and_resuspends_after_panic() {
+        let _gate = TEST_GRAPH_GATE.lock().unwrap();
+        reset();
+        let at = Instant::now();
+        let mut movie = Movie::new();
+        movie.start = Some(at - std::time::Duration::from_secs(2));
+        MOVIES.with(|registry| registry.lock().unwrap().insert(0x9900, movie));
+        let mut saved = Some(crate::suspend_session_at(at));
+        let boundary = at + std::time::Duration::from_secs(60);
+        crate::SuspendedSession::with_current_at(&mut saved, boundary, || {
+            MOVIES.with(|registry| {
+                let start = registry.lock().unwrap()[&0x9900].start.unwrap();
+                assert_eq!(
+                    boundary.duration_since(start),
+                    std::time::Duration::from_secs(2)
+                );
+            });
+        });
+        assert!(MOVIES.with(|registry| registry.lock().unwrap().is_empty()));
+        let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::SuspendedSession::with_current_at(&mut saved, boundary, || {
+                panic!("capture failed")
+            });
+        }));
+        assert!(error.is_err());
+        assert!(saved.is_some());
+        assert!(MOVIES.with(|registry| registry.lock().unwrap().is_empty()));
+        saved
+            .as_mut()
+            .unwrap()
+            .resume_at(boundary + std::time::Duration::from_secs(30));
+        MOVIES.with(|registry| {
+            let start = registry.lock().unwrap()[&0x9900].start.unwrap();
+            assert_eq!(
+                (boundary + std::time::Duration::from_secs(30)).duration_since(start),
+                std::time::Duration::from_secs(2)
+            );
+        });
+        drop(saved);
         reset();
     }
 }

@@ -503,6 +503,8 @@ pub struct BluetoothDriverOpen {
     _lease: Arc<contracts::Lease>,
 }
 pub struct BluetoothOpen {
+    pub index: u32,
+    pub registration: u32,
     pub port: Arc<crate::bluetooth::Port>,
     pub access: u32,
     _lease: Arc<contracts::Lease>,

@@ -42,6 +42,10 @@ pub trait Stream: Send {
     /// Zero is reserved for a real peer EOF.
     fn read(&mut self, bytes: &mut [u8]) -> BtResult<usize>;
     fn write(&mut self, bytes: &[u8]) -> BtResult<usize>;
+    /// Non-consuming, bounded receive snapshot. Restore disconnects the peer.
+    fn capture_received(&self) -> Result<TransportSnapshot, String> {
+        Err("Bluetooth provider cannot capture its unread receive buffer".into())
+    }
 }
 /// Neutral socket address. Guest ARM padding never crosses into host FFI.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -63,6 +67,9 @@ pub trait RfcommSocket: Send {
     fn get_option(&mut self, level: i32, name: i32, size: usize) -> BtResult<Vec<u8>>;
     fn address(&mut self, peer: bool) -> BtResult<SocketAddress>;
     fn shutdown(&mut self, how: i32) -> BtResult<()>;
+    fn capture_received(&self) -> Result<TransportSnapshot, String> {
+        Err("Bluetooth socket provider cannot capture its receive buffer".into())
+    }
 }
 pub struct GuestSocket {
     pub native: Box<dyn RfcommSocket>,
@@ -104,6 +111,7 @@ pub struct Port {
     stream: Mutex<Option<Box<dyn Stream>>>,
     rx: Mutex<VecDeque<u8>>,
     pub mask: std::sync::atomic::AtomicU32,
+    checkpoint: Mutex<Option<(std::time::Instant, std::sync::Weak<PortSnapshot>)>>,
 }
 impl Port {
     pub fn new(stream: Box<dyn Stream>) -> Self {
@@ -111,6 +119,7 @@ impl Port {
             stream: Mutex::new(Some(stream)),
             rx: Mutex::new(VecDeque::new()),
             mask: std::sync::atomic::AtomicU32::new(0),
+            checkpoint: Mutex::new(None),
         }
     }
     pub fn close(&self) {
@@ -169,6 +178,7 @@ struct ServiceInner {
     ports: HashMap<u32, (u32, Arc<Port>)>,
     next: u32,
     sockets: Vec<std::sync::Weak<Mutex<Option<Box<dyn RfcommSocket>>>>>,
+    restored_ports: HashMap<u64, std::sync::Weak<Port>>,
 }
 impl Default for Service {
     fn default() -> Self {
@@ -187,6 +197,7 @@ impl Service {
             ports: HashMap::new(),
             next: 0xb7000000,
             sockets: Vec::new(),
+            restored_ports: HashMap::new(),
         })))
     }
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
@@ -316,6 +327,17 @@ impl ManagedSocket {
     }
 }
 impl RfcommSocket for ManagedSocket {
+    fn capture_received(&self) -> Result<TransportSnapshot, String> {
+        match self
+            .inner
+            .lock()
+            .map_err(|_| "Bluetooth socket poisoned")?
+            .as_ref()
+        {
+            Some(socket) => socket.capture_received(),
+            None => Ok(TransportSnapshot::interrupted(10050)),
+        }
+    }
     fn bind(&mut self, a: &SocketAddress) -> BtResult<()> {
         self.with(|s| s.bind(a))
     }
@@ -377,56 +399,12 @@ pub struct State {
     pub next_socket: u32,
     pub socket_deadlines: HashMap<(usize, u32, u32), std::time::Instant>,
 }
-/// Session metadata for Bluetooth with no live host connections.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct StateSnapshot {
-    enabled: bool,
-    startups: u32,
-    discovery_aliases: HashMap<u64, u64>,
-    next_lookup: u32,
-    next_socket: u32,
-    next_port: u32,
-}
+#[path = "bluetooth_snapshot.rs"]
+mod snapshot;
+pub use snapshot::TransportSnapshot;
+pub(crate) use snapshot::{PortSnapshot, StateSnapshot};
 
 impl State {
-    pub(crate) fn capture_snapshot(&self) -> Result<StateSnapshot, String> {
-        let service = self.service.0.lock().unwrap();
-        if !self.lookups.is_empty()
-            || !self.writes.is_empty()
-            || !self.sockets.is_empty()
-            || !self.socket_deadlines.is_empty()
-            || !service.ports.is_empty()
-            || service
-                .sockets
-                .iter()
-                .any(|socket| socket.strong_count() != 0)
-        {
-            return Err("checkpoint contains an active Bluetooth operation, port or socket".into());
-        }
-        Ok(StateSnapshot {
-            enabled: service.enabled,
-            startups: self.startups,
-            discovery_aliases: self.discovery_aliases.clone(),
-            next_lookup: self.next_lookup,
-            next_socket: self.next_socket,
-            next_port: service.next,
-        })
-    }
-
-    pub(crate) fn restore_snapshot(&mut self, saved: StateSnapshot) -> Result<(), String> {
-        if saved.enabled {
-            self.service.start_driver().map_err(|error| {
-                format!("cannot restore the Bluetooth driver: WinCE error {error}")
-            })?;
-        }
-        self.service.0.lock().unwrap().next = saved.next_port;
-        self.startups = saved.startups;
-        self.discovery_aliases = saved.discovery_aliases;
-        self.next_lookup = saved.next_lookup;
-        self.next_socket = saved.next_socket;
-        Ok(())
-    }
-
     pub fn insert_socket(
         &mut self,
         native: Box<dyn RfcommSocket>,

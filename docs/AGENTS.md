@@ -1051,9 +1051,13 @@ API dispatch and teardown. A guest CPU slice also takes the gate when the
 process has mapped file views, because the CPU can access shared pages directly.
 Processes with private CPU mappings can run instruction slices in parallel.
 Frame hooks and startup acknowledgement run outside the gate so recursive
-SDCreateProcess and remote startup can proceed. SDCreateProcess retains the
-preserved-parent foreground handoff, independent of the generic CreateProcessW
-behavior.
+SDCreateProcess and remote startup can proceed. On Desktop Unicorn,
+SDCreateProcess parks its caller at a mutable CPU checkpoint on its owning host
+thread and starts the foreground child on another host thread. The caller keeps
+its checkpoint participant and suspended native runtime until the child finishes.
+No execution gate may be held while waiting or rendezvousing. Command lines use
+the same WinMain/GetCommandLineW initialization as generic child startup.
+Non-Unicorn builds retain the legacy same-thread handoff.
 
 Creation is transactional: resolve/validate the image, construct the child,
 attach shared handles and physical RAM, initialize WinMain/GetCommandLineW,

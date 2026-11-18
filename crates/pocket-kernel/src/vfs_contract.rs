@@ -495,6 +495,8 @@ impl Vfs {
             self.bluetooth_handles.insert(
                 handle,
                 Arc::new(BluetoothOpen {
+                    index,
+                    registration,
                     port,
                     access,
                     _lease: lease.clone(),

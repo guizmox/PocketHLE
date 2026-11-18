@@ -9,9 +9,10 @@ and slot locations.
 
 The desktop runner queues the request and captures at a kernel checkpoint on
 the emulation thread. This boundary provides a continuation PC and a consistent
-view of CPU, kernel and graphics state. A supported synchronously launched child
-can be captured as the foreground program while its caller is suspended. The
-snapshot identifies that child so the launcher can reopen it directly.
+view of CPU, kernel and graphics state. Synchronously suspended launchers remain
+participants: the snapshot includes each parked caller and its active child,
+using the same coordinated process sections as concurrent launches. Restore
+rebuilds that graph before either continuation can execute.
 
 The captured state is moved to a background writer. The writer encodes it into a
 temporary file in the slot directory, flushes and syncs the file, then persists
@@ -75,15 +76,18 @@ guest addresses, permissions, lazy image residency and deferred memory ranges.
 | Cryptography | Providers, keys, incremental SHA-1 state and ownership graph. No plaintext input history is retained. |
 | MSXML | DOM documents/nodes, attributes and COM aliases, with ownership/cycle/reference validation. |
 | SDL | Surfaces and guest pixel addresses, event queues and keyboard buffer. Restore neutralizes held keyboard/mouse input and emits matching releases. |
-| WinINet | Sessions, connection metadata and unsent requests reopen the current native HTTP client. Completed native channel transfers retain response status/headers, unread bytes, terminal success/error and a pending guest send continuation. Restore never sends the old request. Active transfers remain unsupported. |
+| WinINet | Sessions, connection metadata and unsent requests reopen the current native HTTP client. Native channel transfers retain received response headers, unread bytes and the pending guest send continuation. Completed transfers retain their terminal result; active transfers restore as connection aborted (12030) after the saved bytes. Missing response headers return the abort immediately. Restore never resends the old request. |
+| Bluetooth Classic | Registered COM ports, open aliases, receive queues, sockets, inquiry progress, partial-write offsets and timeout settings. Restore retains received data then reports transport loss (normally 10054); pending discovery is cancelled (995). It does not reconnect endpoints, restart discovery or replay outbound writes. New operations use the current permission-gated native service. |
 | zlib.dll HLE streams | Decoder state, bounded sliding output window, partial header/dictionary negotiation, checksum, terminal status and handle allocator. Restore resumes the stream at its saved input/output position without replaying consumed input. |
 | CEDB | Open Contacts Database cursors, allocator and database contents. Persistent backing is queued into the common file transaction using the current launch path. Closed persistent databases are not rewound. |
 
-Unsupported live resources cause capture to fail with a diagnostic. Remaining
-gaps include active Bluetooth ports/sockets and unfinished HTTP transfers.
-Native HTTP adapters must explicitly prove completion before capturing their
-unread response buffer; adapters without this capability remain unsupported. Physical hardware and remote services are not serialized;
-restore must reacquire the configured provider instead of fabricating data.
+Unsupported live resources cause capture to fail with a diagnostic. HTTP and
+Bluetooth providers must explicitly support non-consuming receive capture;
+unknown providers still reject capture. Desktop native HTTP channels and Windows
+Bluetooth Classic implement it. External services and radio peers cannot be
+rewound: their captured endpoints restore as disconnected, rather than pretending
+the old connection is still live. Physical providers are reacquired only through
+their normal permission and availability checks.
 
 When adding a handle type, check both the guest handle table and the backing
 object. Recreate the backing object through its subsystem, reconnect aliases to
@@ -173,10 +177,25 @@ The desktop runner respawns saved concurrent processes using their saved guest
 module paths, resolved through current application mounts. No CreateProcess call
 is synthesized. Foreground process identity is restored independently of the
 root process used to own host child jobs. An already exited launcher does not
-need to execute again. A synchronous SD-card launch retains the existing isolated
-foreground-child capture path; its suspended caller is deliberately outside that
-snapshot. A CPU still waiting for startup acknowledgement cannot join a capture
-and the request is rejected rather than producing an incomplete archive.
+need to execute again. A synchronous SD-card caller stays on its owning host
+thread at the real launch continuation while the child runs on its own thread.
+Its GLES/media runtime is suspended there and temporarily reinstalled only for
+coordinated capture. DirectShow clocks remain frozen during that wait; restored
+DirectShow clocks start lazily on first service, after the device commit barrier.
+The same guard resuspends resources even when capture unwinds. Parent input is
+neutralized with matching releases when it resumes.
+
+The WinCE section records the waiting child identity. Validation rejects missing
+or exited targets, competing pending launches and cycles. Cold restore parks the
+caller before executing any ARM instruction. Child completion is published after
+CPU/kernel teardown; the caller then receives the exit result and resumes its
+original code, including a later SDCreateProcess with a command line. The former
+isolated foreground-child snapshot format/path has been removed. No game
+executable is patched and no launch is replayed to reconstruct the saved state.
+A process still waiting for startup acknowledgement cannot join a capture and the
+request is rejected rather than producing an incomplete archive. User stop is
+shared across process jobs; a peer emulation failure cancels the group and keeps
+its diagnostic distinct from user cancellation.
 
 ## Graphics and performance
 
@@ -235,8 +254,9 @@ explicitly and keep the previous slot.
 Large ARM, mapped-file, RAM-store and native GLES2 byte arrays use `serde_bytes`
 with bincode's length-prefixed byte representation. This requests bulk writes
 and reads through the buffered zlib stream instead of visiting each byte.
-The WinCE section is version 7, media section version 2 and programmable EGL
-section version 5; development snapshots using earlier section versions must be recreated.
+The session section is version 2, WinCE section version 8, media section version 2
+and programmable EGL section version 5. Development snapshots using earlier
+section versions must be recreated.
 
 [Fixed-function EGL](../crates/pocket-winceapi/src/gles/snapshot.rs) ·
 [GLES 2.0 resource checkpoint](../crates/pocket-winceapi/src/gles2/renderer/checkpoint.rs) ·
@@ -288,12 +308,25 @@ and timeout. This does not make capture itself asynchronous: native resource
 capture still happens at the coordinated boundary; encoding/writing follows on
 the existing background worker.
 
-Completed HTTP responses are received data, not requests to replay. The channel
-copies its unread bounded suffix only when the native producer has finished.
-Its terminal status cannot be overwritten by late completion callbacks, headers
-or body writes. Reading the restored suffix yields the recorded EOF or error;
-a pending guest `HttpSendRequest` continuation can finish without submitting
-another POST. Restore still reacquires the configured native client and honors
-current provider permissions. Streaming transfers and external server state are
-not rewound. See the [phase 3 validation note](testing/SNAPSHOT-PHASE3-2026-11-18.md)
-for exercised configurations and the remaining work.
+HTTP responses are received data, not requests to replay. A channel checkpoint
+copies its bounded unread suffix and response head under the producer mailbox
+lock without consuming data, cancelling the live source or waiting for the
+remote server. A completed result stays terminal; an active result becomes
+connection aborted in the checkpoint only. Later source callbacks cannot change
+that saved result. Reading the restored suffix yields its recorded EOF/error;
+a pending `HttpSendRequest` continuation finishes without submitting another POST.
+The current native client remains available for new requests.
+
+Windows Bluetooth capture uses nonblocking FIONREAD and MSG_PEEK, never recv
+without peek or an implicit connect/accept. Each port/socket receive checkpoint
+is limited to 64 KiB; process Bluetooth state is limited to 64 MiB and validates
+handle namespaces, counts and partial-write offsets. Shared COM aliases use one
+immutable receive boundary per checkpoint epoch and one restored port object.
+The source cache and restored identity cache hold weak references, not a lifetime
+history. Reads drain saved data before reporting the saved transport error;
+writes fail without contacting the old peer. Inquiry results already received
+remain available, while an in-flight inquiry becomes cancelled.
+
+External server/radio state is not rolled back, and uninterrupted network sessions
+are not promised. See the [phase 5 validation note](testing/SNAPSHOT-PHASE5-2026-11-18.md)
+for exercised configurations and platform limits.

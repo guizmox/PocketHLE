@@ -1,5 +1,8 @@
 # Snapshot phase 4 — native uniform identity
 
+Historical phase validation. For subsequent launcher and active-communication
+coverage, see [phase 5](SNAPSHOT-PHASE5-2026-11-18.md).
+
 Base: branch `snapshots`, commit `8acdc23` (`snapshots phase 2`), including
 the phase 3 changes described in [phase 3](SNAPSHOT-PHASE3-2026-11-18.md).
 The delivered patch is cumulative against that commit. No commit/push, game

@@ -1,5 +1,8 @@
 # Snapshot phase 3 — 18 November 2026
 
+Historical phase validation. For subsequent launcher and active-communication
+coverage, see [phase 5](SNAPSHOT-PHASE5-2026-11-18.md).
+
 Base: branch `snapshots`, commit
 `8acdc23` (`snapshots phase 2`). This is a generic native ARM checkpoint
 increment. It changes neither game binaries/assets nor per-title behavior.

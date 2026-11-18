@@ -22,6 +22,19 @@ const REGS: [ArmReg; 17] = [
 ];
 impl KernelState {
     /// True means forced process exit; no guest detach callbacks may run.
+    /// A synchronously suspended owner still services remote process death.
+    /// Thread scheduling updates remain queued until its guest CPU can resume.
+    pub fn apply_suspended_process_termination(
+        &mut self,
+        cpu: &mut dyn Cpu,
+    ) -> Result<bool, KernelError> {
+        if let Some(code) = self.object_handles.take_process_termination() {
+            self.record_process_exit(code);
+            self.reclaim_finished_stacks(cpu)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     pub fn apply_process_controls(
         &mut self,
         cpu: &mut dyn Cpu,

@@ -316,6 +316,18 @@ impl WindowsStream {
     }
 }
 impl Stream for WindowsStream {
+    fn capture_received(&self) -> Result<TransportSnapshot, String> {
+        if self.server {
+            match self.peer.as_ref() {
+                Some(peer) => capture_socket_received(peer.0),
+                None => Ok(TransportSnapshot::interrupted(10054)),
+            }
+        } else if self.connected {
+            capture_socket_received(self.socket.0)
+        } else {
+            Ok(TransportSnapshot::interrupted(10054))
+        }
+    }
     fn read(&mut self, bytes: &mut [u8]) -> BtResult<usize> {
         let socket = self.ready()?;
         let n = unsafe {
@@ -532,6 +544,9 @@ fn status(result: i32) -> BtResult<()> {
     }
 }
 impl RfcommSocket for NativeSocket {
+    fn capture_received(&self) -> Result<TransportSnapshot, String> {
+        capture_socket_received(self.socket.0)
+    }
     fn bind(&mut self, addr: &SocketAddress) -> BtResult<()> {
         let mut a = native_address(addr);
         a.serviceClassId = GUID::default();
@@ -732,5 +747,36 @@ mod tests {
             uuid: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
         };
         assert_eq!(guest_address(native_address(&a)), a);
+    }
+}
+
+// All native sockets are nonblocking. MSG_PEEK snapshots the received prefix
+// without consuming it, accepting a peer, completing connect or transmitting.
+fn capture_socket_received(socket: SOCKET) -> Result<TransportSnapshot, String> {
+    let mut available = 0u32;
+    if unsafe { ioctlsocket(socket, FIONREAD, &mut available) } == SOCKET_ERROR {
+        return Ok(TransportSnapshot::interrupted(error()));
+    }
+    if available == 0 {
+        // Do not probe an idle/connecting socket's native error state merely
+        // to distinguish pending from EOF. Restore invalidates either endpoint.
+        return Ok(TransportSnapshot::interrupted(10054));
+    }
+    if available > 65536 {
+        return Err("Bluetooth receive checkpoint exceeds 64 KiB".into());
+    }
+    let mut bytes = vec![0; available.max(1) as usize];
+    let n = unsafe { recv(socket, bytes.as_mut_ptr(), bytes.len() as i32, MSG_PEEK) };
+    if n == SOCKET_ERROR {
+        let code = error();
+        let code = if matches!(code, 10035 | 10057 | 10022) {
+            10054
+        } else {
+            code
+        };
+        Ok(TransportSnapshot::interrupted(code))
+    } else {
+        bytes.truncate(n as usize);
+        TransportSnapshot::new(bytes, if n == 0 { Ok(()) } else { Err(10054) })
     }
 }

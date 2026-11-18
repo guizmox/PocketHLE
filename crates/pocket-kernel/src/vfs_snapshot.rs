@@ -42,11 +42,18 @@ struct DeviceDescription {
     share: u32,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 enum DeviceKind {
     Bluetooth,
+    BluetoothPort {
+        index: u32,
+        registration: u32,
+        port: Arc<crate::bluetooth::PortSnapshot>,
+    },
     Vibration,
-    Gps { fixed: bool },
+    Gps {
+        fixed: bool,
+    },
     Camera(crate::camera::DeviceSnapshot),
     Accelerometer(AccelerometerStream),
 }
@@ -238,16 +245,10 @@ impl Vfs {
         coordinated: bool,
         at: std::time::Instant,
     ) -> Result<VfsFileSnapshot, String> {
-        for (present, kind) in [
-            (
-                mapping_files.is_empty() && !self.section_files.is_empty(),
-                "file mapping",
-            ),
-            (
-                !self.bluetooth_handles.is_empty(),
-                "Bluetooth COM port handle",
-            ),
-        ] {
+        for (present, kind) in [(
+            mapping_files.is_empty() && !self.section_files.is_empty(),
+            "file mapping",
+        )] {
             if present {
                 return Err(format!("checkpoint contains an unsupported {kind}"));
             }
@@ -255,6 +256,7 @@ impl Vfs {
 
         let mut decoders = self.decoders.clone();
         let mut bluetooth_driver_handles = self.bluetooth_driver_handles.clone();
+        let mut bluetooth_handles = self.bluetooth_handles.clone();
         let mut vibration_handles = self.vibration_handles.clone();
         let mut gps_handles = self.gps_handles.clone();
         let mut camera_handles = self.camera_handles.clone();
@@ -287,8 +289,8 @@ impl Vfs {
                 VfsObjectInner::Registration => {
                     registration.insert(handle);
                 }
-                VfsObjectInner::Bluetooth(_) => {
-                    return Err("checkpoint contains a Bluetooth COM port handle".into())
+                VfsObjectInner::Bluetooth(v) => {
+                    bluetooth_handles.insert(handle, v.clone());
                 }
                 VfsObjectInner::File(_) | VfsObjectInner::Ram(_) => {}
             }
@@ -324,6 +326,17 @@ impl Vfs {
         };
         for (&id, open) in &bluetooth_driver_handles {
             devices_by_lease(id, &open._lease, DeviceKind::Bluetooth);
+        }
+        for (&id, open) in &bluetooth_handles {
+            devices_by_lease(
+                id,
+                &open._lease,
+                DeviceKind::BluetoothPort {
+                    index: open.index,
+                    registration: open.registration,
+                    port: open.port.capture_snapshot(at)?,
+                },
+            );
         }
         for (&id, open) in &vibration_handles {
             devices_by_lease(id, &open._lease, DeviceKind::Vibration);
@@ -482,7 +495,7 @@ impl Vfs {
             ram: self.capture_ram_snapshot(private)?,
             descriptions,
             registration: registration.clone(),
-            bluetooth: self.bluetooth.capture_snapshot()?,
+            bluetooth: self.bluetooth.capture_snapshot(at)?,
             devices: devices
                 .into_values()
                 .chain(
@@ -783,7 +796,9 @@ impl Vfs {
             }
         }
 
+        self.bluetooth.restore_snapshot(snapshot.bluetooth)?;
         let mut drivers = HashMap::new();
+        let mut bluetooth_handles = HashMap::new();
         let mut vibration_handles = HashMap::new();
         let mut gps_handles = HashMap::new();
         let mut camera_handles = HashMap::new();
@@ -816,6 +831,16 @@ impl Vfs {
             if let Some(object) = restored {
                 let contract = match (&record.kind, &object.0) {
                     (DeviceKind::Bluetooth, VfsObjectInner::BluetoothDriver(open)) => {
+                        Some((open._lease.access, open._lease.share))
+                    }
+                    (
+                        DeviceKind::BluetoothPort {
+                            index,
+                            registration,
+                            ..
+                        },
+                        VfsObjectInner::Bluetooth(open),
+                    ) if *index == open.index && *registration == open.registration => {
                         Some((open._lease.access, open._lease.share))
                     }
                     (DeviceKind::Vibration, VfsObjectInner::Vibration(open)) => {
@@ -857,7 +882,28 @@ impl Vfs {
                     for id in record.handles {
                         drivers.insert(id, driver.clone());
                     }
-                    (BLUETOOTH_DRIVER_LEASE, lease)
+                    (BLUETOOTH_DRIVER_LEASE.to_owned(), lease)
+                }
+                DeviceKind::BluetoothPort {
+                    index,
+                    registration,
+                    port,
+                } => {
+                    if !(1..=9).contains(&index) || registration < 0xb7000000 {
+                        return Err("invalid saved Bluetooth port description".into());
+                    }
+                    let lease = lease();
+                    let open = Arc::new(BluetoothOpen {
+                        index,
+                        registration,
+                        port: self.bluetooth.service.restore_port(port)?,
+                        access: record.access,
+                        _lease: lease.clone(),
+                    });
+                    for id in record.handles {
+                        bluetooth_handles.insert(id, open.clone());
+                    }
+                    (format!("bluetooth:COM{index}:{registration}"), lease)
                 }
                 DeviceKind::Vibration => {
                     let lease = lease();
@@ -869,7 +915,7 @@ impl Vfs {
                     for id in record.handles {
                         vibration_handles.insert(id, driver.clone());
                     }
-                    (VIBRATION_DRIVER_LEASE, lease)
+                    (VIBRATION_DRIVER_LEASE.to_owned(), lease)
                 }
                 DeviceKind::Gps { fixed } => {
                     let lease = lease();
@@ -889,7 +935,7 @@ impl Vfs {
                     for id in record.handles {
                         gps_handles.insert(id, open.clone());
                     }
-                    (GPS_DRIVER_LEASE, lease)
+                    (GPS_DRIVER_LEASE.to_owned(), lease)
                 }
                 DeviceKind::Camera(saved) => {
                     let lease = lease();
@@ -910,7 +956,7 @@ impl Vfs {
                     for id in record.handles {
                         camera_handles.insert(id, open.clone());
                     }
-                    (CAMERA_DRIVER_LEASE, lease)
+                    (CAMERA_DRIVER_LEASE.to_owned(), lease)
                 }
                 DeviceKind::Accelerometer(stream) => {
                     if record.access != 0 || record.share != 0 {
@@ -949,7 +995,7 @@ impl Vfs {
                 }
             }
         }
-        self.bluetooth.restore_snapshot(snapshot.bluetooth)?;
+
         self.volumes = volumes;
         shared
             .vibration
@@ -968,6 +1014,7 @@ impl Vfs {
         self.decoders = decoders;
         self.handles = opened;
         self.bluetooth_driver_handles = drivers;
+        self.bluetooth_handles = bluetooth_handles;
         self.vibration_handles = vibration_handles;
         self.gps_handles = gps_handles;
         self.camera_handles = camera_handles;

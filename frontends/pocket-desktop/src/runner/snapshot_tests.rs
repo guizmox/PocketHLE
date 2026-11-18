@@ -44,15 +44,15 @@ fn external_game_device_snapshot_cold_restore() {
             )
         })
         .collect();
-    let keys: Vec<(u64, u16)> = std::env::var("POCKETHLE_SNAPSHOT_TEST_KEYS")
-        .unwrap_or_default()
-        .split(';')
-        .filter(|key| !key.is_empty())
-        .map(|key| {
-            let (at, vk) = key.split_once(':').unwrap();
-            (at.parse().unwrap(), vk.parse().unwrap())
-        })
-        .collect();
+    let keys = parse_keys("POCKETHLE_SNAPSHOT_TEST_KEYS");
+    let restored_keys = parse_keys("POCKETHLE_SNAPSHOT_TEST_RESTORE_KEYS");
+    let restore_seconds = std::env::var("POCKETHLE_SNAPSHOT_TEST_RESTORE_SECONDS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(8);
+    let recapture_after = std::env::var("POCKETHLE_SNAPSHOT_TEST_RECAPTURE_AFTER")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
     for restore in [false, true] {
         let (input, receiver) = std::sync::mpsc::channel();
         let (frames, images) = crate::latest_frame::channel();
@@ -72,7 +72,13 @@ fn external_game_device_snapshot_cold_restore() {
             )
         });
         let start = Instant::now();
-        let mut requested = restore;
+        let capture_at = if restore {
+            recapture_after
+        } else {
+            Some(capture_after)
+        };
+        let mut requested = capture_at.is_none();
+        let phase_keys = if restore { &restored_keys } else { &keys };
         let mut reply = None;
         let mut displayed = 0;
         let mut sent_taps = 0;
@@ -82,7 +88,12 @@ fn external_game_device_snapshot_cold_restore() {
         let mut request_at = None;
         let mut sent_keys = 0;
         let mut held_key = None;
-        while start.elapsed() < Duration::from_secs(if restore { 8 } else { capture_after + 9 })
+        while start.elapsed()
+            < Duration::from_secs(if restore {
+                restore_seconds
+            } else {
+                capture_after + 9
+            })
             && !worker.is_finished()
         {
             if let Ok(frame) = images.try_recv() {
@@ -106,23 +117,23 @@ fn external_game_device_snapshot_cold_restore() {
                     }
                 }
             }
-            if !restore {
-                if let Some((at, vk)) = held_key {
-                    if start.elapsed().as_millis() >= u128::from(at + 150) {
-                        input
-                            .send(InputCommand::Input(InputEvent::KeyUp { vk }))
-                            .unwrap();
-                        held_key = None;
-                    }
-                } else if let Some(&(at, vk)) = keys.get(sent_keys) {
-                    if start.elapsed().as_millis() >= u128::from(at) {
-                        input
-                            .send(InputCommand::Input(InputEvent::KeyDown { vk }))
-                            .unwrap();
-                        held_key = Some((at, vk));
-                        sent_keys += 1;
-                    }
+            if let Some((at, vk)) = held_key {
+                if start.elapsed().as_millis() >= u128::from(at + 150) {
+                    input
+                        .send(InputCommand::Input(InputEvent::KeyUp { vk }))
+                        .unwrap();
+                    held_key = None;
                 }
+            } else if let Some(&(at, vk)) = phase_keys.get(sent_keys) {
+                if start.elapsed().as_millis() >= u128::from(at) {
+                    input
+                        .send(InputCommand::Input(InputEvent::KeyDown { vk }))
+                        .unwrap();
+                    held_key = Some((at, vk));
+                    sent_keys += 1;
+                }
+            }
+            if !restore {
                 if let Some((at, x, y)) = held_tap {
                     if start.elapsed().as_millis() >= u128::from(at + 150) {
                         input
@@ -140,7 +151,8 @@ fn external_game_device_snapshot_cold_restore() {
                     }
                 }
             }
-            if !requested && start.elapsed() > Duration::from_secs(capture_after) {
+            if !requested && capture_at.is_some_and(|at| start.elapsed() > Duration::from_secs(at))
+            {
                 let (tx, rx) = std::sync::mpsc::channel();
                 request_at = Some(Instant::now());
                 input.send(InputCommand::SaveSnapshot(tx)).unwrap();
@@ -167,9 +179,14 @@ fn external_game_device_snapshot_cold_restore() {
         eprintln!("{restore}: {}", outcome.summary);
         assert!(diagnostic.is_none(), "{diagnostic:?}");
         assert!(displayed > 0);
+        assert!(
+            outcome.summary.contains("Emulator exited cleanly."),
+            "{}",
+            outcome.summary
+        );
         assert!(capture_error.is_none(), "{capture_error:?}");
         assert!(reply.is_none(), "snapshot request did not finish");
-        if !restore {
+        if capture_at.is_some() {
             let path = pocket_library::snapshot_slot::path_for(&root, &game);
             let (_, payload) = pocket_library::snapshot_slot::open(&path).unwrap().unwrap();
             let mut saved = pocket_core::SessionSnapshot::read(payload).unwrap();
@@ -195,4 +212,16 @@ fn external_game_device_snapshot_cold_restore() {
             }
         }
     }
+}
+
+fn parse_keys(variable: &str) -> Vec<(u64, u16)> {
+    std::env::var(variable)
+        .unwrap_or_default()
+        .split(';')
+        .filter(|key| !key.is_empty())
+        .map(|key| {
+            let (at, vk) = key.split_once(':').unwrap();
+            (at.parse().unwrap(), vk.parse().unwrap())
+        })
+        .collect()
 }

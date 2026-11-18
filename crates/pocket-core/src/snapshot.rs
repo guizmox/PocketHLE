@@ -31,7 +31,6 @@ const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;
 pub struct SessionSnapshot {
     device: Option<DeviceArchive>,
     executable: [u8; 32],
-    card_program: Option<String>,
     cpu: ArmExecutionSnapshot,
     kernel: KernelSnapshot,
     egl: EglSessionSnapshot,
@@ -60,22 +59,6 @@ impl SessionSnapshot {
             process,
             point,
             false,
-            false,
-            crate::checkpoint_domain::CheckpointTime::now(),
-        )
-    }
-
-    pub fn capture_foreground(
-        cpu: &mut dyn Cpu,
-        process: &mut Process,
-        point: ResumePoint,
-    ) -> Result<Self> {
-        Self::capture_process(
-            cpu,
-            process,
-            point,
-            true,
-            false,
             crate::checkpoint_domain::CheckpointTime::now(),
         )
     }
@@ -84,7 +67,6 @@ impl SessionSnapshot {
         cpu: &mut dyn Cpu,
         process: &mut Process,
         point: ResumePoint,
-        detached: bool,
         coordinated: bool,
         at: crate::checkpoint_domain::CheckpointTime,
     ) -> Result<Self> {
@@ -103,7 +85,7 @@ impl SessionSnapshot {
         let kernel = if coordinated {
             process.state.capture_device_process(at.host)
         } else {
-            process.state.capture_checkpoint_at(detached, at.host)
+            process.state.capture_checkpoint_at(at.host)
         }
         .map_err(anyhow::Error::msg)?;
         let kernel_time = started.elapsed();
@@ -120,7 +102,6 @@ impl SessionSnapshot {
         Ok(Self {
             device: None,
             executable,
-            card_program: detached.then(|| process.state.module_path.clone()),
             cpu,
             kernel,
             egl,
@@ -133,10 +114,6 @@ impl SessionSnapshot {
             thunks: process.thunks.clone(),
             thunk_by_va: process.thunk_by_va.clone(),
         })
-    }
-
-    pub fn card_program(&self) -> Option<&str> {
-        self.card_program.as_deref()
     }
 
     pub fn write(&self, mut output: impl Write) -> std::io::Result<()> {
@@ -162,7 +139,6 @@ impl SessionSnapshot {
             SESSION,
             &(
                 &self.executable,
-                &self.card_program,
                 &self.clock,
                 &self.point,
                 &self.thunks,
@@ -239,9 +215,9 @@ impl SessionSnapshot {
             }
             let mut section = input.take(len);
             match (id, version) {
-                (SESSION, 1) => session = Some(read_section(&mut section)?),
+                (SESSION, 2) => session = Some(read_section(&mut section)?),
                 (ARM, 1) => cpu = Some(read_section(&mut section)?),
-                (KERNEL, 7) => kernel = Some(read_section(&mut section)?),
+                (KERNEL, 8) => kernel = Some(read_section(&mut section)?),
                 (EGL_FIXED, 1) => egl = Some(read_section(&mut section)?),
                 (MEDIA, 2) => media = Some(read_section(&mut section)?),
                 (EGL_PROGRAMMABLE, EGL_PROGRAMMABLE_VERSION) => {
@@ -264,12 +240,11 @@ impl SessionSnapshot {
                 return Err(invalid("snapshot section length mismatch"));
             }
         }
-        let (executable, card_program, clock, point, thunks, thunk_by_va) =
+        let (executable, clock, point, thunks, thunk_by_va) =
             session.ok_or_else(|| invalid("missing session section"))?;
         let snapshot = Self {
             device,
             executable,
-            card_program,
             clock,
             point,
             thunks,
@@ -318,8 +293,8 @@ fn write_section(
     let version = if id == EGL_PROGRAMMABLE {
         EGL_PROGRAMMABLE_VERSION
     } else if id == KERNEL {
-        7
-    } else if id == MEDIA {
+        8
+    } else if id == MEDIA || id == SESSION {
         2
     } else {
         1
@@ -456,6 +431,19 @@ impl Emulator {
             .run_at(
                 restored.resumed.unwrap_or_else(std::time::Instant::now),
                 || {
+                    // A restored synchronous launcher must not execute even one
+                    // guest instruction before its saved foreground child exits.
+                    if process.state.suspended_process_launch.is_some() {
+                        hook.on_checkpoint(self.cpu.as_mut(), process, restored.point);
+                        anyhow::ensure!(
+                            process.state.suspended_process_launch.is_none()
+                                || process.state.should_stop,
+                            "frontend did not resume the suspended child-process wait"
+                        );
+                    }
+                    if process.state.should_stop {
+                        return Ok(());
+                    }
                     pocket_kernel::resume_main_loop(
                         self.cpu.as_mut(),
                         process,
@@ -465,6 +453,7 @@ impl Emulator {
                         Some(hook),
                         restored.point,
                     )
+                    .map_err(anyhow::Error::from)
                 },
             )
             .context("restored emulator loop")
@@ -1279,3 +1268,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "snapshot_launcher_tests.rs"]
+mod launcher_tests;

@@ -1246,6 +1246,9 @@ pub struct KernelState {
     /// Only frontends with foreground handoff support may expose SD launch.
     pub process_launch_enabled: bool,
     pub pending_process_launch: Option<ProcessLaunch>,
+    /// Synchronous foreground child already launched; the caller's CPU stays
+    /// at its checkpoint continuation until that process has torn down.
+    pub suspended_process_launch: Option<ProcessLaunch>,
     pub scheduled_process_launches: HashMap<String, (std::time::SystemTime, String)>,
     pub command_line_cache: Option<u32>,
     pub command_line: Option<String>,
@@ -4693,6 +4696,7 @@ impl Process {
                 module_path: DEFAULT_MODULE_PATH.to_string(),
                 process_launch_enabled: false,
                 pending_process_launch: None,
+                suspended_process_launch: None,
                 scheduled_process_launches: Default::default(),
                 command_line_cache: None,
                 command_line: None,
