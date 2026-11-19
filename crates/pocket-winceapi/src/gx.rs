@@ -395,6 +395,7 @@ pub(crate) fn read_guest_framebuffer(ctx: &mut CallCtx<'_>) -> Result<(), Kernel
 }
 
 fn publish_readback(ctx: &mut CallCtx<'_>) -> Result<(), KernelError> {
+    ctx.kernel.pending_gapi_copy = false;
     let signature = sample_signature(
         &ctx.kernel.gx_readback_scratch,
         ctx.kernel.framebuffer.stride_bytes() as usize,
@@ -589,6 +590,7 @@ pub(crate) mod tests {
             fb_mapped: false,
             guest_fb_pitch: 0,
             direct_fb_frames: 0,
+            pending_gapi_copy: false,
             gx_readback_scratch: Vec::new(),
             gx_previous_readback: Vec::new(),
             gx_layout_scratch: Vec::new(),
@@ -1209,7 +1211,7 @@ mod taskbar_lifecycle_tests {
             &[],
         );
         assert!(k.pocket_pc_taskbar_visible());
-        k.gdi.shell_menus.taskbar_hidden = true;
+        k.gdi.shell_menus.taskbar_visibility = pocket_kernel::shell_menu::TaskbarVisibility::Hidden;
         call(
             &mut cpu,
             &mut k,

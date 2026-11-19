@@ -2090,7 +2090,13 @@ mod tests {
         let mut out = [0; 8];
         tap.peek_into(&mut out);
         assert_eq!(out, expected);
-        assert_eq!(e.wave_playback_cursor(1), 0);
+        {
+            let shared = e.shared.lock().unwrap();
+            // The public cursor query advances silent playback by wall time.
+            // Inspect the stored cursor to isolate preview's effects instead.
+            assert!(!shared.device_active);
+            assert_eq!(shared.wave_streams[&1].consumed, 0);
+        }
         tap.drain_into(&mut out);
         assert_eq!(out, expected);
         assert_eq!(e.wave_playback_cursor(1), 8);

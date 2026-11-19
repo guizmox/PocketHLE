@@ -1313,6 +1313,10 @@ pub struct KernelState {
     /// decide how often that poll is worth running; see
     /// [`PRESENT_POLL_BACKOFF`].
     pub direct_fb_frames: u64,
+    /// Host publication pending after CPU scanline copies. Guest bytes and the
+    /// current CPU image already contain the changes. A cold frontend publishes
+    /// its first restored image independently, so this is not guest snapshot state.
+    pub pending_gapi_copy: bool,
     /// Pre-allocated scratch buffer the GAPI flush uses when copying
     /// the guest-mapped framebuffer back into [`Framebuffer::pixels`].
     /// Sized to `FB_BYTES` once on first use so there is no
@@ -2332,12 +2336,39 @@ impl KernelState {
             }
         }
     }
-    /// The PocketPC shell occupies a separate top-level strip. Apps retain
-    /// responsibility for resizing their windows after SHFullScreen.
+    /// Explicit SHFullScreen requests control shell z-order. Otherwise a
+    /// visible, borderless native window covering the physical panel occupies
+    /// the navigation strip too. Work-area windows and native dialogs retain it.
     pub fn pocket_pc_taskbar_visible(&self) -> bool {
-        self.gapi_action_key == gapi::VK_RETURN
-            && !self.gdi.shell_menus.taskbar_hidden
-            && !self.gdi.shell_menus.gx_fullscreen
+        use shell_menu::TaskbarVisibility;
+        if self.gapi_action_key != gapi::VK_RETURN || self.gdi.shell_menus.gx_fullscreen {
+            return false;
+        }
+        match self.gdi.shell_menus.taskbar_visibility {
+            TaskbarVisibility::Shown => return true,
+            TaskbarVisibility::Hidden => return false,
+            TaskbarVisibility::Automatic => {}
+        }
+        let hwnd = if self.active_window == 0 {
+            0xdead0001
+        } else {
+            self.active_window
+        };
+        if self.controls.panel(hwnd).is_some() || self.window_visibility.get(&hwnd) == Some(&false)
+        {
+            return true;
+        }
+        let fullscreen = self.window_styles.get(&hwnd).is_some_and(|&(style, _)| {
+            // WS_VISIBLE without WS_CHILD or WS_CAPTION. A title alone is not
+            // evidence of window chrome; fullscreen engines also set titles.
+            style & (0x1000_0000 | 0x4000_0000 | 0x00c0_0000) == 0x1000_0000
+        }) && self.window_rects.get(&hwnd).is_some_and(|&(x, y, w, h)| {
+            x <= 0
+                && y <= 0
+                && i64::from(x) + i64::from(w) >= i64::from(self.framebuffer.width)
+                && i64::from(y) + i64::from(h) >= i64::from(self.framebuffer.height)
+        });
+        !fullscreen
     }
 
     pub fn window_client_origin(&self, mut hwnd: u32) -> Option<(i32, i32)> {
@@ -2647,7 +2678,10 @@ impl KernelState {
         let controls = self.controls.clone();
         let modal = self.modal.clone();
         let shell_bar = self.active_shell_bar();
-        let taskbar = self.pocket_pc_taskbar_visible();
+        // No synthetic application title strip precedes the first native
+        // window. Layout queries still reserve the normal work area at startup.
+        let taskbar = self.pocket_pc_taskbar_visible()
+            && (!self.window_rects.is_empty() || self.controls.has_visible_content());
         let title_owner = if self.active_window == 0 {
             0xdead0001
         } else {
@@ -4736,6 +4770,7 @@ impl Process {
                 fb_mapped: false,
                 guest_fb_pitch: 0,
                 direct_fb_frames: 0,
+                pending_gapi_copy: false,
                 gx_readback_scratch: Vec::new(),
                 gx_previous_readback: Vec::new(),
                 gx_layout_scratch: Vec::new(),
@@ -4986,6 +5021,7 @@ pub fn gapi_copy_columns(width: usize, height: usize, src: &[u8], dst: &mut [u8]
 fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
     // Internal polling is not a guest read. Leave untouched GPU pixels deferred.
     if cpu.deferred_memory_pending(SYNTHETIC_FRAMEBUFFER_BASE) {
+        state.pending_gapi_copy = false;
         return;
     }
     if !state.fb_mapped
@@ -5061,6 +5097,17 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
         }
     }
     if host_changed && state.gx_readback_scratch == state.gx_previous_readback {
+        if std::mem::take(&mut state.pending_gapi_copy) {
+            // Known HLE copies already updated the CPU image in API order.
+            // Publish that image, including any later GDI drawing, without
+            // replaying unchanged guest storage over the newer host pixels.
+            if let Ok(frame) = state.framebuffer.cpu_mut() {
+                frame.mark_dirty();
+                if frame.pixels == state.gx_readback_scratch {
+                    state.gx_last_pushed_counter = frame.frame_counter;
+                }
+            }
+        }
         return;
     }
     let frame = match state.framebuffer.cpu() {
@@ -5074,7 +5121,9 @@ fn sync_guest_framebuffer(cpu: &mut dyn Cpu, state: &mut KernelState) {
             return;
         }
     };
-    if state.gx_readback_scratch != frame.pixels {
+    let pending_copy = state.pending_gapi_copy;
+    state.pending_gapi_copy = false;
+    if state.gx_readback_scratch != frame.pixels || pending_copy {
         // The image is resident, so this second access cannot invoke a reader.
         if let Ok(frame) = state.framebuffer.cpu_mut() {
             frame.pixels.copy_from_slice(&state.gx_readback_scratch);
@@ -5801,6 +5850,124 @@ mod tests {
             })
         }
     }
+    #[test]
+    fn shell_navigation_follows_native_window_coverage_and_explicit_requests() {
+        use shell_menu::TaskbarVisibility;
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let state = &mut process.state;
+        state.gapi_action_key = gapi::VK_RETURN;
+        state.framebuffer.resize(240, 320);
+        // Work-area queries retain their startup reservation, but a poll has
+        // no native application strip to paint before CreateWindow.
+        assert!(state.pocket_pc_taskbar_visible());
+        let before = state.framebuffer.cpu().unwrap().pixels.clone();
+        state.composite_controls();
+        assert_eq!(state.framebuffer.cpu().unwrap().pixels, before);
+        let hwnd = 0xdead0001;
+        state.active_window = hwnd;
+        state.window_styles.insert(hwnd, (0x10000000, 0));
+        state.window_visibility.insert(hwnd, true);
+        state.window_rects.insert(hwnd, (0, 0, 240, 320));
+        assert!(!state.pocket_pc_taskbar_visible());
+        state.gdi.shell_menus.taskbar_visibility = TaskbarVisibility::Shown;
+        assert!(state.pocket_pc_taskbar_visible());
+        state.gdi.shell_menus.taskbar_visibility = TaskbarVisibility::Hidden;
+        assert!(!state.pocket_pc_taskbar_visible());
+        state.gdi.shell_menus.taskbar_visibility = TaskbarVisibility::Automatic;
+        state.window_rects.insert(hwnd, (0, 26, 240, 294));
+        assert!(state.pocket_pc_taskbar_visible());
+        state.window_rects.insert(hwnd, (0, 0, 240, 320));
+        state.window_styles.insert(hwnd, (0x10c00000, 0));
+        assert!(state.pocket_pc_taskbar_visible());
+        state.window_styles.insert(hwnd, (0x10000000, 0));
+        state.window_visibility.insert(hwnd, false);
+        assert!(state.pocket_pc_taskbar_visible());
+    }
+
+    #[test]
+    fn staged_gapi_copies_publish_once_at_poll() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let state = &mut process.state;
+        state.framebuffer.resize(3, 2);
+        state.fb_mapped = true;
+        state.guest_fb_pitch = 6;
+        state.gx_readback_scratch = vec![0; 12];
+        state.gx_last_pushed_counter = state.framebuffer.frame_counter;
+        cpu.map_region(SYNTHETIC_FRAMEBUFFER_BASE, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &[0x5a; 12])
+            .unwrap();
+        let before = state.framebuffer.frame_counter;
+        state
+            .framebuffer
+            .cpu_mut()
+            .unwrap()
+            .pixels
+            .copy_from_slice(&[0x5a; 12]);
+        state.pending_gapi_copy = true;
+        assert_eq!(state.framebuffer.frame_counter, before);
+        sync_guest_framebuffer(&mut cpu, state);
+        assert_eq!(state.framebuffer.frame_counter, before + 1);
+        assert!(!state.pending_gapi_copy);
+        assert_eq!(state.framebuffer.presentation_stats.completed(), 0);
+        sync_guest_framebuffer(&mut cpu, state);
+        assert_eq!(state.framebuffer.frame_counter, before + 1);
+    }
+    #[test]
+    fn staged_gapi_copies_preserve_later_gdi_drawing() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let state = &mut process.state;
+        state.framebuffer.resize(3, 2);
+        state.fb_mapped = true;
+        state.guest_fb_pitch = 6;
+        cpu.map_region(SYNTHETIC_FRAMEBUFFER_BASE, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(SYNTHETIC_FRAMEBUFFER_BASE, &[0x5a; 12])
+            .unwrap();
+        state.gx_readback_scratch = vec![0x5a; 12];
+        state.gx_last_pushed_counter = state.framebuffer.frame_counter;
+        state
+            .framebuffer
+            .cpu_mut()
+            .unwrap()
+            .pixels
+            .copy_from_slice(&[0x5a; 12]);
+        state.pending_gapi_copy = true;
+        // A real GDI operation follows the row copies, before the display poll.
+        let frame = state.framebuffer.cpu_mut().unwrap();
+        frame.pixels[..2].copy_from_slice(&[0x7f; 2]);
+        frame.mark_dirty();
+        let before = state.framebuffer.frame_counter;
+        sync_guest_framebuffer(&mut cpu, state);
+        assert_eq!(&state.framebuffer.cpu().unwrap().pixels[..2], &[0x7f; 2]);
+        assert_eq!(&state.framebuffer.cpu().unwrap().pixels[2..], &[0x5a; 10]);
+        assert_eq!(state.framebuffer.frame_counter, before + 1);
+        assert!(!state.pending_gapi_copy);
+        sync_guest_framebuffer(&mut cpu, state);
+        assert_eq!(state.framebuffer.frame_counter, before + 1);
+    }
+
     #[test]
     fn active_kernel_materializes_only_at_cpu_boundaries_and_keeps_gapi_coherent() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

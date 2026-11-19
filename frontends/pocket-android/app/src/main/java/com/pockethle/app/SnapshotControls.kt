@@ -16,7 +16,7 @@ internal class SnapshotControls(
     private val host: FrameLayout,
     action: (restore: Boolean) -> Unit,
 ) {
-    private val radius = (32 * context.resources.displayMetrics.density).toInt().coerceAtLeast(1)
+    private val radius = SnapshotControlGeometry.radius(context.resources.displayMetrics.density)
     private val save = Corner(context, false, "S").apply {
         contentDescription = "Save snapshot"
         setOnClickListener { action(false) }

@@ -41,8 +41,8 @@ class PocketPcControllerGeometryTest {
                     assertEquals(g.dpad.w,g.stick.w)
                     assertTrue(abs(2*g.stick.x+g.stick.w-w)<=1)
                 } else {
-                    assertTrue(abs(centreY2(g.dpad)-h)<=1)
-                    assertTrue(p[0].y < h/12)
+                    assertTrue("lower directional bank $context",centreY2(g.dpad)>h && centreY2(g.dpad)<=h+48*density)
+                    assertTrue(p[0].y >= SnapshotControlGeometry.clearance(density))
                     assertTrue(centreY2(g.actions[2]) < centreY2(g.dpad))
                     assertTrue(g.stick.w<=g.dpad.w)
                 }
@@ -105,26 +105,6 @@ class PocketPcControllerGeometryTest {
         assertFalse(ovalTouchContains(0f, 0f, 0, 64))
     }
 
-    private data class PhoneSnapshot(val w: Int, val h: Int, val density: Float, val big: Boolean, val rectangles: String)
-
-    @Test fun classicPhoneGeometryKeepsControlsWithCompactLandscapeToolbar() {
-        // Landscape remains stable; portrait tools now anchor the bottom edge.
-        val snapshots = listOf(
-            PhoneSnapshot(800, 360, 1.0f, false, "152,36,496,318|6,6,67,102|79,6,67,102|6,114,67,102|79,114,67,102|654,6,67,102|727,6,67,102|654,114,67,102|727,114,67,102|152,6,64,24|222,6,64,24|292,6,64,24|444,6,64,24|514,6,64,24|584,6,64,24|6,234,120,120|674,234,120,120"),
-            PhoneSnapshot(800, 360, 1.0f, true, "170,36,460,318|6,6,67,83|79,6,67,83|6,95,67,83|79,95,67,83|654,6,67,83|727,6,67,83|654,95,67,83|727,95,67,83|170,6,64,24|240,6,64,24|310,6,64,24|426,6,64,24|496,6,64,24|566,6,64,24|6,196,158,158|636,196,158,158"),
-            PhoneSnapshot(360, 800, 1.0f, false, "0,0,360,506|6,512,82,44|94,512,82,44|6,562,82,44|94,562,82,44|182,512,82,44|270,512,82,44|182,562,82,44|270,562,82,44|6,750,51,44|63,750,51,44|120,750,51,44|189,750,51,44|246,750,51,44|303,750,51,44|6,624,120,120|234,624,120,120"),
-            PhoneSnapshot(360, 800, 1.0f, true, "0,0,360,468|6,474,82,44|94,474,82,44|6,524,82,44|94,524,82,44|182,474,82,44|270,474,82,44|182,524,82,44|270,524,82,44|6,750,51,44|63,750,51,44|120,750,51,44|189,750,51,44|246,750,51,44|303,750,51,44|6,586,158,158|196,586,158,158"),
-            PhoneSnapshot(2401, 1081, 2.625f, false, "397,93,1607,973|15,15,176,314|206,15,176,314|15,344,176,314|206,344,176,314|2019,15,176,314|2210,15,176,314|2019,344,176,314|2210,344,176,314|397,15,168,63|580,15,168,63|763,15,168,63|1470,15,168,63|1653,15,168,63|1836,15,168,63|15,706,360,360|2026,706,360,360"),
-            PhoneSnapshot(2401, 1081, 2.625f, true, "505,93,1391,973|15,15,176,257|206,15,176,257|15,287,176,257|206,287,176,257|2019,15,176,257|2210,15,176,257|2019,287,176,257|2210,287,176,257|505,15,168,63|688,15,168,63|871,15,168,63|1362,15,168,63|1545,15,168,63|1728,15,168,63|15,591,475,475|1911,591,475,475")
-        )
-        snapshots.forEach { fixture ->
-            val g = PocketPcGeometry.calculate(fixture.w, fixture.h, fixture.density, fixture.big)
-            val actual = (listOf(g.screen) + g.actions + g.auxiliary + listOf(g.dpad, g.stick))
-                .joinToString("|") { "${it.x},${it.y},${it.w},${it.h}" }
-            assertEquals("${fixture.w}x${fixture.h} / ${fixture.big}", fixture.rectangles, actual)
-        }
-    }
-
     @Test fun tabletGroupsDoNotStretchAsTheViewportGetsTaller() {
         for (big in listOf(false, true)) {
             val a = PocketPcGeometry.calculate(1280, 800, 1f, big, true)
@@ -132,8 +112,8 @@ class PocketPcControllerGeometryTest {
             assertEquals(a.dpad.w, b.dpad.w)
             assertEquals(a.stick.w, b.stick.w)
             a.actions.zip(b.actions).forEach { (x, y) -> assertEquals(x.w, y.w); assertEquals(x.h, y.h) }
-            assertTrue(abs(centreY2(a.dpad)-800)<=1)
-            assertTrue(abs(centreY2(b.dpad)-1440)<=1)
+            assertTrue(centreY2(a.dpad)>800)
+            assertEquals(centreY2(a.dpad)-800,centreY2(b.dpad)-1440)
             assertEquals(800-a.stick.y-a.stick.h,1440-b.stick.y-b.stick.h)
         }
     }

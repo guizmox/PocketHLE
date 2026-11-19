@@ -58,6 +58,46 @@ const VOLUME_SPECIAL_FILE: &str = "vol:";
 /// swallowing the frames is what lets the game past its loading screen.
 const MP3_DECODER_DEVICE: &str = "mas1:";
 
+/// Conventional DOS alias for a long name with no colliding sibling. Collision
+/// numbers depend on the original filesystem's allocation order, which a CAB
+/// does not retain; never guess which long name an ambiguous alias identifies.
+fn short_name(name: &str) -> Option<String> {
+    let name = name.trim_end_matches([' ', '.']);
+    let (stem, extension) = name.rsplit_once('.').unwrap_or((name, ""));
+    let valid = |c: char| c.is_ascii_alphanumeric() || "$%'-_@~`!(){}^#&".contains(c);
+    if !stem.is_empty()
+        && stem.len() <= 8
+        && extension.len() <= 3
+        && stem.chars().all(valid)
+        && extension.chars().all(valid)
+    {
+        return None;
+    }
+    let clean = |part: &str, limit| {
+        part.chars()
+            .filter(|c| !matches!(c, ' ' | '.'))
+            .map(|c| {
+                if valid(c) {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .take(limit)
+            .collect::<String>()
+    };
+    let stem = clean(stem, 6);
+    if stem.is_empty() {
+        return None;
+    }
+    let extension = clean(extension, 3);
+    Some(if extension.is_empty() {
+        format!("{stem}~1")
+    } else {
+        format!("{stem}~1.{extension}")
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     Read,
@@ -1099,10 +1139,64 @@ impl Vfs {
             normalised = normalised.replace("//", "/");
         }
         if normalised.starts_with('/') {
-            normalised
+            self.expand_short_path(normalised)
         } else {
-            format!("/{normalised}")
+            self.expand_short_path(format!("/{normalised}"))
         }
+    }
+
+    fn expand_short_path(&self, path: String) -> String {
+        // Brothers in Arms 3D constructs Progra~1/Brothe~1 itself. Expand at
+        // the guest namespace boundary, before mount/overlay/share selection,
+        // so CRT and Win32 callers use the same files on every host platform.
+        if !path.contains('~') {
+            return path;
+        }
+        let mut expanded = String::new();
+        for component in path.split('/').skip(1) {
+            let mut selected = component.to_string();
+            if component.contains('~') {
+                let parent = format!("{}/", expanded.to_ascii_lowercase());
+                let mut names = std::collections::BTreeMap::new();
+                for mount in &self.mounts {
+                    // Virtual mount ancestors have no backing host directory.
+                    if let Some(child) = mount.prefix.strip_prefix(&parent) {
+                        if let Some(child) = child.split('/').find(|part| !part.is_empty()) {
+                            names.insert(child.to_string(), child.to_string());
+                        }
+                    }
+                    let root = mount.prefix.trim_end_matches('/');
+                    let normal = parent.trim_end_matches('/');
+                    if normal != root && !parent.starts_with(&mount.prefix) {
+                        continue;
+                    }
+                    if let Some(host) = self.host_path_for_mount(mount, normal) {
+                        if let Ok(entries) = std::fs::read_dir(host) {
+                            for entry in entries.flatten() {
+                                let name = entry.file_name().to_string_lossy().into_owned();
+                                if !self.hidden_backing(mount, &entry.path()) {
+                                    names.entry(name.to_ascii_lowercase()).or_insert(name);
+                                }
+                            }
+                        }
+                    }
+                }
+                // A real name such as PROGRA~1 always takes precedence.
+                if !names.contains_key(&component.to_ascii_lowercase()) {
+                    let mut candidates = names.values().filter(|name| {
+                        short_name(name).is_some_and(|alias| alias.eq_ignore_ascii_case(component))
+                    });
+                    if let Some(name) = candidates.next() {
+                        if candidates.next().is_none() {
+                            selected.clone_from(name);
+                        }
+                    }
+                }
+            }
+            expanded.push('/');
+            expanded.push_str(&selected);
+        }
+        expanded
     }
 
     fn matching_mounts<'a>(&'a self, guest_path: &str) -> Vec<&'a Mount> {
@@ -3437,6 +3531,84 @@ mod tests {
         let mut v = Vfs::new();
         v.mount("\\App\\", dir.path());
         assert!(v.resolve("\\App\\..\\..\\etc\\passwd").is_none());
+    }
+
+    #[test]
+    fn dos_aliases_resolve_mount_ancestors_files_and_writable_overlays() {
+        let installed = tempfile::tempdir().unwrap();
+        let saved = tempfile::tempdir().unwrap();
+        std::fs::write(installed.path().join("sprites.bar"), b"sprites").unwrap();
+        std::fs::create_dir(installed.path().join("Sound Effects")).unwrap();
+        let sound = installed.path().join("Sound Effects/Introduction.wav");
+        std::fs::write(&sound, b"sound").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only(r"\Program Files\Brothers in arms 3D\", installed.path());
+        v.mount_save_dir(r"\Program Files\Brothers in arms 3D\", saved.path());
+        assert_eq!(
+            v.resolve(r"\Progra~1\Brothe~1\sprites.bar"),
+            Some(installed.path().join("sprites.bar"))
+        );
+        assert_eq!(
+            v.resolve(r"\PROGRA~1\BROTHE~1\SOUNDE~1\INTROD~1.WAV"),
+            Some(sound)
+        );
+        let handle = v
+            .open(r"\Progra~1\Brothe~1\data.sav", Access::Write, true)
+            .unwrap();
+        assert_eq!(v.write(handle, b"save"), Some(4));
+        assert!(v.close(handle));
+        assert_eq!(
+            std::fs::read(saved.path().join("data.sav")).unwrap(),
+            b"save"
+        );
+        assert_eq!(
+            v.resolve(r"\Program Files\Brothers in arms 3D\data.sav"),
+            Some(saved.path().join("data.sav"))
+        );
+        let handle = v
+            .open_file(r"\Progra~1\Brothe~1\data.sav", 1, 0, 3, false, 0)
+            .unwrap()
+            .handle;
+        assert_eq!(
+            v.open_file(
+                r"\Program Files\Brothers in arms 3D\data.sav",
+                1,
+                3,
+                3,
+                false,
+                0
+            ),
+            Err(32)
+        );
+        assert!(v.close(handle));
+        v.set_default_dir(r"\Program Files\Brothers in arms 3D\");
+        assert!(v.resolve(r"SOUNDE~1\INTROD~1.WAV").unwrap().is_file());
+        assert!(v.resolve(r"\Progra~1\Brothe~1\..\..\outside.bin").is_none());
+    }
+
+    #[test]
+    fn dos_aliases_preserve_literal_names_and_refuse_ambiguous_guesses() {
+        let installed = tempfile::tempdir().unwrap();
+        std::fs::write(installed.path().join("Introduction one.wav"), b"one").unwrap();
+        std::fs::write(installed.path().join("Introduction two.wav"), b"two").unwrap();
+        let mut v = Vfs::new();
+        v.mount_read_only(r"\Program Files\", installed.path());
+        assert_eq!(
+            v.resolve(r"\Progra~1\INTROD~1.WAV"),
+            Some(installed.path().join("introd~1.wav"))
+        );
+        assert!(v
+            .open(r"\Progra~1\INTROD~1.WAV", Access::Read, false)
+            .is_none());
+        let literal = installed.path().join("INTROD~1.WAV");
+        std::fs::write(&literal, b"literal").unwrap();
+        assert_eq!(v.resolve(r"\Progra~1\INTROD~1.WAV"), Some(literal));
+        let other = tempfile::tempdir().unwrap();
+        v.mount_read_only(r"\Program Files Other\", other.path());
+        assert_eq!(
+            v.normalise_guest_path(r"\Progra~1\INTROD~1.WAV"),
+            "/progra~1/introd~1.wav"
+        );
     }
 
     #[test]

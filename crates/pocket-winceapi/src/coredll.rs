@@ -6534,11 +6534,47 @@ fn sync_direct_framebuffer_write(
     if dst >= end || write_end <= base {
         return Ok(());
     }
+    // CPU-resident packed displays need only the bytes written by this HLE call.
+    // Keep CPU/GDI reads coherent immediately, but let the display poll publish
+    // the accumulated scanlines. A row copy is not a completed presentation.
+    if !complete_gapi_transfer
+        && !ctx.kernel.gx_explicit_present
+        && ctx.kernel.fb_mapped
+        && !pocket_kernel::gapi_uses_columns(ctx.kernel)
+        && ctx.kernel.guest_fb_pitch == ctx.kernel.framebuffer.stride_bytes()
+        && ctx.kernel.gx_readback_scratch.len() == ctx.kernel.framebuffer.byte_size() as usize
+        && ctx.kernel.framebuffer.gpu_source().is_none()
+    {
+        let start = dst.max(base);
+        let finish = write_end.min(end);
+        let offset = (start - base) as usize;
+        let bytes = (finish - start) as usize;
+        ctx.kernel.gx_layout_scratch.resize(bytes, 0);
+        ctx.cpu
+            .read_mem_into(start, &mut ctx.kernel.gx_layout_scratch)?;
+        let frame = ctx
+            .kernel
+            .framebuffer
+            .cpu_mut()
+            .map_err(KernelError::Dispatch)?;
+        if frame.pixels[offset..offset + bytes] != ctx.kernel.gx_layout_scratch {
+            frame.pixels[offset..offset + bytes].copy_from_slice(&ctx.kernel.gx_layout_scratch);
+            frame.clear_render_presentation();
+            ctx.kernel.pending_gapi_copy = true;
+        }
+        // Remember the guest bytes already observed by this copy. A later GDI
+        // draw may replace part of the CPU image before the poll; unchanged
+        // guest storage must not overwrite that newer host drawing.
+        ctx.kernel.gx_readback_scratch[offset..offset + bytes]
+            .copy_from_slice(&ctx.kernel.gx_layout_scratch);
+        return Ok(());
+    }
     let fb_len = ctx.kernel.framebuffer.byte_size() as usize;
     if ctx.kernel.gx_readback_scratch.len() != fb_len {
         ctx.kernel.gx_readback_scratch.resize(fb_len, 0);
     }
     crate::gx::read_guest_framebuffer(ctx)?;
+    ctx.kernel.pending_gapi_copy = false;
     if complete_gapi_transfer {
         ctx.kernel.framebuffer.presentation_stats.record_present();
     }
@@ -6558,9 +6594,12 @@ fn sync_direct_framebuffer_write(
             .copy_from_slice(&ctx.kernel.gx_readback_scratch);
         ctx.kernel.framebuffer.mark_dirty();
         ctx.kernel.gx_last_pushed_counter = ctx.kernel.framebuffer.frame_counter;
-        // Tell the run loop the guest announces its own frames, so it
-        // can stop polling for plain stores it will never find.
-        ctx.kernel.direct_fb_frames = ctx.kernel.direct_fb_frames.saturating_add(1);
+        // Only an atomic full transfer establishes a completed-frame lease.
+        // A cold polling cache or padded/rotated partial copy still needs the
+        // ordinary scanout poll after this synchronization.
+        if complete_gapi_transfer {
+            ctx.kernel.direct_fb_frames = ctx.kernel.direct_fb_frames.saturating_add(1);
+        }
         if complete_gapi_transfer && ctx.kernel.framebuffer.directdraw.frame_rate_limit.is_some() {
             ctx.kernel.framebuffer.directdraw.last_present = Some(std::time::Instant::now());
         }
@@ -32905,6 +32944,7 @@ mod tests {
             fb_mapped: false,
             guest_fb_pitch: 0,
             direct_fb_frames: 0,
+            pending_gapi_copy: false,
             gx_readback_scratch: Vec::new(),
             gx_previous_readback: Vec::new(),
             gx_layout_scratch: Vec::new(),
@@ -39161,6 +39201,67 @@ mod tests {
     }
 
     #[test]
+    fn packed_gapi_copies_accumulate_before_publication() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        kernel.framebuffer.resize(4, 3);
+        let thunk = dummy_thunk();
+        cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_mem(0x1000, &[0xab; 8]).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        crate::gx::ensure_fb_mapped(&mut ctx).unwrap();
+        let before = ctx.kernel.framebuffer.frame_counter;
+        for row in 0..3 {
+            ctx.cpu
+                .write_reg(ArmReg::R0, SYNTHETIC_FRAMEBUFFER_BASE + row * 8)
+                .unwrap();
+            ctx.cpu.write_reg(ArmReg::R1, 0x1000).unwrap();
+            ctx.cpu.write_reg(ArmReg::R2, 8).unwrap();
+            memcpy(&mut ctx).unwrap();
+            assert_eq!(ctx.kernel.framebuffer.frame_counter, before);
+            assert_eq!(
+                &ctx.kernel.framebuffer.cpu().unwrap().pixels
+                    [row as usize * 8..(row as usize + 1) * 8],
+                &[0xab; 8]
+            );
+        }
+        assert!(ctx.kernel.pending_gapi_copy);
+        assert_eq!(ctx.kernel.direct_fb_frames, 0);
+        assert_eq!(ctx.kernel.framebuffer.presentation_stats.completed(), 0);
+        // A game may leave an explicit GX phase and subsequently write through
+        // its retained pointer. Preserve that phase's established fallback;
+        // the coalesced path is only for writers without explicit presentation.
+        ctx.kernel.gx_explicit_present = true;
+        ctx.cpu.write_mem(0x1000, &[0xcd; 8]).unwrap();
+        ctx.cpu
+            .write_reg(ArmReg::R0, SYNTHETIC_FRAMEBUFFER_BASE)
+            .unwrap();
+        memcpy(&mut ctx).unwrap();
+        assert!(ctx.kernel.framebuffer.frame_counter > before);
+        assert!(!ctx.kernel.pending_gapi_copy);
+        assert_eq!(
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..8],
+            &[0xcd; 8]
+        );
+        // Restore starts without polling history. The first row uses the full
+        // synchronization fallback, but cannot claim a completed-frame lease.
+        ctx.kernel.gx_explicit_present = false;
+        ctx.kernel.gx_readback_scratch.clear();
+        ctx.cpu.write_mem(0x1000, &[0xef; 8]).unwrap();
+        memcpy(&mut ctx).unwrap();
+        assert_eq!(
+            &ctx.kernel.framebuffer.cpu().unwrap().pixels[..8],
+            &[0xef; 8]
+        );
+        assert_eq!(ctx.kernel.gx_readback_scratch.len(), 24);
+        assert_eq!(ctx.kernel.direct_fb_frames, 0);
+    }
+    #[test]
     fn locked_scanlines_do_not_publish_partial_frames() {
         for gapi in [false, true] {
             let mut cpu = StubCpu::new();
@@ -39191,7 +39292,9 @@ mod tests {
             ctx.kernel.framebuffer.directdraw.primary_locks.clear();
             sync_direct_framebuffer_write(&mut ctx, base, 2).unwrap();
             assert_eq!(ctx.kernel.framebuffer.frame_counter, before + 1);
-            assert_eq!(ctx.kernel.direct_fb_frames, 1);
+            // Publishing a changed pixel after unlocking is not an atomic
+            // full-frame transfer and must not enable scanout-poll backoff.
+            assert_eq!(ctx.kernel.direct_fb_frames, 0);
         }
     }
 

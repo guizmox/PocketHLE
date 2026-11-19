@@ -14,6 +14,16 @@ to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
 - [Stylus modes](#pocketpc-right-stick-stylus-modes) and [Center tap](#center-tap)
 - [Focus and dialogs](#desktop-focus-and-import-launch-settings-prompt)
 
+## PocketPC shell strip
+
+A native borderless window covering the entire emulated panel occupies the
+navigation strip in the automatic shell policy. Windows positioned inside the
+work area, captioned windows and native dialogs retain the strip. Explicit
+`SHFullScreen` show/hide requests take precedence; GAPI fullscreen ownership keeps
+its existing behavior. This policy uses native window state, not game identities
+or graphics profiles. The initial shell strip is composed only once an application
+window exists; startup work-area queries still reserve its usual height.
+
 ## Experimental desktop snapshots
 
 Snapshots are available on Windows and Linux desktop builds with the Unicorn
@@ -423,10 +433,11 @@ Normal/Big choice in Display and controls; both layouts support it.
 
 Controller reuses the existing input IDs and functions with this arrangement:
 
-* Landscape: P1/P2 on the left and P3/P4 on the right sit at the top corners,
-  retaining their previous dimensions in Normal and Big. The D-pad is centred
-  vertically. A/B/C/Action form a raised diamond below the right P bank; it no
-  longer has to share the D-pad's horizontal axis.
+* Landscape: P1/P2 on the left and P3/P4 on the right sit below the physical
+  snapshot corners with a safety gap. Their height is slightly reduced in both
+  Normal and Big. The D-pad sits below the vertical midpoint. A/B/C/Action form
+  a diamond below the right P bank, closer to the lowered stylus stick.
+  The top toolbar keeps its existing position.
 * The landscape stylus stick fills the space below the diamond, up to the D-pad
   diameter. On short viewports its diameter is capped to keep the targets apart;
   P-key/action sizes do not shrink just to enlarge the stick.
@@ -445,8 +456,10 @@ goes to the game viewport rather than stretching these keys. Portrait reserves
 a bottom bank and landscape reserves side banks. This changes host layout only,
 not guest framebuffer dimensions, mappings or the inverse touch transform.
 
-Classic preserves the existing landscape phone rectangles, including fractional
-density and Normal/Big. Its portrait toolbar also anchors the bottom, freeing
+Classic shortens its two landscape action rows and lowers the upper edge of
+that bank to leave the same snapshot safety gap. The toolbar, D-pad and stylus
+stick keep their existing positions. This applies at fractional density and in
+Normal/Big. Its portrait toolbar also anchors the bottom, freeing
 the area above the control bank for the game. On viewports whose smaller dimension is at least 600dp,
 its landscape action banks have a bounded height and remain just above the thumb
 controls; portrait action cells have a bounded width and stay in two side groups.

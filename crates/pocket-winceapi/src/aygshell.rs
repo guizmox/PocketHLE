@@ -169,11 +169,11 @@ fn sh_full_screen(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
     }
     let shell = &mut ctx.kernel.gdi.shell_menus;
     if flags & 1 != 0 {
-        shell.taskbar_hidden = false;
+        shell.taskbar_visibility = pocket_kernel::shell_menu::TaskbarVisibility::Shown;
         shell.gx_fullscreen = false;
     }
     if flags & 2 != 0 {
-        shell.taskbar_hidden = true;
+        shell.taskbar_visibility = pocket_kernel::shell_menu::TaskbarVisibility::Hidden;
     }
     if flags & 4 != 0 {
         shell.sip_button_hidden = false;

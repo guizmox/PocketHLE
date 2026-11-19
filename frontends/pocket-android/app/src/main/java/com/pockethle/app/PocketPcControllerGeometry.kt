@@ -40,7 +40,7 @@ internal object PocketPcControllerGeometry {
         // therefore retain exactly the same dimensions when size mode changes.
         val unit = minOf(density.coerceAtLeast(.1f) * .8f, w / minWidth, h / minHeight)
         fun px(value: Float) = (value * unit).roundToInt().coerceAtLeast(1)
-        val margin = px(edge); var pW = px(pWidth); val pH = px(76f)
+        val margin = px(edge); var pW = px(pWidth); val pH = if (portrait) px(76f) else minOf(px(76f), maxOf(px(64f),(44f*density).roundToInt()))
         val pGap = px(12f)
         var pad = px(normalPad * if (big) 4f / 3f else 1f)
         var stick = pad
@@ -66,7 +66,7 @@ internal object PocketPcControllerGeometry {
             }
         }
         val faceX = w - margin - delta - diameter / 2
-        val bottom = h - px(16f)
+        val bottom = h - px(if (portrait) 16f else 8f)
         val stickX: Int
         val stickY: Int
         val axisY: Int
@@ -97,15 +97,15 @@ internal object PocketPcControllerGeometry {
             dpadY = axisY
             pY = axisY - maxOf(pad / 2, delta + diameter / 2) - pGap - pH
         } else {
-            // P keys keep their size but move to the top corners; the action
-            // diamond has its own raised axis, independent of the centred pad.
-            pY = toolY
+            // Reserve an independent corner band for snapshot actions. Shorter P
+            // keys keep room for the face diamond and directional controls.
+            pY = maxOf(toolY,SnapshotControlGeometry.clearance(density))
             axisY = pY + pH + px(12f) + delta + diameter / 2
             val stickRoom = bottom - (axisY + delta + diameter / 2) - px(12f)
             stick = minOf(pad, stickRoom.coerceAtLeast(1))
             stickX = minOf(faceX, w - margin - stick / 2)
             stickY = bottom - stick / 2
-            dpadY = (h / 2).coerceIn(pY + pH + px(12f) + pad / 2, bottom - pad / 2)
+            dpadY = (h / 2 + px(12f)).coerceIn(pY + pH + px(12f) + pad / 2, bottom - pad / 2)
         }
         val pLeft1 = ControlRect(margin, pY, pW, pH)
         val pLeft2 = ControlRect(margin + pW + pGap, pY, pW, pH)

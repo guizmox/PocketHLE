@@ -522,6 +522,9 @@ impl KernelSnapshot {
         state.fb_mapped = self.fb_mapped;
         state.guest_fb_pitch = self.guest_fb_pitch;
         state.direct_fb_frames = self.direct_fb_frames;
+        // A cold frontend publishes the captured CPU image before observing
+        // subsequent guest writes. Pending host upload work is not guest state.
+        state.pending_gapi_copy = false;
         state.gapi_column_major = self.gapi_column_major;
         state.gx_last_pushed_counter = self.gx_last_pushed_counter;
         state.gx_draw_active = self.gx_draw_active;

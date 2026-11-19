@@ -35,20 +35,22 @@ internal data class PocketPcGeometry(
                     }
                 }
                 val padY=h-gap-pad
-                val actionBottom=(padY-safety).coerceAtLeast(gap+2)
+                val bankStart=maxOf(gap,SnapshotControlGeometry.clearance(density))
+                val actionBottom=(padY-safety).coerceAtLeast(bankStart+gap+2)
                 val cellW=((side-gap)/2).coerceAtLeast(1)
-                val fullHeight=((actionBottom-2*gap)/2).coerceAtLeast(1)
+                val fullHeight=((actionBottom-bankStart-gap)/2).coerceAtLeast(1)
                 // Match a phone-sized bank rather than stretching it with tablet height.
                 val cellH=if(tablet) minOf(fullHeight,dp(if(bigDirectionalControls) 84f else 104f)) else fullHeight
-                val bankTop=if(tablet) actionBottom-2*cellH-gap else gap
+                val bankTop=if(tablet) maxOf(bankStart,actionBottom-2*cellH-gap) else bankStart
                 fun bank(x: Int)=listOf(ControlRect(x,bankTop,cellW,cellH),ControlRect(x+cellW+gap,bankTop,cellW,cellH),
                     ControlRect(x,bankTop+cellH+gap,cellW,cellH),ControlRect(x+cellW+gap,bankTop+cellH+gap,cellW,cellH))
                 val left=maxOf(side,pad)+2*gap; val room=(w-2*left).coerceAtLeast(1)
                 // Wider guest keys, with a distinct gap before the orange host actions.
                 val bw=minOf(dp(64f),((room-6*gap)/6).coerceAtLeast(1))
-                val aux=(0..2).map { ControlRect(left+it*(bw+gap),gap,bw,toolbarH) } +
-                    listOf(ControlRect(w-left-3*bw-2*gap,gap,bw,toolbarH),ControlRect(w-left-2*bw-gap,gap,bw,toolbarH),ControlRect(w-left-bw,gap,bw,toolbarH))
-                return PocketPcGeometry(ControlRect(left,toolbarH+2*gap,room,(h-toolbarH-3*gap).coerceAtLeast(1)),
+                val toolbarTop=gap
+                val aux=(0..2).map { ControlRect(left+it*(bw+gap),toolbarTop,bw,toolbarH) } +
+                    listOf(ControlRect(w-left-3*bw-2*gap,toolbarTop,bw,toolbarH),ControlRect(w-left-2*bw-gap,toolbarTop,bw,toolbarH),ControlRect(w-left-bw,toolbarTop,bw,toolbarH))
+                return PocketPcGeometry(ControlRect(left,toolbarTop+toolbarH+gap,room,(h-toolbarTop-toolbarH-2*gap).coerceAtLeast(1)),
                     bank(gap)+bank(w-side-gap),aux,ControlRect(gap,padY,pad,pad),ControlRect(w-gap-pad,padY,pad,pad))
             }
             // Match the landscape calculation after exchanging the screen

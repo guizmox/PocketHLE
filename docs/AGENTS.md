@@ -1113,6 +1113,14 @@ fallback. A read-only mount lazily keeps a list of candidate files for repeated
 fallback lookups. The ranking and ambiguity checks still run on the candidates.
 Exact lookups and writable mounts continue to observe the live filesystem.
 
+Host-backed paths also resolve conventional, unambiguous DOS `~1` aliases for
+mount ancestors and existing directory/file names. Brothers in Arms 3D builds
+`\Progra~1\Brothe~1\sprites.bar` from its own module path. Expand aliases before
+mount and overlay selection so CRT access, Win32 sharing and save writes refer
+to the same files. Literal short filenames win. Colliding aliases remain
+unresolved because CAB files do not retain the original short-name allocation
+order. Ordinary paths retain the direct normalization path.
+
 Flash Disk has a 32 MiB logical file-data quota, independent of physical RAM and
 the object store. Serialize size-growth validation with writes/truncation; count
 sparse logical lengths and refund through current file sizes after truncate/delete.

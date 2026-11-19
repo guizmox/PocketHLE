@@ -107,7 +107,7 @@ use this interpreter and snapshot path.
 
 The managed and native payload versions evolve separately; neither has a legacy
 development-format reader. Current native session identity is section version 3,
-WinCE 8, fixed EGL 2, programmable EGL 6 and media 2. Managed payload version is 1.
+WinCE 9, fixed EGL 2, programmable EGL 6 and media 2. Managed payload version is 1.
 Recreate development slots after this change.
 
 ## Restore and ARM block reads

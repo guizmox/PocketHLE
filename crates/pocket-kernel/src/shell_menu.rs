@@ -31,11 +31,20 @@ struct Popup {
     selected: usize,
     first: usize,
 }
+/// Explicit shell z-order requests override automatic native-window coverage.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TaskbarVisibility {
+    #[default]
+    Automatic,
+    Shown,
+    Hidden,
+}
+
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShellMenus {
     pub bars: HashMap<u32, Bar>,
     pub tracking: Option<TrackingMenu>,
-    pub taskbar_hidden: bool,
+    pub taskbar_visibility: TaskbarVisibility,
     pub gx_fullscreen: bool,
     pub taskbar_captured: bool,
     pub start_icon_hidden: bool,
