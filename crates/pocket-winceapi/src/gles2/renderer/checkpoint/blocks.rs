@@ -1,13 +1,36 @@
 //! Native compressed storage layout; never infer a format from its byte count.
-//! Khronos KHR_texture_compression_astc_hdr and IMG_texture_compression_pvrtc.
+//! Layouts follow Khronos ASTC, S3TC, ETC/EAC, ATC, RGTC, LATC and BPTC.
+//! PVRTC remains opaque: its storage cannot be edited as independent blocks.
 pub(super) fn layout(format: u32) -> Option<(usize, usize, usize)> {
     match format {
-        0x83f0 | 0x83f1 | 0x8c4c | 0x8c4d | 0x8d64 | 0x8c92 | 0x9270 | 0x9271 | 0x9274..=0x9277 => {
-            Some((4, 4, 8))
-        }
-        0x83f2 | 0x83f3 | 0x8c4e | 0x8c4f | 0x8c93 | 0x87ee | 0x9272 | 0x9273 | 0x9278 | 0x9279 => {
-            Some((4, 4, 16))
-        }
+        0x83f0
+        | 0x83f1
+        | 0x8c4c
+        | 0x8c4d
+        | 0x8d64
+        | 0x8c92
+        | 0x8c70
+        | 0x8c71
+        | 0x8dbb
+        | 0x8dbc
+        | 0x9270
+        | 0x9271
+        | 0x9274..=0x9277 => Some((4, 4, 8)),
+        0x83f2
+        | 0x83f3
+        | 0x8c4e
+        | 0x8c4f
+        | 0x8c93
+        | 0x87ee
+        | 0x8c72
+        | 0x8c73
+        | 0x8dbd
+        | 0x8dbe
+        | 0x8e8c..=0x8e8f
+        | 0x9272
+        | 0x9273
+        | 0x9278
+        | 0x9279 => Some((4, 4, 16)),
         0x93b0..=0x93bd | 0x93d0..=0x93dd => {
             const SHAPES: [(usize, usize); 14] = [
                 (4, 4),
@@ -53,6 +76,11 @@ pub(super) fn update(
     {
         return false;
     }
+    // A successfully accepted empty update changes no texels, even when its
+    // format has no independently editable block layout (for example PVRTC).
+    if w == 0 || h == 0 {
+        return data.is_empty();
+    }
     if rect == [0, 0, width, height] {
         storage.clear();
         storage.extend_from_slice(data);
@@ -78,8 +106,14 @@ pub(super) fn update(
     }
     let columns = width.div_ceil(bw);
     let rows = h.div_ceil(bh);
-    let count = w.div_ceil(bw) * bytes;
-    if storage.len() != columns * height.div_ceil(bh) * bytes || data.len() != rows * count {
+    let Some(count) = w.div_ceil(bw).checked_mul(bytes) else {
+        return false;
+    };
+    let expected_storage = columns
+        .checked_mul(height.div_ceil(bh))
+        .and_then(|v| v.checked_mul(bytes));
+    let expected_data = rows.checked_mul(count);
+    if expected_storage != Some(storage.len()) || expected_data != Some(data.len()) {
         return false;
     }
     for row in 0..rows {
@@ -124,5 +158,53 @@ mod tests {
             &[2; 8]
         ));
         assert_eq!(blocks, vec![1; 128]);
+    }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    #[test]
+    fn signed_and_unsigned_channel_formats_preserve_untouched_blocks() {
+        for (format, bytes) in [
+            (0x8dbb, 8),
+            (0x8dbc, 8),
+            (0x8dbd, 16),
+            (0x8dbe, 16),
+            (0x8c70, 8),
+            (0x8c71, 8),
+            (0x8c72, 16),
+            (0x8c73, 16),
+            (0x8e8c, 16),
+            (0x8e8d, 16),
+            (0x8e8e, 16),
+            (0x8e8f, 16),
+        ] {
+            let mut storage = vec![3; 6 * bytes];
+            assert!(update(
+                format,
+                [12, 8],
+                [4, 0, 4, 8],
+                &mut storage,
+                &vec![7; 2 * bytes]
+            ));
+            for block in 0..6 {
+                assert_eq!(
+                    &storage[block * bytes..(block + 1) * bytes],
+                    &vec![if block % 3 == 1 { 7 } else { 3 }; bytes],
+                    "format {format:#x}, block {block}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn accepted_empty_updates_do_not_require_a_block_layout_or_mutate_storage() {
+        let mut storage = vec![3; 32];
+        for rect in [[0, 0, 0, 4], [0, 0, 8, 0], [8, 4, 0, 0]] {
+            assert!(update(0xffff, [8, 4], rect, &mut storage, &[]));
+            assert_eq!(storage, vec![3; 32]);
+        }
+        assert!(!update(0xffff, [8, 4], [0, 0, 0, 4], &mut storage, &[1]));
+        assert!(!update(0xffff, [8, 4], [9, 0, 0, 0], &mut storage, &[]));
     }
 }

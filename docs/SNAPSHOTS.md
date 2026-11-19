@@ -102,8 +102,8 @@ the current configured provider on the next callback.
 Normal stop retains CF close handlers. Snapshot replacement discards the old
 instance without executing those handlers, preventing shutdown side effects from
 being mistaken for part of the restored session. Android reattaches the original
-JNI input channel after every cold replacement. The legacy Android compatibility
-renderer remains a separate explicit unsupported path; it is not the CF VM.
+JNI input channel after every cold replacement. All managed Android applications
+use this interpreter and snapshot path.
 
 The managed and native payload versions evolve separately; neither has a legacy
 development-format reader. Current native session identity is section version 3,
@@ -329,12 +329,14 @@ metadata records dimensions/internal format only; compressed textures also retai
 the current accepted native blocks because ES has no compressed-block readback.
 Accepted definitions, subimages and deletion replace/remove those live records;
 ordinary draws accumulate no history or pixel copies. Native rejected definitions
-preserve the prior metadata and the guest's GL error. Compressed subimages use their actual format layout (including non-square ASTC
+preserve the prior metadata and the guest's GL error. Compressed subimages use
+their actual format layout (including RGTC, LATC, BPTC and non-square ASTC
 blocks), rather than guessing from the byte count. Whole-image uploads replace
 opaque blocks directly, including PVRTC, and can repair a previously unsupported
 mirror. Accepted partial updates of unknown layouts still fail capture explicitly;
 unsupported/permissive compressed mip generation is not represented as a guessed
-image. No compressed data is decoded/recompressed by the snapshot path.
+image. Accepted empty subimage updates leave both the data and its capture
+status unchanged. No compressed data is decoded/recompressed by the snapshot path.
 
 Fixed-function surface capture uses the same ES transfer implementation. Even
 a programmable-only game has a fixed-function EGL section; leaving the old
@@ -458,4 +460,4 @@ Save/preflight failures reuse the existing diagnostic dialog, with Continue when
 the session remains live; fatal restore failures use the same dialog without it.
 Desktop uses that same diagnostic payload and controller-aware window.
 
-Validation procedures and platform limits: [phase 6 record](testing/SNAPSHOT-PHASE6-2026-11-19.md) · [phase 7 record](testing/SNAPSHOT-PHASE7-2026-11-19.md).
+Validation procedures and platform limits: [phase 6 record](testing/SNAPSHOT-PHASE6-2026-11-19.md) · [phase 7 record](testing/SNAPSHOT-PHASE7-2026-11-19.md) · [native compressed textures](testing/SNAPSHOT-COMPRESSED-2026-11-19.md).

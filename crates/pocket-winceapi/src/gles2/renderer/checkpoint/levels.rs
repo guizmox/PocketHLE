@@ -78,6 +78,11 @@ impl Renderer {
         let Some(image) = self.texture_levels.get_mut(&(texture, face, level)) else {
             return Err(error("missing compressed texture allocation"));
         };
+        // The driver accepted this call; an empty update cannot invalidate or
+        // repair a previously captured compressed image.
+        if rect[2] == 0 || rect[3] == 0 {
+            return Ok(());
+        }
         if rect == [0, 0, image.width, image.height] {
             let blocks = image.blocks.get_or_insert_with(Vec::new);
             blocks.clear();

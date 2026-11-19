@@ -27,7 +27,6 @@ mod colors_trace;
 mod gps;
 mod graphics;
 mod internet;
-mod managed_game;
 mod power;
 mod runner;
 mod vibration;

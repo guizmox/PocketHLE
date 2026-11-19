@@ -156,7 +156,8 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
-    pub(crate) fn reject_snapshot(&self, restore: bool, reason: &str) {
+    #[cfg(feature = "unicorn")]
+    fn reject_snapshot(&self, restore: bool, reason: &str) {
         self.snapshot_notices
             .lock()
             .unwrap()
@@ -669,19 +670,6 @@ fn run_process_inner(
     if let Ok(image) = &image {
         if let Some(runtime) = &image.managed_runtime {
             let screen = entry.settings.screen.resolve_image(Some(image));
-            if guest_path.is_none() && crate::managed_game::supports(&exe) {
-                summary_lines.push(
-                    "Managed image: using the Android vAlienAttack compatibility renderer."
-                        .to_string(),
-                );
-                summary_lines.push(format!("Screen: {}x{}", screen.0, screen.1));
-                let renderer_summary =
-                    crate::managed_game::run(&exe, &state, hook.take_input_receiver(), screen);
-                return (
-                    format!("{}\n{renderer_summary}", summary_lines.join("\n")),
-                    0,
-                );
-            }
             if guest_path.is_none() || hook.has_managed_restore() {
                 return run_compact_framework(
                     &exe,

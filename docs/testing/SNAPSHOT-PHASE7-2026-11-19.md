@@ -57,10 +57,6 @@ reapplies the current host rotation policy after restoration. The managed runner
 uses the launch configuration pinned by preparation rather than reopening it. The host
 input accumulator starts neutral and the sensor provider supplies the next sample.
 
-The legacy Android compatibility renderer remains explicitly unsupported. It is
-not the generic CF interpreter, and this work does not add game-specific replay
-or checkpoint logic for that renderer.
-
 ## GPU and Android UI
 
 Native compressed subimages use explicit format layouts, including non-square

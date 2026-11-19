@@ -76,6 +76,108 @@ mod tests {
     use super::*;
     use pocket_gles::gpu::with_shared_context_source;
     #[test]
+    #[ignore = "requires native host OpenGL ES 3 with RGTC/BPTC"]
+    fn compressed_partial_updates_survive_two_cold_restores() -> Result<()> {
+        use super::super::super::uniforms::native_tests::call;
+        use pocket_kernel::Thunk;
+        use pocket_pe::ImportBinding;
+        let ui = ProgrammableHost::new_programmable().map_err(error)?;
+        with_shared_context_source(Some(ui.shared_source()), || {
+            let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+            let thunk = Thunk {
+                thunk_va: 0,
+                iat_va: 0,
+                dll: "libglesv2.dll".into(),
+                binding: ImportBinding::Name("glCompressedTexImage2D".into()),
+                friendly_name: None,
+            };
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let mut r = Renderer::new(8, 8, 1)?;
+            assert!(r.host.es);
+            let count = integer(&mut r, 0x86a2)?;
+            assert!((0..4096).contains(&count));
+            let mut supported = vec![0; count as usize];
+            invoke!(&mut r, "glGetIntegerv", (0x86a3 => u32, supported.as_mut_ptr() => *mut i32), ());
+            let mut expected = Vec::new();
+            for format in [
+                0x8dbb, 0x8dbc, 0x8dbd, 0x8dbe, 0x8e8c, 0x8e8d, 0x8e8e, 0x8e8f,
+            ] {
+                if !supported.contains(&(format as i32)) {
+                    continue;
+                }
+                let (_, _, size) = super::super::blocks::layout(format).unwrap();
+                call(&mut r, &mut ctx, "glGenTextures", &[1, 0x1000])?;
+                let texture = ctx.cpu.read_u32_le(0x1000)?;
+                call(&mut r, &mut ctx, "glBindTexture", &[TEXTURE_2D, texture])?;
+                let mut bytes = vec![0x40; 8 * size];
+                ctx.cpu.write_mem(0x2000, &bytes)?;
+                call(
+                    &mut r,
+                    &mut ctx,
+                    "glCompressedTexImage2D",
+                    &[TEXTURE_2D, 0, format, 16, 8, 0, bytes.len() as u32, 0x2000],
+                )?;
+                assert_eq!(
+                    call(&mut r, &mut ctx, "glGetError", &[])?,
+                    0,
+                    "upload {format:#x}"
+                );
+                let replacement = vec![0x80; 2 * size];
+                ctx.cpu.write_mem(0x2000, &replacement)?;
+                call(
+                    &mut r,
+                    &mut ctx,
+                    "glCompressedTexSubImage2D",
+                    &[
+                        TEXTURE_2D,
+                        0,
+                        4,
+                        0,
+                        4,
+                        8,
+                        format,
+                        replacement.len() as u32,
+                        0x2000,
+                    ],
+                )?;
+                assert_eq!(
+                    call(&mut r, &mut ctx, "glGetError", &[])?,
+                    0,
+                    "subimage {format:#x}"
+                );
+                bytes[size..2 * size].fill(0x80);
+                bytes[5 * size..6 * size].fill(0x80);
+                expected.push((texture, format, bytes));
+            }
+            // This is a native-format test, never a pass obtained by skipping every format.
+            assert!(!expected.is_empty(), "host exposes no RGTC/BPTC format");
+            for _ in 0..2 {
+                let saved = r.capture_context().map_err(error)?;
+                for (texture, format, bytes) in &expected {
+                    let image = &saved
+                        .native
+                        .textures
+                        .iter()
+                        .find(|t| t.guest == *texture)
+                        .unwrap()
+                        .levels[0]
+                        .2;
+                    assert!(image.compressed);
+                    assert_eq!(image.internal, *format);
+                    assert_eq!(&image.bytes, bytes);
+                }
+                drop(r);
+                r = saved.restore(1).map_err(error)?;
+                assert_eq!(call(&mut r, &mut ctx, "glGetError", &[])?, 0);
+            }
+            Ok(())
+        })
+    }
+    #[test]
     #[ignore = "requires native shared desktop GL and OpenGL ES 3 contexts"]
     fn odd_width_deleted_color_images_preserve_pixels_and_pack_alignment() -> Result<()> {
         use super::super::super::uniforms::native_tests::call;

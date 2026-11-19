@@ -65,8 +65,8 @@ engine and the host-specific GPU transfers.
 Compact Framework sessions use the same slot and verified-restore commands.
 Their managed object graph, forms, timer deadlines, resources, audio and GLES
 state are restored between IL callbacks, without re-running the program entry
-point. The separate legacy Android compatibility renderer does not expose a
-managed checkpoint; it reports an explicit unsupported-operation diagnostic.
+point. Android and Desktop both execute managed applications through the common
+Compact Framework interpreter.
 
 Files open for writing or appending at capture return to their captured contents
 on successful restore. Files already closed at capture are not rolled back.

@@ -1,1 +1,13 @@
-crates/pocket-winceapi/src/gles2/renderer/journal.rs
+frontends/pocket-android-jni/assets/valien-attack/BAlien.png
+frontends/pocket-android-jni/assets/valien-attack/BackDrop.png
+frontends/pocket-android-jni/assets/valien-attack/Cross.png
+frontends/pocket-android-jni/assets/valien-attack/Defender.png
+frontends/pocket-android-jni/assets/valien-attack/GAlien.png
+frontends/pocket-android-jni/assets/valien-attack/GameOver.png
+frontends/pocket-android-jni/assets/valien-attack/Missile.png
+frontends/pocket-android-jni/assets/valien-attack/PAlien.png
+frontends/pocket-android-jni/assets/valien-attack/RAlien.png
+frontends/pocket-android-jni/assets/valien-attack/Star.png
+frontends/pocket-android-jni/assets/valien-attack/YAlien.png
+frontends/pocket-android-jni/assets/valien-attack/YouWin.png
+frontends/pocket-android-jni/src/managed_game.rs
