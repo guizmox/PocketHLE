@@ -22,6 +22,7 @@
 
 mod bluetooth;
 mod camera;
+mod checkpoint_io;
 mod colors_trace;
 mod gps;
 mod graphics;
@@ -1479,4 +1480,26 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeGpuQueryResult(
     #[cfg(not(target_os = "android"))]
     let _ = query;
     -1
+}
+
+/// Snapshot UI commands are asynchronous; the worker owns all CPU/GL state.
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativeRequestSnapshot(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    restore: jni::sys::jboolean,
+) -> jni::sys::jboolean {
+    session_from_handle(handle).is_some_and(|session| session.request_snapshot(restore != 0)) as _
+}
+#[no_mangle]
+pub extern "system" fn Java_com_pockethle_app_NativeBridge_nativePollSnapshotNotice(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) -> jstring {
+    match session_from_handle(handle).and_then(|session| session.poll_snapshot_notice()) {
+        Some(notice) => new_jstring(&env, notice),
+        None => std::ptr::null_mut(),
+    }
 }

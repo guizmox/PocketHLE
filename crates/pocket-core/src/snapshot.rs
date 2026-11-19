@@ -4,9 +4,10 @@ use super::*;
 use bincode::Options;
 use pocket_cpu::unicorn::{ArmExecutionSnapshot, UnicornCpu};
 use pocket_kernel::{guest_clock::GuestClockSnapshot, KernelSnapshot, ResumePoint};
+use pocket_snapshot::{codec, PAYLOAD_LIMIT};
 use pocket_winceapi::gles::EglSessionSnapshot;
 use serde::Serialize;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{Read, Write};
 
 #[path = "device_snapshot.rs"]
 mod device;
@@ -18,19 +19,19 @@ const SESSION: u16 = SECTION_REQUIRED | 1;
 const ARM: u16 = SECTION_REQUIRED | 2;
 const KERNEL: u16 = SECTION_REQUIRED | 3;
 const EGL_FIXED: u16 = SECTION_REQUIRED | 4;
+const EGL_FIXED_VERSION: u16 = 2;
 const MEDIA: u16 = SECTION_REQUIRED | 5;
 const EGL_PROGRAMMABLE: u16 = SECTION_REQUIRED | 6;
-const EGL_PROGRAMMABLE_VERSION: u16 = 5;
+const EGL_PROGRAMMABLE_VERSION: u16 = 6;
 const HSS: u16 = SECTION_REQUIRED | 7;
 const INPUT_RELEASES: u16 = SECTION_REQUIRED | 8;
 const DEVICE: u16 = SECTION_REQUIRED | 9;
 const SECTION_HEADER_SIZE: u64 = 12;
-const IO_BUFFER_SIZE: usize = 64 * 1024;
-const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;
 
 pub struct SessionSnapshot {
     device: Option<DeviceArchive>,
     executable: [u8; 32],
+    environment: std::collections::BTreeMap<String, String>,
     cpu: ArmExecutionSnapshot,
     kernel: KernelSnapshot,
     egl: EglSessionSnapshot,
@@ -101,6 +102,7 @@ impl SessionSnapshot {
         );
         Ok(Self {
             device: None,
+            environment: Default::default(),
             executable,
             cpu,
             kernel,
@@ -116,16 +118,11 @@ impl SessionSnapshot {
         })
     }
 
-    pub fn write(&self, mut output: impl Write) -> std::io::Result<()> {
-        output.write_all(SECTION_MAGIC)?;
-        let compressed = flate2::write::ZlibEncoder::new(output, flate2::Compression::fast());
-        let mut buffered = BufWriter::with_capacity(IO_BUFFER_SIZE, compressed);
-        self.write_sections(&mut buffered)?;
-        buffered.into_inner()?.finish()?;
-        Ok(())
+    pub fn write(&self, output: impl Write) -> std::io::Result<()> {
+        pocket_snapshot::write_stream(output, SECTION_MAGIC, |out| self.write_sections(out))
     }
 
-    fn write_sections(&self, mut buffered: &mut impl Write) -> std::io::Result<()> {
+    fn write_sections(&self, mut buffered: &mut (impl Write + ?Sized)) -> std::io::Result<()> {
         let count = 5
             + u16::from(self.programmable.is_some())
             + u16::from(self.hss.is_some())
@@ -139,6 +136,7 @@ impl SessionSnapshot {
             SESSION,
             &(
                 &self.executable,
+                &self.environment,
                 &self.clock,
                 &self.point,
                 &self.thunks,
@@ -174,26 +172,18 @@ impl SessionSnapshot {
         Ok(())
     }
 
-    pub fn read(mut input: impl Read) -> std::io::Result<Self> {
-        let mut magic = [0; 8];
-        input.read_exact(&mut magic)?;
-        if &magic != SECTION_MAGIC {
-            return Err(invalid("unsupported snapshot format"));
-        }
-        let compressed = flate2::read::ZlibDecoder::new(input);
-        let mut buffered = BufReader::with_capacity(IO_BUFFER_SIZE, compressed);
-        let snapshot = Self::read_sections(&mut buffered)?;
-        if buffered.read(&mut [0; 1])? != 0 {
-            return Err(invalid("trailing snapshot data"));
-        }
-        Ok(snapshot)
+    pub fn read(input: impl Read) -> std::io::Result<Self> {
+        pocket_snapshot::read_stream(input, SECTION_MAGIC, |input| Self::read_sections(input))
     }
 
-    fn read_sections(input: &mut impl Read) -> std::io::Result<Self> {
+    fn read_sections(input: &mut (impl Read + ?Sized)) -> std::io::Result<Self> {
         Self::read_sections_mode(input, true)
     }
 
-    fn read_sections_mode(input: &mut impl Read, allow_device: bool) -> std::io::Result<Self> {
+    fn read_sections_mode(
+        input: &mut (impl Read + ?Sized),
+        allow_device: bool,
+    ) -> std::io::Result<Self> {
         let mut count = [0; 2];
         input.read_exact(&mut count)?;
         let mut remaining = PAYLOAD_LIMIT;
@@ -215,10 +205,10 @@ impl SessionSnapshot {
             }
             let mut section = input.take(len);
             match (id, version) {
-                (SESSION, 2) => session = Some(read_section(&mut section)?),
+                (SESSION, 3) => session = Some(read_section(&mut section)?),
                 (ARM, 1) => cpu = Some(read_section(&mut section)?),
                 (KERNEL, 8) => kernel = Some(read_section(&mut section)?),
-                (EGL_FIXED, 1) => egl = Some(read_section(&mut section)?),
+                (EGL_FIXED, EGL_FIXED_VERSION) => egl = Some(read_section(&mut section)?),
                 (MEDIA, 2) => media = Some(read_section(&mut section)?),
                 (EGL_PROGRAMMABLE, EGL_PROGRAMMABLE_VERSION) => {
                     programmable = Some(read_section(&mut section)?)
@@ -240,11 +230,12 @@ impl SessionSnapshot {
                 return Err(invalid("snapshot section length mismatch"));
             }
         }
-        let (executable, clock, point, thunks, thunk_by_va) =
+        let (executable, environment, clock, point, thunks, thunk_by_va) =
             session.ok_or_else(|| invalid("missing session section"))?;
         let snapshot = Self {
             device,
             executable,
+            environment,
             clock,
             point,
             thunks,
@@ -257,6 +248,20 @@ impl SessionSnapshot {
             hss,
             input_releases,
         };
+        let pc = snapshot
+            .cpu
+            .validate()
+            .map_err(|e| invalid(e.to_string()))?;
+        if pc != snapshot.point.pc {
+            return Err(invalid("snapshot continuation mismatch"));
+        }
+        if snapshot
+            .thunk_by_va
+            .values()
+            .any(|&index| index >= snapshot.thunks.len())
+        {
+            return Err(invalid("invalid snapshot thunk table"));
+        }
         if allow_device && snapshot.kernel.is_device_process() != snapshot.device.is_some() {
             return Err(invalid("process checkpoint is missing its device domain"));
         }
@@ -280,7 +285,7 @@ fn consume_budget(remaining: &mut u64, len: u64) -> std::io::Result<()> {
 }
 
 fn write_section(
-    output: &mut impl Write,
+    output: &mut (impl Write + ?Sized),
     remaining: &mut u64,
     id: u16,
     value: &impl Serialize,
@@ -290,11 +295,15 @@ fn write_section(
         .map_err(std::io::Error::other)?;
     consume_budget(remaining, len)?;
     output.write_all(&id.to_le_bytes())?;
-    let version = if id == EGL_PROGRAMMABLE {
+    let version = if id == EGL_FIXED {
+        EGL_FIXED_VERSION
+    } else if id == EGL_PROGRAMMABLE {
         EGL_PROGRAMMABLE_VERSION
     } else if id == KERNEL {
         8
-    } else if id == MEDIA || id == SESSION {
+    } else if id == SESSION {
+        3
+    } else if id == MEDIA {
         2
     } else {
         1
@@ -407,6 +416,9 @@ impl Emulator {
         if process.state.sdl.key_ptr != 0 {
             cpu.write_mem(process.state.sdl.key_ptr, &process.state.sdl.keys)?;
         }
+        // Host presentation pacing is a current preference, not guest state.
+        // Retain saved explicit waits and their remaining time.
+        process.state.framebuffer.directdraw.frame_rate_limit = self.requested_frame_rate_limit;
         process.thunks = saved.thunks;
         process.thunk_by_va = saved.thunk_by_va;
         self.cpu = Box::new(cpu);
@@ -458,12 +470,6 @@ impl Emulator {
             )
             .context("restored emulator loop")
     }
-}
-
-fn codec() -> impl Options {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(PAYLOAD_LIMIT)
 }
 
 #[cfg(test)]
@@ -1136,6 +1142,59 @@ mod tests {
             error(section(35, PAYLOAD_LIMIT, b"")),
             "snapshot sections exceed the size limit"
         );
+    }
+
+    #[test]
+    fn read_rejects_a_validly_compressed_but_inconsistent_continuation() {
+        let mut source = fixture(3);
+        let point = ResumePoint {
+            main_entry: 0x11000,
+            pc: 0x11004,
+        };
+        let mut saved =
+            SessionSnapshot::capture(source.cpu.as_mut(), source.process.as_mut().unwrap(), point)
+                .unwrap();
+        saved.point.pc = 0x11000;
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        let error = SessionSnapshot::read(bytes.as_slice()).err().unwrap();
+        assert!(error.to_string().contains("continuation mismatch"));
+    }
+
+    #[test]
+    fn current_host_pacing_keeps_saved_guest_waits() {
+        let mut source = fixture(3);
+        source.set_frame_rate_limit(Some(30));
+        source
+            .process_mut()
+            .unwrap()
+            .state
+            .framebuffer
+            .directdraw
+            .pending
+            .insert(
+                (0, 1, 2),
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            );
+        let point = ResumePoint {
+            main_entry: 0x11000,
+            pc: 0x11004,
+        };
+        let saved =
+            SessionSnapshot::capture(source.cpu.as_mut(), source.process.as_mut().unwrap(), point)
+                .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination.set_frame_rate_limit(Some(60));
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        let timing = &destination.process().unwrap().state.framebuffer.directdraw;
+        assert_eq!(timing.frame_rate_limit, Some(60));
+        assert_eq!(timing.pending.len(), 1);
     }
 
     #[test]

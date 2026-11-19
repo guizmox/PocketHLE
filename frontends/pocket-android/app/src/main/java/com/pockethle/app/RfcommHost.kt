@@ -251,4 +251,15 @@ object RfcommHost {
             return if (n == 0) 0 else if (e.tx.offer(bytes.copyOf(n))) n else -10035
         }
     }
+    /** A non-consuming copy of the bounded native reader queue. */
+    @JvmStatic fun checkpoint(id: Int): ByteArray {
+        val e = sockets[id] ?: throw IllegalStateException("Bluetooth endpoint is closed")
+        synchronized(e) {
+            val bytes = e.rx.toByteArray()
+            val terminal = if (e.closed) 995 else if (e.error != 0) e.error else if (e.eof) 0 else 10054
+            return java.nio.ByteBuffer.allocate(4 + bytes.size)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(terminal).put(bytes).array()
+        }
+    }
+
 }

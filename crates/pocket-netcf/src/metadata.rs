@@ -113,6 +113,10 @@ fn read_index(bytes: &[u8], offset: usize, width: usize) -> Option<usize> {
 }
 
 impl<'a> Assembly<'a> {
+    pub(crate) fn image(&self) -> &'a [u8] {
+        self.bytes
+    }
+
     pub(crate) fn read(bytes: &'a [u8]) -> Option<Self> {
         if !bytes.starts_with(b"MZ") {
             return None;

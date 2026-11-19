@@ -2,6 +2,7 @@
 //! by simple settings classes. Guest paths are confined to a game's save folder.
 
 use crate::metadata::Assembly;
+use crate::vm::ObjectGraph;
 use crate::vm::{Fault, Machine, Value};
 use pocket_kernel::vfs::{Access, Vfs};
 use std::collections::BTreeMap;
@@ -9,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 const XML_LIMIT: u64 = 64 * 1024;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Storage {
     pub root: Option<PathBuf>,
     readers: BTreeMap<usize, String>,
@@ -233,4 +234,73 @@ pub fn read_bounded(vfs: &mut Vfs, path: &str, limit: u64) -> Option<Vec<u8>> {
     })();
     vfs.close(handle);
     result
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct StorageSnapshot {
+    readers: BTreeMap<usize, String>,
+    writers: BTreeMap<usize, String>,
+    serializers: BTreeMap<usize, u32>,
+}
+impl Storage {
+    pub(crate) fn checkpoint(&self) -> Result<StorageSnapshot, String> {
+        let writers = self
+            .writers
+            .iter()
+            .map(|(&id, path)| {
+                let root = self.root.as_ref().ok_or("Missing managed storage root")?;
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|_| "Managed writer escapes storage root")?;
+                let name = relative
+                    .to_str()
+                    .filter(|s| filename(s) == Some(*s))
+                    .ok_or("Invalid managed writer name")?;
+                Ok((id, name.to_owned()))
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(StorageSnapshot {
+            readers: self.readers.clone(),
+            writers,
+            serializers: self.serializers.clone(),
+        })
+    }
+}
+impl StorageSnapshot {
+    pub(crate) fn restore(self, root: Option<PathBuf>) -> Result<Storage, String> {
+        let writers = self
+            .writers
+            .into_iter()
+            .map(|(id, name)| {
+                if filename(&name) != Some(name.as_str()) {
+                    return Err("Invalid saved managed writer name".into());
+                }
+                let root = root.as_ref().ok_or("Missing managed storage root")?;
+                let path = root.join(name);
+                if path.exists() && !pocket_cab::plain_path_below(root, &path, false) {
+                    return Err("Saved managed writer escapes storage root".into());
+                }
+                Ok((id, path))
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(Storage {
+            root,
+            readers: self.readers,
+            writers,
+            serializers: self.serializers,
+        })
+    }
+}
+impl StorageSnapshot {
+    pub(crate) fn validate_checkpoint(&self, machine: &impl ObjectGraph) -> bool {
+        self.writers
+            .values()
+            .all(|name| filename(name) == Some(name.as_str()))
+            && self
+                .readers
+                .keys()
+                .chain(self.writers.keys())
+                .chain(self.serializers.keys())
+                .all(|&id| machine.live_object(id))
+    }
 }

@@ -203,4 +203,15 @@ object BluetoothHost {
         return if (c.tx.offer(bytes.copyOf(n))) n else -10035
     }
     @JvmStatic fun close(id: Int) { connections.remove(id)?.close() }
+    /** A non-consuming copy of the bounded native reader queue. */
+    @JvmStatic fun checkpoint(id: Int): ByteArray {
+        val c = connections[id] ?: throw IllegalStateException("Bluetooth endpoint is closed")
+        synchronized(c) {
+            val bytes = c.rx.toByteArray()
+            val terminal = if (c.closed) 995 else if (c.error != 0) c.error else if (c.eof) 0 else 10054
+            return java.nio.ByteBuffer.allocate(4 + bytes.size)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(terminal).put(bytes).array()
+        }
+    }
+
 }

@@ -64,6 +64,11 @@ pub struct SurfaceSnapshot {
 }
 
 impl SurfaceSnapshot {
+    /// The archive, rather than the requested host policy, identifies the live backend.
+    pub fn requires_native_renderer(&self) -> bool {
+        self.native.is_some()
+    }
+
     fn capture(
         target: &RenderTarget,
         renderer: Option<&crate::gpu::Renderer>,

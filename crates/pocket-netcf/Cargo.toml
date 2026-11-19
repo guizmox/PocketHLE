@@ -12,3 +12,11 @@ image = { version = "0.24", default-features = false, features = ["png", "bmp", 
 pocket-cab = { path = "../pocket-cab" }
 quick-xml = "0.39"
 tempfile = "3"
+
+serde.workspace = true
+serde_bytes.workspace = true
+pocket-snapshot = { path = "../pocket-snapshot" }
+sha2 = "0.11"
+
+[dev-dependencies]
+bincode = "1.3"

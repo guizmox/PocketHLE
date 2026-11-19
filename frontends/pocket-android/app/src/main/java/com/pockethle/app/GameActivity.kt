@@ -222,6 +222,81 @@ class GameActivity : AppCompatActivity() {
         bar.visibility = View.VISIBLE
     }
 
+    private lateinit var snapshotControls: SnapshotControls
+    private var diagnosticDialog: AddDataDialog? = null
+    private var snapshotOperationPending = false
+
+    private fun positionRateOverlays() {
+        if (!showFps && !showIps) return
+        val frame = lastFrame ?: return
+        val parent = surface.parent as? FrameLayout ?: return
+        if (surface.width <= 0 || surface.height <= 0) return
+        val rect = renderedDisplayRect(surface.width, surface.height, frame.width, frame.height,
+            frame.textureWidth, frame.textureHeight, rotationDegrees, !gizmondoGame, controllerFullscreenHost.active)
+        val gap = (6 * resources.displayMetrics.density).toInt()
+        var top = surface.top + rect.top + gap
+        // When the image fills the physical corner, keep the rate badge below L.
+        val corner = if (::snapshotControls.isInitialized) snapshotControls.loadBoundsInWindow() else null
+        if (corner != null) {
+            val origin = IntArray(2).also { parent.getLocationInWindow(it) }
+            val badgeRight = origin[0] + surface.left + rect.left + rect.width - gap
+            val badgeTop = origin[1] + top
+            if (badgeRight > corner.left && badgeTop < corner.bottom && badgeTop >= corner.top) {
+                top = corner.bottom - origin[1] + gap
+            }
+        }
+        val right = (parent.width - surface.left - rect.left - rect.width + gap).coerceAtLeast(gap)
+        for (overlay in listOf(fpsOverlay, ipsOverlay)) {
+            if (overlay.parent !== parent) continue
+            val layout = overlay.layoutParams as? FrameLayout.LayoutParams ?: continue
+            if (layout.topMargin != top || layout.rightMargin != right || layout.gravity != (android.view.Gravity.TOP or android.view.Gravity.RIGHT)) {
+                layout.gravity = android.view.Gravity.TOP or android.view.Gravity.RIGHT
+                layout.topMargin = top; layout.rightMargin = right
+                overlay.layoutParams = layout
+            }
+        }
+    }
+
+    private fun updateSnapshotControls() {
+        if (!::snapshotControls.isInitialized) return
+        val host = findViewById<FrameLayout>(android.R.id.content)
+        if (session == 0L || lastFrame == null || host.width <= 0 || host.height <= 0) {
+            snapshotControls.place(null); return
+        }
+        val safe = androidx.core.view.ViewCompat.getRootWindowInsets(host)
+            ?.getInsets(androidx.core.view.WindowInsetsCompat.Type.displayCutout())
+            ?: androidx.core.graphics.Insets.NONE
+        snapshotControls.place(android.graphics.Rect(safe.left, safe.top,
+            host.width - safe.right, host.height - safe.bottom))
+    }
+
+    private fun pollSnapshotNotice() {
+        if (!snapshotOperationPending) return
+        NativeBridge.nativePollSnapshotNotice(session)?.let { raw ->
+            val notice = JSONObject(raw)
+            snapshotOperationPending = false
+            snapshotControls.busy(false)
+            when (notice.getString("action")) {
+                "saved", "restored" -> {
+                    // Rotation is host presentation/input policy, not a held input to restore.
+                    if (notice.getString("action") == "restored" && !gizmondoGame) {
+                        NativeBridge.nativeSendInput(session, NativeBridge.INPUT_KEYBOARD_ROTATION, rotationDegrees / 90, 0)
+                    }
+                    val date = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM,
+                        java.text.DateFormat.SHORT).format(java.util.Date(notice.getLong("timestamp")))
+                    val title = if (notice.getString("action") == "saved") "Snapshot saved" else "Snapshot restored"
+                    Toast.makeText(this, "$title\n$date", Toast.LENGTH_LONG).show()
+                }
+                "error" -> {
+                    val diagnostic = notice.getJSONObject("diagnostic")
+                    showSessionDiagnostic(diagnostic.getString("title"), diagnostic.getString("reason"),
+                        diagnostic.getString("details"), resumable = NativeBridge.nativeIsRunning(session) != 0)
+                }
+                "missing" -> Unit // Restore with an empty slot intentionally does nothing.
+            }
+        }
+    }
+
     private val pollTick = object : Runnable {
         override fun run() {
             if (session == 0L) return
@@ -247,6 +322,9 @@ class GameActivity : AppCompatActivity() {
                 android.widget.Toast.makeText(this@GameActivity, message, android.widget.Toast.LENGTH_LONG).show()
             }
             updateMediaBar()
+            updateSnapshotControls()
+            positionRateOverlays()
+            pollSnapshotNotice()
             updateFpsOverlay()
             updateIpsOverlay()
             if (NativeBridge.nativeIsRunning(session) == 0) {
@@ -349,6 +427,14 @@ class GameActivity : AppCompatActivity() {
         }
         status.visibility = View.GONE
 
+        snapshotControls = SnapshotControls(this, findViewById(android.R.id.content)) { restore ->
+            val handle = session
+            if (handle != 0L && NativeBridge.nativeRequestSnapshot(handle, restore)) {
+                releaseHeldInput()
+                snapshotControls.busy(true)
+                snapshotOperationPending = true
+            }
+        }
         wireSurfaceTouchInput()
         wireVirtualGamepad()
 
@@ -562,6 +648,8 @@ class GameActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        diagnosticDialog?.dismiss()
+        diagnosticDialog = null
         BluetoothHost.closeAll()
         CameraHost.closeAll()
         GpsHost.closeAll()
@@ -586,6 +674,8 @@ class GameActivity : AppCompatActivity() {
         val handle = session
         if (handle == 0L) return
         joiningSession = true
+        snapshotOperationPending = false
+        if (::snapshotControls.isInitialized) { snapshotControls.busy(false); snapshotControls.place(null) }
         glRenderer.stopPresentation()
         fpsOverlay.visibility = View.GONE
         ipsOverlay.visibility = View.GONE
@@ -630,26 +720,42 @@ class GameActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun showSessionDiagnostic(title: String, reason: String, details: String) {
+    private fun showSessionDiagnostic(title: String, reason: String, details: String, resumable: Boolean = false) {
+        releaseHeldInput()
+        diagnosticDialog?.dismiss()
         val message = android.widget.TextView(this).apply {
             text = reason
             val padding = (24 * resources.displayMetrics.density).toInt()
             setPadding(padding, padding / 2, padding, padding / 2)
         }
-        val scroll = android.widget.ScrollView(this).apply {
-            addView(message)
-            isFocusable = false
+        val scroll = object : android.widget.ScrollView(this) {
+            override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+                val limit = (resources.displayMetrics.heightPixels * 0.45f).toInt()
+                val offered = View.MeasureSpec.getSize(heightSpec)
+                val height = if (View.MeasureSpec.getMode(heightSpec) == View.MeasureSpec.UNSPECIFIED) limit else minOf(offered, limit)
+                super.onMeasure(widthSpec, View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.AT_MOST))
+            }
+        }.apply { addView(message); isFocusable = false }
+        lateinit var dialog: AddDataDialog
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(scroll, LinearLayout.LayoutParams(-1, -2))
+            if (resumable) addView(android.widget.Button(this@GameActivity).apply {
+                text = "Continue"
+                setOnClickListener { dialog.dismiss() }
+            }, LinearLayout.LayoutParams(-1, -2))
         }
         var expanded = false
-        val dialog = AddDataDialog(this) { false }.apply {
+        dialog = AddDataDialog(this) { false }.apply {
             setTitle(title)
-            setView(scroll)
+            setView(content)
             setButton(android.content.DialogInterface.BUTTON_NEUTRAL, "Show details", null as android.content.DialogInterface.OnClickListener?)
             setButton(android.content.DialogInterface.BUTTON_NEGATIVE, "Copy diagnostic", null as android.content.DialogInterface.OnClickListener?)
             setButton(android.content.DialogInterface.BUTTON_POSITIVE, "Return to library") { _, _ -> finish() }
             setCancelable(false)
             controllerCancel = false
         }
+        dialog.setOnDismissListener { if (diagnosticDialog === dialog) diagnosticDialog = null }
         dialog.setOnShowListener {
             val showDetails = dialog.getButton(android.content.DialogInterface.BUTTON_NEUTRAL)
             showDetails.setOnClickListener {
@@ -664,6 +770,7 @@ class GameActivity : AppCompatActivity() {
             }
             showDetails.requestFocus()
         }
+        diagnosticDialog = dialog
         dialog.show()
     }
 

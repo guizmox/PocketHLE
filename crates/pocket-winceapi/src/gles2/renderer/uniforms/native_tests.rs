@@ -4,7 +4,12 @@ use pocket_cpu::regs::ArmReg::{R0, R1, R2, R3};
 use pocket_kernel::Thunk;
 use pocket_pe::ImportBinding;
 
-fn call(renderer: &mut Renderer, ctx: &mut CallCtx<'_>, name: &str, args: &[u32]) -> Result<u32> {
+pub(in crate::gles2::renderer) fn call(
+    renderer: &mut Renderer,
+    ctx: &mut CallCtx<'_>,
+    name: &str,
+    args: &[u32],
+) -> Result<u32> {
     for (reg, &value) in [R0, R1, R2, R3].into_iter().zip(args) {
         ctx.cpu.write_reg(reg, value)?;
     }
@@ -441,5 +446,118 @@ fn relocated_uniforms_survive_typed_updates_repeated_capture_and_program_lifecyc
     assert!(renderer.deleted_programs.is_empty());
     assert!(renderer.uniform_locations.is_empty());
     assert_eq!(call(&mut renderer, &mut ctx, "glGetError", &[])?, 0);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires native OpenGL"]
+pub(in crate::gles2::renderer) fn installed_executable_survives_failed_link_and_two_cold_snapshots(
+) -> Result<()> {
+    let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+    let thunk = Thunk {
+        thunk_va: 0,
+        iat_va: 0,
+        dll: "libglesv2.dll".into(),
+        binding: ImportBinding::Name("glDrawArrays".into()),
+        friendly_name: None,
+    };
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    let mut renderer = Renderer::new(4, 4, 1)?;
+    let vertex = shader(
+        &mut renderer,
+        &mut ctx,
+        0x8b31,
+        "void main(){gl_Position=vec4(0.,0.,0.,1.);gl_PointSize=1.;}",
+    )?;
+    let fragment = shader(
+        &mut renderer,
+        &mut ctx,
+        0x8b30,
+        "precision mediump float;uniform vec4 tint;void main(){gl_FragColor=tint;}",
+    )?;
+    let program = call(&mut renderer, &mut ctx, "glCreateProgram", &[])?;
+    for shader in [vertex, fragment] {
+        call(
+            &mut renderer,
+            &mut ctx,
+            "glAttachShader",
+            &[program, shader],
+        )?;
+    }
+    call(&mut renderer, &mut ctx, "glLinkProgram", &[program])?;
+    call(&mut renderer, &mut ctx, "glUseProgram", &[program])?;
+    let tint = location(&mut renderer, &mut ctx, program, "tint")?;
+    call(
+        &mut renderer,
+        &mut ctx,
+        "glUniform4f",
+        &[
+            tint,
+            0.25f32.to_bits(),
+            0.5f32.to_bits(),
+            0.75f32.to_bits(),
+            1f32.to_bits(),
+        ],
+    )?;
+    call(&mut renderer, &mut ctx, "glDrawArrays", &[0, 0, 1])?;
+    call(
+        &mut renderer,
+        &mut ctx,
+        "glReadPixels",
+        &[0, 0, 4, 4, RGBA, UNSIGNED_BYTE, 0x3000],
+    )?;
+    let expected = ctx.cpu.read_mem(0x3000, 64)?;
+    assert!(expected.chunks_exact(4).any(|pixel| pixel[1] != 0));
+    // ES permits one attached shader of each type. Recompile that shader
+    // unsuccessfully so LinkProgram genuinely fails on both native APIs.
+    let invalid = "void main( invalid";
+    ctx.cpu.write_mem(0x2000, invalid.as_bytes())?;
+    ctx.cpu.write_mem(0x1000, &0x2000u32.to_le_bytes())?;
+    ctx.cpu
+        .write_mem(0x1004, &(invalid.len() as u32).to_le_bytes())?;
+    call(
+        &mut renderer,
+        &mut ctx,
+        "glShaderSource",
+        &[vertex, 1, 0x1000, 0x1004],
+    )?;
+    call(&mut renderer, &mut ctx, "glCompileShader", &[vertex])?;
+    call(&mut renderer, &mut ctx, "glLinkProgram", &[program])?;
+    call(
+        &mut renderer,
+        &mut ctx,
+        "glGetProgramiv",
+        &[program, 0x8b82, 0x1010],
+    )?;
+    assert_eq!(ctx.cpu.read_mem(0x1010, 4)?, [0; 4]);
+    for _ in 0..2 {
+        renderer = roundtrip(&mut renderer)?;
+        call(
+            &mut renderer,
+            &mut ctx,
+            "glGetProgramiv",
+            &[program, 0x8b82, 0x1010],
+        )?;
+        assert_eq!(ctx.cpu.read_mem(0x1010, 4)?, [0; 4]);
+        call(&mut renderer, &mut ctx, "glClearColor", &[0, 0, 0, 0])?;
+        call(&mut renderer, &mut ctx, "glClear", &[0x4000])?;
+        call(&mut renderer, &mut ctx, "glDrawArrays", &[0, 0, 1])?;
+        call(
+            &mut renderer,
+            &mut ctx,
+            "glReadPixels",
+            &[0, 0, 4, 4, RGBA, UNSIGNED_BYTE, 0x3000],
+        )?;
+        assert_eq!(ctx.cpu.read_mem(0x3000, 64)?, expected);
+        assert_eq!(call(&mut renderer, &mut ctx, "glGetError", &[])?, 0);
+    }
+    call(&mut renderer, &mut ctx, "glUseProgram", &[0])?;
+    call(&mut renderer, &mut ctx, "glUseProgram", &[program])?;
+    assert_eq!(call(&mut renderer, &mut ctx, "glGetError", &[])?, 0x0502);
+    assert!(renderer.failed_program.is_none());
     Ok(())
 }

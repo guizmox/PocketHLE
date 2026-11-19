@@ -4,7 +4,8 @@ use jni::{
     JNIEnv, JavaVM,
 };
 use pocket_core::kernel::internet::{
-    self, Backend, Client, RequestSpec, ResponseHead, Result, SessionSpec, Transfer,
+    self, Backend, BufferedTransfer, Client, RequestSpec, ResponseHead, Result, SessionSpec,
+    Transfer,
 };
 use std::sync::Arc;
 struct Bridge {
@@ -112,6 +113,20 @@ impl Client for JavaClient {
     }
 }
 impl Transfer for JavaTransfer {
+    fn capture_checkpoint(&self) -> std::result::Result<BufferedTransfer, String> {
+        let bytes = self
+            .session
+            .bridge
+            .call(|e, c| {
+                let data = JByteArray::from(
+                    e.call_static_method(c, "httpCheckpoint", "(I)[B", &[JValue::Int(self.id)])?
+                        .l()?,
+                );
+                e.convert_byte_array(data)
+            })
+            .map_err(|code| format!("cannot capture Android HTTP transfer: {code}"))?;
+        crate::checkpoint_io::http(&bytes)
+    }
     fn head(&mut self) -> Result<Option<ResponseHead>> {
         let json = self.session.bridge.call(|e, c| {
             let s = JString::from(

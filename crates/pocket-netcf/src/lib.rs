@@ -7,6 +7,7 @@ pub mod il;
 mod metadata;
 mod runtime;
 mod sensors;
+pub mod snapshot;
 mod storage;
 mod system;
 pub mod vm;

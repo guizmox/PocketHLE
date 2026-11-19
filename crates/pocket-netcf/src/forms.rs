@@ -1,11 +1,14 @@
 //! Guest Forms objects. These records do not create host windows.
 
+use crate::vm::ObjectGraph;
 use crate::vm::{Machine, Value};
 use std::collections::BTreeMap;
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Forms {
+    #[serde(with = "crate::snapshot::frames")]
     bitmaps: BTreeMap<usize, pocket_kernel::Framebuffer>,
+    #[serde(with = "crate::snapshot::images")]
     images: Vec<Option<image::RgbaImage>>,
     controls: BTreeMap<usize, Control>,
     fonts: BTreeMap<usize, Font>,
@@ -18,17 +21,18 @@ pub struct Forms {
     next_tick: BTreeMap<usize, u64>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Font {
     family: Value,
     size: u32,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct Control {
-    kind: &'static str,
+    kind: crate::snapshot::ServiceName,
     is_form: bool,
     image: Option<Value>,
-    integer_properties: BTreeMap<&'static str, i32>,
+    integer_properties: BTreeMap<crate::snapshot::ServiceName, i32>,
     layout_suspensions: usize,
     back_color: Option<i32>,
     name: Option<u32>,
@@ -36,7 +40,7 @@ struct Control {
     text: Option<u32>,
     children: Vec<usize>,
     items: Vec<Value>,
-    handlers: BTreeMap<&'static str, Vec<Value>>,
+    handlers: BTreeMap<crate::snapshot::ServiceName, Vec<Value>>,
     position: (i32, i32),
     size: (i32, i32),
     scale_dimensions: (u32, u32),
@@ -176,16 +180,19 @@ impl Forms {
         let Some(control) = self.controls.get_mut(&hit) else {
             return Vec::new();
         };
-        let changed = match control.kind {
+        let changed = match control.kind.as_str() {
             "CheckBox" => {
-                let checked = control.integer_properties.entry("Checked").or_default();
+                let checked = control
+                    .integer_properties
+                    .entry("Checked".into())
+                    .or_default();
                 *checked = i32::from(*checked == 0);
                 Some("CheckedChanged")
             }
             "ComboBox" if !control.items.is_empty() => {
                 let selected = control
                     .integer_properties
-                    .entry("SelectedIndex")
+                    .entry("SelectedIndex".into())
                     .or_insert(-1);
                 *selected = (*selected + 1).rem_euclid(control.items.len() as i32);
                 Some("SelectedIndexChanged")
@@ -276,16 +283,16 @@ impl Forms {
                     .map(|color| pack_rgb565((color >> 16) as u8, (color >> 8) as u8, color as u8));
                 let face = pack_rgb565(230, 230, 230);
                 let outline = pack_rgb565(75, 75, 75);
-                if let Some(color) =
-                    back.or_else(|| matches!(control.kind, "Button" | "ComboBox").then_some(face))
-                {
+                if let Some(color) = back.or_else(|| {
+                    matches!(control.kind.as_str(), "Button" | "ComboBox").then_some(face)
+                }) {
                     framebuffer.fill_rect(x, y, w, h, color);
                 }
-                if matches!(control.kind, "Button" | "ComboBox") {
+                if matches!(control.kind.as_str(), "Button" | "ComboBox") {
                     framebuffer.stroke_rect(left, top, right - left, bottom - top, outline);
                 }
                 let mut text_x = x.saturating_add(3);
-                if control.kind == "CheckBox" {
+                if control.kind.as_str() == "CheckBox" {
                     framebuffer.fill_rect(x, y, 12, 12, face);
                     framebuffer.stroke_rect(
                         left,
@@ -477,7 +484,7 @@ impl Forms {
                 self.controls.insert(
                     *id,
                     Control {
-                        kind,
+                        kind: kind.into(),
                         is_form,
                         ..Control::default()
                     },
@@ -645,7 +652,7 @@ impl Forms {
                     .controls
                     .get_mut(id)?
                     .handlers
-                    .entry(event)
+                    .entry(event.into())
                     .or_default();
                 match verb {
                     "add" => handlers.push(*handler),
@@ -677,10 +684,80 @@ impl Forms {
                 self.controls
                     .get_mut(id)?
                     .integer_properties
-                    .insert(property, *value);
+                    .insert(property.into(), *value);
                 Some(None)
             }
             _ => None,
         }
+    }
+}
+
+impl Forms {
+    pub(crate) fn valid_image(&self, id: usize) -> bool {
+        id < self.images.len()
+    }
+    pub(crate) fn validate_checkpoint(
+        &self,
+        machine: &impl ObjectGraph,
+        valid: impl Fn(Value) -> bool,
+    ) -> Result<(), String> {
+        if self.display_size.0 <= 0
+            || self.display_size.1 <= 0
+            || self.display_size.0 > 2048
+            || self.display_size.1 > 2048
+            || self
+                .main_form
+                .is_some_and(|id| !self.controls.contains_key(&id))
+        {
+            return Err("Invalid managed display/form".into());
+        }
+        if self
+            .bitmaps
+            .keys()
+            .chain(self.fonts.keys())
+            .chain(self.next_tick.keys())
+            .any(|&id| !machine.live_object(id))
+            || self.fonts.values().any(|font| !valid(font.family))
+        {
+            return Err("Invalid managed form service".into());
+        }
+        for (&id, c) in &self.controls {
+            if !machine.live_object(id)
+                || c.children.iter().any(|id| !self.controls.contains_key(id))
+                || c.font.is_some_and(|id| !self.fonts.contains_key(&id))
+                || c.handlers.values().flatten().any(|v| !valid(*v))
+                || c.items.iter().any(|v| !valid(*v))
+                || c.image.is_some_and(|v| !valid(v))
+            {
+                return Err("Invalid managed control graph".into());
+            }
+            // Paint walks descendants recursively. Validate ancestry, allowing shared subtrees.
+            let mut pending = vec![(id, 0usize, false)];
+            let mut visiting = std::collections::BTreeSet::new();
+            let mut visited = std::collections::BTreeSet::new();
+            while let Some((next, depth, exit)) = pending.pop() {
+                if exit {
+                    visiting.remove(&next);
+                    visited.insert(next);
+                    continue;
+                }
+                if visited.contains(&next) {
+                    continue;
+                }
+                if depth > 256 || !visiting.insert(next) {
+                    return Err("Invalid cyclic managed control graph".into());
+                }
+                pending.push((next, depth, true));
+                if let Some(control) = self.controls.get(&next) {
+                    pending.extend(
+                        control
+                            .children
+                            .iter()
+                            .map(|&child| (child, depth + 1, false)),
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }

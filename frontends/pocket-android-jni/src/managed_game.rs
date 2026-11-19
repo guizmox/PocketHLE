@@ -331,6 +331,10 @@ pub(crate) fn run(
             match input_rx.try_recv() {
                 Ok(InputCommand::Input(event)) => game.handle(event),
                 Ok(InputCommand::SystemMedia(_)) => {}
+                Ok(InputCommand::Snapshot { restore }) => state.reject_snapshot(
+                    restore,
+                    "Snapshots are not supported by this legacy compatibility renderer",
+                ),
                 Ok(InputCommand::Stop) => stop = true,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => stop = true,

@@ -1,13 +1,13 @@
-# Desktop snapshot internals
+# Snapshot internals
 
-The desktop frontend checkpoints an ARM WinCE session, including concurrently
-running processes. Gizmondo and Pocket PC share the serializer and restore path. See
+Desktop and Android checkpoint native ARM WinCE sessions, including concurrently
+running processes, and supported Compact Framework interpreter sessions. Gizmondo and Pocket PC share the serializer and restore path. See
 [the frontend guide](FRONTENDS.md#experimental-desktop-snapshots) for commands
 and slot locations.
 
 ## Capture and write
 
-The desktop runner queues the request and captures at a kernel checkpoint on
+Both frontends queue the request into `pocket-session` and capture at a kernel checkpoint on
 the emulation thread. This boundary provides a continuation PC and a consistent
 view of CPU, kernel and graphics state. Synchronously suspended launchers remain
 participants: the snapshot includes each parked caller and its active child,
@@ -19,7 +19,9 @@ temporary file in the slot directory, flushes and syncs the file, then persists
 it over the slot. The previous slot remains available if capture or writing
 fails. Capture itself, including any required graphics readback, happens before
 the writer starts.
-[Desktop checkpoint hook](../frontends/pocket-desktop/src/runner.rs) ·
+[Shared session coordinator](../crates/pocket-session/src/snapshot.rs) ·
+[Desktop adapter](../frontends/pocket-desktop/src/runner/snapshots.rs) ·
+[Android adapter](../frontends/pocket-android-jni/src/runner_snapshots.rs) ·
 [Slot storage](../crates/pocket-library/src/snapshot_slot.rs)
 
 ## Disk layout
@@ -27,8 +29,9 @@ the writer starts.
 | Layer | Contents |
 | --- | --- |
 | Slot header | Eight-byte magic `PHSNAP01` and a little-endian 64-bit UTC timestamp in Unix milliseconds. |
-| Session header | Eight-byte magic `PHSECT01`, followed by one zlib stream. |
-| Decompressed stream | Little-endian 16-bit section count, then each section's 16-bit tag, 16-bit version, 64-bit byte length and fixed-integer bincode payload. |
+| Backend header | `PHSECT01` for ARM sections or `PHCFSE01` for managed version 1; followed by one zlib stream. |
+| Native stream | Little-endian 16-bit section count, then each section's 16-bit tag, 16-bit version, 64-bit byte length and fixed-integer bincode payload. |
+| Managed stream | Little-endian 64-bit payload length and a versioned fixed-integer bincode document, using the same bounded codec, zlib and buffered I/O implementation. |
 
 Session identity and continuation, ARM execution, WinCE kernel (including mapped sections), fixed-function
 EGL and media are always present. Programmable EGL, HSS and pending input
@@ -39,7 +42,73 @@ outer zlib stream. The high bit of the tag marks a required
 section. The reader checks for duplicate tags, bounds each section read and
 enforces a cumulative 512 MiB budget for section headers and payloads. It can
 skip unknown optional sections and rejects unknown required sections.
-[Session codec](../crates/pocket-core/src/snapshot.rs)
+[Native sections](../crates/pocket-core/src/snapshot.rs) ·
+[Shared format/compression](../crates/pocket-snapshot/src/lib.rs) ·
+[Managed state](../crates/pocket-netcf/src/runtime_snapshot.rs)
+
+## Verified restore and emulation requirements
+
+Both GUIs use `prepare_async` from the shared archive module. Decode and checksum
+verification run off the UI/emulation threads while the old session remains live.
+Native reads also validate ARM memory/deferred ranges, registers, hooks,
+continuation and thunk indexes without creating a CPU. Managed reads validate
+object/free lists, service references, control graphs, images and resource ranges.
+Every saved process executable is resolved below current application mounts and
+its raw bytes are checked against the captured SHA-256 identity.
+
+The semantic manifest compares the requested device/display policy, host rendering
+policy and internal resolution. Native sessions additionally compare processor,
+executable heap, EGL/vendor profile and device-identity requirements. CF does not
+inherit irrelevant ARM CPU or vendor-driver restrictions. Presentation rotation,
+FPS limits, keyboard/controller/grid assignments and physical-provider enablement
+are deliberately outside this manifest. Native restore applies the current host
+presentation ceiling while preserving explicit guest waits.
+
+`PreparedRestore` is opaque to frontends. It owns the exact decoded archive and
+pins the checked target configuration; replacement of the on-disk slot or changes
+to launcher settings cannot substitute a different payload/configuration after
+verification. Starting another game or leaving cancels a pending Desktop delivery.
+An invalid/missing archive never stops the old session. Once preparation succeeds,
+the old process graph is joined and the receiving launch reconstructs native
+resources on their owning threads. Hardware acquisition, native GPU allocation,
+changed dependencies/mounts and other late failures can still fail reconstruction;
+preflight is not a guarantee that every external resource will remain available.
+
+[Shared verified archive/slot coordinator](../crates/pocket-session/src/snapshot/archive.rs) ·
+[Requirement manifest](../crates/pocket-session/src/compatibility.rs)
+
+## Managed interpreter state
+
+CF capture runs between completed IL callbacks. It retains object IDs and aliases,
+free slots, statics and initialized types; forms/controls, images/bitmaps, fonts and
+event handlers; timers and collection deadlines; string interning and assembly
+resource stream positions; system RNG state, sensors and managed service tables;
+XML reader contents and writer/serializer identities; FMOD sample handles and the
+shared mixer checkpoint. Host paths, live stack frames, native handles and
+assembly pointers are not serialized. Resource slices are bounded offsets into
+the fingerprinted assembly. Writer identities are sandboxed names resolved below
+the current save root. This does not roll back closed persistent files.
+
+Restore parses metadata without executing `Main`, constructors or initial events.
+It rebuilds the VM/service graph and resumes its saved event clock. GLES contexts
+reuse existing `ContextSnapshot`/`SurfaceSnapshot`, including native GPU surface
+transfers. The framebuffer serializer reuses the kernel's `PixelSnapshot`.
+A software fallback is identified by the saved surface, not by the initial GPU
+preference; a captured native surface must reconstruct a real native renderer.
+Audio uses the existing shared `AudioSnapshot`. Held host inputs are neutralized
+because the host input accumulator is freshly created. Sensors resample through
+the current configured provider on the next callback.
+
+Normal stop retains CF close handlers. Snapshot replacement discards the old
+instance without executing those handlers, preventing shutdown side effects from
+being mistaken for part of the restored session. Android reattaches the original
+JNI input channel after every cold replacement. The legacy Android compatibility
+renderer remains a separate explicit unsupported path; it is not the CF VM.
+
+The managed and native payload versions evolve separately; neither has a legacy
+development-format reader. Current native session identity is section version 3,
+WinCE 8, fixed EGL 2, programmable EGL 6 and media 2. Managed payload version is 1.
+Recreate development slots after this change.
 
 ## Restore and ARM block reads
 
@@ -83,8 +152,11 @@ guest addresses, permissions, lazy image residency and deferred memory ranges.
 
 Unsupported live resources cause capture to fail with a diagnostic. HTTP and
 Bluetooth providers must explicitly support non-consuming receive capture;
-unknown providers still reject capture. Desktop native HTTP channels and Windows
-Bluetooth Classic implement it. External services and radio peers cannot be
+unknown providers still reject capture. Desktop native HTTP channels, Windows Bluetooth Classic and Android HTTP,
+serial Bluetooth and RFCOMM providers implement it. Android copies the unread
+receive suffix under the provider lock without consuming it or cancelling the
+source transfer. Its bounded JNI packet is validated before entering the common
+WinCE codec. External services and radio peers cannot be
 rewound: their captured endpoints restore as disconnected, rather than pretending
 the old connection is still live. Physical providers are reacquired only through
 their normal permission and availability checks.
@@ -200,7 +272,7 @@ its diagnostic distinct from user cancellation.
 ## Graphics and performance
 
 Fixed-function EGL restores its context and resources through the fixed-function
-snapshot path. With a desktop OpenGL host context, GLES 2.0 captures live resources
+snapshot path. On both desktop OpenGL and host OpenGL ES 3 contexts, GLES 2.0 captures live resources
 and context state at the checkpoint boundary: shader sources and linked executable
 sources, uniforms and attribute locations, buffer storage, texture faces and
 mipmap levels, compressed texture bytes, renderbuffer contents, framebuffer
@@ -226,8 +298,12 @@ linker assigns different locations. Scalar, vector, matrix and array updates,
 capture saves guest locations again, not the current host numbers. An invalid
 guest location cannot accidentally refer to another valid native uniform.
 A successful guest relink discards the old correspondence; a failed link keeps
-it for the executable still installed in the context. Capturing an active
-program whose latest link failed remains explicitly unsupported. Delete-pending
+it for the executable still installed in the context. Before relinking a current
+linked program, the renderer captures its installed interface. A failed native
+link retains that interface with its last successful executable. Restore installs
+that executable and its uniform values first, then repeats the actual failed link.
+Native link status and subsequent draw/error behavior remain native; no query
+result or shader is patched to simulate failure. Delete-pending
 current programs retain their table until GL releases them; final release removes
 it. No shader source or guest memory is rewritten to force linker assignments.
 
@@ -238,29 +314,61 @@ uniform storage stay on the native renderer. This removes one linker-identity
 restriction, not the other configuration, API and native-driver compatibility
 requirements. Use the same graphics settings and emulated device configuration.
 
-The direct resource path requires desktop OpenGL queries and depth/stencil
-transfers. Owned Desktop GLES2 contexts now select the same native API as the UI:
-desktop OpenGL on Linux/Windows and OpenGL ES on Android. A missing share source
-therefore no longer forces Linux through the lifetime journal. If a Linux host
-cannot create desktop OpenGL, initialization can still use its existing ES path.
-That fallback, or a Desktop context explicitly shared with an OpenGL ES source,
-retains the bounded journal fallback:
-96 MiB for unique calls and chronological indices, with exact call replay.
-Android does not record that journal and explicitly rejects programmable capture;
-it must never return a successful but empty graphics checkpoint. Desktop controls
-do not imply Android snapshot integration. Unsupported resource states fail
-explicitly and keep the previous slot.
+Desktop and Android share the same resource archive, object reconstruction,
+state restoration and guest-name mapping. The host-specific transfer helpers are
+confined to the common `pocket-gles` checkpoint transfer module. There is no draw-history journal or
+replay fallback. Desktop prefers its UI's native API; ES-only hosts use the same
+ES 3 resource path as Android. An ES 2-only host fails explicitly at capture.
+
+ES 3.0 lacks desktop texture/buffer readback queries and portable depth/stencil
+ReadPixels. Buffers use read-only mapping at capture. A private shared ES context
+samples live color textures into a GPU staging image. It never switches away
+from the owner's installed guest executable. Cube faces, mip levels and legacy
+alpha/luminance formats are handled through that same transfer. Allocation
+metadata records dimensions/internal format only; compressed textures also retain
+the current accepted native blocks because ES has no compressed-block readback.
+Accepted definitions, subimages and deletion replace/remove those live records;
+ordinary draws accumulate no history or pixel copies. Native rejected definitions
+preserve the prior metadata and the guest's GL error. Compressed subimages use their actual format layout (including non-square ASTC
+blocks), rather than guessing from the byte count. Whole-image uploads replace
+opaque blocks directly, including PVRTC, and can repair a previously unsupported
+mirror. Accepted partial updates of unknown layouts still fail capture explicitly;
+unsupported/permissive compressed mip generation is not represented as a guessed
+image. No compressed data is decoded/recompressed by the snapshot path.
+
+Fixed-function surface capture uses the same ES transfer implementation. Even
+a programmable-only game has a fixed-function EGL section; leaving the old
+fixed-function ES depth rejection in place would still block its whole-session
+snapshot. Fixed-function ES capture/restore binds shared renderbuffers in a
+private native context so it does not invalidate the fixed renderer's cached
+program/texture/vertex state. Saved surfaces retain their RGB565/RGBA format and
+the exact depth representatives needed by that host API. Desktop OpenGL keeps
+its direct attachment transfer. No normal drawing path creates these helpers.
+
+Depth/stencil is blitted on the GPU into a shared staging image. Depth capture
+uses actual GPU EQUAL tests to find a floating-point representative that writes
+back to precisely the stored native depth. The temporary color encoding uses
+the unused sign bit of non-negative depth values as a match marker, then removes
+that marker before saving. Unmatched pixels fail capture; zero-filled staging
+memory can never masquerade as verified depth. This avoids assuming that a driver's
+normalized depth sampling and conversion round identically. Capture rejects a
+value that cannot be verified. Stencil's eight bit planes are tested and packed
+by GPU draws. Restore writes depth with a fragment shader and stencil with masked
+GPU passes. CPU work validates and packs serialized bytes; it does not rasterize
+the scene. All readbacks and these synchronization points occur at an explicit
+snapshot, never in the frame loop. Unsupported resources keep the previous slot.
 
 Large ARM, mapped-file, RAM-store and native GLES2 byte arrays use `serde_bytes`
 with bincode's length-prefixed byte representation. This requests bulk writes
 and reads through the buffered zlib stream instead of visiting each byte.
 The session section is version 2, WinCE section version 8, media section version 2
-and programmable EGL section version 5. Development snapshots using earlier
+fixed-function EGL section version 2, and programmable EGL section version 6. Development snapshots using earlier
 section versions must be recreated.
 
 [Fixed-function EGL](../crates/pocket-winceapi/src/gles/snapshot.rs) ·
 [GLES 2.0 resource checkpoint](../crates/pocket-winceapi/src/gles2/renderer/checkpoint.rs) ·
-[GLES 2.0 journal fallback](../crates/pocket-winceapi/src/gles2/renderer/journal.rs) ·
+[Shared ES GPU transfers](../crates/pocket-gles/src/gpu/checkpoint_transfer.rs) ·
+[GLES2 archive adapter](../crates/pocket-winceapi/src/gles2/renderer/checkpoint/es.rs) ·
 [GLES 2.0 object names](../crates/pocket-winceapi/src/gles2/renderer/names.rs) ·
 [RAM object store](../crates/pocket-kernel/src/vfs_ram_snapshot.rs)
 
@@ -330,3 +438,24 @@ remain available, while an in-flight inquiry becomes cancelled.
 External server/radio state is not rolled back, and uninterrupted network sessions
 are not promised. See the [phase 5 validation note](testing/SNAPSHOT-PHASE5-2026-11-18.md)
 for exercised configurations and platform limits.
+
+## Frontend commands and diagnostics
+
+`pocket-session` owns process participation/rendezvous, parked launchers, device
+restore coordination, child-job completion, background writing, slot reading and
+saved-program resolution. UI adapters provide process construction, frame/audio
+publication and diagnostic presentation. There is one engine, not one per GUI.
+Both adapters release the old native process resources before a cold restore.
+The common device commit barrier still completes before guest continuation.
+
+Android keeps its JNI session handle and persistent presentation root while the
+worker joins the old process graph and reconstructs the saved graph. Save/Restore
+are serialized; the UI polls for a result only while an operation is pending.
+A save acknowledgement means the atomic slot write succeeded. A restore
+acknowledgement follows the first frame published after restore commit. Both
+include the saved slot timestamp. An absent slot leaves the live game untouched.
+Save/preflight failures reuse the existing diagnostic dialog, with Continue when
+the session remains live; fatal restore failures use the same dialog without it.
+Desktop uses that same diagnostic payload and controller-aware window.
+
+Validation procedures and platform limits: [phase 6 record](testing/SNAPSHOT-PHASE6-2026-11-19.md) · [phase 7 record](testing/SNAPSHOT-PHASE7-2026-11-19.md).

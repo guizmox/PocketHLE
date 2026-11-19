@@ -102,6 +102,26 @@ impl DeviceArchive {
     }
 }
 impl SessionSnapshot {
+    pub fn environment(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.environment
+    }
+    pub fn set_environment(&mut self, environment: std::collections::BTreeMap<String, String>) {
+        self.environment = environment;
+    }
+    /// Identity of each saved process, including parked launchers and children.
+    pub fn executable_identities(&self) -> Vec<(&str, [u8; 32])> {
+        let mut all = vec![(self.program_path(), self.executable)];
+        if let Some(device) = &self.device {
+            all.extend(
+                device
+                    .others
+                    .iter()
+                    .map(|child| (child.session.program_path(), child.session.executable)),
+            );
+        }
+        all
+    }
+
     pub fn process_id(&self) -> u32 {
         self.kernel.process_id()
     }

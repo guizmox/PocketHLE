@@ -283,6 +283,7 @@ pub struct PocketLauncher {
     game_viewport_active: bool,
     run_repaint_context: egui::Context,
     run_diagnostic: Option<(pocket_library::session_diagnostic::Diagnostic, bool)>,
+    diagnostic_can_resume: bool,
     menu_host_press: std::collections::HashMap<(usize, String), Instant>,
     display_fullscreen: bool,
     startup_window: Option<bool>,
@@ -318,6 +319,9 @@ pub struct PocketLauncher {
     file_dialog: Option<crate::file_dialog::FileDialog>,
     pending_run: Option<(GameEntry, bool)>,
     snapshot_result: Option<(String, Receiver<Result<u64, String>>)>,
+    restoring_snapshot: bool,
+    #[cfg(feature = "unicorn")]
+    snapshot_preflight: Option<(GameEntry, pocket_session::snapshot::Preparation)>,
     snapshot_slot: Option<SnapshotSlotStatus>,
     colors_startup_prompt: Option<(
         GameEntry,
@@ -934,6 +938,7 @@ impl PocketLauncher {
             game_viewport_active: false,
             run_repaint_context: cc.egui_ctx.clone(),
             run_diagnostic: None,
+            diagnostic_can_resume: false,
             menu_host_press: Default::default(),
             display_fullscreen: false,
             startup_window: None,
@@ -974,6 +979,9 @@ impl PocketLauncher {
             file_dialog: None,
             pending_run: None,
             snapshot_result: None,
+            restoring_snapshot: false,
+            #[cfg(feature = "unicorn")]
+            snapshot_preflight: None,
             snapshot_slot: None,
             colors_startup_prompt: None,
             screen: Screen::Library,
@@ -1267,6 +1275,7 @@ impl PocketLauncher {
                     }
                 }
                 UiEvent::RunFinished(outcome, diagnostic) => {
+                    self.diagnostic_can_resume = false;
                     if let Some(worker) = self.run_thread.take() {
                         let _ = worker.join();
                     }
@@ -1290,6 +1299,7 @@ impl PocketLauncher {
                     self.release_all_keys();
                     self.pointer_down_at = None;
                     self.running_game = None;
+                    self.restoring_snapshot = false;
                     if self.game_viewport_active && self.pending_run.is_none() {
                         if let Some(diagnostic) = diagnostic {
                             self.screen = Screen::Run;
@@ -1299,6 +1309,25 @@ impl PocketLauncher {
                             self.return_to_library(ctx);
                         }
                     }
+                }
+            }
+        }
+        #[cfg(feature = "unicorn")]
+        if let Some((_, receiver)) = &self.snapshot_preflight {
+            let result = match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err("Snapshot verification was interrupted".into())),
+                Err(mpsc::TryRecvError::Empty) => { ctx.request_repaint_after(Duration::from_millis(100)); None }
+            };
+            if let Some(result) = result {
+                let (game, _) = self.snapshot_preflight.take().unwrap();
+                match result {
+                    Ok(Some(prepared)) => {
+                        self.runner.stage_restore(game.id.clone(), prepared);
+                        self.spawn_run_selected_with_snapshot(&game, true);
+                    }
+                    Ok(None) => self.status.clear(),
+                    Err(error) => self.show_snapshot_error(true, error),
                 }
             }
         }
@@ -1314,12 +1343,12 @@ impl PocketLauncher {
                     self.snapshot_result = None;
                 }
                 Ok(Err(error)) => {
-                    self.status = format!("Cannot save snapshot: {error}");
                     self.snapshot_result = None;
+                    self.show_snapshot_error(false, error);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.status = "Snapshot capture was interrupted".into();
                     self.snapshot_result = None;
+                    self.show_snapshot_error(false, "Snapshot capture was interrupted".into());
                 }
                 Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
             }
@@ -1370,6 +1399,9 @@ impl PocketLauncher {
             }
         }
         if let Some(frame) = latest {
+            if self.pending_run.is_none() {
+                self.restoring_snapshot = false;
+            }
             self.upload_frame_texture(ctx, &frame);
         }
     }
@@ -1734,7 +1766,7 @@ impl PocketLauncher {
             encoding,
             upscale: self.upscale_x2,
             snapshot: self.can_save_game_snapshot(),
-            restore_snapshot: self.snapshot_result.is_none()
+            restore_snapshot: !self.snapshot_operation_busy()
                 && cfg!(feature = "unicorn")
                 && snapshot_game.is_some(),
             snapshot_timestamp: timestamp.as_deref(),
@@ -1812,14 +1844,36 @@ impl PocketLauncher {
         ctx.request_repaint();
     }
 
+    fn show_snapshot_error(&mut self, restore: bool, error: String) {
+        self.release_all_keys();
+        self.controller_ui.stop_repeat();
+        self.diagnostic_can_resume = self.screen == Screen::Run && self.input_tx.is_some();
+        self.run_diagnostic = Some((
+            pocket_library::session_diagnostic::snapshot_failure(
+                restore,
+                error,
+                self.last_frame_status.clone().unwrap_or_default(),
+            ),
+            false,
+        ));
+    }
+    fn snapshot_operation_busy(&self) -> bool {
+        #[cfg(feature = "unicorn")]
+        if self.snapshot_preflight.is_some() {
+            return true;
+        }
+        self.snapshot_result.is_some() || self.pending_run.is_some() || self.restoring_snapshot
+    }
     fn can_save_game_snapshot(&self) -> bool {
         cfg!(feature = "unicorn")
             && self.running_game.is_some()
             && self.last_frame_snapshot.is_some()
-            && self.snapshot_result.is_none()
-            && self.running_game_id.as_ref().is_some_and(|id| self.library.get(id).is_some())
+            && !self.snapshot_operation_busy()
+            && self
+                .running_game_id
+                .as_ref()
+                .is_some_and(|id| self.library.get(id).is_some())
     }
-
     fn save_game_snapshot(&mut self) {
         #[cfg(feature = "unicorn")]
         if self.can_save_game_snapshot() {
@@ -1833,20 +1887,25 @@ impl PocketLauncher {
             }
         }
     }
-
     fn restore_game_snapshot(&mut self) {
-        if !cfg!(feature = "unicorn") || self.snapshot_result.is_some() {
-            return;
-        }
-        let Some(game) = self.running_game_id.as_ref().or(self.selected_game.as_ref())
-            .and_then(|id| self.library.get(id)).cloned() else {
-            return;
-        };
-        let path = pocket_library::snapshot_slot::path_for(self.library.root(), &game);
-        match pocket_library::snapshot_slot::timestamp(&path) {
-            Ok(Some(_)) => self.spawn_run_selected_with_snapshot(&game, true),
-            Ok(None) => {}
-            Err(error) => self.status = format!("Cannot restore snapshot: {error}"),
+        #[cfg(feature = "unicorn")]
+        {
+            if self.snapshot_operation_busy() { return; }
+            let Some(game) = self.running_game_id.as_ref().or(self.selected_game.as_ref())
+                .and_then(|id| self.library.get(id)).cloned() else { return; };
+            let context = pocket_session::LaunchContext {
+                library: self.library.root().to_path_buf(),
+                card: game.gizmondo_storage_card_root(self.library.root()),
+                game: game.clone(),
+                config: self.library.config().clone(),
+            };
+            match pocket_session::snapshot::prepare_async(context) {
+                Ok(receiver) => {
+                    self.snapshot_preflight = Some((game, receiver));
+                    self.status = "Checking snapshot…".into();
+                }
+                Err(error) => self.show_snapshot_error(true, error),
+            }
         }
     }
 
@@ -1920,6 +1979,12 @@ impl PocketLauncher {
         self.data_game = None;
         self.deck_library_actions.clear();
         self.pending_run = None;
+        self.restoring_snapshot = false;
+        #[cfg(feature = "unicorn")]
+        {
+            self.snapshot_preflight = None;
+            self.runner.cancel_prepared_restore();
+        }
         self.release_all_keys();
         if let Some(tx) = self.input_tx.as_ref() {
             let _ = tx.send(InputCommand::Stop);
@@ -1934,7 +1999,6 @@ impl PocketLauncher {
         self.screen = Screen::Library;
         ctx.request_repaint();
     }
-
     fn settings_draft(&mut self) -> LauncherConfig {
         let mut draft = self.library.config().clone();
         for (file, platform) in [
@@ -5692,6 +5756,8 @@ impl PocketLauncher {
                         self.return_to_library(ctx);
                     } else {
                         self.pending_run = None;
+        #[cfg(feature = "unicorn")]
+        { self.snapshot_preflight = None; }
                         self.release_all_keys();
                         self.screen = Screen::Library;
                         ctx.request_repaint();
@@ -6257,6 +6323,13 @@ impl PocketLauncher {
     }
 
     fn spawn_run_selected_with_snapshot(&mut self, game: &GameEntry, restore_snapshot: bool) {
+        #[cfg(feature = "unicorn")]
+        {
+            self.snapshot_preflight = None;
+            if !restore_snapshot {
+                self.runner.cancel_prepared_restore();
+            }
+        }
         #[cfg(windows)]
         if self.library.config().gps_enabled
             && !(self.library.config().gps_fixed_enabled
@@ -6268,7 +6341,12 @@ impl PocketLauncher {
             self.pending_run = Some((game.clone(), restore_snapshot));
             self.release_all_keys();
             if let Some(tx) = self.input_tx.as_ref() {
-                let _ = tx.send(InputCommand::Stop);
+                let command = if restore_snapshot {
+                    InputCommand::StopForRestore
+                } else {
+                    InputCommand::Stop
+                };
+                let _ = tx.send(command);
             }
             self.status = format!(
                 "Stopping current game before starting {}...",
@@ -6276,6 +6354,7 @@ impl PocketLauncher {
             );
             return;
         }
+        self.restoring_snapshot = restore_snapshot;
         self.live_grid = self.live_grid_launch_id.as_deref() == Some(game.id.as_str());
         self.live_grid_launch_id = None;
         self.last_frame_texture = None;
@@ -6580,6 +6659,8 @@ impl eframe::App for PocketLauncher {
             self.update_gamepad_input(ctx);
             egui::CentralPanel::default().show(ctx, |_| {});
             let mut back = false;
+            let mut resume = false;
+            let can_resume = self.diagnostic_can_resume;
             if let Some((diagnostic, expanded)) = &mut self.run_diagnostic {
                 egui::Window::new(diagnostic.title)
                     .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -6603,6 +6684,7 @@ impl eframe::App for PocketLauncher {
                                     "{}\n{}\n\n{}", diagnostic.title, diagnostic.reason, diagnostic.details
                                 ));
                             }
+                            if can_resume { resume = crate::controller_ui::button(ui, "Continue").clicked(); }
                             back = crate::controller_ui::button(ui, "Return to library").clicked();
                         };
                         if ui.is_enabled() {
@@ -6614,6 +6696,11 @@ impl eframe::App for PocketLauncher {
             }
             if back {
                 self.return_to_library(ctx);
+                self.diagnostic_can_resume = false;
+            } else if resume {
+                self.run_diagnostic = None;
+                self.diagnostic_can_resume = false;
+                ctx.request_repaint();
             }
             self.controller_ui.show(ctx);
             return;

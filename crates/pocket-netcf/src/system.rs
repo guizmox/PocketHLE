@@ -1,10 +1,11 @@
 //! Compact Framework system services backed by managed object identities.
 
+use crate::vm::ObjectGraph;
 use crate::vm::{Fault, Value};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Services {
     vb_random: u32,
     vb_last: f32,
@@ -106,7 +107,9 @@ impl Services {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Random {
+    #[serde(with = "crate::snapshot::array")]
     values: [i32; 56],
     index: usize,
     other: usize,
@@ -160,4 +163,15 @@ pub fn date_text(seconds: u64) -> String {
     let month = (month_index + 2) % 12 + 1;
     let year = year + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{date:02}")
+}
+impl Services {
+    pub(crate) fn validate_checkpoint(&self, machine: &impl ObjectGraph) -> bool {
+        self.vb_last.is_finite()
+            && self.random.iter().all(|(&id, r)| {
+                machine.live_object(id)
+                    && r.index <= 55
+                    && r.other <= 55
+                    && r.values.iter().all(|&v| v >= 0)
+            })
+    }
 }

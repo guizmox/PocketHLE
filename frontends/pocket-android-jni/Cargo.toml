@@ -23,9 +23,10 @@ arm-diagnostics = ["unicorn"]
 # `--no-default-features` is for type checks only: running a game requires Unicorn.
 default = ["unicorn", "video-static"]
 video-static = ["pocket-core/video-static"]
-unicorn = ["pocket-core/unicorn"]
+unicorn = ["pocket-core/unicorn", "pocket-session/snapshots"]
 
 [dependencies]
+pocket-session = { path = "../../crates/pocket-session" }
 pocket-netcf = { path = "../../crates/pocket-netcf" }
 xbrz = { package = "xbrz-rs", version = "0.1.0" }
 anyhow.workspace = true
@@ -38,4 +39,5 @@ pocket-core = { path = "../../crates/pocket-core" }
 pocket-library = { path = "../../crates/pocket-library" }
 
 [dev-dependencies]
+env_logger.workspace = true
 tempfile = "3"

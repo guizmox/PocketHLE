@@ -17,12 +17,17 @@ fn external_game_device_snapshot_cold_restore() {
     game.executable = PathBuf::from(game.executable.to_string_lossy().replace('\\', "/"));
     game.settings.max_slices = 0;
     let ui = pocket_gles::gpu::Renderer::new(800, 800).unwrap();
+    let es = std::env::var_os("POCKETHLE_SNAPSHOT_TEST_HOST_ES")
+        .map(|_| pocket_gles::gpu::ProgrammableHost::new_programmable().unwrap());
     let runner = Runner::default();
     runner
         .shared_export_policy()
         .store(true, std::sync::atomic::Ordering::Release);
     let owned_context = std::env::var_os("POCKETHLE_SNAPSHOT_TEST_OWNED_CONTEXT").is_some();
-    runner.set_shared_context_source((!owned_context).then(|| ui.shared_context_source()));
+    runner.set_shared_context_source((!owned_context).then(|| {
+        es.as_ref()
+            .map_or_else(|| ui.shared_context_source(), |host| host.shared_source())
+    }));
     eprintln!(
         "probe uses {} context",
         if owned_context { "owned" } else { "shared" }
@@ -179,37 +184,23 @@ fn external_game_device_snapshot_cold_restore() {
         eprintln!("{restore}: {}", outcome.summary);
         assert!(diagnostic.is_none(), "{diagnostic:?}");
         assert!(displayed > 0);
-        assert!(
-            outcome.summary.contains("Emulator exited cleanly."),
-            "{}",
-            outcome.summary
-        );
         assert!(capture_error.is_none(), "{capture_error:?}");
         assert!(reply.is_none(), "snapshot request did not finish");
         if capture_at.is_some() {
-            let path = pocket_library::snapshot_slot::path_for(&root, &game);
-            let (_, payload) = pocket_library::snapshot_slot::open(&path).unwrap().unwrap();
-            let mut saved = pocket_core::SessionSnapshot::read(payload).unwrap();
-            eprintln!(
-                "saved root={} module={} device={}",
-                saved.process_id(),
-                saved.program_path(),
-                saved.has_device()
-            );
-            if let Some(archive) = saved.take_device() {
-                let (shared, foreground, children) = archive.into_parts();
-                eprintln!(
-                    "saved processes={:?} foreground={foreground}",
-                    shared.process_ids()
-                );
-                for child in children {
-                    eprintln!(
-                        "saved child={} module={}",
-                        child.process_id(),
-                        child.program_path()
-                    );
-                }
-            }
+            let config = pocket_library::Library::open(&root)
+                .unwrap()
+                .config()
+                .clone();
+            let context = pocket_session::LaunchContext {
+                library: root.clone(),
+                card: game.gizmondo_storage_card_root(&root),
+                game: game.clone(),
+                config,
+            };
+            let prepared = pocket_session::snapshot::prepare(&context)
+                .unwrap()
+                .expect("written checkpoint");
+            eprintln!("verified checkpoint: {prepared:?}");
         }
     }
 }

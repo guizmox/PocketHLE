@@ -17,7 +17,7 @@ to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
 ## Experimental desktop snapshots
 
 Snapshots are available on Windows and Linux desktop builds with the Unicorn
-ARM backend. Each game has one slot.
+ARM backend. Android uses the same snapshot engine. Each game has one slot.
 
 - **Save Snapshot** (F5) is available after the running game produces a frame.
 - **Restore Snapshot** (F6) loads the slot for the running or selected game.
@@ -43,13 +43,30 @@ playhead. Loaded files reopen through the real decoder at that position.
 Microphone capture restores guest queues and reopens the current real backend;
 missing devices fail restore.
 
-Programmable GLES on a desktop OpenGL host captures live GPU resources and draw
-state, then reconstructs them without replaying the session's draw history.
-Use the same host graphics driver and settings. Owned Desktop contexts prefer
-desktop OpenGL; an explicitly shared ES source or ES-only Linux fallback retains
-the bounded 96 MiB programmable journal fallback. Unsupported resource states
+On Android, **S** saves and **L** loads. These small quarter-circle controls
+occupy the upper-left and upper-right corners of the physical app window,
+respect display cutouts, and use the same function-button palette as EXIT/FULL.
+Their placement is independent of the emulated image, rotation and letterboxing.
+FPS/IPS remain inside the actual displayed game image. During an operation both
+snapshot controls are disabled. Success displays Save/Restore confirmation and
+the slot date/time on the next line. Restore with an empty slot does nothing.
+
+Snapshot failures use the normal diagnostic dialog on both platforms: details,
+copy diagnostic and return to library, plus Continue for a still-running session.
+
+Programmable GLES on desktop OpenGL and host OpenGL ES 3 captures live GPU
+resources and draw state, then reconstructs them without replaying draw history.
+Restore checks emulation requirements before stopping a running game. Keep a
+compatible host graphics driver. Unsupported resource states
 report a capture failure and keep the previous slot. Fixed-function EGL uses
-its own resource checkpoint path.
+its own resource checkpoint path. The technical guide describes the shared
+engine and the host-specific GPU transfers.
+
+Compact Framework sessions use the same slot and verified-restore commands.
+Their managed object graph, forms, timer deadlines, resources, audio and GLES
+state are restored between IL callbacks, without re-running the program entry
+point. The separate legacy Android compatibility renderer does not expose a
+managed checkpoint; it reports an explicit unsupported-operation diagnostic.
 
 Files open for writing or appending at capture return to their captured contents
 on successful restore. Files already closed at capture are not rolled back.

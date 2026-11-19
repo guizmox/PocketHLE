@@ -44,6 +44,23 @@ pub fn startup_failure(reason: String, log: Vec<String>) -> Diagnostic {
     }
 }
 
+/// Nonfatal checkpoint operations use the same diagnostic view as session errors.
+pub fn snapshot_failure(restore: bool, reason: String, details: String) -> Diagnostic {
+    Diagnostic {
+        title: if restore {
+            "Could not restore snapshot"
+        } else {
+            "Could not save snapshot"
+        },
+        details: if details.is_empty() {
+            reason.clone()
+        } else {
+            format!("{reason}\n\n{details}")
+        },
+        reason,
+    }
+}
+
 /// Limit exit-code and stderr heuristics to startup, excluding frontend teardown.
 pub const STARTUP_DIAGNOSTIC_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 

@@ -3,7 +3,7 @@
 use crate::il::{self, Instruction};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Int(i32),
     Float(u32),
@@ -119,7 +119,8 @@ pub trait Environment<'image> {
     ) -> Result<Option<Value>, Fault>;
 }
 
-enum Object {
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Object {
     Instance {
         constructor: u32,
         fields: BTreeMap<u32, Value>,
@@ -1009,5 +1010,108 @@ mod collection_tests {
         );
         machine.collect([root], |_, _| {});
         assert!(machine.array(child).is_none());
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct MachineSnapshot {
+    objects: Vec<Option<Object>>,
+    free_objects: Vec<usize>,
+    statics: BTreeMap<u32, Value>,
+    initialized: BTreeSet<u32>,
+}
+impl Machine {
+    pub(crate) fn checkpoint(&self) -> Result<MachineSnapshot, String> {
+        if !self.locals.is_empty() || !self.arguments.is_empty() {
+            return Err("Managed checkpoint requires an event boundary".into());
+        }
+        Ok(MachineSnapshot {
+            objects: self.objects.clone(),
+            free_objects: self.free_objects.clone(),
+            statics: self.statics.clone(),
+            initialized: self.initialized.clone(),
+        })
+    }
+}
+pub(crate) trait ObjectGraph {
+    fn objects(&self) -> &[Option<Object>];
+    fn statics(&self) -> &BTreeMap<u32, Value>;
+    fn live_object(&self, id: usize) -> bool {
+        self.objects().get(id).is_some_and(Option::is_some)
+    }
+    fn validate_value(&self, value: Value) -> bool {
+        match value {
+            Value::Reference(id)
+            | Value::DrawingSurface(id)
+            | Value::ControlCollection(id)
+            | Value::ItemCollection(id)
+            | Value::FieldAddress(id, _)
+            | Value::Delegate {
+                target: Some(id), ..
+            } => self.live_object(id),
+            Value::ArrayAddress(id, index) => {
+                matches!(self.objects().get(id),Some(Some(Object::Array(a))) if index<=a.len())
+            }
+            Value::LocalAddress(..) | Value::ArgumentAddress(..) => false,
+            _ => true,
+        }
+    }
+    fn all_values(&self, mut test: impl FnMut(Value) -> bool) -> bool {
+        if !self.statics().values().copied().all(&mut test) {
+            return false;
+        }
+        for object in self.objects().iter().flatten() {
+            let valid = match object {
+                Object::Instance { fields, .. } => fields.values().copied().all(&mut test),
+                Object::Array(a) => a.iter().copied().all(&mut test),
+            };
+            if !valid {
+                return false;
+            }
+        }
+        true
+    }
+}
+impl ObjectGraph for Machine {
+    fn objects(&self) -> &[Option<Object>] {
+        &self.objects
+    }
+    fn statics(&self) -> &BTreeMap<u32, Value> {
+        &self.statics
+    }
+}
+impl ObjectGraph for MachineSnapshot {
+    fn objects(&self) -> &[Option<Object>] {
+        &self.objects
+    }
+    fn statics(&self) -> &BTreeMap<u32, Value> {
+        &self.statics
+    }
+}
+impl MachineSnapshot {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        let free: BTreeSet<_> = self.free_objects.iter().copied().collect();
+        let expected: BTreeSet<_> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| v.is_none().then_some(i))
+            .collect();
+        if free.len() != self.free_objects.len() || free != expected {
+            return Err("Invalid managed free-object table".into());
+        }
+        if !self.all_values(|v| self.validate_value(v)) {
+            return Err("Invalid managed object reference".into());
+        }
+        Ok(())
+    }
+    pub(crate) fn restore(self) -> Result<Machine, String> {
+        self.validate()?;
+        let mut machine = Machine::new(0);
+        machine.objects = self.objects;
+        machine.free_objects = self.free_objects;
+        machine.statics = self.statics;
+        machine.initialized = self.initialized;
+        Ok(machine)
     }
 }

@@ -75,6 +75,20 @@ impl UnicornCpu {
 }
 
 impl ArmExecutionSnapshot {
+    /// Pure structural validation: no Unicorn instance, native hooks or mapped host pages.
+    pub fn validate(&self) -> Result<u32, CpuError> {
+        self.memory.validate()?;
+        self.registers.validate()?;
+        if self
+            .hooks
+            .iter()
+            .any(|h| matches!(h,SavedHook::Dispatch{begin,end} if begin>end))
+        {
+            return Err(CpuError::Backend("invalid saved WinCE hook range".into()));
+        }
+        Ok(self.registers.continuation())
+    }
+
     /// Build a new Unicorn instance. No native hook IDs or JIT data cross the
     /// checkpoint. Reset all native execution caches through normal startup.
     pub fn restore(self, budget: Arc<dyn ImagePageBudget>) -> Result<(UnicornCpu, u32), CpuError> {

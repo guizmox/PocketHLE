@@ -1,4 +1,5 @@
 //! OpenGL 2.1 / GLES 2 offscreen rasterizer. Guest pointers never reach a driver.
+pub mod checkpoint_transfer;
 mod depth_bias;
 mod diagnostic;
 mod fixed_vertices;

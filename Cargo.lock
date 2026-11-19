@@ -2991,12 +2991,14 @@ version = "0.4.9"
 dependencies = [
  "android_logger",
  "anyhow",
+ "env_logger 0.11.10",
  "image 0.24.9",
  "jni",
  "log",
  "pocket-core",
  "pocket-library",
  "pocket-netcf",
+ "pocket-session",
  "serde_json",
  "tempfile",
  "xbrz-rs",
@@ -3038,13 +3040,13 @@ version = "0.4.9"
 dependencies = [
  "anyhow",
  "bincode",
- "flate2",
  "log",
  "pocket-cab",
  "pocket-cpu",
  "pocket-gles",
  "pocket-kernel",
  "pocket-pe",
+ "pocket-snapshot",
  "pocket-winceapi",
  "serde",
  "serde_bytes",
@@ -3085,6 +3087,7 @@ dependencies = [
  "pocket-library",
  "pocket-netcf",
  "pocket-pe",
+ "pocket-session",
  "rfd",
  "sdl3",
  "serde",
@@ -3102,6 +3105,7 @@ dependencies = [
  "log",
  "once_cell",
  "serde",
+ "serde_bytes",
  "serde_json",
  "texture2ddecoder",
 ]
@@ -3170,12 +3174,17 @@ dependencies = [
 name = "pocket-netcf"
 version = "0.4.9"
 dependencies = [
+ "bincode",
  "image 0.24.9",
  "log",
  "pocket-cab",
  "pocket-gles",
  "pocket-kernel",
+ "pocket-snapshot",
  "quick-xml",
+ "serde",
+ "serde_bytes",
+ "sha2",
  "tempfile",
 ]
 
@@ -3190,6 +3199,28 @@ dependencies = [
  "log",
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "pocket-session"
+version = "0.4.9"
+dependencies = [
+ "anyhow",
+ "log",
+ "pocket-core",
+ "pocket-library",
+ "pocket-netcf",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "pocket-snapshot"
+version = "0.4.9"
+dependencies = [
+ "bincode",
+ "flate2",
+ "serde",
 ]
 
 [[package]]

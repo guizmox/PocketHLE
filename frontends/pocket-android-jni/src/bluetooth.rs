@@ -126,6 +126,9 @@ struct JavaStream {
     id: i32,
 }
 impl Stream for JavaStream {
+    fn capture_received(&self) -> Result<bluetooth::TransportSnapshot, String> {
+        self.bridge.checkpoint("btCheckpoint", self.id)
+    }
     fn read(&mut self, bytes: &mut [u8]) -> BtResult<usize> {
         if bytes.is_empty() {
             return Ok(0);
@@ -239,6 +242,20 @@ fn decode_address(v: &serde_json::Value) -> BtResult<bluetooth::SocketAddress> {
     })
 }
 impl Bridge {
+    fn checkpoint(&self, method: &str, id: i32) -> Result<bluetooth::TransportSnapshot, String> {
+        let bytes = self
+            .call(|env, class| {
+                let data = JByteArray::from(
+                    env.call_static_method(class, method, "(I)[B", &[JValue::Int(id)])?
+                        .l()?,
+                );
+                env.convert_byte_array(data)
+            })
+            .map_err(|code| format!("cannot capture Android Bluetooth endpoint: {code}"))?;
+        crate::checkpoint_io::bluetooth(&bytes)
+    }
+}
+impl Bridge {
     fn socket_call(&self, value: serde_json::Value) -> BtResult<serde_json::Value> {
         let text: String = self.call(|env, class| {
             let request = env.new_string(value.to_string())?;
@@ -269,6 +286,9 @@ impl JavaSocket {
     }
 }
 impl bluetooth::RfcommSocket for JavaSocket {
+    fn capture_received(&self) -> Result<bluetooth::TransportSnapshot, String> {
+        self.bridge.checkpoint("btSocketCheckpoint", self.id)
+    }
     fn bind(&mut self, a: &bluetooth::SocketAddress) -> BtResult<()> {
         self.control("bind", serde_json::json!({"addr": socket_address(a)}))
             .map(|_| ())

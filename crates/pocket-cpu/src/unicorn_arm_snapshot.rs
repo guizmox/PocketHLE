@@ -29,6 +29,24 @@ struct Bank {
 }
 
 impl ArmRegisterSnapshot {
+    pub(super) fn validate(&self) -> Result<(), CpuError> {
+        check_mode(self.cpsr)?;
+        if self
+            .banks
+            .iter()
+            .enumerate()
+            .any(|(index, bank)| bank.spsr.is_some() != (index != 0))
+            || self.pc & if self.cpsr & THUMB == 0 { 3 } else { 1 } != 0
+        {
+            return Err(CpuError::Backend("invalid ARM snapshot registers".into()));
+        }
+
+        Ok(())
+    }
+    pub(super) fn continuation(&self) -> u32 {
+        self.pc | ((self.cpsr & THUMB) >> 5)
+    }
+
     pub(super) fn set_continuation(&mut self, address: u32) {
         self.pc = address & !1;
         self.cpsr = (self.cpsr & !THUMB) | ((address & 1) << 5);
@@ -90,16 +108,7 @@ impl UnicornCpu {
         snapshot: &ArmRegisterSnapshot,
     ) -> Result<u32, CpuError> {
         self.require_arm_snapshot()?;
-        check_mode(snapshot.cpsr)?;
-        if snapshot
-            .banks
-            .iter()
-            .enumerate()
-            .any(|(index, bank)| bank.spsr.is_some() != (index != 0))
-            || snapshot.pc & if snapshot.cpsr & THUMB == 0 { 3 } else { 1 } != 0
-        {
-            return Err(CpuError::Backend("invalid ARM snapshot registers".into()));
-        }
+        snapshot.validate()?;
 
         for (mode, bank) in BANKS.into_iter().zip(&snapshot.banks) {
             self.snapshot_write(RegisterARM::CPSR, (snapshot.cpsr & !MODE_MASK) | mode)?;

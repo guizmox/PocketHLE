@@ -37,7 +37,7 @@ impl Renderer {
         kind: Kind,
         deleted: &[(u32, u32)],
     ) -> Result<()> {
-        if self.host.es || deleted.is_empty() || self.guest_framebuffers.is_empty() {
+        if deleted.is_empty() || self.guest_framebuffers.is_empty() {
             return Ok(());
         }
         self.preserve_native_errors()?;
@@ -109,10 +109,18 @@ impl Renderer {
                         let target = if face == 0 { TEXTURE_2D } else { 0x8513 };
                         let image_target = if face == 0 { TEXTURE_2D } else { face as u32 };
                         invoke!(self,"glBindTexture",(target=>u32,name as u32=>u32),());
-                        for (pname, value) in
-                            [0x1000, 0x1001, 0x1003].into_iter().zip(&mut dimensions)
-                        {
-                            invoke!(self,"glGetTexLevelParameteriv",(image_target=>u32,level=>i32,pname=>u32,value=>*mut i32),());
+                        if self.host.es {
+                            let defined = self
+                                .texture_levels
+                                .get(&(name as u32, image_target, level))
+                                .ok_or_else(|| error("missing ES retained image allocation"))?;
+                            dimensions = [defined.width, defined.height, defined.internal as i32];
+                        } else {
+                            for (pname, value) in
+                                [0x1000, 0x1001, 0x1003].into_iter().zip(&mut dimensions)
+                            {
+                                invoke!(self,"glGetTexLevelParameteriv",(image_target=>u32,level=>i32,pname=>u32,value=>*mut i32),());
+                            }
                         }
                     }
                     let format = checkpoint::image_format(dimensions[2] as u32);
@@ -149,7 +157,11 @@ impl Renderer {
                         invoke!(self,"glFramebufferTexture2D",(FRAMEBUFFER=>u32,attachment=>u32,target=>u32,name as u32=>u32,level=>i32),());
                     }
                     let color = if format == RGBA { 0x8ce0 } else { 0 };
-                    invoke!(self,"glDrawBuffer",(color=>u32),());
+                    if self.host.es {
+                        invoke!(self,"glDrawBuffers",(1=>i32,&color=>*const u32),());
+                    } else {
+                        invoke!(self,"glDrawBuffer",(color=>u32),());
+                    }
                     invoke!(self,"glReadBuffer",(color=>u32),());
                     let status = invoke!(self,"glCheckFramebufferStatus",(FRAMEBUFFER=>u32),u32);
                     if status != 0x8cd5 {

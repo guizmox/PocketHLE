@@ -3,7 +3,7 @@
 use pocket_kernel::{audio::decode_pcm_wave, AudioEngine, GuestFormat, VoiceParams};
 use std::collections::BTreeMap;
 
-#[derive(Default)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Fmod {
     channels: u32,
     next_channel: u32,

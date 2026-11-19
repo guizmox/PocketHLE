@@ -11,9 +11,9 @@ use pocket_gles::GL_TEXTURE0;
 
 use super::{error, CallCtx, Result};
 
-mod journal;
+mod guest_io;
 mod names;
-use journal::{GlIo, Journal, JournalSnapshot};
+use guest_io::GlIo;
 use names::{Kind, ObjectNames};
 
 const FRAMEBUFFER: u32 = 0x8d40;
@@ -73,8 +73,7 @@ pub(super) struct ContextSnapshot {
     width: u32,
     height: u32,
     scale: u32,
-    journal: Option<JournalSnapshot>,
-    native: Option<checkpoint::NativeCheckpoint>,
+    native: checkpoint::NativeCheckpoint,
 }
 
 impl ContextSnapshot {
@@ -84,16 +83,7 @@ impl ContextSnapshot {
         if renderer.scale != self.scale {
             return Err("host cannot restore the saved GLES2 surface scale".into());
         }
-        match (self.native, self.journal) {
-            (Some(native), None) => native.restore(&mut renderer)?,
-            (None, Some(journal)) => {
-                let mut names = Box::<ObjectNames>::default();
-                renderer.journal =
-                    Journal::replay(journal, &mut names, |name, io| renderer.gl_inner(name, io))?;
-                renderer.names = Some(names);
-            }
-            _ => return Err("invalid GLES2 snapshot resource encoding".into()),
-        }
+        self.native.restore(&mut renderer)?;
         Ok(renderer)
     }
 }
@@ -130,7 +120,7 @@ pub(super) struct Renderer {
     unpack: usize,
     pack: usize,
     guest_error: u32,
-    journal: Journal,
+    texture_levels: HashMap<(u32, u32, i32), checkpoint::Level>,
     retained: retained::RetainedImages,
     names: Option<Box<ObjectNames>>,
     native_compressed_formats: Vec<i32>,
@@ -140,6 +130,8 @@ pub(super) struct Renderer {
     desktop_shader_sources: HashMap<u32, Vec<u8>>,
     compiled_shaders: HashMap<u32, CompiledShader>,
     linked_programs: HashMap<u32, Vec<CompiledShader>>,
+    attribute_bindings: HashMap<u32, BTreeMap<Vec<u8>, u32>>,
+    failed_program: Option<(u32, checkpoint::ProgramInterface)>,
     deleted_programs: HashSet<u32>,
     uniform_locations: HashMap<u32, UniformLocations>,
     // Used only while a restored program needs uniform relocation.
@@ -180,14 +172,12 @@ impl Renderer {
                 }
             })
             // Match the UI's native API even without a share source: desktop
-            // OpenGL on desktop, OpenGL ES on Android. Forcing ES here would
-            // retain a lifetime journal on Linux's otherwise native path.
+            // OpenGL on desktop, OpenGL ES on Android.
             .map_or_else(
                 || {
                     ProgrammableHost::new().or_else(|reason| {
                         if cfg!(all(unix, not(target_os = "android"))) {
-                            // Keep rendering on hosts which expose only ES. Their
-                            // existing bounded checkpoint fallback stays explicit.
+                            // Keep rendering on hosts which expose only ES.
                             log::debug!(
                                 "Owned desktop OpenGL unavailable ({reason}); trying OpenGL ES"
                             );
@@ -232,7 +222,7 @@ impl Renderer {
             unpack: 4,
             pack: 4,
             guest_error: 0,
-            journal: Journal::default(),
+            texture_levels: HashMap::new(),
             retained: Default::default(),
             names: Some(Box::default()),
             native_compressed_formats: Vec::new(),
@@ -242,6 +232,8 @@ impl Renderer {
             desktop_shader_sources: HashMap::new(),
             compiled_shaders: HashMap::new(),
             linked_programs: HashMap::new(),
+            attribute_bindings: HashMap::new(),
+            failed_program: None,
             deleted_programs: HashSet::new(),
             uniform_locations: HashMap::new(),
             uniform_program: 0,
@@ -306,19 +298,8 @@ impl Renderer {
             width: self.width,
             height: self.height,
             scale: self.scale,
-            native: if self.host.es {
-                None
-            } else {
-                Some(
-                    checkpoint::NativeCheckpoint::capture(self)
-                        .map_err(|error| error.to_string())?,
-                )
-            },
-            journal: if self.host.es {
-                Some(self.journal.capture()?)
-            } else {
-                None
-            },
+            native: checkpoint::NativeCheckpoint::capture(self)
+                .map_err(|error| error.to_string())?,
         })
     }
 
@@ -693,16 +674,9 @@ impl Renderer {
     }
 
     pub(super) fn gl(&mut self, name: &str, ctx: &mut CallCtx<'_>) -> Result<u32> {
-        let mut call = self.host.es.then(|| self.journal.begin(name)).flatten();
         let mut names = self.names.take().expect("renderer object names");
-        let result = self.gl_inner(name, &mut GlIo::live(ctx, call.as_mut(), name, &mut names));
+        let result = self.gl_inner(name, &mut GlIo::live(ctx, name, &mut names));
         self.names = Some(names);
-        match &result {
-            Ok(value) => self.journal.commit(call, *value),
-            Err(error) => self.journal.invalidate(format!(
-                "OpenGL ES 2.0 snapshot journal could not record {name}: {error}"
-            )),
-        }
         result
     }
 
@@ -790,23 +764,49 @@ impl Renderer {
                 });
             }
             "glFinish" | "glFlush" => gl!(),
-            "glClear" | "glGenerateMipmap" | "glCullFace" | "glDepthFunc" | "glDisable"
-            | "glEnable" | "glValidateProgram" | "glFrontFace" | "glBlendEquation"
-            | "glStencilMask" => {
+            "glClear" | "glCullFace" | "glDepthFunc" | "glDisable" | "glEnable"
+            | "glValidateProgram" | "glFrontFace" | "glBlendEquation" | "glStencilMask" => {
                 gl!(u!(0) => u32)
             }
             "glCompileShader" => {
                 let shader = u!(0);
                 gl!(shader => u32);
-                if !self.host.es {
-                    self.remember_compiled_shader(shader)?;
-                }
+                self.remember_compiled_shader(shader)?;
             }
             "glLinkProgram" => {
                 let program = u!(0);
+                let mut current = 0;
+                invoke!(self, "glGetIntegerv", (0x8b8d => u32, &mut current => *mut i32), ());
+                let before = if current as u32 == program
+                    && program != 0
+                    && invoke!(self, "glIsProgram", (program => u32), u8) != 0
+                {
+                    let mut linked = 0;
+                    invoke!(self, "glGetProgramiv", (program => u32, 0x8b82 => u32, &mut linked => *mut i32), ());
+                    if linked != 0 {
+                        for _ in 0..16 {
+                            let pending = invoke!(self, "glGetError", (), u32);
+                            if pending == 0 {
+                                break;
+                            }
+                            self.reject(pending);
+                        }
+                        Some(checkpoint::ProgramInterface::capture(self, program)?)
+                    } else {
+                        self.failed_program
+                            .as_ref()
+                            .filter(|(name, _)| *name == program)
+                            .map(|(_, value)| value.clone())
+                    }
+                } else {
+                    None
+                };
                 gl!(program => u32);
-                if !self.host.es {
-                    self.remember_linked_program(program)?;
+                self.remember_linked_program(program)?;
+                if let Some(before) = before {
+                    let mut linked = 0;
+                    invoke!(self, "glGetProgramiv", (program => u32, 0x8b82 => u32, &mut linked => *mut i32), ());
+                    self.failed_program = (linked == 0).then_some((program, before));
                 }
             }
             "glActiveTexture" => {
@@ -858,6 +858,13 @@ impl Renderer {
                     let mut current = 0;
                     invoke!(self, "glGetIntegerv", (0x8b8d => u32, &mut current => *mut i32), ());
                     self.uniform_program = current as u32;
+                }
+                if let Some(failed) = self.failed_program.as_ref().map(|(name, _)| *name) {
+                    let mut current = 0;
+                    invoke!(self, "glGetIntegerv", (0x8b8d => u32, &mut current => *mut i32), ());
+                    if current as u32 != failed {
+                        self.failed_program = None;
+                    }
                 }
                 self.reap_shader_sources()?;
             }
@@ -1151,6 +1158,10 @@ impl Renderer {
                 };
                 names.retain(|id| objects.remove(id));
                 gl!(names.len() as i32 => i32, names.as_ptr() => *const u32);
+                if name == "glDeleteTextures" {
+                    self.texture_levels
+                        .retain(|(texture, _, _), _| !names.contains(texture));
+                }
                 if name == "glDeleteBuffers" {
                     for id in &names {
                         self.index_data.remove(id);
@@ -1449,14 +1460,37 @@ impl Renderer {
                     gl!(mode => u32, count => i32, kind => u32, address as usize as *const c_void => *const c_void);
                 }
             }
+            "glGenerateMipmap" => {
+                let target = u!(0);
+                if self.host.es {
+                    self.preserve_native_errors()?;
+                }
+                gl!(target => u32);
+                if self.host.es && self.accepted_image_call()? {
+                    self.generated_levels(target)?;
+                }
+            }
             "glTexImage2D" => {
                 let (width, height, format, kind, address) = (i!(3), i!(4), u!(6), u!(7), u!(8));
                 let Some(bytes) = texture_size(width, height, format, kind, self.unpack) else {
                     return Ok(self.reject(0x0501));
                 };
                 let pixels = optional_bytes(ctx, address, bytes)?;
-                gl!(u!(0) => u32, i!(1) => i32, i!(2) => i32, width => i32, height => i32,
-                    i!(5) => i32, format => u32, kind => u32, data_pointer(&pixels) => *const c_void);
+                let (target, level, internal, border) = (u!(0), i!(1), u!(2), i!(5));
+                if self.host.es {
+                    self.preserve_native_errors()?;
+                }
+                gl!(target => u32, level => i32, internal as i32 => i32, width => i32, height => i32,
+                    border => i32, format => u32, kind => u32, data_pointer(&pixels) => *const c_void);
+                if self.host.es && self.accepted_image_call()? {
+                    let storage = match kind {
+                        0x8363 => 0x8d62,
+                        0x8033 => 0x8056,
+                        0x8034 => 0x8057,
+                        _ => internal,
+                    };
+                    self.defined_level(target, level, width, height, storage, None)?;
+                }
             }
             "glTexSubImage2D" => {
                 let (width, height, format, kind, address) = (i!(4), i!(5), u!(6), u!(7), u!(8));
@@ -1478,6 +1512,9 @@ impl Renderer {
             "glCopyTexImage2D" | "glCopyTexSubImage2D" => {
                 let (target, level, a, b, c, d, e, f) =
                     (u!(0), i!(1), u!(2), i!(3), i!(4), i!(5), i!(6), i!(7));
+                if self.host.es {
+                    self.preserve_native_errors()?;
+                }
                 self.with_logical_read_target(|renderer| {
                     if name == "glCopyTexImage2D" {
                         invoke!(renderer, name, (target => u32, level => i32, a => u32, b => i32,
@@ -1488,6 +1525,9 @@ impl Renderer {
                     }
                     Ok(())
                 })?;
+                if self.host.es && self.accepted_image_call()? && name == "glCopyTexImage2D" {
+                    self.defined_level(target, level, d, e, a, None)?;
+                }
             }
             "glCompressedTexSubImage2D" => {
                 let (target, level, x, y, width, height, format, size, address) = (
@@ -1513,13 +1553,24 @@ impl Renderer {
                 } else {
                     ctx.read_mem(address, bytes as u32)?
                 };
+                if self.host.es {
+                    self.preserve_native_errors()?;
+                }
                 gl!(target => u32, level => i32, x => i32, y => i32, width => i32, height => i32,
                     format => u32, size => i32, data.as_ptr().cast() => *const c_void);
+                if self.host.es && self.accepted_image_call()? {
+                    self.updated_blocks(target, level, [x, y, width, height], &data)?;
+                }
             }
             "glCompressedTexImage2D" => {
                 let (target, level, format, width, height, border, size, address) =
                     (u!(0), i!(1), u!(2), i!(3), i!(4), i!(5), i!(6), u!(7));
                 let pixels = optional_bytes(ctx, address, transfer_size(size, 1)?)?;
+                if self.host.es {
+                    self.preserve_native_errors()?;
+                }
+                let mut stored_format = format;
+                let mut stored_blocks = pixels.clone();
                 use pocket_gles::{
                     GL_ATC_RGBA_EXPLICIT_ALPHA_AMD, GL_ATC_RGBA_INTERPOLATED_ALPHA_AMD,
                     GL_ATC_RGB_AMD,
@@ -1547,6 +1598,8 @@ impl Renderer {
                     }) else {
                         return Ok(self.reject(0x0501));
                     };
+                    stored_format = RGBA;
+                    stored_blocks = None;
                     invoke!(self, "glPixelStorei", (0x0cf5 => u32, 1 => i32), ());
                     invoke!(self, "glTexImage2D", (target => u32, level => i32, RGBA as i32 => i32,
                         width => i32, height => i32, border => i32, RGBA => u32, UNSIGNED_BYTE => u32,
@@ -1556,6 +1609,9 @@ impl Renderer {
                 } else {
                     gl!(target => u32, level => i32, format => u32, width => i32, height => i32,
                         border => i32, size => i32, data_pointer(&pixels) => *const c_void);
+                }
+                if self.host.es && self.accepted_image_call()? {
+                    self.defined_level(target, level, width, height, stored_format, stored_blocks)?;
                 }
             }
             "glShaderSource" => {
@@ -1740,7 +1796,15 @@ impl Renderer {
                 let symbol = CString::new(ctx.read_string(address, 4096)?)
                     .map_err(|_| error("Invalid shader symbol"))?;
                 if bind {
-                    gl!(object => u32, u!(1) => u32, symbol.as_ptr() => *const c_char);
+                    let index = u!(1);
+                    self.preserve_native_errors()?;
+                    gl!(object => u32, index => u32, symbol.as_ptr() => *const c_char);
+                    if self.accepted_image_call()? {
+                        self.attribute_bindings
+                            .entry(object)
+                            .or_default()
+                            .insert(symbol.as_bytes().to_vec(), index);
+                    }
                 } else {
                     let location =
                         invoke!(self, name, (object => u32, symbol.as_ptr() => *const c_char), i32);
@@ -2000,6 +2064,7 @@ impl Renderer {
         for program in std::mem::take(&mut self.deleted_programs) {
             if invoke!(self, "glIsProgram", (program => u32), u8) == 0 {
                 self.linked_programs.remove(&program);
+                self.attribute_bindings.remove(&program);
                 self.uniform_locations.remove(&program);
             } else {
                 self.deleted_programs.insert(program);
@@ -2116,7 +2181,7 @@ fn desktop_shader(source: &[u8]) -> Vec<u8> {
 mod tests {
     fn read_words(ctx: &mut CallCtx<'_>, address: u32, count: usize) -> Result<Vec<u32>> {
         super::read_words(
-            &mut GlIo::live(ctx, None, "", &mut ObjectNames::default()),
+            &mut GlIo::live(ctx, "", &mut ObjectNames::default()),
             address,
             count,
         )
@@ -2124,7 +2189,7 @@ mod tests {
 
     fn write_words(ctx: &mut CallCtx<'_>, address: u32, values: &[u32]) -> Result<()> {
         super::write_words(
-            &mut GlIo::live(ctx, None, "", &mut ObjectNames::default()),
+            &mut GlIo::live(ctx, "", &mut ObjectNames::default()),
             address,
             values,
         )
@@ -2616,8 +2681,7 @@ mod tests {
             invoke!(&mut source,"glClearStencil",(93=>i32),());
             invoke!(&mut source,"glClear",(0x4000u32|0x0100|0x0400=>u32),());
             let saved = source.capture_context().map_err(error)?;
-            assert!(saved.native.is_some());
-            assert!(saved.journal.is_none());
+
             let bytes = serde_json::to_vec(&saved).map_err(|e| error(e.to_string()))?;
             drop(saved);
             drop(source);

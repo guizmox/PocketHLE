@@ -11,6 +11,8 @@ members = [
     "crates/pocket-netcf",
     "crates/pocket-core",
     "crates/pocket-library",
+    "crates/pocket-session",
+    "crates/pocket-snapshot",
     "frontends/pocket-cli",
     "frontends/pocket-desktop",
     "frontends/pocket-android-jni",

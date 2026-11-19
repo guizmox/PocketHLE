@@ -80,4 +80,4 @@ mod tests {
 }
 
 #[cfg(all(test, unix))]
-mod native_tests;
+pub(in crate::gles2::renderer) mod native_tests;

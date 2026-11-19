@@ -49,8 +49,44 @@ impl Input {
     }
 }
 
+pub enum Poll {
+    Continue,
+    Stop,
+    Discard,
+}
+/// Completion runs on the emulation thread; it must move plain checkpoint data
+/// to a background writer, never move native resources to that writer.
+pub struct CaptureRequest {
+    environment: std::collections::BTreeMap<String, String>,
+    complete: Option<Box<dyn FnOnce(Result<crate::snapshot::ManagedSnapshot, String>) + Send>>,
+}
+impl CaptureRequest {
+    pub fn new(
+        environment: std::collections::BTreeMap<String, String>,
+        complete: impl FnOnce(Result<crate::snapshot::ManagedSnapshot, String>) + Send + 'static,
+    ) -> Self {
+        Self {
+            environment,
+            complete: Some(Box::new(complete)),
+        }
+    }
+    fn capture(mut self, session: &Session<'_>, elapsed: u64) {
+        let result = session.checkpoint(elapsed, std::mem::take(&mut self.environment));
+        if let Some(complete) = self.complete.take() {
+            complete(result);
+        }
+    }
+}
+impl Drop for CaptureRequest {
+    fn drop(&mut self) {
+        if let Some(complete) = self.complete.take() {
+            complete(Err("Managed snapshot capture was interrupted".into()));
+        }
+    }
+}
 pub struct Options {
     pub size: (u32, u32),
+    pub restore: Option<crate::snapshot::ManagedSnapshot>,
     pub save_root: Option<std::path::PathBuf>,
     pub guest_path: Option<String>,
     pub tilt: Option<TiltAxes>,
@@ -62,7 +98,7 @@ pub struct Options {
 pub fn run(
     executable: &Path,
     options: Options,
-    mut poll: impl FnMut(&mut Vec<InputEvent>) -> bool,
+    mut poll: impl FnMut(&mut Vec<InputEvent>, &mut Vec<CaptureRequest>) -> Poll,
     mut present: impl FnMut(&Framebuffer),
     audio_ready: impl FnOnce(&mut pocket_kernel::AudioEngine),
 ) -> Result<(), String> {
@@ -77,16 +113,26 @@ pub fn run(
     if bytes.len() as u64 > MAX_IMAGE {
         return Err("Managed image exceeds the 32 MiB limit".into());
     }
-    let mut session = Session::start_in(
-        &bytes,
-        options.size,
-        INSTRUCTIONS_PER_CALLBACK,
-        options.save_root,
-        options.guest_path,
-        (options.gpu_renderer, options.gles_internal_resolution),
-        executable.parent().map(Path::to_path_buf),
-    )
-    .map_err(|error| format!("Managed startup: {error:?}"))?;
+    let offset = options.restore.as_ref().map_or(0, |s| s.elapsed_ms());
+    let mut session = match options.restore {
+        Some(saved) => saved.restore(
+            &bytes,
+            options.size,
+            options.save_root,
+            executable.parent().map(Path::to_path_buf),
+            (options.gpu_renderer, options.gles_internal_resolution),
+        )?,
+        None => Session::start_in(
+            &bytes,
+            options.size,
+            INSTRUCTIONS_PER_CALLBACK,
+            options.save_root,
+            options.guest_path,
+            (options.gpu_renderer, options.gles_internal_resolution),
+            executable.parent().map(Path::to_path_buf),
+        )
+        .map_err(|e| format!("Managed startup: {e:?}"))?,
+    };
     audio_ready(session.audio());
     let mut framebuffer = Framebuffer::new(options.size.0, options.size.1);
     let mut generation = 0;
@@ -94,12 +140,28 @@ pub fn run(
     let mut events = Vec::new();
     let start = Instant::now();
     let mut last_present = None;
+    let mut captures = Vec::new();
+    let mut discard = false;
     let interval = options
         .frame_rate_limit
         .filter(|fps| *fps > 0)
         .map(|fps| Duration::from_secs_f64(1.0 / f64::from(fps)));
     let run = (|| {
-        while session.running() && poll(&mut events) {
+        while session.running() {
+            match poll(&mut events, &mut captures) {
+                Poll::Continue => {}
+                Poll::Stop => break,
+                Poll::Discard => {
+                    discard = true;
+                    break;
+                }
+            }
+            for request in captures.drain(..) {
+                request.capture(
+                    &session,
+                    offset.saturating_add(start.elapsed().as_millis() as u64),
+                );
+            }
             for event in events.drain(..) {
                 if let InputEvent::PointerUp { x, y } = event {
                     session
@@ -113,7 +175,7 @@ pub fn run(
             let now = Instant::now();
             session
                 .tick(
-                    now.duration_since(start).as_millis() as u64,
+                    offset.saturating_add(now.duration_since(start).as_millis() as u64),
                     INSTRUCTIONS_PER_CALLBACK,
                 )
                 .map_err(|error| format!("Managed event: {error:?}"))?;
@@ -137,9 +199,13 @@ pub fn run(
         }
         Ok(())
     })();
-    let close = session
-        .close(INSTRUCTIONS_PER_CALLBACK)
-        .map_err(|error| format!("Managed shutdown: {error:?}"));
+    let close = if discard {
+        Ok(())
+    } else {
+        session
+            .close(INSTRUCTIONS_PER_CALLBACK)
+            .map_err(|error| format!("Managed shutdown: {error:?}"))
+    };
     if let (Err(_), Err(error)) = (&run, &close) {
         log::warn!("{error}");
     }

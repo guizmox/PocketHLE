@@ -1056,5 +1056,5 @@ mod presentation_stats_tests {
 /// Checked GPU/CPU authority facade, not yet installed in KernelState.
 pub mod deferred;
 mod snapshot;
-pub use snapshot::DisplaySnapshot;
+pub use snapshot::{DisplaySnapshot, SavedImage as PixelSnapshot};
 pub mod gapi_memory;

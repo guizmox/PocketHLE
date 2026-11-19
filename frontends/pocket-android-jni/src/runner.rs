@@ -44,6 +44,10 @@ use pocket_core::winceapi::{self, SystemMediaCommand, SystemMediaInput, SystemMe
 use pocket_core::Emulator;
 use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry, Library};
 
+#[cfg(feature = "unicorn")]
+#[path = "runner_snapshots.rs"]
+mod snapshots;
+
 const FRAME_PUSH_INTERVAL: Duration = Duration::from_millis(16);
 
 fn presentation_phase(last: Option<Instant>, now: Instant) -> Option<Instant> {
@@ -110,11 +114,23 @@ pub enum InputCommand {
     SystemMedia(SystemMediaCommand),
     Input(InputEvent),
     Stop,
+    Snapshot { restore: bool },
 }
 
 /// Shared between the worker thread and the UI thread for the
 /// lifetime of one game session.
 pub(crate) struct SessionState {
+    user_stop: Arc<AtomicBool>,
+    session_error: Arc<Mutex<Option<String>>>,
+    restore_requested: AtomicBool,
+    #[cfg(feature = "unicorn")]
+    preparation: Mutex<Option<pocket_session::snapshot::Preparation>>,
+    #[cfg(feature = "unicorn")]
+    prepared_restore: Mutex<Option<pocket_session::snapshot::PreparedRestore>>,
+    snapshot_busy: AtomicBool,
+    snapshot_replies: Mutex<Option<Receiver<Result<u64, String>>>>,
+    snapshot_notices: Mutex<std::collections::VecDeque<String>>,
+    restore_notice: Mutex<Option<u64>>,
     presentation: Option<Arc<crate::graphics::Presentation>>,
     system_media: Mutex<Option<SystemMediaStatus>>,
     stop_all: Arc<AtomicBool>,
@@ -140,8 +156,26 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
+    pub(crate) fn reject_snapshot(&self, restore: bool, reason: &str) {
+        self.snapshot_notices
+            .lock()
+            .unwrap()
+            .push_back(snapshot_failure(restore, reason.into()));
+        self.snapshot_busy.store(false, Ordering::Release);
+    }
     fn new() -> Self {
         Self {
+            user_stop: Arc::new(AtomicBool::new(false)),
+            session_error: Arc::new(Mutex::new(None)),
+            restore_requested: AtomicBool::new(false),
+            #[cfg(feature = "unicorn")]
+            preparation: Default::default(),
+            #[cfg(feature = "unicorn")]
+            prepared_restore: Default::default(),
+            snapshot_busy: AtomicBool::new(false),
+            snapshot_replies: Mutex::new(None),
+            snapshot_notices: Mutex::new(Default::default()),
+            restore_notice: Mutex::new(None),
             presentation: None,
             stop_all: Arc::new(AtomicBool::new(false)),
             latest_frame: Mutex::new(None),
@@ -229,10 +263,92 @@ impl Session {
     }
 
     pub fn request_stop(&self) {
+        self.state.user_stop.store(true, Ordering::Release);
         self.state.stop_all.store(true, Ordering::Release);
         self.send_input(InputCommand::Stop);
     }
 
+    pub fn request_snapshot(&self, restore: bool) -> bool {
+        if !cfg!(feature = "unicorn")
+            || !self.is_running()
+            || self
+                .state
+                .snapshot_busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        if self
+            .input_tx
+            .send(InputCommand::Snapshot { restore })
+            .is_err()
+        {
+            self.state.snapshot_busy.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+    pub fn poll_snapshot_notice(&self) -> Option<String> {
+        #[cfg(feature = "unicorn")]
+        {
+            let result = self
+                .state
+                .preparation
+                .lock()
+                .ok()?
+                .as_ref()
+                .and_then(|receiver| match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(TryRecvError::Disconnected) => {
+                        Some(Err("Snapshot verification was interrupted".into()))
+                    }
+                    Err(TryRecvError::Empty) => None,
+                });
+            if let Some(result) = result {
+                self.state.preparation.lock().ok()?.take();
+                match result {
+                    Ok(Some(prepared)) => {
+                        *self.state.prepared_restore.lock().ok()? = Some(prepared);
+                        self.state.restore_requested.store(true, Ordering::Release);
+                        self.state.stop_all.store(true, Ordering::Release);
+                    }
+                    Ok(None) => {
+                        self.state.snapshot_busy.store(false, Ordering::Release);
+                        return Some(serde_json::json!({"action":"missing"}).to_string());
+                    }
+                    Err(error) => {
+                        self.state.snapshot_busy.store(false, Ordering::Release);
+                        return Some(snapshot_failure(true, error));
+                    }
+                }
+            }
+        }
+        let result =
+            self.state
+                .snapshot_replies
+                .lock()
+                .ok()?
+                .as_ref()
+                .and_then(|reply| match reply.try_recv() {
+                    Ok(value) => Some(value),
+                    Err(TryRecvError::Disconnected) => {
+                        Some(Err("Snapshot capture was interrupted".into()))
+                    }
+                    Err(TryRecvError::Empty) => None,
+                });
+        if let Some(result) = result {
+            self.state.snapshot_replies.lock().ok()?.take();
+            self.state.snapshot_busy.store(false, Ordering::Release);
+            return Some(match result {
+                Ok(timestamp) => {
+                    serde_json::json!({"action":"saved", "timestamp":timestamp}).to_string()
+                }
+                Err(error) => snapshot_failure(false, error),
+            });
+        }
+        self.state.snapshot_notices.lock().ok()?.pop_front()
+    }
     pub fn published_image_ips(&self) -> Option<f32> {
         self.state.presentation_stats.lock().ok()?.as_ref()?.ips()
     }
@@ -317,6 +433,9 @@ fn run_game_to_completion(
     state: &Arc<SessionState>,
     input_rx: Receiver<InputCommand>,
 ) -> String {
+    #[cfg(feature = "unicorn")]
+    let mut card_root = entry.gizmondo_storage_card_root(library_root);
+    #[cfg(not(feature = "unicorn"))]
     let card_root = entry.gizmondo_storage_card_root(library_root);
     if is_gizmondo_game(entry, library_root)
         && entry.settings.storage_card_dir.is_some()
@@ -327,33 +446,95 @@ fn run_game_to_completion(
             pocket_library::session_diagnostic::startup_failure(reason.clone(), Vec::new());
         return serde_json::json!({"summary": reason, "diagnostic": diagnostic}).to_string();
     }
-    let mut hook = SessionHook::new(Arc::clone(state), input_rx);
-    let ((summary, code), log) = pocket_library::session_diagnostic::capture(|| {
-        run_process(
-            library_root,
-            entry,
-            &card_root,
-            None,
-            None,
-            None,
-            None,
-            &mut hook,
-        )
-    });
-    let diagnostic = pocket_library::session_diagnostic::classify(
-        false,
-        hook.started,
-        code,
-        hook.startup_exit,
-        hook.runtime_error.as_deref(),
-        &summary,
-        log,
-    );
-    serde_json::json!({"summary": summary, "diagnostic": diagnostic}).to_string()
+    #[cfg(feature = "unicorn")]
+    let mut receiver = input_rx;
+    #[cfg(not(feature = "unicorn"))]
+    let receiver = input_rx;
+    #[cfg(feature = "unicorn")]
+    let mut selected = entry.clone();
+    #[cfg(not(feature = "unicorn"))]
+    let selected = entry.clone();
+    #[cfg(feature = "unicorn")]
+    let mut saved = None;
+    loop {
+        let mut hook = SessionHook::new(Arc::clone(state), receiver);
+        #[cfg(feature = "unicorn")]
+        {
+            if let Some(prepared) = saved.take() {
+                let prepared: pocket_session::snapshot::PreparedRestore = prepared;
+                let target = prepared.install(&mut hook.snapshots);
+                selected = target.context.game;
+                card_root = target.context.card;
+                selected.executable =
+                    selected.child_executable_reference(library_root, &target.executable);
+                *state.restore_notice.lock().unwrap() = Some(target.timestamp);
+            }
+        }
+        #[cfg(feature = "unicorn")]
+        let guest = hook.snapshots.program_path().map(str::to_owned);
+        #[cfg(not(feature = "unicorn"))]
+        let guest: Option<String> = None;
+        let ((summary, code), log) = pocket_library::session_diagnostic::capture(|| {
+            run_process(
+                library_root,
+                &selected,
+                &card_root,
+                guest.as_deref(),
+                None,
+                None,
+                None,
+                &mut hook,
+            )
+        });
+        #[cfg(feature = "unicorn")]
+        if state.restore_requested.swap(false, Ordering::AcqRel)
+            && !state.user_stop.load(Ordering::Acquire)
+        {
+            let next = state
+                .prepared_restore
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| "Missing validated snapshot".to_owned());
+            match next {
+                Ok(prepared) => {
+                    // All old CPU/native jobs have joined before resetting stop or
+                    // reusing the persistent Android presentation root.
+                    saved = Some(prepared);
+                    receiver = hook.take_input_receiver();
+                    state.latest_frame.lock().unwrap().take();
+                    state.presentation_stats.lock().unwrap().take();
+                    state.audio.lock().unwrap().take();
+                    state.session_error.lock().unwrap().take();
+                    state.stop_all.store(false, Ordering::Release);
+                    continue;
+                }
+                Err(error) => {
+                    let diagnostic =
+                        pocket_library::session_diagnostic::snapshot_failure(true, error, summary);
+                    state.snapshot_busy.store(false, Ordering::Release);
+                    return serde_json::json!({"summary":diagnostic.reason, "diagnostic":diagnostic}).to_string();
+                }
+            }
+        }
+        let peer_error = state.session_error.lock().unwrap().clone();
+        let diagnostic = pocket_library::session_diagnostic::classify(
+            state.user_stop.load(Ordering::Acquire),
+            hook.started,
+            code,
+            hook.startup_exit,
+            hook.runtime_error.as_deref().or(peer_error.as_deref()),
+            &summary,
+            log,
+        );
+        return serde_json::json!({"summary":summary, "diagnostic":diagnostic}).to_string();
+    }
 }
 
 #[derive(Clone)]
 struct LaunchContext {
+    #[cfg(feature = "unicorn")]
+    config: pocket_library::LauncherConfig,
     library_root: PathBuf,
     entry: GameEntry,
     card_root: PathBuf,
@@ -415,7 +596,7 @@ fn run_process(
         .as_ref()
         .map(|p| p.enabled.clone())
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-    pocket_core::winceapi::gles::with_shared_context_source(source, || {
+    let result = pocket_core::winceapi::gles::with_shared_context_source(source, || {
         pocket_core::winceapi::gles::with_shared_frame_export(enabled, || {
             run_process_inner(
                 library_root,
@@ -428,7 +609,15 @@ fn run_process(
                 hook,
             )
         })
-    })
+    });
+    #[cfg(feature = "unicorn")]
+    if let Some(group) = &hook.snapshots.restore_group {
+        group.cancel(format!(
+            "process stopped before device restore completed: {}",
+            result.0
+        ));
+    }
+    result
 }
 fn run_process_inner(
     library_root: &std::path::Path,
@@ -457,6 +646,25 @@ fn run_process_inner(
         .unwrap_or(pocket_core::pe::machine::ARM);
     summary_lines.push(format!("Executable: {}", exe.display()));
 
+    let launcher_config = {
+        #[cfg(feature = "unicorn")]
+        let pinned = hook.snapshots.launch_config.clone();
+        #[cfg(not(feature = "unicorn"))]
+        let pinned: Option<pocket_library::LauncherConfig> = None;
+        pinned.unwrap_or_else(|| {
+            pocket_library::Library::open(library_root)
+                .map(|l| l.config().clone())
+                .unwrap_or_default()
+        })
+    };
+
+    hook.launch_context = Some(LaunchContext {
+        #[cfg(feature = "unicorn")]
+        config: launcher_config.clone(),
+        library_root: library_root.to_path_buf(),
+        entry: entry.clone(),
+        card_root: card_root.to_path_buf(),
+    });
     // Route IL applications through the managed runtime before selecting a native CPU.
     if let Ok(image) = &image {
         if let Some(runtime) = &image.managed_runtime {
@@ -474,8 +682,15 @@ fn run_process_inner(
                     0,
                 );
             }
-            if guest_path.is_none() {
-                return run_compact_framework(&exe, entry, library_root, hook, screen);
+            if guest_path.is_none() || hook.has_managed_restore() {
+                return run_compact_framework(
+                    &exe,
+                    entry,
+                    library_root,
+                    &launcher_config,
+                    hook,
+                    screen,
+                );
             }
             summary_lines.push(format!("Unsupported managed child process ({runtime})."));
             return (summary_lines.join("\n"), 0xc0000135);
@@ -485,9 +700,6 @@ fn run_process_inner(
     // Same Stub→Unicorn promotion logic as `pocket_desktop::runner`:
     // a user who clicks "Run" wants the real ARM core regardless of
     // what is persisted in their library.json.
-    let launcher_config = pocket_library::Library::open(library_root)
-        .map(|l| l.config().clone())
-        .unwrap_or_default();
     let requested_backend = entry.settings.cpu_backend;
     let mut effective_backend = requested_backend;
     let mut emu = match requested_backend {
@@ -866,11 +1078,7 @@ fn run_process_inner(
     let kernel = &mut emu.process_mut().unwrap().state;
     kernel.process_launch_enabled = true;
     hook.pid = kernel.object_handles.process_id();
-    hook.launch_context = Some(LaunchContext {
-        library_root: library_root.to_path_buf(),
-        entry: entry.clone(),
-        card_root: card_root.to_path_buf(),
-    });
+
     if let Some(startup) = startup.as_mut() {
         if let Err(error) = emu.set_startup_command_line(&startup.command_line) {
             startup.error = 8;
@@ -890,13 +1098,64 @@ fn run_process_inner(
             emu.process_mut().unwrap().state.should_stop = true;
         }
     }
+    #[cfg(feature = "unicorn")]
+    let restored = match hook
+        .snapshots
+        .restore
+        .take()
+        .map(|saved| pocket_session::snapshot::restore(hook, &mut emu, saved))
+        .transpose()
+    {
+        Ok(restored) => restored,
+        Err(error) => {
+            let reason = format!("Cannot restore snapshot: {error:#}");
+            if let Some(group) = &hook.snapshots.restore_group {
+                group.cancel(reason.clone());
+            }
+            hook.runtime_error = Some(reason.clone());
+            hook.state
+                .session_error
+                .lock()
+                .unwrap()
+                .get_or_insert(reason.clone());
+            hook.stop_all.store(true, Ordering::Release);
+            drop(emu);
+            hook.finish_children();
+            return (reason, 13);
+        }
+    };
+    #[cfg(feature = "unicorn")]
+    {
+        hook.pid = emu.process().unwrap().state.object_handles.process_id();
+        if let Err(error) = hook.snapshots.register(hook.pid) {
+            hook.runtime_error = Some(error.clone());
+            drop(emu);
+            hook.finish_children();
+            return (error, 13);
+        }
+    }
     hook.started = true;
     let started_at = std::time::Instant::now();
+    #[cfg(feature = "unicorn")]
+    let run_result = if let Some(restored) = restored {
+        emu.run_restored(restored, hook)
+    } else {
+        emu.run_with_hook(hook)
+    };
+    #[cfg(not(feature = "unicorn"))]
     let run_result = emu.run_with_hook(hook);
     hook.startup_exit =
         started_at.elapsed() < pocket_library::session_diagnostic::STARTUP_DIAGNOSTIC_WINDOW;
     if let Err(error) = &run_result {
         hook.runtime_error = Some(format!("{error:#}"));
+    }
+    if let Some(error) = &hook.runtime_error {
+        hook.state
+            .session_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(|| error.clone());
+        hook.stop_all.store(true, Ordering::Release);
     }
     match &run_result {
         Ok(()) => summary_lines.push("Emulator exited cleanly.".to_string()),
@@ -939,6 +1198,10 @@ fn run_process_inner(
     if let Some(table) = table {
         table.complete_process_exit(code);
     }
+    #[cfg(feature = "unicorn")]
+    {
+        hook.snapshots.participant = None;
+    }
     hook.finish_children();
     (summary_lines.join("\n"), code)
 }
@@ -966,13 +1229,11 @@ fn run_compact_framework(
     exe: &std::path::Path,
     entry: &GameEntry,
     library_root: &std::path::Path,
+    config: &pocket_library::LauncherConfig,
     hook: &mut SessionHook,
     size: (u32, u32),
 ) -> (String, u32) {
-    let config = pocket_library::Library::open(library_root)
-        .map(|library| library.config().clone())
-        .unwrap_or_default();
-    let tilt = entry.settings.effective_tilt_axes(&config);
+    let tilt = entry.settings.effective_tilt_axes(config);
     let rx = hook.take_input_receiver();
     let stop_all = Arc::clone(&hook.stop_all);
     let state = Arc::clone(&hook.state);
@@ -981,6 +1242,16 @@ fn run_compact_framework(
         exe,
         pocket_netcf::host::Options {
             size,
+            restore: {
+                #[cfg(feature = "unicorn")]
+                {
+                    hook.snapshots.managed_restore.take()
+                }
+                #[cfg(not(feature = "unicorn"))]
+                {
+                    None
+                }
+            },
             save_root: Some(entry.save_dir(library_root)),
             guest_path: entry
                 .guest_launch_paths(library_root)
@@ -988,19 +1259,33 @@ fn run_compact_framework(
             tilt,
             gpu_renderer: config.gpu_renderer,
             gles_internal_resolution: config.gles_internal_resolution,
-            frame_rate_limit: entry.settings.effective_frame_rate_limit(&config),
+            frame_rate_limit: entry.settings.effective_frame_rate_limit(config),
         },
-        |events| {
+        |events, _captures| {
             if stop_all.load(Ordering::Acquire) {
-                return false;
+                return if state.restore_requested.load(Ordering::Acquire) {
+                    pocket_netcf::host::Poll::Discard
+                } else {
+                    pocket_netcf::host::Poll::Stop
+                };
             }
             loop {
                 match rx.try_recv() {
                     Ok(InputCommand::Input(event)) => events.push(event),
-                    Ok(InputCommand::Stop) | Err(TryRecvError::Disconnected) => return false,
+                    Ok(InputCommand::Stop) | Err(TryRecvError::Disconnected) => {
+                        return pocket_netcf::host::Poll::Stop
+                    }
                     Ok(InputCommand::SystemMedia(_)) => {}
-                    Err(TryRecvError::Empty) => return true,
+                    Ok(InputCommand::Snapshot { restore }) => hook.snapshot_command(restore),
+                    Err(TryRecvError::Empty) => break,
                 }
+            }
+            #[cfg(feature = "unicorn")]
+            pocket_session::snapshot::queue_managed_captures(hook, _captures);
+            if state.restore_requested.load(Ordering::Acquire) {
+                pocket_netcf::host::Poll::Discard
+            } else {
+                pocket_netcf::host::Poll::Continue
             }
         },
         |frame| {
@@ -1016,6 +1301,8 @@ fn run_compact_framework(
     if let Ok(mut slot) = state.audio.lock() {
         *slot = None;
     }
+    // Cold restore reuses the JNI session's original input channel.
+    hook.input_rx = Arc::new(Mutex::new(rx));
     hook.started = presented;
     hook.runtime_error = result.as_ref().err().cloned();
     match result {
@@ -1025,6 +1312,19 @@ fn run_compact_framework(
 }
 
 pub(crate) fn push_frame(state: &Arc<SessionState>, frame: FrameSnapshot) {
+    if let Some(timestamp) = state
+        .restore_notice
+        .lock()
+        .ok()
+        .and_then(|mut value| value.take())
+    {
+        state
+            .snapshot_notices
+            .lock()
+            .unwrap()
+            .push_back(serde_json::json!({"action":"restored", "timestamp":timestamp}).to_string());
+        state.snapshot_busy.store(false, Ordering::Release);
+    }
     if let Ok(mut stats) = state.presentation_stats.lock() {
         *stats = Some(frame.presentation_stats.clone());
     }
@@ -1039,6 +1339,8 @@ pub(crate) fn push_frame(state: &Arc<SessionState>, frame: FrameSnapshot) {
 /// Bridges the UI thread (Kotlin) and the running emulator on the
 /// worker thread.
 struct SessionHook {
+    #[cfg(feature = "unicorn")]
+    snapshots: pocket_session::snapshot::ProcessSnapshots,
     media_input: SystemMediaInput,
     media_commands: Vec<SystemMediaCommand>,
     colors_random_gps: Option<pocket_library::LauncherConfig>,
@@ -1061,7 +1363,63 @@ struct SessionHook {
     runtime_error: Option<String>,
 }
 
+fn snapshot_failure(restore: bool, error: String) -> String {
+    let diagnostic =
+        pocket_library::session_diagnostic::snapshot_failure(restore, error, String::new());
+    serde_json::json!({"action":"error", "diagnostic":diagnostic}).to_string()
+}
+
 impl SessionHook {
+    fn has_managed_restore(&self) -> bool {
+        #[cfg(feature = "unicorn")]
+        {
+            self.snapshots.managed_restore.is_some()
+        }
+        #[cfg(not(feature = "unicorn"))]
+        {
+            false
+        }
+    }
+    fn snapshot_command(&mut self, restore: bool) {
+        #[cfg(feature = "unicorn")]
+        {
+            if restore {
+                let result = <Self as pocket_session::snapshot::Host>::launch_context(self)
+                    .ok_or_else(|| "Missing snapshot launch context".to_owned())
+                    .and_then(|mut context| {
+                        let library = pocket_library::Library::open(&context.library)
+                            .map_err(|e| e.to_string())?;
+                        context.config = library.config().clone();
+                        context.game = library
+                            .get(&context.game.id)
+                            .cloned()
+                            .ok_or("Snapshot game is no longer in the library")?;
+                        context.card = context.game.gizmondo_storage_card_root(&context.library);
+                        pocket_session::snapshot::prepare_async(context)
+                    });
+                match result {
+                    Ok(receiver) => *self.state.preparation.lock().unwrap() = Some(receiver),
+                    Err(error) => self.state.reject_snapshot(true, &error),
+                }
+            } else {
+                let (reply, receiver) = channel();
+                *self.state.snapshot_replies.lock().unwrap() = Some(receiver);
+                self.snapshots.requests.push(reply);
+            }
+        }
+        #[cfg(not(feature = "unicorn"))]
+        {
+            self.state.snapshot_busy.store(false, Ordering::Release);
+            self.state
+                .snapshot_notices
+                .lock()
+                .unwrap()
+                .push_back(snapshot_failure(
+                    restore,
+                    "Snapshots require the Unicorn ARM backend".into(),
+                ));
+        }
+    }
     fn queue_input(
         &mut self,
         ev: InputEvent,
@@ -1106,6 +1464,12 @@ impl SessionHook {
                 request.executable.display(),
                 context.as_ref().map(|context| &context.card_root),
             );
+        }
+        #[cfg(feature = "unicorn")]
+        if !request.concurrent {
+            state.pending_process_launch = Some(request);
+            self.snapshots.synchronous_launch = true;
+            return;
         }
         if request.concurrent {
             let result = if let (Some(context), Ok(executable_reference)) =
@@ -1205,59 +1569,62 @@ impl SessionHook {
             }
             return;
         }
-        let mut exit_code = 0xc0000135;
-        if let (Some(context), Ok(executable_reference)) = (context, executable_reference) {
-            let mut child_game = context.entry.clone();
-            child_game.executable = executable_reference;
-            state.audio.suspend_output();
-            let saved = pocket_core::suspend_host_session();
-            let mut child_hook = self.child_hook();
-            let child_pid = state
-                .object_handles
-                .child_id(request.process_handle)
-                .unwrap();
-            self.foreground.store(child_pid, Ordering::Release);
-            log::info!("parent suspended; entering child {}", request.guest_path);
-            let (outcome, code) = run_process(
-                &context.library_root,
-                &child_game,
-                &context.card_root,
-                Some(&request.guest_path),
-                state.memory_division.clone(),
-                state.child_handle_context(request.process_handle),
-                None,
-                &mut child_hook,
-            );
-            exit_code = code;
-            self.foreground.store(self.pid, Ordering::Release);
-            self.input_disconnected = child_hook.input_disconnected;
+        #[cfg(not(feature = "unicorn"))]
+        {
+            let mut exit_code = 0xc0000135;
+            if let (Some(context), Ok(executable_reference)) = (context, executable_reference) {
+                let mut child_game = context.entry.clone();
+                child_game.executable = executable_reference;
+                state.audio.suspend_output();
+                let saved = pocket_core::suspend_host_session();
+                let mut child_hook = self.child_hook();
+                let child_pid = state
+                    .object_handles
+                    .child_id(request.process_handle)
+                    .unwrap();
+                self.foreground.store(child_pid, Ordering::Release);
+                log::info!("parent suspended; entering child {}", request.guest_path);
+                let (outcome, code) = run_process(
+                    &context.library_root,
+                    &child_game,
+                    &context.card_root,
+                    Some(&request.guest_path),
+                    state.memory_division.clone(),
+                    state.child_handle_context(request.process_handle),
+                    None,
+                    &mut child_hook,
+                );
+                exit_code = code;
+                self.foreground.store(self.pid, Ordering::Release);
+                self.input_disconnected = child_hook.input_disconnected;
 
-            // run_process has dropped its child Emulator and its media first.
-            drop(saved);
-            state.audio.resume_output();
-            log::info!("child finished with code 0x{exit_code:08x}; resuming preserved parent");
-            if exit_code != 0 {
-                log::warn!("child outcome: {}", outcome);
+                // run_process has dropped its child Emulator and its media first.
+                drop(saved);
+                state.audio.resume_output();
+                log::info!("child finished with code 0x{exit_code:08x}; resuming preserved parent");
+                if exit_code != 0 {
+                    log::warn!("child outcome: {}", outcome);
+                }
+                self.last_frame = 0;
+                self.last_emit_at = None;
+                self.saw_non_black = false;
+                // Repaint the preserved parent frame even if its counter is static.
+                state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
+                state.reset_foreground_input();
             }
-            self.last_frame = 0;
-            self.last_emit_at = None;
-            self.saw_non_black = false;
-            // Repaint the preserved parent frame even if its counter is static.
-            state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
-            state.reset_foreground_input();
-        }
-        if let Some(table) = state.object_handles.child(request.process_handle) {
-            table.complete_process_exit(exit_code);
-            table.set_exit(Some(0), exit_code);
-            table.mark_inactive();
-        }
-        state.sync_transferred_handles();
-        if let Some(child) = state.child_processes.get_mut(&request.process_handle) {
-            child.exit_code = Some(exit_code);
-        }
-        for handle in [request.process_handle, request.thread_handle] {
-            if let Some(mut event) = state.events.get_mut(&handle) {
-                event.signalled = true;
+            if let Some(table) = state.object_handles.child(request.process_handle) {
+                table.complete_process_exit(exit_code);
+                table.set_exit(Some(0), exit_code);
+                table.mark_inactive();
+            }
+            state.sync_transferred_handles();
+            if let Some(child) = state.child_processes.get_mut(&request.process_handle) {
+                child.exit_code = Some(exit_code);
+            }
+            for handle in [request.process_handle, request.thread_handle] {
+                if let Some(mut event) = state.events.get_mut(&handle) {
+                    event.signalled = true;
+                }
             }
         }
     }
@@ -1273,6 +1640,10 @@ impl SessionHook {
     fn child_hook(&self) -> Self {
         let (_, input_rx) = channel();
         let mut hook = Self::new(Arc::clone(&self.state), input_rx);
+        #[cfg(feature = "unicorn")]
+        {
+            hook.snapshots = self.snapshots.child();
+        }
         hook.input_rx = Arc::clone(&self.input_rx);
         hook.stop_all = Arc::clone(&self.stop_all);
         hook.foreground = Arc::clone(&self.foreground);
@@ -1292,6 +1663,8 @@ impl SessionHook {
 
     fn new(state: Arc<SessionState>, input_rx: Receiver<InputCommand>) -> Self {
         Self {
+            #[cfg(feature = "unicorn")]
+            snapshots: Default::default(),
             colors_random_gps: None,
             geofence_down: false,
             media_input: SystemMediaInput::default(),
@@ -1317,6 +1690,30 @@ impl SessionHook {
 }
 
 impl FrameHook for SessionHook {
+    #[cfg(feature = "unicorn")]
+    fn checkpoint_requested(&mut self) -> bool {
+        self.snapshots.requested(
+            self.pid,
+            self.foreground.load(Ordering::Acquire) == self.pid,
+        )
+    }
+    #[cfg(feature = "unicorn")]
+    fn checkpoint_requires_execution_gate(&self) -> bool {
+        false
+    }
+    #[cfg(feature = "unicorn")]
+    fn on_checkpoint(
+        &mut self,
+        cpu: &mut dyn pocket_core::cpu::Cpu,
+        process: &mut pocket_core::kernel::Process,
+        point: pocket_core::kernel::ResumePoint,
+    ) {
+        if self.snapshots.synchronous_launch || process.state.suspended_process_launch.is_some() {
+            pocket_session::snapshot::wait_for_child(self, cpu, process, point);
+        } else {
+            pocket_session::snapshot::capture(self, cpu, process, point, None);
+        }
+    }
     fn on_frame(&mut self, kernel: &mut KernelState) -> FrameAction {
         // Drain any pending UI input into the kernel's queue.
         self.reap_children();
@@ -1341,7 +1738,11 @@ impl FrameHook for SessionHook {
                         }
                     }
                     Ok(InputCommand::SystemMedia(command)) => self.media_commands.push(command),
-                    Ok(InputCommand::Stop) => stop_requested = true,
+                    Ok(InputCommand::Stop) => {
+                        self.state.user_stop.store(true, Ordering::Release);
+                        stop_requested = true;
+                    }
+                    Ok(InputCommand::Snapshot { restore }) => self.snapshot_command(restore),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         self.input_disconnected = true;
@@ -1363,6 +1764,10 @@ impl FrameHook for SessionHook {
             }
         }
 
+        #[cfg(feature = "unicorn")]
+        if self.foreground.load(Ordering::Acquire) == self.pid {
+            self.snapshots.request(self.pid, kernel);
+        }
         stop_requested |= self.input_disconnected;
         if stop_requested {
             self.stop_all.store(true, Ordering::Release);
@@ -1536,6 +1941,8 @@ mod child_card_tests {
         entry.settings.storage_card_dir = Some("cards/sd-card".into());
         assert_eq!(entry.gizmondo_storage_card_root(&root), card);
         test(LaunchContext {
+            #[cfg(feature = "unicorn")]
+            config: Default::default(),
             library_root: root.clone(),
             entry,
             card_root: card,
@@ -1867,3 +2274,160 @@ mod deferred_read_tests {
 #[cfg(test)]
 #[path = "netcf_session_test.rs"]
 mod netcf_session_test;
+
+#[cfg(all(test, feature = "unicorn", not(target_os = "android")))]
+mod snapshot_integration_tests {
+    use super::*;
+    fn notice(session: &Session, action: &str, timeout: Duration) -> serde_json::Value {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(raw) = session.poll_snapshot_notice() {
+                let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(value["action"], action, "{raw}");
+                return value;
+            }
+            assert!(
+                session.is_running(),
+                "session ended: {:?}",
+                session.state.summary.lock().unwrap()
+            );
+            assert!(Instant::now() < deadline, "timed out waiting for {action}");
+            let _ = session.poll_frame();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    /// An opt-in real-game check. Assets stay outside the repository. The same
+    /// public session commands back Kotlin, including cold restore in one handle.
+    #[test]
+    #[ignore = "requires a supplied game library, native GL and Unicorn"]
+    fn real_game_save_restore_reuses_session_and_publishes_saved_timestamp() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let root = PathBuf::from(
+            std::env::var_os("POCKETHLE_TEST_LIBRARY").expect("POCKETHLE_TEST_LIBRARY"),
+        );
+        let id = std::env::var("POCKETHLE_TEST_GAME").expect("POCKETHLE_TEST_GAME");
+        let session = start_with_presentation(root, id, None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut first = false;
+        while !first {
+            first = session.poll_frame().is_some();
+            assert!(
+                session.is_running(),
+                "{:?}",
+                session.state.summary.lock().unwrap()
+            );
+            assert!(Instant::now() < deadline, "no first frame");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Optional navigation uses ordinary guest keys, never a game patch.
+        if let Ok(keys) = std::env::var("POCKETHLE_TEST_KEYS") {
+            for key in keys
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse::<u16>().unwrap())
+            {
+                session.send_input(InputCommand::Input(InputEvent::KeyDown { vk: key }));
+                std::thread::sleep(Duration::from_millis(100));
+                session.send_input(InputCommand::Input(InputEvent::KeyUp { vk: key }));
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+        let warmup = std::env::var("POCKETHLE_TEST_WARMUP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
+        let until = Instant::now() + Duration::from_secs(warmup);
+        while Instant::now() < until {
+            let _ = session.poll_frame();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for _ in 0..2 {
+            let started = Instant::now();
+            assert!(session.request_snapshot(false));
+            let saved = notice(&session, "saved", Duration::from_secs(120));
+            eprintln!(
+                "Save: {:?}, timestamp {}",
+                started.elapsed(),
+                saved["timestamp"]
+            );
+            std::thread::sleep(Duration::from_millis(500));
+            let started = Instant::now();
+            assert!(session.request_snapshot(true));
+            let restored = notice(&session, "restored", Duration::from_secs(120));
+            eprintln!("Restore: {:?}", started.elapsed());
+            assert_eq!(saved["timestamp"], restored["timestamp"]);
+            assert!(session.is_running());
+        }
+        session.request_stop();
+        let result = session.finish();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&result).unwrap()["diagnostic"].is_null(),
+            "{result}"
+        );
+    }
+    #[test]
+    #[ignore = "requires a supplied game library and native GL"]
+    fn bad_snapshot_and_changed_settings_leave_the_live_session_running() {
+        let root = PathBuf::from(std::env::var_os("POCKETHLE_TEST_LIBRARY").unwrap());
+        let id = std::env::var("POCKETHLE_TEST_GAME").unwrap();
+        let library = Library::open(&root).unwrap();
+        let game = library.get(&id).unwrap().clone();
+        let slot = pocket_library::snapshot_slot::path_for(&root, &game);
+        let config_path = root.join("config.json");
+        let config = std::fs::read(&config_path).unwrap();
+        let session = start_with_presentation(root.clone(), id, None).unwrap();
+        fn frames(session: &Session) {
+            let _ = session.poll_frame();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                assert!(
+                    session.is_running(),
+                    "{:?}",
+                    session.state.summary.lock().unwrap()
+                );
+                if session.poll_frame().is_some() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "live session stopped publishing frames"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        frames(&session);
+        assert!(session.request_snapshot(false));
+        let saved = notice(&session, "saved", Duration::from_secs(120));
+        let bytes = std::fs::read(&slot).unwrap();
+        std::fs::write(&slot, &bytes[..bytes.len() / 2]).unwrap();
+        assert!(session.request_snapshot(true));
+        let failed = notice(&session, "error", Duration::from_secs(30));
+        assert!(failed["diagnostic"]["title"]
+            .as_str()
+            .unwrap()
+            .contains("restore"));
+        frames(&session);
+        std::fs::write(&slot, &bytes).unwrap();
+        let mut changed: serde_json::Value = serde_json::from_slice(&config).unwrap();
+        changed["gles_internal_resolution"] = serde_json::json!(2);
+        std::fs::write(&config_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(session.request_snapshot(true));
+        let failed = notice(&session, "error", Duration::from_secs(30));
+        assert!(failed["diagnostic"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Internal resolution policy"));
+        frames(&session);
+        std::fs::write(&config_path, &config).unwrap();
+        assert!(session.request_snapshot(true));
+        let restored = notice(&session, "restored", Duration::from_secs(120));
+        assert_eq!(saved["timestamp"], restored["timestamp"]);
+        frames(&session);
+        session.request_stop();
+        let result = session.finish();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&result).unwrap()["diagnostic"].is_null(),
+            "{result}"
+        );
+    }
+}

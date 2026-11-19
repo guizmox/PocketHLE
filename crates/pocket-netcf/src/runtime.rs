@@ -2,6 +2,8 @@
 
 use crate::metadata::{aligned, dword, word, Assembly};
 use crate::{forms, graphics, sensors, storage, system, vm};
+#[path = "runtime_snapshot.rs"]
+pub(crate) mod snapshot;
 
 struct Startup<'a> {
     assembly: Assembly<'a>,

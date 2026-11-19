@@ -226,7 +226,7 @@ impl UnicornCpu {
 }
 
 impl ArmMemorySnapshot {
-    fn validate(&self) -> Result<(), CpuError> {
+    pub(super) fn validate(&self) -> Result<(), CpuError> {
         let mut previous_end = 0;
         for mapping in &self.mapped {
             permissions(mapping.permissions)?;

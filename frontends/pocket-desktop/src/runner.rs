@@ -20,7 +20,7 @@ use pocket_library::{is_gizmondo_game, CpuBackendPref, GameEntry};
 #[path = "runner/snapshots.rs"]
 mod snapshots;
 #[cfg(feature = "unicorn")]
-use snapshots::resolve_snapshot_program;
+use pocket_session::snapshot::resolve_program as resolve_snapshot_program;
 #[cfg(all(test, feature = "unicorn"))]
 #[path = "runner/snapshot_tests.rs"]
 mod snapshot_tests;
@@ -58,6 +58,8 @@ fn presentation_phase(
 #[derive(Debug, Clone)]
 pub struct Runner {
     library_profile: pocket_library::LauncherProfile,
+    #[cfg(feature = "unicorn")]
+    prepared_restore: Arc<Mutex<Option<(String, pocket_session::snapshot::PreparedRestore)>>>,
     inner: Arc<Mutex<()>>,
     missing_api_logging: Arc<AtomicBool>,
     shared_context_source: Arc<Mutex<Option<pocket_core::winceapi::gles::SharedContextSource>>>,
@@ -68,6 +70,8 @@ impl Default for Runner {
     fn default() -> Self {
         Self {
             library_profile: Default::default(),
+            #[cfg(feature = "unicorn")]
+            prepared_restore: Default::default(),
             inner: Default::default(),
             missing_api_logging: Arc::new(AtomicBool::new(true)),
             shared_context_source: Default::default(),
@@ -76,6 +80,16 @@ impl Default for Runner {
     }
 }
 impl Runner {
+    #[cfg(feature = "unicorn")]
+    pub fn cancel_prepared_restore(&self) {
+        self.prepared_restore.lock().unwrap().take();
+    }
+
+    #[cfg(feature = "unicorn")]
+    pub fn stage_restore(&self, id: String, prepared: pocket_session::snapshot::PreparedRestore) {
+        *self.prepared_restore.lock().unwrap() = Some((id, prepared));
+    }
+
     pub fn new(library_profile: pocket_library::LauncherProfile) -> Self {
         Self {
             library_profile,
@@ -141,11 +155,16 @@ impl Runner {
         RunOutcome,
         Option<pocket_library::session_diagnostic::Diagnostic>,
     ) {
+        #[cfg(feature = "unicorn")]
+        let mut game = game;
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
         hook.system_media = system_media;
         hook.gps_notice_tx = gps_notice_tx;
         hook.dependency_notice_tx = dependency_notice_tx;
+        #[cfg(feature = "unicorn")]
+        let mut card_root = game.gizmondo_storage_card_root(&library_root);
+        #[cfg(not(feature = "unicorn"))]
         let card_root = game.gizmondo_storage_card_root(&library_root);
         if is_gizmondo_game(&game, &library_root)
             && game.settings.storage_card_dir.is_some()
@@ -165,13 +184,33 @@ impl Runner {
         if restore_snapshot {
             #[cfg(feature = "unicorn")]
             {
-                let path = pocket_library::snapshot_slot::path_for(&library_root, &game);
-                let saved = pocket_library::snapshot_slot::open(&path).and_then(|slot| {
-                    slot.map(|(_, payload)| pocket_core::SessionSnapshot::read(payload))
-                        .transpose()
-                });
+                let staged = self.prepared_restore.lock().unwrap().take();
+                let saved = match staged {
+                    Some((id, prepared)) if id == game.id => Ok(Some(prepared)),
+                    _ => {
+                        let config = pocket_library::Library::open_with_profile(
+                            &library_root,
+                            self.library_profile,
+                        )
+                        .map(|l| l.config().clone())
+                        .unwrap_or_default();
+                        let context = pocket_session::LaunchContext {
+                            library: library_root.clone(),
+                            game: game.clone(),
+                            card: card_root.clone(),
+                            config,
+                        };
+                        pocket_session::snapshot::prepare(&context)
+                    }
+                };
                 match saved {
-                    Ok(Some(snapshot)) => hook.restore_snapshot = Some(snapshot),
+                    Ok(Some(prepared)) => {
+                        let target = prepared.install(&mut hook.snapshots);
+                        card_root = target.context.card;
+                        game = target.context.game;
+                        game.executable =
+                            game.child_executable_reference(&library_root, &target.executable);
+                    }
                     Ok(None) => {
                         return (
                             RunOutcome {
@@ -199,11 +238,7 @@ impl Runner {
             }
         }
         #[cfg(feature = "unicorn")]
-        let snapshot_program = hook
-            .restore_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.program_path())
-            .map(str::to_owned);
+        let snapshot_program = hook.snapshots.program_path().map(str::to_owned);
         #[cfg(not(feature = "unicorn"))]
         let snapshot_program: Option<String> = None;
         #[cfg(feature = "unicorn")]
@@ -295,7 +330,7 @@ impl Runner {
             )
         });
         #[cfg(feature = "unicorn")]
-        if let Some(group) = &hook.restore_group {
+        if let Some(group) = &hook.snapshots.restore_group {
             group.cancel(format!(
                 "process stopped before device restore completed: {}",
                 result.0.summary
@@ -341,27 +376,30 @@ impl Runner {
         // [`pocket_library::Library::migrate_legacy_entries`], which
         // covers users who downgrade or who have a stale
         // `library.json` from before that migration existed.
-        let launcher_config =
-            pocket_library::Library::open_with_profile(library_root, self.library_profile)
-                .map(|l| l.config().clone())
-                .unwrap_or_default();
-        if guest_path.is_none()
+        let launcher_config = {
+            #[cfg(feature = "unicorn")]
+            let pinned = hook.snapshots.launch_config.clone();
+            #[cfg(not(feature = "unicorn"))]
+            let pinned: Option<pocket_library::LauncherConfig> = None;
+            pinned.unwrap_or_else(|| {
+                pocket_library::Library::open_with_profile(library_root, self.library_profile)
+                    .map(|l| l.config().clone())
+                    .unwrap_or_default()
+            })
+        };
+        hook.launch_context = Some(LaunchContext {
+            #[cfg(feature = "unicorn")]
+            config: launcher_config.clone(),
+            runner: self.clone(),
+            library_root: library_root.clone(),
+            game: game.clone(),
+            card_root: card_root.clone(),
+        });
+        if (guest_path.is_none() || hook.has_managed_restore())
             && metadata
                 .as_ref()
                 .is_some_and(|image| image.managed_runtime.is_some())
         {
-            #[cfg(feature = "unicorn")]
-            if hook.restore_snapshot.is_some() {
-                let summary =
-                    "Cannot restore snapshot: Compact Framework sessions are unsupported.".into();
-                return (
-                    RunOutcome {
-                        summary,
-                        framebuffer: None,
-                    },
-                    13,
-                );
-            }
             return run_compact_framework(
                 &exe,
                 game,
@@ -857,12 +895,7 @@ impl Runner {
         if let Some(process) = emu.process_mut() {
             process.state.process_launch_enabled = true;
         }
-        hook.launch_context = Some(LaunchContext {
-            runner: self.clone(),
-            library_root: library_root.clone(),
-            game: game.clone(),
-            card_root: card_root.clone(),
-        });
+
         hook.pid = emu.process().unwrap().state.object_handles.process_id();
         if let Some(startup) = startup.as_mut() {
             if let Err(error) = emu.set_startup_command_line(&startup.command_line) {
@@ -889,7 +922,8 @@ impl Runner {
         }
         #[cfg(feature = "unicorn")]
         let restored = match hook
-            .restore_snapshot
+            .snapshots
+            .restore
             .take()
             .map(|snapshot| hook.restore_checkpoint(&mut emu, snapshot))
             .transpose()
@@ -897,7 +931,7 @@ impl Runner {
             Ok(restored) => restored,
             Err(error) => {
                 summary_lines.push(format!("Cannot restore snapshot: {error:#}"));
-                if let Some(group) = &hook.restore_group {
+                if let Some(group) = &hook.snapshots.restore_group {
                     group.cancel(format!("{error:#}"));
                 }
                 hook.stop_all.store(true, Ordering::Release);
@@ -914,8 +948,8 @@ impl Runner {
         #[cfg(feature = "unicorn")]
         {
             hook.pid = emu.process().unwrap().state.object_handles.process_id();
-            match hook.checkpoint_domain.register(hook.pid) {
-                Ok(participant) => hook.checkpoint_participant = Some(participant),
+            match hook.snapshots.domain.register(hook.pid) {
+                Ok(participant) => hook.snapshots.participant = Some(participant),
                 Err(error) => {
                     hook.runtime_error = Some(error.clone());
                     return (
@@ -934,7 +968,7 @@ impl Runner {
         #[cfg(feature = "unicorn")]
         let run_result = if let Some(restored) = restored {
             hook.pid = emu.process().unwrap().state.object_handles.process_id();
-            if hook.restore_group.is_none() {
+            if hook.snapshots.restore_group.is_none() {
                 hook.foreground.store(hook.pid, Ordering::Release);
             }
             emu.run_restored(restored, hook)
@@ -995,7 +1029,7 @@ impl Runner {
         }
         #[cfg(feature = "unicorn")]
         {
-            hook.checkpoint_participant = None;
+            hook.snapshots.participant = None;
         }
         hook.finish_children();
         (
@@ -1201,6 +1235,7 @@ pub enum InputCommand {
     /// Explicitly choose another Colors Eiffel Tower simulated fix.
     /// "Back to library" button — ask the run loop to stop cleanly.
     Stop,
+    StopForRestore,
 }
 
 /// Frame hook that:
@@ -1210,6 +1245,8 @@ pub enum InputCommand {
 ///    them into the kernel's input queue / stop flag.
 #[derive(Clone)]
 struct LaunchContext {
+    #[cfg(feature = "unicorn")]
+    config: pocket_library::LauncherConfig,
     runner: Runner,
     library_root: PathBuf,
     game: GameEntry,
@@ -1261,19 +1298,7 @@ impl Drop for ProcessStartup {
 
 struct RunHook {
     #[cfg(feature = "unicorn")]
-    checkpoint_domain:
-        pocket_core::checkpoint_domain::CheckpointDomain<pocket_core::ProcessCheckpoint>,
-    #[cfg(feature = "unicorn")]
-    checkpoint_participant:
-        Option<pocket_core::checkpoint_domain::Participant<pocket_core::ProcessCheckpoint>>,
-    #[cfg(feature = "unicorn")]
-    restore_group: Option<Arc<pocket_core::DeviceRestoreGroup>>,
-    #[cfg(feature = "unicorn")]
-    restore_snapshot: Option<pocket_core::SessionSnapshot>,
-    #[cfg(feature = "unicorn")]
-    snapshot_requests: Vec<Sender<Result<u64, String>>>,
-    #[cfg(feature = "unicorn")]
-    synchronous_launch: bool,
+    snapshots: pocket_session::snapshot::ProcessSnapshots,
     system_media: SystemMediaView,
     last_system_media: Option<SystemMediaStatus>,
     media_was_foreground: bool,
@@ -1309,12 +1334,23 @@ struct RunHook {
     startup_exit: bool,
     runtime_error: Option<String>,
     stopped_by_user: bool,
+    restoring: bool,
     user_stop: Arc<AtomicBool>,
     session_error: Arc<Mutex<Option<String>>>,
     launch_context: Option<LaunchContext>,
 }
 
 impl RunHook {
+    fn has_managed_restore(&self) -> bool {
+        #[cfg(feature = "unicorn")]
+        {
+            self.snapshots.managed_restore.is_some()
+        }
+        #[cfg(not(feature = "unicorn"))]
+        {
+            false
+        }
+    }
     fn run_pending_child(&mut self, state: &mut KernelState) {
         let Some(request) = state.take_process_launch() else {
             return;
@@ -1335,7 +1371,7 @@ impl RunHook {
         #[cfg(feature = "unicorn")]
         if !request.concurrent {
             state.pending_process_launch = Some(request);
-            self.synchronous_launch = true;
+            self.snapshots.synchronous_launch = true;
             return;
         }
         if request.concurrent {
@@ -1549,7 +1585,14 @@ impl RunHook {
                             self.recording_audio_pending = true;
                         }
                         #[cfg(feature = "unicorn")]
-                        Ok(InputCommand::SaveSnapshot(reply)) => self.snapshot_requests.push(reply),
+                        Ok(InputCommand::SaveSnapshot(reply)) => {
+                            self.snapshots.requests.push(reply)
+                        }
+                        Ok(InputCommand::StopForRestore) => {
+                            self.restoring = true;
+                            self.user_stop.store(true, Ordering::Release);
+                            stop_requested = true;
+                        }
                         Ok(InputCommand::Stop) => {
                             self.user_stop.store(true, Ordering::Release);
                             stop_requested = true;
@@ -1584,7 +1627,7 @@ impl RunHook {
         hook.foreground = self.foreground.clone();
         #[cfg(feature = "unicorn")]
         {
-            hook.checkpoint_domain = self.checkpoint_domain.clone();
+            hook.snapshots = self.snapshots.child();
         }
         hook
     }
@@ -1609,17 +1652,7 @@ impl RunHook {
     ) -> Self {
         Self {
             #[cfg(feature = "unicorn")]
-            checkpoint_domain: Default::default(),
-            #[cfg(feature = "unicorn")]
-            checkpoint_participant: None,
-            #[cfg(feature = "unicorn")]
-            restore_group: None,
-            #[cfg(feature = "unicorn")]
-            restore_snapshot: None,
-            #[cfg(feature = "unicorn")]
-            snapshot_requests: Vec::new(),
-            #[cfg(feature = "unicorn")]
-            synchronous_launch: false,
+            snapshots: Default::default(),
             system_media: SystemMediaView::default(),
             last_system_media: None,
             media_was_foreground: false,
@@ -1650,6 +1683,7 @@ impl RunHook {
             startup_exit: false,
             runtime_error: None,
             stopped_by_user: false,
+            restoring: false,
             user_stop: Arc::new(AtomicBool::new(false)),
             session_error: Arc::new(Mutex::new(None)),
             launch_context: None,
@@ -1673,6 +1707,16 @@ fn run_compact_framework(
         exe,
         pocket_netcf::host::Options {
             size: game.settings.screen.resolve_image(image),
+            restore: {
+                #[cfg(feature = "unicorn")]
+                {
+                    hook.snapshots.managed_restore.take()
+                }
+                #[cfg(not(feature = "unicorn"))]
+                {
+                    None
+                }
+            },
             save_root: Some(game.save_dir(library_root)),
             guest_path: game
                 .guest_launch_paths(library_root)
@@ -1682,14 +1726,18 @@ fn run_compact_framework(
             gles_internal_resolution: config.gles_internal_resolution,
             frame_rate_limit: game.settings.effective_frame_rate_limit(config),
         },
-        |events| {
+        |events, _captures| {
             let stop = hook.drain_input(&mut input);
             #[cfg(feature = "unicorn")]
-            for reply in hook.snapshot_requests.drain(..) {
-                let _ = reply.send(Err("Compact Framework sessions are unsupported".into()));
-            }
+            pocket_session::snapshot::queue_managed_captures(hook, _captures);
             events.extend(input.drain(..));
-            !stop
+            if hook.restoring {
+                pocket_netcf::host::Poll::Discard
+            } else if stop {
+                pocket_netcf::host::Poll::Stop
+            } else {
+                pocket_netcf::host::Poll::Continue
+            }
         },
         |frame| {
             let snapshot = FrameSnapshot::from_framebuffer(frame);
@@ -1718,10 +1766,10 @@ fn run_compact_framework(
 impl FrameHook for RunHook {
     #[cfg(feature = "unicorn")]
     fn checkpoint_requested(&mut self) -> bool {
-        self.synchronous_launch
-            || self.checkpoint_domain.requested(self.pid)
-            || (!self.snapshot_requests.is_empty()
-                && self.foreground.load(Ordering::Acquire) == self.pid)
+        self.snapshots.requested(
+            self.pid,
+            self.foreground.load(Ordering::Acquire) == self.pid,
+        )
     }
 
     #[cfg(feature = "unicorn")]
@@ -1736,7 +1784,7 @@ impl FrameHook for RunHook {
         process: &mut pocket_core::kernel::Process,
         point: pocket_core::kernel::ResumePoint,
     ) {
-        if self.synchronous_launch || process.state.suspended_process_launch.is_some() {
+        if self.snapshots.synchronous_launch || process.state.suspended_process_launch.is_some() {
             self.run_suspended_child(cpu, process, point);
         } else {
             self.capture_checkpoint(cpu, process, point);
@@ -1761,21 +1809,8 @@ impl FrameHook for RunHook {
             self.stop_all.load(Ordering::Acquire)
         };
         #[cfg(feature = "unicorn")]
-        if active
-            && !self.snapshot_requests.is_empty()
-            && !self.checkpoint_domain.requested(self.pid)
-        {
-            let processes = state.object_handles.checkpoint_process_ids();
-            if processes.len() > 1 || self.pid != 1 {
-                if let Err(error) =
-                    self.checkpoint_domain
-                        .request(self.pid, processes, Duration::from_secs(10))
-                {
-                    for reply in self.snapshot_requests.drain(..) {
-                        let _ = reply.send(Err(error.clone()));
-                    }
-                }
-            }
+        if active {
+            self.snapshots.request(self.pid, state);
         }
         if std::mem::take(&mut self.recording_audio_pending) {
             state.audio.record_output(self.recording_audio.clone());
@@ -1965,6 +2000,8 @@ mod child_card_tests {
         std::fs::write(card.join("autorun.exe"), b"card game").unwrap();
         game.settings.storage_card_dir = Some(card.clone());
         test(LaunchContext {
+            #[cfg(feature = "unicorn")]
+            config: Default::default(),
             runner: Runner::new(Default::default()),
             library_root: root.clone(),
             game,

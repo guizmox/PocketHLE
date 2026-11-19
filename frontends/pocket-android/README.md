@@ -21,3 +21,13 @@ The local debug APK is
 `app/build/outputs/apk/debug/app-debug.apk` relative to this directory. Keep JNI
 libraries and Kotlin/resources from the same revision. Packaging checks do not
 replace physical GPS, camera, Bluetooth or gameplay validation.
+
+## Experimental snapshots
+
+The upper-left **S** and upper-right **L** quarter-circle controls save/restore
+one slot per game. They belong to the physical app window, respect cutouts,
+and share EXIT/FULL's palette. FPS/IPS stay within the displayed guest image.
+Success shows the slot timestamp. An empty restore slot does nothing. Failures
+use the existing diagnostic dialog. Both GUIs share the `pocket-session` capture,
+verified-restore and storage coordinator, plus the native/managed codecs and GPU
+reconstruction. See [Snapshot internals](../../docs/SNAPSHOTS.md).

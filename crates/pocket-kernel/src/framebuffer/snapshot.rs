@@ -113,7 +113,7 @@ impl DisplayTimingSnapshot {
 }
 
 #[derive(Serialize, Deserialize)]
-struct SavedImage {
+pub struct SavedImage {
     width: u32,
     height: u32,
     frame_counter: u64,
@@ -123,7 +123,7 @@ struct SavedImage {
 }
 
 impl SavedImage {
-    fn capture(fb: &Framebuffer) -> Self {
+    pub fn capture(fb: &Framebuffer) -> Self {
         Self {
             width: fb.width,
             height: fb.height,
@@ -134,7 +134,7 @@ impl SavedImage {
         }
     }
 
-    fn restore(self) -> Result<Framebuffer, String> {
+    pub fn restore(self) -> Result<Framebuffer, String> {
         fn valid(w: u32, h: u32, bytes: usize, pixel: usize) -> bool {
             w != 0
                 && h != 0

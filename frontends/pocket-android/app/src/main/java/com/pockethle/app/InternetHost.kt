@@ -119,6 +119,22 @@ object InternetHost {
             return out
         }
     }
+    /** Copy the received boundary; never drain, cancel or resend the live request. */
+    fun checkpoint(id: Int): ByteArray {
+        val r = requests[id] ?: throw IllegalStateException("HTTP request is closed")
+        synchronized(r.lock) {
+            val terminal = if (r.closed) 12017 else if (r.error != 0) r.error else if (r.done) 0 else 12030
+            val metadata = JSONObject()
+                .put("head", if (r.head.isEmpty()) JSONObject.NULL else JSONObject(r.head))
+                .put("head_error", if (r.head.isEmpty()) if (terminal != 0) terminal else 12030 else 0)
+                .put("end_error", terminal).toString().toByteArray(Charsets.UTF_8)
+            val out = ByteBuffer.allocate(4 + metadata.size + r.count).order(ByteOrder.LITTLE_ENDIAN)
+            out.putInt(metadata.size).put(metadata)
+            val first = minOf(r.count, r.bytes.size - r.offset)
+            out.put(r.bytes, r.offset, first).put(r.bytes, 0, r.count - first)
+            return out.array()
+        }
+    }
     private fun packet(status: Int) = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(status).array()
     fun close(id: Int) { requests.remove(id)?.cancel() }
     private fun bypass(host: String, patterns: String): Boolean = patterns.split(';').any {

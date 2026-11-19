@@ -1,10 +1,13 @@
 //! Native programmable resources and context state at the checkpoint boundary.
 //! Resource readback happens only on explicit capture.
+mod blocks;
 use super::*;
 use serde::{Deserialize, Serialize};
+mod es;
+mod levels;
+pub(super) use levels::Level;
 
 const DEPTH_STENCIL: u32 = 0x84f9;
-const UNSIGNED_INT_24_8: u32 = 0x84fa;
 const MAX_CHECKPOINT_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -40,13 +43,14 @@ struct Program {
     shaders: Vec<u32>,
     executable: Vec<CompiledShader>,
     attributes: Vec<(Vec<u8>, u32)>,
+    pending_attributes: Vec<(Vec<u8>, u32)>,
     uniforms: Vec<Uniform>,
     linked: bool,
     validated: bool,
     deleted: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Uniform {
     name: Vec<u8>,
     // The guest keeps this location in ARM memory across native relinking.
@@ -111,6 +115,8 @@ struct Image {
     format: u32,
     kind: u32,
     compressed: bool,
+    #[serde(with = "serde_bytes")]
+    depth_samples: Vec<u8>,
     #[serde(with = "serde_bytes")]
     bytes: Vec<u8>,
 }
@@ -208,24 +214,26 @@ pub(super) fn image_format(internal: u32) -> u32 {
 }
 
 impl Image {
+    fn layout(width: i32, height: i32, internal: u32) -> Result<(u32, u32, usize)> {
+        pocket_gles::gpu::checkpoint_transfer::Plane::layout(width, height, internal).map_err(error)
+    }
+    fn validate(&self) -> Result<()> {
+        if self.compressed {
+            return Err(error("expected uncompressed checkpoint image"));
+        }
+        pocket_gles::gpu::checkpoint_transfer::Plane::validate_data(
+            self.width,
+            self.height,
+            self.internal,
+            self.format,
+            self.kind,
+            &self.bytes,
+            &self.depth_samples,
+        )
+        .map_err(error)
+    }
     fn new(width: i32, height: i32, internal: u32) -> Result<Self> {
-        let format = image_format(internal);
-        let (kind, pixel_bytes) = match format {
-            0x1902 => (0x1405, 4),
-            DEPTH_STENCIL => (UNSIGNED_INT_24_8, 4),
-            0x1901 => (UNSIGNED_BYTE, 1),
-            _ => (UNSIGNED_BYTE, 4),
-        };
-        let size = usize::try_from(width)
-            .ok()
-            .and_then(|width| {
-                usize::try_from(height)
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .and_then(|pixels| pixels.checked_mul(pixel_bytes))
-            .filter(|&bytes| bytes <= MAX_TRANSFER)
-            .ok_or_else(|| error("invalid programmable snapshot image dimensions"))?;
+        let (format, kind, size) = Self::layout(width, height, internal)?;
         Ok(Self {
             width,
             height,
@@ -233,6 +241,7 @@ impl Image {
             format,
             kind,
             compressed: false,
+            depth_samples: Vec::new(),
             bytes: vec![0; size],
         })
     }
@@ -247,17 +256,147 @@ impl Image {
                 self.bytes.as_ptr().cast() => *const c_void), ());
             return Ok(());
         }
-        let expected = Self::new(self.width, self.height, self.internal)?;
-        if expected.bytes.len() != self.bytes.len()
-            || expected.format != self.format
-            || expected.kind != self.kind
-        {
-            return Err(error("invalid programmable snapshot image data"));
+        self.validate()?;
+        let mut format = self.format;
+        let mut kind = self.kind;
+        let mut bytes = self.bytes.clone();
+        if renderer.host.es && self.format == RGBA {
+            match self.internal {
+                0x1906 => {
+                    format = 0x1906;
+                    bytes = self.bytes.chunks_exact(4).map(|p| p[3]).collect();
+                }
+                0x1909 => {
+                    format = 0x1909;
+                    bytes = self.bytes.chunks_exact(4).map(|p| p[0]).collect();
+                }
+                0x190a => {
+                    format = 0x190a;
+                    bytes = self
+                        .bytes
+                        .chunks_exact(4)
+                        .flat_map(|p| [p[0], p[3]])
+                        .collect();
+                }
+                0x1907 | 0x8051 => {
+                    format = 0x1907;
+                    bytes = self
+                        .bytes
+                        .chunks_exact(4)
+                        .flat_map(|p| [p[0], p[1], p[2]])
+                        .collect();
+                }
+                0x8d62 | 0x8056 | 0x8057 => {
+                    kind = if self.internal == 0x8d62 {
+                        0x8363
+                    } else if self.internal == 0x8056 {
+                        0x8033
+                    } else {
+                        0x8034
+                    };
+                    format = if kind == 0x8363 { 0x1907 } else { RGBA };
+                    bytes = self
+                        .bytes
+                        .chunks_exact(4)
+                        .flat_map(|p| {
+                            let [a, b, c, d] = [
+                                u16::from(p[0]),
+                                u16::from(p[1]),
+                                u16::from(p[2]),
+                                u16::from(p[3]),
+                            ];
+                            let v = if kind == 0x8363 {
+                                ((a >> 3) << 11) | ((b >> 2) << 5) | (c >> 3)
+                            } else if kind == 0x8033 {
+                                ((a >> 4) << 12) | ((b >> 4) << 8) | ((c >> 4) << 4) | (d >> 4)
+                            } else {
+                                ((a >> 3) << 11) | ((b >> 3) << 6) | ((c >> 3) << 1) | (d >> 7)
+                            };
+                            v.to_le_bytes()
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
         }
         invoke!(renderer, "glTexImage2D", (target => u32, level => i32, self.internal as i32 => i32,
-            self.width => i32, self.height => i32, 0 => i32, self.format => u32,
-            self.kind => u32, self.bytes.as_ptr().cast() => *const c_void), ());
+            self.width => i32, self.height => i32, 0 => i32, format => u32,
+            kind => u32, bytes.as_ptr().cast() => *const c_void), ());
+        if renderer.host.es && self.format != RGBA && !self.depth_samples.is_empty() {
+            es::upload_texture_depth_stencil(renderer, target, level, self)?;
+        }
         Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct ProgramInterface {
+    attributes: Vec<(Vec<u8>, u32)>,
+    uniforms: Vec<Uniform>,
+}
+impl ProgramInterface {
+    pub(super) fn capture(renderer: &mut Renderer, program: u32) -> Result<Self> {
+        let mut saved = Self::default();
+        for (query, size_query, function, uniform) in [
+            (0x8b89, 0x8b8a, "glGetActiveAttrib", false),
+            (0x8b86, 0x8b87, "glGetActiveUniform", true),
+        ] {
+            let count = program_parameter(renderer, program, query)?;
+            let capacity = program_parameter(renderer, program, size_query)?.max(1);
+            for index in 0..count {
+                let mut name = vec![0; transfer_size(capacity, 1)?];
+                let (mut length, mut count, mut kind) = (0, 0, 0);
+                invoke!(renderer, function, (program => u32, index as u32 => u32, capacity => i32,
+                    &mut length => *mut i32, &mut count => *mut i32, &mut kind => *mut u32,
+                    name.as_mut_ptr().cast() => *mut c_char), ());
+                name.truncate(length.max(0) as usize);
+                if !uniform {
+                    let c_name =
+                        CString::new(name.clone()).map_err(|_| error("invalid attribute name"))?;
+                    let location = invoke!(renderer, "glGetAttribLocation", (program => u32, c_name.as_ptr() => *const c_char), i32);
+                    if location >= 0 {
+                        saved.attributes.push((name, location as u32));
+                    }
+                    continue;
+                }
+                let (components, integer) = uniform_components(kind)?;
+                for element in 0..count {
+                    let element_name = if count > 1 {
+                        let base = String::from_utf8_lossy(&name);
+                        if base.contains("[0]") {
+                            base.replacen("[0]", &format!("[{element}]"), 1)
+                                .into_bytes()
+                        } else {
+                            format!("{base}[{element}]").into_bytes()
+                        }
+                    } else {
+                        name.clone()
+                    };
+                    let c_name = CString::new(element_name.clone())
+                        .map_err(|_| error("invalid uniform name"))?;
+                    let location = invoke!(renderer, "glGetUniformLocation", (program => u32, c_name.as_ptr() => *const c_char), i32);
+                    if location < 0 {
+                        continue;
+                    }
+                    let mut values = vec![0u32; components];
+                    if integer {
+                        invoke!(renderer, "glGetUniformiv", (program => u32, location => i32, values.as_mut_ptr().cast() => *mut i32), ());
+                    } else {
+                        invoke!(renderer, "glGetUniformfv", (program => u32, location => i32, values.as_mut_ptr().cast() => *mut f32), ());
+                    }
+                    saved.uniforms.push(Uniform {
+                        name: element_name,
+                        location: renderer.uniform_guest(program, location).ok_or_else(|| {
+                            error("cannot capture an untracked programmable uniform")
+                        })?,
+                        kind,
+                        values,
+                    });
+                }
+            }
+        }
+        check_error(renderer, "program interface capture")?;
+        Ok(saved)
     }
 }
 
@@ -326,13 +465,35 @@ impl NativeCheckpoint {
                 "programmable state capture failed with GL error {pending:#x}"
             )));
         }
-        let result = Self::capture_resources(renderer, state.clone_for_readback());
-        let restored = state.apply(renderer);
+        let auxiliary = if renderer.host.es {
+            // Resource staging uses ES 3 (the same minimum as Android's view).
+            if integer(renderer, 0x821b)? < 3 {
+                return Err(error("programmable snapshots require a host ES 3 context"));
+            }
+            invoke!(renderer, "glFinish", (), ());
+            let auxiliary =
+                ProgrammableHost::shared(&renderer.host.shared_source()).map_err(error)?;
+            renderer.host.make_programmable_current().map_err(error)?;
+            Some(auxiliary)
+        } else {
+            None
+        };
+        let result =
+            Self::capture_resources(renderer, state.clone_for_readback(), auxiliary.as_ref());
+        let restored = renderer
+            .host
+            .make_programmable_current()
+            .map_err(error)
+            .and_then(|()| state.apply(renderer));
         restored?;
         result
     }
 
-    fn capture_resources(renderer: &mut Renderer, state: State) -> Result<Self> {
+    fn capture_resources(
+        renderer: &mut Renderer,
+        state: State,
+        auxiliary: Option<&ProgrammableHost>,
+    ) -> Result<Self> {
         let mut checkpoint = Self {
             shaders: Vec::new(),
             programs: Vec::new(),
@@ -358,6 +519,7 @@ impl NativeCheckpoint {
         if let Some(reason) = &renderer.retained.failure {
             return Err(error(reason));
         }
+        invoke!(renderer, "glPixelStorei", (0x0d05 => u32, 1 => i32), ());
         let mut budget = MAX_CHECKPOINT_BYTES;
         let retained: Vec<_> = renderer
             .retained
@@ -367,12 +529,16 @@ impl NativeCheckpoint {
             .collect();
         for (id, kept) in retained {
             let mut image = Image::new(kept.width, kept.height, kept.internal)?;
+            if let Some(aux) = auxiliary {
+                es::read_framebuffer(renderer, aux, kept.keeper, &mut image)?;
+            } else {
+                invoke!(renderer,"glBindFramebuffer",(FRAMEBUFFER=>u32,kept.keeper=>u32),());
+                invoke!(renderer,"glReadPixels",(0=>i32,0=>i32,image.width=>i32,image.height=>i32,
+                    image.format=>u32,image.kind=>u32,image.bytes.as_mut_ptr().cast()=>*mut c_void),());
+            }
             budget = budget
-                .checked_sub(image.bytes.len())
+                .checked_sub(image.bytes.len() + image.depth_samples.len())
                 .ok_or_else(|| error("programmable snapshot exceeds 256 MiB"))?;
-            invoke!(renderer,"glBindFramebuffer",(FRAMEBUFFER=>u32,kept.keeper=>u32),());
-            invoke!(renderer,"glReadPixels",(0=>i32,0=>i32,image.width=>i32,image.height=>i32,
-                image.format=>u32,image.kind=>u32,image.bytes.as_mut_ptr().cast()=>*mut c_void),());
             check_error(renderer, "retained framebuffer image capture")?;
             checkpoint.retained.push(RetainedPlane {
                 id,
@@ -418,19 +584,21 @@ impl NativeCheckpoint {
                     .cloned()
                     .unwrap_or_default(),
                 attributes: Vec::new(),
+                pending_attributes: renderer
+                    .attribute_bindings
+                    .get(&program)
+                    .map(|bindings| {
+                        bindings
+                            .iter()
+                            .map(|(name, &index)| (name.clone(), index))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 uniforms: Vec::new(),
                 linked: program_parameter(renderer, program, 0x8b82)? != 0,
                 validated: program_parameter(renderer, program, 0x8b83)? != 0,
                 deleted: program_parameter(renderer, program, 0x8b80)? != 0,
             };
-            if !saved.linked
-                && !saved.executable.is_empty()
-                && checkpoint.state.int(0x8b8d)? as u32 == guest_id
-            {
-                return Err(error(
-                    "snapshot contains an active program whose last link failed",
-                ));
-            }
             let count = program_parameter(renderer, program, 0x8b85)?;
             let mut shaders = vec![0; transfer_size(count, 4)? / 4];
             invoke!(renderer, "glGetAttachedShaders", (program => u32, count => i32, std::ptr::null_mut() => *mut i32, shaders.as_mut_ptr() => *mut u32), ());
@@ -439,69 +607,24 @@ impl NativeCheckpoint {
                 .map(|shader| guest(renderer, Kind::Shader, shader))
                 .collect();
             if saved.linked {
-                for (query, size_query, function, uniform) in [
-                    (0x8b89, 0x8b8a, "glGetActiveAttrib", false),
-                    (0x8b86, 0x8b87, "glGetActiveUniform", true),
-                ] {
-                    let count = program_parameter(renderer, program, query)?;
-                    let capacity = program_parameter(renderer, program, size_query)?.max(1);
-                    for index in 0..count {
-                        let mut name = vec![0; transfer_size(capacity, 1)?];
-                        let (mut length, mut count, mut kind) = (0, 0, 0);
-                        invoke!(renderer, function, (program => u32, index as u32 => u32, capacity => i32,
-                            &mut length => *mut i32, &mut count => *mut i32, &mut kind => *mut u32,
-                            name.as_mut_ptr().cast() => *mut c_char), ());
-                        name.truncate(length.max(0) as usize);
-                        if !uniform {
-                            let c_name = CString::new(name.clone())
-                                .map_err(|_| error("invalid attribute name"))?;
-                            let location = invoke!(renderer, "glGetAttribLocation", (program => u32, c_name.as_ptr() => *const c_char), i32);
-                            if location >= 0 {
-                                saved.attributes.push((name, location as u32));
-                            }
-                            continue;
-                        }
-                        let (components, integer) = uniform_components(kind)?;
-                        for element in 0..count {
-                            let element_name = if count > 1 {
-                                let base = String::from_utf8_lossy(&name);
-                                if base.contains("[0]") {
-                                    base.replacen("[0]", &format!("[{element}]"), 1)
-                                        .into_bytes()
-                                } else {
-                                    format!("{base}[{element}]").into_bytes()
-                                }
-                            } else {
-                                name.clone()
-                            };
-                            let c_name = CString::new(element_name.clone())
-                                .map_err(|_| error("invalid uniform name"))?;
-                            let location = invoke!(renderer, "glGetUniformLocation", (program => u32, c_name.as_ptr() => *const c_char), i32);
-                            if location < 0 {
-                                continue;
-                            }
-                            let mut values = vec![0u32; components];
-                            if integer {
-                                invoke!(renderer, "glGetUniformiv", (program => u32, location => i32, values.as_mut_ptr().cast() => *mut i32), ());
-                            } else {
-                                invoke!(renderer, "glGetUniformfv", (program => u32, location => i32, values.as_mut_ptr().cast() => *mut f32), ());
-                            }
-                            saved.uniforms.push(Uniform {
-                                name: element_name,
-                                location: renderer.uniform_guest(program, location).ok_or_else(
-                                    || error("cannot capture an untracked programmable uniform"),
-                                )?,
-                                kind,
-                                values,
-                            });
-                        }
-                    }
-                }
+                let interface = ProgramInterface::capture(renderer, program)?;
+                saved.attributes = interface.attributes;
+                saved.uniforms = interface.uniforms;
+            } else if checkpoint.state.int(0x8b8d)? as u32 == guest_id
+                && !saved.executable.is_empty()
+            {
+                let interface = renderer
+                    .failed_program
+                    .as_ref()
+                    .filter(|(name, _)| *name == program)
+                    .map(|(_, interface)| interface.clone())
+                    .ok_or_else(|| error("missing installed executable after failed relink"))?;
+                saved.attributes = interface.attributes;
+                saved.uniforms = interface.uniforms;
             }
             checkpoint.programs.push(saved);
         }
         check_error(renderer, "program capture")?;
-        invoke!(renderer, "glPixelStorei", (0x0d05 => u32, 1 => i32), ());
         for (guest, buffer) in renderer.names.as_ref().unwrap().pairs(Kind::Buffer) {
             if invoke!(renderer, "glIsBuffer", (buffer => u32), u8) == 0 {
                 continue;
@@ -514,7 +637,22 @@ impl NativeCheckpoint {
             budget = budget
                 .checked_sub(bytes.len())
                 .ok_or_else(|| error("programmable snapshot exceeds 256 MiB"))?;
-            invoke!(renderer, "glGetBufferSubData", (ARRAY_BUFFER => u32, 0 => isize, bytes.len() as isize => isize, bytes.as_mut_ptr().cast() => *mut c_void), ());
+            if renderer.host.es {
+                if !bytes.is_empty() {
+                    let mapped = invoke!(renderer,"glMapBufferRange",(ARRAY_BUFFER=>u32,0=>isize,bytes.len() as isize=>isize,1=>u32),*const u8);
+                    if mapped.is_null() {
+                        return Err(error("cannot map ES snapshot buffer for reading"));
+                    }
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(mapped, bytes.as_mut_ptr(), bytes.len());
+                    }
+                    if invoke!(renderer,"glUnmapBuffer",(ARRAY_BUFFER=>u32),u8) == 0 {
+                        return Err(error("ES snapshot buffer became invalid"));
+                    }
+                }
+            } else {
+                invoke!(renderer, "glGetBufferSubData", (ARRAY_BUFFER => u32, 0 => isize, bytes.len() as isize => isize, bytes.as_mut_ptr().cast() => *mut c_void), ());
+            }
             checkpoint.buffers.push(Buffer {
                 guest,
                 usage: usage as u32,
@@ -572,53 +710,85 @@ impl NativeCheckpoint {
                 invoke!(renderer, "glGetTexParameteriv", (target => u32, pname => u32, value => *mut i32), ());
             }
             let mut levels = Vec::new();
-            let maximum = integer(renderer, if target == TEXTURE_2D { 0x0d33 } else { 0x851c })?;
-            let last_level = u32::try_from(maximum)
-                .ok()
-                .filter(|&v| v != 0)
-                .ok_or_else(|| error("invalid host texture size limit"))?
-                .ilog2() as i32;
-            for face in if target == TEXTURE_2D {
-                vec![target]
-            } else {
-                (0x8515..=0x851a).collect()
-            } {
-                for level in 0..=last_level {
-                    let (mut width, mut height, mut internal) = (0, 0, 0);
-                    for (pname, value) in [
-                        (0x1000, &mut width),
-                        (0x1001, &mut height),
-                        (0x1003, &mut internal),
-                    ] {
-                        invoke!(renderer, "glGetTexLevelParameteriv", (face => u32, level => i32, pname => u32, value => *mut i32), ());
-                    }
-                    check_error(
-                        renderer,
-                        &format!("texture {guest} target {face:#x} level {level} query"),
-                    )?;
-                    if width == 0 || height == 0 {
+            if let Some(aux) = auxiliary {
+                let definitions: Vec<_> = renderer
+                    .texture_levels
+                    .iter()
+                    .filter(|((name, _, _), _)| *name == texture)
+                    .map(|(&(name, face, level), image)| {
+                        let _ = name;
+                        (face, level, image.clone())
+                    })
+                    .collect();
+                for (face, level, defined) in definitions {
+                    if defined.width == 0 || defined.height == 0 {
                         continue;
                     }
-                    let mut image = Image::new(width, height, internal as u32)?;
-                    let mut compressed = 0;
-                    invoke!(renderer, "glGetTexLevelParameteriv", (face => u32, level => i32, 0x86a1 => u32, &mut compressed => *mut i32), ());
-                    if compressed != 0 {
-                        let mut length = 0;
-                        invoke!(renderer, "glGetTexLevelParameteriv", (face => u32, level => i32, 0x86a0 => u32, &mut length => *mut i32), ());
-                        image.bytes = vec![0; transfer_size(length, 1)?];
+                    if defined.unsupported_blocks {
+                        return Err(error("host ES cannot recover generated or unsupported compressed texture blocks"));
+                    }
+                    let mut image = Image::new(defined.width, defined.height, defined.internal)?;
+                    if let Some(blocks) = defined.blocks {
+                        image.bytes = blocks;
                         image.compressed = true;
+                    } else {
+                        es::read_texture(renderer, aux, texture, face, level, &mut image)?;
                     }
                     budget = budget
-                        .checked_sub(image.bytes.len())
+                        .checked_sub(image.bytes.len() + image.depth_samples.len())
                         .ok_or_else(|| error("programmable snapshot exceeds 256 MiB"))?;
-                    if image.compressed {
-                        invoke!(renderer, "glGetCompressedTexImage", (face => u32, level => i32, image.bytes.as_mut_ptr().cast() => *mut c_void), ());
-                    } else {
-                        invoke!(renderer, "glGetTexImage", (face => u32, level => i32, image.format => u32,
-                            image.kind => u32, image.bytes.as_mut_ptr().cast() => *mut c_void), ());
-                    }
-                    check_error(renderer, &format!("texture {guest} target {face:#x} level {level} internal {internal:#x} capture"))?;
                     levels.push((face, level, image));
+                }
+            } else {
+                let maximum =
+                    integer(renderer, if target == TEXTURE_2D { 0x0d33 } else { 0x851c })?;
+                let last_level = u32::try_from(maximum)
+                    .ok()
+                    .filter(|&v| v != 0)
+                    .ok_or_else(|| error("invalid host texture size limit"))?
+                    .ilog2() as i32;
+                for face in if target == TEXTURE_2D {
+                    vec![target]
+                } else {
+                    (0x8515..=0x851a).collect()
+                } {
+                    for level in 0..=last_level {
+                        let (mut width, mut height, mut internal) = (0, 0, 0);
+                        for (pname, value) in [
+                            (0x1000, &mut width),
+                            (0x1001, &mut height),
+                            (0x1003, &mut internal),
+                        ] {
+                            invoke!(renderer, "glGetTexLevelParameteriv", (face => u32, level => i32, pname => u32, value => *mut i32), ());
+                        }
+                        check_error(
+                            renderer,
+                            &format!("texture {guest} target {face:#x} level {level} query"),
+                        )?;
+                        if width == 0 || height == 0 {
+                            continue;
+                        }
+                        let mut image = Image::new(width, height, internal as u32)?;
+                        let mut compressed = 0;
+                        invoke!(renderer, "glGetTexLevelParameteriv", (face => u32, level => i32, 0x86a1 => u32, &mut compressed => *mut i32), ());
+                        if compressed != 0 {
+                            let mut length = 0;
+                            invoke!(renderer, "glGetTexLevelParameteriv", (face => u32, level => i32, 0x86a0 => u32, &mut length => *mut i32), ());
+                            image.bytes = vec![0; transfer_size(length, 1)?];
+                            image.compressed = true;
+                        }
+                        budget = budget
+                            .checked_sub(image.bytes.len() + image.depth_samples.len())
+                            .ok_or_else(|| error("programmable snapshot exceeds 256 MiB"))?;
+                        if image.compressed {
+                            invoke!(renderer, "glGetCompressedTexImage", (face => u32, level => i32, image.bytes.as_mut_ptr().cast() => *mut c_void), ());
+                        } else {
+                            invoke!(renderer, "glGetTexImage", (face => u32, level => i32, image.format => u32,
+                            image.kind => u32, image.bytes.as_mut_ptr().cast() => *mut c_void), ());
+                        }
+                        check_error(renderer, &format!("texture {guest} target {face:#x} level {level} internal {internal:#x} capture"))?;
+                        levels.push((face, level, image));
+                    }
                 }
             }
             checkpoint.textures.push(Texture {
@@ -715,10 +885,17 @@ impl NativeCheckpoint {
                 if size[0] == 0 || size[1] == 0 {
                     continue;
                 }
-                let image =
-                    read_renderbuffer(renderer, scratch, buffer, size[0], size[1], size[2] as u32)?;
+                let image = read_renderbuffer(
+                    renderer,
+                    auxiliary,
+                    scratch,
+                    buffer,
+                    size[0],
+                    size[1],
+                    size[2] as u32,
+                )?;
                 budget = budget
-                    .checked_sub(image.bytes.len())
+                    .checked_sub(image.bytes.len() + image.depth_samples.len())
                     .ok_or_else(|| error("programmable snapshot exceeds 256 MiB"))?;
                 checkpoint.renderbuffers.push(Renderbuffer { guest, image });
             }
@@ -728,6 +905,7 @@ impl NativeCheckpoint {
                 checkpoint.window.bytes.as_mut_ptr().cast() => *mut c_void), ());
             let window_depth = read_renderbuffer(
                 renderer,
+                auxiliary,
                 scratch,
                 renderer.window_depth_stencil,
                 checkpoint.window.width,
@@ -764,6 +942,7 @@ pub(super) fn attachment_point(format: u32) -> u32 {
 
 fn read_renderbuffer(
     renderer: &mut Renderer,
+    auxiliary: Option<&ProgrammableHost>,
     scratch: u32,
     buffer: u32,
     width: i32,
@@ -780,13 +959,17 @@ fn read_renderbuffer(
     let point = attachment_point(image.format);
     invoke!(renderer, "glFramebufferRenderbuffer", (FRAMEBUFFER => u32, point => u32, RENDERBUFFER => u32, buffer => u32), ());
     let color = if image.format == RGBA { 0x8ce0 } else { 0 };
-    invoke!(renderer, "glDrawBuffer", (color => u32), ());
+    select_buffer(renderer, color)?;
     invoke!(renderer, "glReadBuffer", (color => u32), ());
     if invoke!(renderer, "glCheckFramebufferStatus", (FRAMEBUFFER => u32), u32) != 0x8cd5 {
         return Err(error("programmable snapshot renderbuffer is incomplete"));
     }
-    invoke!(renderer, "glReadPixels", (0 => i32, 0 => i32, width => i32, height => i32,
+    if let Some(aux) = auxiliary {
+        es::read_framebuffer(renderer, aux, scratch, &mut image)?;
+    } else {
+        invoke!(renderer, "glReadPixels", (0 => i32, 0 => i32, width => i32, height => i32,
         image.format => u32, image.kind => u32, image.bytes.as_mut_ptr().cast() => *mut c_void), ());
+    }
     Ok(image)
 }
 
@@ -959,7 +1142,11 @@ impl State {
         invoke!(renderer, "glClearColor", (clear[0] => f32, clear[1] => f32, clear[2] => f32, clear[3] => f32), ());
         let blend = self.floats(0x8005, 4)?;
         invoke!(renderer, "glBlendColor", (blend[0] => f32, blend[1] => f32, blend[2] => f32, blend[3] => f32), ());
-        invoke!(renderer, "glClearDepth", (self.floats(0x0b73, 1)?[0] as f64 => f64), ());
+        if renderer.host.es {
+            invoke!(renderer,"glClearDepthf",(self.floats(0x0b73,1)?[0]=>f32),());
+        } else {
+            invoke!(renderer, "glClearDepth", (self.floats(0x0b73, 1)?[0] as f64 => f64), ());
+        }
         invoke!(renderer, "glClearStencil", (self.int(0x0b91)? => i32), ());
         invoke!(renderer, "glBlendEquationSeparate", (self.int(0x8009)? as u32 => u32, self.int(0x883d)? as u32 => u32), ());
         invoke!(renderer, "glBlendFuncSeparate", (self.int(0x80c9)? as u32 => u32, self.int(0x80c8)? as u32 => u32,
@@ -969,7 +1156,11 @@ impl State {
         invoke!(renderer, "glDepthMask", (self.int(0x0b72)? as u8 => u8), ());
         invoke!(renderer, "glDepthFunc", (self.int(0x0b74)? as u32 => u32), ());
         let range = self.floats(0x0b70, 2)?;
-        invoke!(renderer, "glDepthRange", (range[0] as f64 => f64, range[1] as f64 => f64), ());
+        if renderer.host.es {
+            invoke!(renderer,"glDepthRangef",(range[0]=>f32,range[1]=>f32),());
+        } else {
+            invoke!(renderer, "glDepthRange", (range[0] as f64 => f64, range[1] as f64 => f64), ());
+        }
         invoke!(renderer, "glLineWidth", (self.floats(0x0b21, 1)?[0] => f32), ());
         invoke!(renderer, "glPolygonOffset", (self.floats(0x8038, 1)?[0] => f32, self.floats(0x2a00, 1)?[0] => f32), ());
         invoke!(renderer, "glSampleCoverage", (self.floats(0x80aa, 1)?[0] => f32, self.int(0x80ab)? as u8 => u8), ());
@@ -1026,7 +1217,12 @@ impl State {
             host(renderer, Kind::Framebuffer, framebuffer)
         };
         invoke!(renderer, "glBindFramebuffer", (FRAMEBUFFER => u32, framebuffer => u32), ());
-        invoke!(renderer, "glUseProgram", (host(renderer, Kind::Program, self.int(0x8b8d)? as u32) => u32), ());
+        let program = host(renderer, Kind::Program, self.int(0x8b8d)? as u32);
+        // Reusing an already installed executable must not call UseProgram on
+        // its now-unlinked object: that call would itself be a native GL error.
+        if integer(renderer, 0x8b8d)? as u32 != program {
+            invoke!(renderer, "glUseProgram", (program => u32), ());
+        }
         invoke!(renderer, "glPixelStorei", (0x0d05 => u32, self.int(0x0d05)? => i32), ());
         invoke!(renderer, "glPixelStorei", (0x0cf5 => u32, self.int(0x0cf5)? => i32), ());
         for (parameter, function) in [(0x0ba2, "glViewport"), (0x0c10, "glScissor")] {
@@ -1044,11 +1240,6 @@ impl NativeCheckpoint {
     }
 
     fn restore_resources(self, renderer: &mut Renderer) -> Result<()> {
-        if renderer.host.es {
-            return Err(error(
-                "native programmable snapshot requires desktop OpenGL",
-            ));
-        }
         let assign = |renderer: &mut Renderer, kind, guest, host| -> Result<()> {
             renderer
                 .names
@@ -1106,7 +1297,10 @@ impl NativeCheckpoint {
                     .map_err(|_| error("invalid saved attribute name"))?;
                 invoke!(renderer, "glBindAttribLocation", (name => u32, *index => u32, symbol.as_ptr() => *const c_char), ());
             }
-            if program.linked {
+            let installed_failed = !program.linked
+                && !program.executable.is_empty()
+                && self.state.int(0x8b8d)? as u32 == program.guest;
+            if program.linked || installed_failed {
                 invoke!(renderer, "glLinkProgram", (name => u32), ());
                 if program_parameter(renderer, name, 0x8b82)? == 0 {
                     return Err(error("saved programmable program could not link"));
@@ -1161,6 +1355,14 @@ impl NativeCheckpoint {
             for shader in &program.shaders {
                 invoke!(renderer, "glAttachShader", (name => u32, host(renderer, Kind::Shader, *shader) => u32), ());
             }
+            for (symbol, index) in &program.pending_attributes {
+                let symbol = CString::new(symbol.as_slice())
+                    .map_err(|_| error("invalid saved pending attribute"))?;
+                invoke!(renderer,"glBindAttribLocation",(name=>u32,*index=>u32,symbol.as_ptr()=>*const c_char),());
+            }
+            renderer
+                .attribute_bindings
+                .insert(name, program.pending_attributes.iter().cloned().collect());
             renderer
                 .linked_programs
                 .insert(name, program.executable.clone());
@@ -1184,6 +1386,18 @@ impl NativeCheckpoint {
             invoke!(renderer, "glBindTexture", (texture.target => u32, name => u32), ());
             for (target, level, image) in texture.levels {
                 image.upload(renderer, target, level)?;
+                if renderer.host.es {
+                    renderer.texture_levels.insert(
+                        (name, target, level),
+                        Level {
+                            width: image.width,
+                            height: image.height,
+                            internal: image.internal,
+                            blocks: image.compressed.then(|| image.bytes.clone()),
+                            unsupported_blocks: false,
+                        },
+                    );
+                }
             }
             for (parameter, value) in [0x2800, 0x2801, 0x2802, 0x2803]
                 .into_iter()
@@ -1266,7 +1480,7 @@ impl NativeCheckpoint {
                 } else {
                     0
                 };
-                invoke!(renderer,"glDrawBuffer",(color=>u32),());
+                select_buffer(renderer, color)?;
                 invoke!(renderer,"glReadBuffer",(color=>u32),());
                 renderer.retained.next = renderer.retained.next.max(plane.id);
                 renderer.retained.images.insert(
@@ -1390,6 +1604,28 @@ impl NativeCheckpoint {
         renderer.scissor = logical(0x0c10)?;
         self.state.apply(renderer)?;
         renderer.uniform_program = host(renderer, Kind::Program, self.state.int(0x8b8d)? as u32);
+        for program in self.programs.iter().filter(|program| {
+            !program.linked
+                && !program.executable.is_empty()
+                && self.state.int(0x8b8d).ok().map(|id| id as u32) == Some(program.guest)
+        }) {
+            let name = host(renderer, Kind::Program, program.guest);
+            // The old executable is installed first. Repeating the real failed
+            // native link leaves it installed while exposing LINK_STATUS=false.
+            invoke!(renderer, "glLinkProgram", (name => u32), ());
+            if program_parameter(renderer, name, 0x8b82)? != 0 {
+                return Err(error(
+                    "the host could not reproduce the saved program link failure",
+                ));
+            }
+            renderer.failed_program = Some((
+                name,
+                ProgramInterface {
+                    attributes: program.attributes.clone(),
+                    uniforms: program.uniforms.clone(),
+                },
+            ));
+        }
         for program in self.programs.iter().filter(|program| program.deleted) {
             let name = host(renderer, Kind::Program, program.guest);
             invoke!(renderer, "glDeleteProgram", (name => u32), ());
@@ -1417,6 +1653,9 @@ fn upload_renderbuffer(
     target: u32,
     image: &Image,
 ) -> Result<()> {
+    if renderer.host.es && image.format != RGBA {
+        return es::upload_depth_stencil(renderer, target, image);
+    }
     let mut texture = 0;
     let mut source = 0;
     invoke!(renderer, "glGenTextures", (1 => i32, &mut texture => *mut u32), ());
@@ -1429,14 +1668,14 @@ fn upload_renderbuffer(
         let color = if image.format == RGBA { 0x8ce0 } else { 0 };
         invoke!(renderer, "glBindFramebuffer", (FRAMEBUFFER => u32, source => u32), ());
         invoke!(renderer, "glFramebufferTexture2D", (FRAMEBUFFER => u32, point => u32, TEXTURE_2D => u32, texture => u32, 0 => i32), ());
-        invoke!(renderer, "glDrawBuffer", (color => u32), ());
+        select_buffer(renderer, color)?;
         invoke!(renderer, "glReadBuffer", (color => u32), ());
         invoke!(renderer, "glBindFramebuffer", (FRAMEBUFFER => u32, scratch => u32), ());
         for attachment in [0x8ce0, 0x8d00, 0x8d20] {
             invoke!(renderer, "glFramebufferRenderbuffer", (FRAMEBUFFER => u32, attachment => u32, RENDERBUFFER => u32, 0 => u32), ());
         }
         invoke!(renderer, "glFramebufferRenderbuffer", (FRAMEBUFFER => u32, point => u32, RENDERBUFFER => u32, target => u32), ());
-        invoke!(renderer, "glDrawBuffer", (color => u32), ());
+        select_buffer(renderer, color)?;
         invoke!(renderer, "glReadBuffer", (color => u32), ());
         if invoke!(renderer, "glCheckFramebufferStatus", (FRAMEBUFFER => u32), u32) != 0x8cd5 {
             return Err(error("cannot restore saved programmable renderbuffer"));
@@ -1458,4 +1697,13 @@ fn upload_renderbuffer(
     invoke!(renderer, "glDeleteFramebuffers", (1 => i32, &source => *const u32), ());
     invoke!(renderer, "glDeleteTextures", (1 => i32, &texture => *const u32), ());
     result
+}
+
+fn select_buffer(renderer: &mut Renderer, color: u32) -> Result<()> {
+    if renderer.host.es {
+        es::select_buffer(renderer, color)
+    } else {
+        invoke!(renderer,"glDrawBuffer",(color=>u32),());
+        Ok(())
+    }
 }

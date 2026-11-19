@@ -769,7 +769,7 @@ also passes against the unmodified production code of commit 9bebfb5b.
 
 ## Persistent programmable checkpoints
 
-Desktop OpenGL hosts capture GLES2 resources and state at an explicit checkpoint;
+Desktop OpenGL and host OpenGL ES 3 capture GLES2 resources and state at an explicit checkpoint;
 ordinary drawing does not accumulate a lifetime replay history. Deleted images
 retained by an unbound FBO keep private FBO references to the same GPU storage,
 without copying or reading pixels during play. Preserve image generation identity
@@ -777,7 +777,12 @@ when native or guest names are reused, and release keepers after the last guest
 attachment disappears. Readback belongs to explicit snapshot capture, not to
 ordinary deletion or drawing. Rebuild resources on their owning context thread.
 See [Snapshot internals](SNAPSHOTS.md#graphics-and-performance) for format, restore
-ordering and the remaining host-OpenGL-ES journal fallback.
+ordering, ES GPU staging, exact depth/stencil validation and current programs
+whose latest native link failed. Desktop and Android share the resource archive
+and reconstruction code. Fixed-function ES surface depth uses those same
+[GPU transfer helpers](../crates/pocket-gles/src/gpu/checkpoint_transfer.rs) in a
+private shared context, preserving the renderer's native state cache. The former
+bounded replay journal has been removed.
 
 Native programmable restore also remaps saved guest uniform locations to newly
 linked native locations by name. Queries and typed/array updates use the same

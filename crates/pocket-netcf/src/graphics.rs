@@ -352,3 +352,120 @@ impl GuestMemory for ArrayMemory<'_> {
         true
     }
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct GraphicsSnapshot {
+    size: (u32, u32),
+    gpu: (bool, u8),
+    initialized: bool,
+    window: bool,
+    current: bool,
+    context: Option<(
+        pocket_gles::context::ContextSnapshot,
+        pocket_gles::context::SurfaceSnapshot,
+    )>,
+    bindings: BTreeMap<u32, (usize, usize)>,
+    #[serde(with = "serde_bytes")]
+    frame: Vec<u8>,
+    generation: u64,
+}
+impl Graphics {
+    pub(crate) fn checkpoint(&self) -> Result<GraphicsSnapshot, String> {
+        let context = self
+            .context
+            .as_ref()
+            .map(|c| Ok::<_, String>((c.capture_state(&mut None)?, c.capture_surface()?)))
+            .transpose()?;
+        Ok(GraphicsSnapshot {
+            size: self.size,
+            gpu: self.gpu,
+            initialized: self.initialized,
+            window: self.window,
+            current: self.current,
+            context,
+            bindings: self.bindings.clone(),
+            frame: self.frame.clone(),
+            generation: self.generation,
+        })
+    }
+}
+impl GraphicsSnapshot {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.size.0 == 0
+            || self.size.1 == 0
+            || self.size.0 > 2048
+            || self.size.1 > 2048
+            || (!self.frame.is_empty()
+                && self.frame.len() != self.size.0 as usize * self.size.1 as usize * 2)
+            || (self.current && (!self.window || self.context.is_none()))
+        {
+            return Err("Invalid managed graphics checkpoint".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore(self) -> Result<Graphics, String> {
+        self.validate()?;
+        let context = self
+            .context
+            .map(|(state, surface)| {
+                let native = surface.requires_native_renderer();
+                let mut context = state.restore()?;
+                let mut surface = surface.restore(self.gpu.1)?;
+                context.exchange_surface(&mut surface);
+                if native && !context.gpu_active() {
+                    return Err(
+                        "Managed GPU checkpoint could not recreate its native context".into(),
+                    );
+                }
+                Ok::<_, String>(context)
+            })
+            .transpose()?;
+        Ok(Graphics {
+            size: self.size,
+            gpu: self.gpu,
+            initialized: self.initialized,
+            window: self.window,
+            current: self.current,
+            context,
+            bindings: self.bindings,
+            frame: self.frame,
+            generation: self.generation,
+        })
+    }
+}
+impl Graphics {
+    pub(crate) fn display_size(&self) -> (u32, u32) {
+        self.size
+    }
+    pub(crate) fn render_policy(&self) -> (bool, u8) {
+        self.gpu
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    #[test]
+    fn a_real_software_fallback_does_not_claim_or_require_a_native_renderer() {
+        let mut graphics = Graphics::new((16, 16), (true, 1));
+        graphics.initialized = true;
+        graphics.window = true;
+        graphics.current = true;
+        let mut context = Context::new_rgb565(16, 16);
+        context.clear_color = [1.0, 0.25, 0.0, 1.0];
+        context.clear(pocket_gles::GL_COLOR_BUFFER_BIT);
+        let mut expected = vec![0; 16 * 16 * 2];
+        context.present_rgb565(&mut expected);
+        graphics.context = Some(context);
+        let mut restored = graphics.checkpoint().unwrap().restore().unwrap();
+        assert!(!restored.gpu_active());
+        let mut pixels = vec![0; 16 * 16 * 2];
+        restored
+            .context
+            .as_mut()
+            .unwrap()
+            .present_rgb565(&mut pixels);
+        assert_eq!(pixels, expected);
+    }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "pocket-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Shared native game-session lifecycle and checkpoint orchestration for GUI frontends."
+
+[features]
+default = []
+snapshots = ["pocket-core/unicorn"]
+
+[dependencies]
+pocket-core = { path = "../pocket-core" }
+pocket-library = { path = "../pocket-library" }
+anyhow.workspace = true
+log.workspace = true
+serde_json.workspace = true
+sha2 = "0.11"
+
+pocket-netcf = { path = "../pocket-netcf" }

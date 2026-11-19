@@ -4,6 +4,7 @@ use crate::vm::Value;
 
 pub(crate) const UPRIGHT_ACCELERATION: [f32; 3] = [0.0, 9.8, 0.0];
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Sensors {
     acceleration: [f32; 3],
 }

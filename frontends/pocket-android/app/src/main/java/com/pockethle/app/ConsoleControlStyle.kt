@@ -24,13 +24,19 @@ internal class ConsoleControlStyle(private val dp: Float) {
                 else shape(0xff303a47.toInt(), 0xff141c28.toInt(), 0xff506078.toInt()))
         }
     }
+    /** Shared function-button palette, including custom-shaped corner controls. */
+    fun toolbarColors(pressed: Boolean, emulatorAction: Boolean = false): Pair<Int, Int> {
+        val rgb = if (emulatorAction) 0x00cf8b58 else 0x00ffffff
+        return (if (pressed) 0x24000000 or rgb else android.graphics.Color.TRANSPARENT) to
+            ((if (pressed) 0xff000000.toInt() else 0x70000000) or rgb)
+    }
     /** No resting fill: the game remains visible behind the toolbar. */
     fun toolbarBackground(emulatorAction: Boolean = false): StateListDrawable {
-        val rgb = if (emulatorAction) 0x00cf8b58 else 0x00ffffff
         fun outline(pressed: Boolean) = GradientDrawable().apply {
+            val (fill, stroke) = toolbarColors(pressed, emulatorAction)
             setCornerRadius(18f * dp)
-            setColor(if (pressed) 0x24000000 or rgb else android.graphics.Color.TRANSPARENT)
-            setStroke(dp.toInt().coerceAtLeast(1), (if (pressed) 0xff000000.toInt() else 0x70000000) or rgb)
+            setColor(fill)
+            setStroke(dp.toInt().coerceAtLeast(1), stroke)
         }
         return StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_pressed), outline(true))

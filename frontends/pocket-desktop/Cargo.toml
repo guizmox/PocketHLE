@@ -25,12 +25,13 @@ arm-diagnostics = ["unicorn"]
 # all `waveOut*` traffic is silently discarded. Disable with
 # `--no-default-features` to omit emulator-native features (SDL3 still builds through CMake).
 default = ["unicorn", "audio-cpal", "video-static"]
-unicorn = ["pocket-core/unicorn"]
+unicorn = ["pocket-core/unicorn", "pocket-session/snapshots"]
 audio-cpal = ["pocket-core/audio-cpal"]
 
 video-static = ["pocket-core/video-static"]
 
 [dependencies]
+pocket-session = { path = "../../crates/pocket-session" }
 pocket-netcf = { path = "../../crates/pocket-netcf" }
 anyhow.workspace = true
 log.workspace = true

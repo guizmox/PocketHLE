@@ -25,6 +25,7 @@ object NativeBridge {
     @JvmStatic fun httpHead(id: Int): String = InternetHost.head(id)
     @JvmStatic fun httpAvailable(id: Int): Long = InternetHost.available(id)
     @JvmStatic fun httpRead(id: Int, size: Int): ByteArray = InternetHost.read(id, size)
+    @JvmStatic fun httpCheckpoint(id: Int): ByteArray = InternetHost.checkpoint(id)
     @JvmStatic fun httpClose(id: Int) = InternetHost.close(id)
     @JvmStatic fun batteryStatus(): Int = BatteryHost.read()
     @JvmStatic fun displayPowerState(): Int = BatteryHost.displayPowerState()
@@ -38,6 +39,7 @@ object NativeBridge {
     @JvmStatic fun btSocketCall(request: String): String = RfcommHost.call(request)
     @JvmStatic fun btSocketStatus(id: Int): Int = RfcommHost.status(id)
     @JvmStatic fun btSocketRead(id: Int, count: Int, peek: Boolean): ByteArray = RfcommHost.read(id, count, peek)
+    @JvmStatic fun btSocketCheckpoint(id: Int): ByteArray = RfcommHost.checkpoint(id)
     @JvmStatic fun btSocketWrite(id: Int, bytes: ByteArray): Int = RfcommHost.write(id, bytes)
     @JvmStatic fun btReady(): Int = BluetoothHost.ready()
     @JvmStatic fun btHostname(): String = BluetoothHost.hostname()
@@ -45,6 +47,7 @@ object NativeBridge {
     @JvmStatic fun btOpen(server: Boolean, address: Long, uuid: String): Int = BluetoothHost.open(server, address, uuid)
     @JvmStatic fun btStatus(id: Int): Int = BluetoothHost.status(id)
     @JvmStatic fun btRead(id: Int, count: Int): ByteArray = BluetoothHost.read(id, count)
+    @JvmStatic fun btCheckpoint(id: Int): ByteArray = BluetoothHost.checkpoint(id)
     @JvmStatic fun btWrite(id: Int, bytes: ByteArray): Int = BluetoothHost.write(id, bytes)
     @JvmStatic fun btClose(id: Int) = BluetoothHost.close(id)
     init {
@@ -117,6 +120,8 @@ object NativeBridge {
      * [nativeFinishGame] is called, after which the handle is
      * invalid and **must not** be passed back in.
      */
+    @JvmStatic external fun nativeRequestSnapshot(handle: Long, restore: Boolean): Boolean
+    @JvmStatic external fun nativePollSnapshotNotice(handle: Long): String?
     @JvmStatic external fun nativeStartGameWithDiagnostic(libraryRoot: String, id: String, presentation: Long = 0): String
 
     /** Changed images per second, or -1 before the first change. */
