@@ -80,6 +80,9 @@ pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
             317 => return Some("??3@YAXPAX@Z".into()),
             _ => {}
         }
+        if let Some(name) = crate::mfc::additional_ordinal_name(ordinal) {
+            return Some(name.into());
+        }
     }
     // The OpenGL ES client libraries keep their tables in
     // `pocket-gles`, next to the implementation they describe.
@@ -114,7 +117,7 @@ pub fn lookup_for_arch(dll: &str, ordinal: u16, arch: pocket_cpu::Arch) -> Optio
 pub fn entry_count(dll: &str) -> usize {
     let key = dll.to_ascii_lowercase();
     if key == "mfcce300.dll" {
-        return 11;
+        return 11 + crate::mfc::ADDITIONAL_ORDINAL_COUNT;
     }
     if pocket_gles::ordinals::is_gles_dll(&key) {
         return pocket_gles::ordinals::entry_count(&key);

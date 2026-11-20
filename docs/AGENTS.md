@@ -1489,3 +1489,24 @@ of every function; preserve entry-point and interworking handling.
 These links identify sources, not a claim that they were all fetched or verified
 online during this documentation-only review. No SDK/game/driver binaries are
 added by this change.
+
+## MFC file and GDI object ownership
+
+See [MFC bridge](MFC.md) for the verified CE3 ARM layout, registered exports,
+allocation/handle ownership and partial-support boundary. Additional ordinal
+names come from the same export tables as their handlers. Ordinary CFile opens
+must not set the VFS append flag. Pattern brushes own pixel copies independently
+of source bitmap handles; paint operations share the existing GDI authority and
+clipping paths. Their pixels and DC origins belong to WinCE snapshot section 10.
+
+### Host motion mapping ownership
+
+`pocket-session::input::AccelerometerKeys` owns physical-sensor calibration,
+filtering, rotation, digital hysteresis, source merging and relative aiming for
+both GUI frontends. Configuration is per-game; no mapping is active by default.
+The existing physical providers (SDL3 / Android SensorManager) remain the only
+sample source. `KernelState::accelerometer_to_arrows` is host routing policy,
+not archived guest state: it prevents simultaneous guest HTC/SEN sensor delivery.
+Do not serialize host neutral positions or asserted motion commands. Stick output
+uses `StylusAim`, not the grid router or visible-pointer state. See the
+[frontend guide](FRONTENDS.md#physical-accelerometer-mapping) for user behavior.

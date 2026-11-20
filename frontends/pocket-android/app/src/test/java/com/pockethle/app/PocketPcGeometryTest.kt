@@ -4,6 +4,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PocketPcGeometryTest {
+    @org.junit.Test
+    fun portraitToolbarIsIdenticalForClassicAndController() {
+        for (density in listOf(1f, 2f, 2.625f, 3f)) {
+            for ((width,height) in listOf(320 to 480,360 to 800,412 to 915,800 to 1280)) {
+                for (big in listOf(false,true)) {
+                    val w=(width*density).toInt();val h=(height*density).toInt()
+                    val classic=PocketPcGeometry.calculate(w,h,density,big,false)
+                    val controller=PocketPcGeometry.calculate(w,h,density,big,true)
+                    org.junit.Assert.assertEquals(classic.auxiliary,controller.auxiliary)
+                    org.junit.Assert.assertTrue(classic.dpad.y+classic.dpad.h<classic.auxiliary.first().y)
+                    org.junit.Assert.assertTrue(classic.stick.y+classic.stick.h<classic.auxiliary.first().y)
+                }
+            }
+        }
+    }
+
     private fun overlaps(a:ControlRect,b:ControlRect)=a.x<b.x+b.w && b.x<a.x+a.w && a.y<b.y+b.h && b.y<a.y+a.h
     @Test fun portraitThumbControlsMatchLandscapeSizeAndLiftActionRows() {
         for(density in listOf(1f,2f,2.625f,3f)) for(size in listOf(360 to 800,412 to 915,480 to 960,800 to 1280)) {
@@ -34,8 +50,8 @@ class PocketPcGeometryTest {
             else {
                 assertTrue(layout.auxiliary.all { it.y>=layout.dpad.y+layout.dpad.h })
                 assertEquals(1,layout.auxiliary.map { it.y }.distinct().size)
-                val guestEnd=layout.auxiliary[2].let { it.x+it.w }
-                assertTrue("host action separation",layout.auxiliary[3].x-guestEnd>=18*density-3)
+                val controller=PocketPcGeometry.calculate(w,h,density,false,true)
+                assertEquals(controller.auxiliary,layout.auxiliary)
             }
         }
     }

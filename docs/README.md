@@ -23,6 +23,7 @@ retain their spelling.
 | --- | --- |
 | Architecture, ABI/memory/scheduler contracts, CPU optimizations and primary sources | [Architecture](AGENTS.md) |
 | Rendering, EGL/NV execution, pixel ownership, resolution, filters and pacing | [Graphics](GPU.md) |
+| Windows CE 3 ARM MFC object ABI and ownership | [MFC bridge](MFC.md) |
 | Shared Desktop/Android snapshot format, restore pipeline and handle coverage | [Snapshot internals](SNAPSHOTS.md) |
 
 The root [README](../README.md) is the project overview. Contributor entry points

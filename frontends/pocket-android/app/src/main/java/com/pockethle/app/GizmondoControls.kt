@@ -84,10 +84,16 @@ class GizmondoControls(context: Context, attrs: AttributeSet? = null) : FrameLay
         measure(dpad, geometry.dpad)
         targets().forEach { (id, rect) ->
             val view = keys.getValue(id)
-            if (view is Button) view.textSize = when (id) {
-                R.id.btn_stop_emulation, R.id.btn_fullscreen -> 13f * geometry.toolbarScale
-                R.id.btn_soft1, R.id.btn_soft2 -> 18f
-                else -> 20f * geometry.controlScale
+            if (view is Button) {
+                if (id == R.id.btn_stop_emulation || id == R.id.btn_fullscreen) {
+                    val preferred = android.util.TypedValue.applyDimension(
+                        android.util.TypedValue.COMPLEX_UNIT_SP,
+                        13f * geometry.toolbarScale, resources.displayMetrics,
+                    )
+                    view.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, minOf(preferred, rect.h * .55f))
+                } else {
+                    view.textSize = if (id == R.id.btn_soft1 || id == R.id.btn_soft2) 18f else 20f * geometry.controlScale
+                }
             }
             measure(view, rect)
         }
@@ -105,6 +111,7 @@ private class FunctionButton(context: Context, private val kind: Int) : AppCompa
     private val ink = Paint(Paint.ANTI_ALIAS_FLAG).apply { color=Color.WHITE; strokeWidth=1.8f; strokeCap=Paint.Cap.ROUND; strokeJoin=Paint.Join.ROUND }
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        // Fit the vector to the measured compact toolbar, including stroke margins.
         val scale = minOf(resources.displayMetrics.density, width / 28f, height / 28f)
         canvas.save(); canvas.translate(width / 2f - 12 * scale, height / 2f - 12 * scale)
         canvas.scale(scale, scale)

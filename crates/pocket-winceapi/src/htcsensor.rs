@@ -16,10 +16,14 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
 }
 
 fn available(kernel: &pocket_kernel::KernelState) -> bool {
-    kernel.virtual_tilt_axes.is_some() || accelerometer::available()
+    !kernel.accelerometer_to_arrows
+        && (kernel.virtual_tilt_axes.is_some() || accelerometer::available())
 }
 
 fn sample_counts(kernel: &mut pocket_kernel::KernelState) -> Option<[i16; 3]> {
+    if kernel.accelerometer_to_arrows {
+        return None;
+    }
     // The HTC sensor reports gravity in device axes (X right, Y down,
     // Z toward the screen). Host sensors report proper acceleration in
     // display axes (X right, Y up, Z toward the screen).

@@ -92,6 +92,14 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
         } }
     }
     fun configure(config: LauncherConfig, settings: GameSettings = GameSettings.default()) {
+        keys.getValue(R.id.btn_soft1).apply {
+            text=if(settings.pocketpcPhoneSoftkeys) "F1" else "Tab"
+            contentDescription=if(settings.pocketpcPhoneSoftkeys) "Left soft key (F1)" else "Tab"
+        }
+        keys.getValue(R.id.btn_soft2).apply {
+            text=if(settings.pocketpcPhoneSoftkeys) "F2" else "Esc"
+            contentDescription=if(settings.pocketpcPhoneSoftkeys) "Right soft key (F2)" else "Escape"
+        }
         swapButtonGroups = settings.pocketpcSwapButtonGroups
         controllerLayout = config.pocketpcTouchLayout == "controller"
         bigDirectionalControls = config.pocketpcControlsSize == "big"

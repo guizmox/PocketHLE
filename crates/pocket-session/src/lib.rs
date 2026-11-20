@@ -27,6 +27,7 @@ pub struct LaunchContext {
     pub config: pocket_library::LauncherConfig,
 }
 pub mod compatibility;
+pub mod input;
 #[cfg(feature = "snapshots")]
 pub mod snapshot;
 

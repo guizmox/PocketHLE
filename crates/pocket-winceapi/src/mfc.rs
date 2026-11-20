@@ -1,4 +1,7 @@
 //! The CE3 MFC byte-array and Unicode CString ABI. No application-specific state.
+mod file;
+mod gdi;
+mod strings;
 use crate::{CallCtx, WinCeDispatcher};
 use pocket_kernel::{DispatchOutcome, KernelError};
 const RUNTIME: &str = "__PocketHLE_CByteArray_GetRuntimeClass";
@@ -7,6 +10,16 @@ const SERIALIZE: &str = "__PocketHLE_CByteArray_Serialize";
 const TABLE_BYTES: u32 = 96;
 
 pub(crate) fn register(d: &mut WinCeDispatcher) {
+    for &(ordinal, name, handler) in strings::EXPORTS
+        .iter()
+        .chain(file::EXPORTS)
+        .chain(gdi::EXPORTS)
+    {
+        for alias in [format!("ord:{ordinal}"), format!("#{ordinal}"), name.into()] {
+            d.register_handler("mfcce300.dll", &alias, handler);
+        }
+    }
+    file::register(d);
     for (ordinal, name, handler) in [
         (
             47,
@@ -33,6 +46,16 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
     d.register_handler("coredll.dll", DELETE, deleting_destructor);
     d.register_handler("coredll.dll", SERIALIZE, serialize);
 }
+pub(crate) fn additional_ordinal_name(ordinal: u16) -> Option<&'static str> {
+    strings::EXPORTS
+        .iter()
+        .chain(file::EXPORTS)
+        .chain(gdi::EXPORTS)
+        .find_map(|&(number, name, _)| (number == ordinal).then_some(name))
+}
+pub(crate) const ADDITIONAL_ORDINAL_COUNT: usize =
+    strings::EXPORTS.len() + file::EXPORTS.len() + gdi::EXPORTS.len();
+
 fn word(ctx: &mut CallCtx<'_>, p: u32) -> Result<u32, KernelError> {
     Ok(u32::from_le_bytes(
         ctx.cpu.read_mem(p, 4)?.try_into().unwrap(),
@@ -200,27 +223,44 @@ fn new_string(ctx: &mut CallCtx<'_>, object: u32, text: &[u16]) -> Result<(), Ke
         .ok()
         .filter(|n| *n <= 0x3ffffff0)
         .ok_or_else(|| KernelError::Loader("MFC string too large".into()))?;
+    ctx.cpu
+        .check_guest_access(object, 4, pocket_cpu::Prot::WRITE)?;
     let p = alloc(ctx, 12 + (len + 1) * 2)?;
-    put(ctx, p, 1)?;
-    put(ctx, p + 4, len)?;
-    put(ctx, p + 8, len)?;
-    let bytes: Vec<u8> = text.iter().flat_map(|c| c.to_le_bytes()).collect();
-    ctx.cpu.write_mem(p + 12, &bytes)?;
-    put(ctx, object, p + 12)
+    let result = (|| {
+        put(ctx, p, 1)?;
+        put(ctx, p + 4, len)?;
+        put(ctx, p + 8, len)?;
+        let bytes: Vec<u8> = text.iter().flat_map(|c| c.to_le_bytes()).collect();
+        ctx.cpu.write_mem(p + 12, &bytes)?;
+        ctx.cpu.write_mem(p + 12 + len * 2, &[0, 0])?;
+        put(ctx, object, p + 12)
+    })();
+    if result.is_err() {
+        ctx.kernel.heap.free(p);
+    }
+    result
 }
 fn string_new(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let o = ctx.arg_u32(0)?;
     new_string(ctx, o, &[])?;
     Ok(DispatchOutcome::ReturnedR0(o))
 }
+fn string_header(pointer: u32) -> Result<u32, KernelError> {
+    pointer
+        .checked_sub(12)
+        .ok_or_else(|| KernelError::Loader("MFC string pointer invalid".into()))
+}
+
 fn release_string(ctx: &mut CallCtx<'_>, o: u32) -> Result<(), KernelError> {
+    ctx.cpu.check_guest_access(o, 4, pocket_cpu::Prot::WRITE)?;
     let p = word(ctx, o)?;
     if p != 0 {
-        let refs = word(ctx, p - 12)? as i32;
+        let header = string_header(p)?;
+        let refs = word(ctx, header)? as i32;
         if refs <= 1 {
-            ctx.kernel.heap.free(p - 12);
+            ctx.kernel.heap.free(header);
         } else {
-            put(ctx, p - 12, (refs - 1) as u32)?;
+            put(ctx, header, (refs - 1) as u32)?;
         }
     }
     put(ctx, o, 0)
@@ -253,28 +293,8 @@ fn string_from_ansi(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
 fn string_assign(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let (o, other) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
     if o != other {
-        let p = word(ctx, other)?;
-        let len = word(ctx, p - 8)?;
-        let b = ctx.cpu.read_mem(
-            p,
-            len.checked_mul(2)
-                .filter(|n| *n <= 0x7fffffff)
-                .ok_or_else(|| KernelError::Loader("MFC string overflow".into()))?,
-        )?;
-        let text: Vec<u16> = b
-            .chunks_exact(2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]))
-            .collect();
-        // Allocate before releasing: an allocation failure preserves the old value.
-        let slot = alloc(ctx, 4)?;
-        if let Err(error) = new_string(ctx, slot, &text) {
-            ctx.kernel.heap.free(slot);
-            return Err(error);
-        }
-        let p = word(ctx, slot)?;
-        release_string(ctx, o)?;
-        put(ctx, o, p)?;
-        ctx.kernel.heap.free(slot);
+        let text = strings::value(ctx, other)?;
+        strings::replace(ctx, o, &text)?;
     }
     Ok(DispatchOutcome::ReturnedR0(o))
 }

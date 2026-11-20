@@ -18,13 +18,15 @@ internal data class GizmondoGeometry(
             // Toolbar size is independent of the control size and overflow option.
             val toolbarScale = ((w / dp - 296f) / 416f).coerceIn(0.1f, 1f)
             val unit = dp * toolbarScale
+            // Reduce the original 32-unit height by one third; preserve widths.
+            val toolbarHeight=32f * unit * (2f / 3f)
             val start = (w - 416f * unit) / 2f
             fun rect(x: Float, y: Float, rw: Float, rh: Float) = ControlRect(
                 x.toInt(), y.toInt(), rw.toInt().coerceAtLeast(1), rh.toInt().coerceAtLeast(1))
-            val toolbar = (0..4).map { rect(start + it * 52f * unit, 8f * dp, 44f * unit, 32f * unit) } +
-                listOf(rect(start + 280f * unit, 8f * dp, 64f * unit, 32f * unit),
-                    rect(start + 352f * unit, 8f * dp, 64f * unit, 32f * unit))
-            val shoulderTop = 8f * dp + 32f * unit + 4f * dp
+            val toolbar = (0..4).map { rect(start + it * 52f * unit, 8f * dp, 44f * unit, toolbarHeight) } +
+                listOf(rect(start + 280f * unit, 8f * dp, 64f * unit, toolbarHeight),
+                    rect(start + 352f * unit, 8f * dp, 64f * unit, toolbarHeight))
+            val shoulderTop = 8f * dp + toolbarHeight + 4f * dp
             // Keep both thumb groups on screen, including short and narrow displays.
             val factor = minOf(if (big) 4f / 3f else 1f,
                 ((w / dp - 36f) / 276f).coerceAtLeast(0.1f),
@@ -47,7 +49,7 @@ internal data class GizmondoGeometry(
             }
             val left = (maxOf(pad.x + pad.w, shoulders[0].x + shoulders[0].w) + 8f * dp).toInt().coerceIn(0, w - 1)
             val right = (minOf(actions.minOf { it.x }, shoulders[1].x) - 8f * dp).toInt().coerceIn(left + 1, w)
-            val top = (8f * dp + 32f * unit + 8f * dp).toInt().coerceIn(0, h - 1)
+            val top = (8f * dp + toolbarHeight + 8f * dp).toInt().coerceIn(0, h - 1)
             val screen = if (maximizeScreen) ControlRect(0, 0, w, h)
                 else ControlRect(left, top, right - left, h - top)
             return GizmondoGeometry(pad, screen, toolbarScale, shoulders, actions, toolbar, scale)

@@ -1556,6 +1556,8 @@ pub struct KernelState {
     pub touch_steering: touch_steering::TouchSteering,
     /// Supply HTC accelerometer readings from the display-relative direction keys.
     pub virtual_tilt_axes: Option<accelerometer::TiltAxes>,
+    /// Physical motion is routed to host directional keys instead of guest sensors.
+    pub accelerometer_to_arrows: bool,
     /// Set once the guest has fetched the GAPI key list through
     /// `GXGetDefaultKeys`. Such a guest only reacts to the virtual keys
     /// that table names, so the host's confirm key has to be delivered
@@ -4848,6 +4850,7 @@ impl Process {
                 stylus_stick: Default::default(),
                 touch_steering: Default::default(),
                 virtual_tilt_axes: None,
+                accelerometer_to_arrows: false,
                 gapi_keys_queried: false,
                 pocketpc_processor: None,
                 gapi_action_key: gapi::VK_A,

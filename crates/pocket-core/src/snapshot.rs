@@ -207,7 +207,7 @@ impl SessionSnapshot {
             match (id, version) {
                 (SESSION, 3) => session = Some(read_section(&mut section)?),
                 (ARM, 1) => cpu = Some(read_section(&mut section)?),
-                (KERNEL, 9) => kernel = Some(read_section(&mut section)?),
+                (KERNEL, 10) => kernel = Some(read_section(&mut section)?),
                 (EGL_FIXED, EGL_FIXED_VERSION) => egl = Some(read_section(&mut section)?),
                 (MEDIA, 2) => media = Some(read_section(&mut section)?),
                 (EGL_PROGRAMMABLE, EGL_PROGRAMMABLE_VERSION) => {
@@ -300,7 +300,7 @@ fn write_section(
     } else if id == EGL_PROGRAMMABLE {
         EGL_PROGRAMMABLE_VERSION
     } else if id == KERNEL {
-        9
+        10
     } else if id == SESSION {
         3
     } else if id == MEDIA {

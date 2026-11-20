@@ -117,26 +117,21 @@ class GameSettingsActivity : HostKeyActivity() {
                 controlsCategory.addPreference(viewGrid)
                 updateEditor()
                 controlsCategory.addPreference(androidx.preference.SwitchPreferenceCompat(requireContext()).apply {
+                    key="pocketpc_phone_softkeys"; title="Map Tab/Esc to F1/F2"; isPersistent=false
+                    isChecked=current.pocketpcPhoneSoftkeys
+                    summary="Send F1 for Tab and F2 for Esc on keyboard, gamepad and on-screen controls. Restart the game to apply."
+                    setOnPreferenceChangeListener { _, value ->
+                        current=current.copy(pocketpcPhoneSoftkeys=value as Boolean)
+                        writeGameSettings();true
+                    }
+                })
+                controlsCategory.addPreference(androidx.preference.SwitchPreferenceCompat(requireContext()).apply {
                     key="pocketpc_swap_button_groups"; title="Swap action / P buttons"; isPersistent=false
                     isChecked=current.pocketpcSwapButtonGroups
                     summary="Exchange A/B/C/Action with P1–P4 on screen and for keyboard/gamepad inputs. Applies to Classic and Controller layouts, Normal and Big. Restart the game to apply."
                     setOnPreferenceChangeListener { _, value ->
                         current=current.copy(pocketpcSwapButtonGroups=value as Boolean)
                         writeGameSettings();true
-                    }
-                })
-                controlsCategory.addPreference(ListPreference(requireContext()).apply {
-                    key = "pocketpc_tilt_input"
-                    title = "Tilt input (accelerometer)"
-                    isPersistent = false
-                    entries = arrayOf("Emulator Default") + TiltInput.values().map { it.label }
-                    entryValues = arrayOf("inherit") + TiltInput.values().map { it.id }
-                    value = current.pocketpcTiltInput?.id ?: "inherit"
-                    summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                    setOnPreferenceChangeListener { _, value ->
-                        current = current.copy(pocketpcTiltInput = TiltInput.fromId(value.toString()))
-                        writeGameSettings()
-                        true
                     }
                 })
                 fun identityField(keyName: String, label: String, initial: String, update: (String) -> Unit) {
@@ -200,6 +195,50 @@ class GameSettingsActivity : HostKeyActivity() {
                         true
                     }
                 })
+            val controlsCategory = findPreference<androidx.preference.PreferenceCategory>("controls_category")!!
+            val isGizmondo = NativeBridge.isGizmondoGame(rootDir, gameId)
+            val tiltPreference = ListPreference(requireContext()).apply {
+                key = "pocketpc_tilt_input"
+                title = "Tilt input (accelerometer)"
+                isPersistent = false
+                entries = if (isGizmondo) arrayOf(TiltInput.ACCELEROMETER.label) else arrayOf("Emulator Default") + TiltInput.values().map { it.label }
+                entryValues = if (isGizmondo) arrayOf(TiltInput.ACCELEROMETER.id) else arrayOf("inherit") + TiltInput.values().map { it.id }
+                value = if (isGizmondo) TiltInput.ACCELEROMETER.id else current.pocketpcTiltInput?.id ?: "inherit"
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                isEnabled = current.accelerometerArrows == "disabled"
+                setOnPreferenceChangeListener { _, value ->
+                    current = current.copy(pocketpcTiltInput = TiltInput.fromId(value.toString()))
+                    writeGameSettings(); true
+                }
+            }
+            controlsCategory.addPreference(tiltPreference)
+            val outputPreference = ListPreference(requireContext()).apply {
+                key = "accelerometer_output"; title = "Accelerometer output"; isPersistent = false
+                entries = arrayOf("Arrows", "Stick"); entryValues = arrayOf("arrows", "stick")
+                value = current.accelerometerOutput
+                isEnabled = current.accelerometerArrows != "disabled"
+                summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { "${it.entry}\nStick adjusts aiming through the existing relative-aim controls. It does not activate the visible pointer or touch-grid assignments. Restart the game to apply." }
+                setOnPreferenceChangeListener { _, value -> current = current.copy(accelerometerOutput = value.toString()); writeGameSettings(); true }
+            }
+            val sensitivities = listOf("disabled", "low", "medium", "high")
+            val labels = listOf("Disabled", "Low sensitivity", "Medium sensitivity", "High sensitivity")
+            controlsCategory.addPreference(androidx.preference.SeekBarPreference(requireContext()).apply {
+                key = "accelerometer_arrows"
+                title = if (isGizmondo) "Accelerometer → arrows" else "Accelerometer mapping"
+                isPersistent = false
+                min = 0; max = 3; seekBarIncrement = 1; isAdjustable = true
+                value = sensitivities.indexOf(current.accelerometerArrows).coerceAtLeast(0)
+                fun updateSummary(index: Int) { summary = "${labels[index]}\nHold the device comfortably when starting or resuming the game to set neutral. Tilt input is disabled while this mode is active. Restart the game to apply." }
+                updateSummary(value)
+                setOnPreferenceChangeListener { _, newValue ->
+                    val index = (newValue as Int).coerceIn(0, 3)
+                    current = current.copy(accelerometerArrows = sensitivities[index])
+                    tiltPreference.isEnabled = index == 0
+                    outputPreference.isEnabled = index != 0
+                    updateSummary(index); writeGameSettings(); true
+                }
+            })
+            if (!isGizmondo) controlsCategory.addPreference(outputPreference)
             findPreference<ListPreference>("screen")?.apply {
                 summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
                     "${pref.entry}\n${getString(R.string.pref_screen_summary)}"

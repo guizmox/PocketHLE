@@ -91,6 +91,7 @@ class GameActivity : AppCompatActivity() {
     private var rotationDegrees: Int = 0
     private var gizmondoGame = true
     private var simulateAccelerometerTilt = false
+    private var accelerometerAim = false
     private var gameId = ""
     private var gameRoot = ""
     private var pocketPcFullscreen = false
@@ -448,7 +449,8 @@ class GameActivity : AppCompatActivity() {
         val rootDir = LibraryPaths.root(this)
         val isGizmondo = NativeBridge.isGizmondoGame(rootDir, id)
         val gameSettings = runCatching { GameSettings.fromJson(JSONObject(NativeBridge.readGameSettings(rootDir, id))) }.getOrDefault(GameSettings.default())
-        simulateAccelerometerTilt = !isGizmondo &&
+        accelerometerAim = !isGizmondo && gameSettings.accelerometerArrows != "disabled" && gameSettings.accelerometerOutput == "stick"
+        simulateAccelerometerTilt = gameSettings.accelerometerArrows == "disabled" && !isGizmondo &&
             (gameSettings.pocketpcTiltInput ?: config.pocketpcTiltInput) != TiltInput.ACCELEROMETER
         dpadDeadzone = ControlDeadzone.from(gameSettings.dpadDeadzone)
         touchSteeringEnabled = !gizmondoGame && gameSettings.controlsMode()=="zones"
@@ -574,10 +576,13 @@ class GameActivity : AppCompatActivity() {
     }
 
     private val accelerometer by lazy {
-        AccelerometerHost(this) {
-            @Suppress("DEPRECATION")
-            windowManager.defaultDisplay.rotation
-        }
+        AccelerometerHost(this,
+            displayRotation = {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.rotation
+            },
+            inputAllowed = { activityResumed && hasWindowFocus() && liveGrid?.editing != true && !snapshotOperationPending && (!accelerometerAim || (!stylusPointer.pointer && !surfacePointerDown && gridRouter?.active != true)) },
+        )
     }
 
     override fun onResume() {

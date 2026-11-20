@@ -457,9 +457,9 @@ a bottom bank and landscape reserves side banks. This changes host layout only,
 not guest framebuffer dimensions, mappings or the inverse touch transform.
 
 Classic shortens its two landscape action rows and lowers the upper edge of
-that bank to leave the same snapshot safety gap. The toolbar, D-pad and stylus
-stick keep their existing positions. This applies at fractional density and in
-Normal/Big. Its portrait toolbar also anchors the bottom, freeing
+that bank to leave the same snapshot safety gap. Landscape toolbar and thumb
+positions retain their established anchors. This applies at fractional density and in
+Normal/Big. In portrait, Classic uses Controller's compact toolbar rectangles and anchors its other banks above them, freeing
 the area above the control bank for the game. On viewports whose smaller dimension is at least 600dp,
 its landscape action banks have a bounded height and remain just above the thumb
 controls; portrait action cells have a bounded width and stay in two side groups.
@@ -490,7 +490,7 @@ No full Android APK build or physical device validation is claimed.
 Landscape margins and the game/control gutter remain compact. The top P row can
 sit beside the central toolbar; toolbar width is bounded by the gap between the
 P banks. The action diamond and P-key dimensions are unchanged by the new thumb
-placement. Classic geometry is unchanged. The landscape reference viewport still
+placement. The landscape reference viewport still
 fits the same integer game-image scale as Classic in Normal and Big. Portrait
 uses the remaining display space above the larger centred stick, rather than
 forcing a previous zoom that would overlap the controls.
@@ -831,8 +831,8 @@ Source changes apply on the next launch.
 | Mode | Source and behavior |
 | --- | --- |
 | **Use physical accelerometer** | Default. Android uses the device's accelerometer. Desktop uses an SDL host accelerometer when available, then tries the selected controller's accelerometer. |
-| **Simulate left/right tilt** | The configured directional buttons or the left stick simulate horizontal tilt relative to the displayed game. Vertical tilt stays neutral. |
-| **Simulate tilt in four directions** | The directional buttons or the left stick simulate horizontal and vertical tilt relative to the displayed game. |
+| **Simulate left/right tilt with arrows** | The configured directional buttons or the left stick simulate horizontal tilt relative to the displayed game. Vertical tilt stays neutral. |
+| **Simulate tilt in four directions with arrows** | The directional buttons or the left stick simulate horizontal and vertical tilt relative to the displayed game. |
 
 In simulated modes, a held direction overrides the stick on its axis.
 Opposite buttons on one axis cancel each other. The stick uses a 12% dead zone
@@ -1078,3 +1078,70 @@ HIDAPI dependencies. Both Windows and Linux archives include the notices;
 Android does not bundle desktop SDL3. Historical guest SDL2 ABI references and
 orbclient's target-specific transitive dependency are distinct from the desktop
 input/playback backend and are not obsolete merely because they mention SDL2.
+
+### PocketPC phone soft keys
+
+Per-game **Controls → Map Tab/Esc to F1/F2** changes Tab to the Windows Mobile
+left context key (`VK_F1`, `0x70`) and Escape to the right context key (`VK_F2`,
+`0x71`). It is disabled by default, applies on the next launch, and is not
+available for Gizmondo. Classic and Controller touch layouts display **F1/F2**
+when enabled; existing keyboard and gamepad assignments continue to use the
+same commands. The shared Rust session adapter converts press and release
+before delivery to native or managed guests on Desktop and Android. Pointer
+input, Action, A/B/C, P1–P4, snapshot shortcuts and the GAPI key table are unchanged.
+
+Brothers in Arms 3D uses these phone context keys for its sound prompt. Its
+executable maps F1/F2, Enter, arrow keys and digits; Ctrl/Space/Shift (the
+PocketPC A/B/C defaults) are not mapped by that game's key translator. No
+application-name detection or automatic remapping is used.
+
+In portrait orientation, PocketPC Classic and Controller reuse the same compact
+function-bar rectangles, including button heights, bottom inset and the gap
+between guest keys and host actions. Classic's action rows, D-pad and stylus
+stick are positioned from that bar's top edge. Normal and Big retain their
+established directional-target sizes. Landscape layout is independent.
+
+The Android Gizmondo function bar keeps its horizontal fit and button widths,
+with its original height reduced by one third. Vector icons fit the measured
+button bounds; Exit/Full text is capped to that height. Shoulders and the reserved
+game viewport start below the resized bar. Big controls and overflow do not
+change the bar size.
+
+### Physical accelerometer mapping
+
+Per-game **Controls** offers motion mapping on Desktop and Android for both
+PocketPC and Gizmondo. The slider below **Tilt input** has **Disabled**, **Low
+sensitivity**, **Medium sensitivity** and **High sensitivity**. Disabled is the
+default. Restart the game after changing these settings.
+
+Gizmondo maps physical tilt to arrow keys. PocketPC additionally offers
+**Accelerometer output: Arrows / Stick**:
+
+- **Arrows** holds directional keys, including diagonals, and releases them
+  when the device returns to neutral. Normal guest arrow-key handling applies.
+- **Stick** supplements the existing relative aiming command, for example for
+  small camera corrections in a shooter. It does not enable the visible cursor,
+  run touch-grid bindings or change their assignments. Relative aiming already
+  uses internal stylus drags for PocketPC games that implement aiming through
+  touch. Direct touch takes priority and suppresses motion aiming while held.
+
+The selected device's first valid sample establishes a comfortable neutral
+position. Motion mapping follows presentation rotation. Sensitivity uses angular
+thresholds (20°, 12°, 6° for digital activation), a 45 ms filter and release
+hysteresis; stick aiming is continuous and reuses the configured stylus-aim speed
+and resolution scaling. No sensor, stale samples, lost focus and grid editing
+release motion input; the next valid sample recentres it. Host calibration and
+held commands are not snapshot data.
+
+While mapping is active, **Tilt input** is disabled and guest sensor delivery is
+not used simultaneously. With mapping disabled, the existing **Simulate
+left/right tilt with arrows** and **Simulate tilt in four directions with
+arrows** modes retain their previous behavior: keys/stick produce sensor data.
+The two directions of conversion share neither activation nor guest sensor reads.
+
+Desktop reuses the SDL3 host accelerometer, falling back to the selected
+controller's actual accelerometer. Android reuses the physical device sensor
+with the display-axis correction. The conversion, filtering, keyboard merging
+and aiming output live once in `pocket-session::input`; the frontends supply
+samples and UI, not separate conversion implementations. Hardware operation
+still depends on the connected device exposing an accelerometer.

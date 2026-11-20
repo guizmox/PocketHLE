@@ -10,6 +10,7 @@ import android.view.Surface
 internal class AccelerometerHost(
     context: Context,
     private val displayRotation: () -> Int,
+    private val inputAllowed: () -> Boolean,
 ) : SensorEventListener {
     private val manager = context.getSystemService(SensorManager::class.java)
     private var listening = false
@@ -31,6 +32,10 @@ internal class AccelerometerHost(
 
     override fun onSensorChanged(event: SensorEvent) {
         if (!listening || event.sensor.type != Sensor.TYPE_ACCELEROMETER || event.values.size < 3) return
+        if (!inputAllowed()) {
+            NativeBridge.nativeSetAccelerometer(false, 0f, 0f, 0f)
+            return
+        }
         val (x, y, z) = event.values
         when (displayRotation()) {
             Surface.ROTATION_90 -> NativeBridge.nativeSetAccelerometer(true, -y, x, z)

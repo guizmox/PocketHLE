@@ -19,6 +19,9 @@
 //! manages the **data**.
 
 use std::collections::HashMap;
+#[path = "gdi_pattern.rs"]
+mod pattern;
+pub use pattern::{BrushPaint, PatternBrush};
 
 use crate::framebuffer::Framebuffer;
 
@@ -92,6 +95,9 @@ pub struct Bitmap {
     /// pixel buffer at [`Bitmap::dib_bits_va`] — `BitBlt` re-reads
     /// the guest VA on demand to stay current.
     pub pixels: Vec<u8>,
+    /// Palette-relative pixels of an 8-bit device-dependent bitmap.
+    /// Unlike a DIB, colours come from the DC palette at drawing time.
+    pub ddb_indices: Option<Vec<u8>>,
     /// Window backing stores retain only pixels actually painted by GDI.
     /// Unpainted pixels must reveal the underlying window, not allocation zeros.
     /// Ordinary compatible bitmaps and guest DIBs remain opaque (`None`).
@@ -136,6 +142,7 @@ pub struct Bitmap {
 impl Bitmap {
     /// Record a completed host-side pixel write, separately from DIB syncing.
     pub fn mark_painted(&mut self) {
+        self.ddb_indices = None;
         self.host_dirty = true;
         self.paint_generation = self.paint_generation.wrapping_add(1);
     }
@@ -146,6 +153,7 @@ impl Bitmap {
             height: height.max(1),
             bpp: 16,
             pixels: vec![0u8; (width.max(1) * height.max(1) * 2) as usize],
+            ddb_indices: None,
             painted: None,
             dib_bits_va: None,
             dib_palette: Vec::new(),
@@ -178,6 +186,7 @@ impl Bitmap {
             height: height.max(1),
             bpp,
             pixels: vec![0u8; (width.max(1) * height.max(1) * 2) as usize],
+            ddb_indices: None,
             painted: None,
             dib_bits_va: Some(bits_va),
             dib_palette: palette,
@@ -225,6 +234,7 @@ pub struct Dc {
     pub selected_font: u32,
     pub selected_palette: u32,
     pub brush_color: u32,
+    pub brush_origin: (i32, i32),
     pub pen_color: u32,
     pub text_color: u32,
     pub text_align: u32,
@@ -244,6 +254,7 @@ impl Default for Dc {
             selected_font: STOCK_SYSTEM_FONT,
             selected_palette: STOCK_DEFAULT_PALETTE,
             brush_color: 0x00ff_ffff,
+            brush_origin: (0, 0),
             pen_color: 0,
             text_color: 0,
             text_align: 0,
@@ -322,6 +333,7 @@ pub enum GdiObject {
     Pen(Pen),
     Font(Font),
     Palette(Vec<[u8; 4]>),
+    PatternBrush(PatternBrush),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -437,11 +449,20 @@ pub struct GdiSnapshot(GdiState);
 impl GdiSnapshot {
     pub fn restore(self) -> Result<GdiState, String> {
         for object in self.0.objects.values() {
+            if let GdiObject::PatternBrush(pattern) = object {
+                if !pattern.valid() {
+                    return Err("invalid saved pattern brush".into());
+                }
+            }
             if let GdiObject::Bitmap(bitmap) = object {
                 let count = (bitmap.width as usize)
                     .checked_mul(bitmap.height as usize)
                     .ok_or("invalid saved GDI bitmap")?;
-                if count.checked_mul(2) != Some(bitmap.pixels.len())
+                if bitmap
+                    .ddb_indices
+                    .as_ref()
+                    .is_some_and(|v| bitmap.bpp != 8 || v.len() != count)
+                    || count.checked_mul(2) != Some(bitmap.pixels.len())
                     || bitmap
                         .painted
                         .as_ref()
@@ -852,7 +873,7 @@ impl GdiState {
         // Read the object's kind without holding a borrow on self.
         let kind = match self.objects.get(&obj_handle) {
             Some(GdiObject::Bitmap(_)) => "bitmap",
-            Some(GdiObject::Brush(_)) => "brush",
+            Some(GdiObject::Brush(_) | GdiObject::PatternBrush(_)) => "brush",
             Some(GdiObject::Pen(_)) => "pen",
             Some(GdiObject::Font(_)) => "font",
             _ => return 0,
@@ -1085,6 +1106,9 @@ impl<'a> Surface<'a> {
 
     /// Alternate-fill polygon, with scanlines clipped to the target bitmap.
     pub fn polygon(&mut self, points: &[(i32, i32)], color: u16) {
+        self.polygon_paint(points, &BrushPaint::Solid(color));
+    }
+    pub fn polygon_paint(&mut self, points: &[(i32, i32)], paint: &BrushPaint) {
         if points.len() < 3 {
             return;
         }
@@ -1112,7 +1136,7 @@ impl<'a> Surface<'a> {
             for pair in intersections.chunks_exact(2) {
                 let l = (pair[0] - 0.5).ceil().clamp(0.0, width as f64) as i32;
                 let r = (pair[1] - 0.5).ceil().clamp(0.0, width as f64) as i32;
-                self.fill_rect(l, y, r - l, 1, color);
+                self.fill_rect_paint(l, y, r - l, 1, paint, rop3::PATCOPY);
             }
         }
     }
@@ -1120,6 +1144,14 @@ impl<'a> Surface<'a> {
     /// Rasterize an ellipse inside an exclusive bounding rectangle. Clip
     /// before iterating so far-off native map coordinates remain bounded.
     pub fn ellipse(&mut self, rect: [i32; 4], fill: Option<u16>, stroke: Option<(u16, u32)>) {
+        self.ellipse_paint(rect, fill.map(BrushPaint::Solid), stroke);
+    }
+    pub fn ellipse_paint(
+        &mut self,
+        rect: [i32; 4],
+        fill: Option<BrushPaint>,
+        stroke: Option<(u16, u32)>,
+    ) {
         let [left, top, right, bottom] = rect.map(i64::from);
         if right <= left || bottom <= top || (fill.is_none() && stroke.is_none()) {
             return;
@@ -1139,10 +1171,11 @@ impl<'a> Surface<'a> {
                 let inside = inner_x > 0.0
                     && inner_y > 0.0
                     && (dx / inner_x).powi(2) + (dy / inner_y).powi(2) < 1.0;
+                let fill_color = fill.as_ref().map(|paint| paint.sample(x as i32, y as i32));
                 let color = if !inside {
-                    stroke.map(|(c, _)| c).or(fill)
+                    stroke.map(|(c, _)| c).or(fill_color)
                 } else {
-                    fill
+                    fill_color
                 };
                 if let Some(color) = color {
                     self.put_pixel(x as i32, y as i32, color);
@@ -1162,6 +1195,15 @@ impl<'a> Surface<'a> {
         rect: [i32; 4],
         corner: [i32; 2],
         fill: Option<u16>,
+        stroke: Option<(u16, u32)>,
+    ) {
+        self.round_rect_paint(rect, corner, fill.map(BrushPaint::Solid), stroke);
+    }
+    pub fn round_rect_paint(
+        &mut self,
+        rect: [i32; 4],
+        corner: [i32; 2],
+        fill: Option<BrushPaint>,
         stroke: Option<(u16, u32)>,
     ) {
         let [l, t, r, b] = rect.map(i64::from);
@@ -1208,10 +1250,11 @@ impl<'a> Surface<'a> {
                 if !inside(x as f64 + 0.5, y as f64 + 0.5, 0.0) {
                     continue;
                 }
+                let fill_color = fill.as_ref().map(|paint| paint.sample(x as i32, y as i32));
                 let color = if !inside(x as f64 + 0.5, y as f64 + 0.5, pen) {
-                    stroke.map(|(c, _)| c).or(fill)
+                    stroke.map(|(c, _)| c).or(fill_color)
                 } else {
-                    fill
+                    fill_color
                 };
                 if let Some(color) = color {
                     self.put_pixel(x as i32, y as i32, color);
@@ -1320,6 +1363,35 @@ impl<'a> Surface<'a> {
         rop: u32,
         pat: u16,
     ) {
+        self.blit_from_bytes_rop_paint(
+            dx,
+            dy,
+            sx,
+            sy,
+            w,
+            h,
+            src,
+            src_w,
+            src_h,
+            rop,
+            &BrushPaint::Solid(pat),
+        );
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_from_bytes_rop_paint(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        sx: i32,
+        sy: i32,
+        w: i32,
+        h: i32,
+        src: &[u8],
+        src_w: u32,
+        src_h: u32,
+        rop: u32,
+        pat: &BrushPaint,
+    ) {
         if w <= 0 || h <= 0 || src_w == 0 || src_h == 0 {
             return;
         }
@@ -1368,7 +1440,13 @@ impl<'a> Surface<'a> {
             for col in (0..row_bytes).step_by(2) {
                 let s = u16::from_le_bytes([src[src_off + col], src[src_off + col + 1]]);
                 let d = u16::from_le_bytes([pix[dst_off + col], pix[dst_off + col + 1]]);
-                let out = rop3::apply(rop, pat, s, d).to_le_bytes();
+                let out = rop3::apply(
+                    rop,
+                    pat.sample(dx0 as i32 + col as i32 / 2, dy0 as i32 + row),
+                    s,
+                    d,
+                )
+                .to_le_bytes();
                 pix[dst_off + col] = out[0];
                 pix[dst_off + col + 1] = out[1];
             }

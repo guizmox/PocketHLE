@@ -90,6 +90,7 @@ pub struct Options {
     pub save_root: Option<std::path::PathBuf>,
     pub guest_path: Option<String>,
     pub tilt: Option<TiltAxes>,
+    pub accelerometer_to_arrows: bool,
     pub gpu_renderer: bool,
     pub gles_internal_resolution: u8,
     pub frame_rate_limit: Option<u32>,
@@ -171,7 +172,11 @@ pub fn run(
                     input.accept(event);
                 }
             }
-            session.set_acceleration(input.acceleration(options.tilt));
+            session.set_acceleration(if options.accelerometer_to_arrows {
+                crate::sensors::UPRIGHT_ACCELERATION
+            } else {
+                input.acceleration(options.tilt)
+            });
             let now = Instant::now();
             session
                 .tick(

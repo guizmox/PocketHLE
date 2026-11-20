@@ -4,6 +4,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class GizmondoGeometryTest {
+    @Test fun functionBarLosesOneThirdOfItsHeightAndKeepsItsWidthFit() {
+        for ((w,h,density) in listOf(Triple(800,360,1f),Triple(1620,1080,1080f/449f),Triple(2486,1200,1200f/362f))) {
+            for (big in listOf(false,true)) {
+                val giz=GizmondoGeometry.calculate(w,h,density,big)
+                val unit=density*giz.toolbarScale
+                assertTrue(giz.toolbar.all { it.h==(32f*unit*(2f/3f)).toInt().coerceAtLeast(1) })
+                assertEquals((44f*unit).toInt(),giz.toolbar.first().w)
+                assertEquals((64f*unit).toInt(),giz.toolbar.last().w)
+            }
+        }
+    }
     @Test fun overflowOnlyChangesTheGameViewport() {
         // Safe landscape viewports: KEY2, P40 Pro+, phone, tablet; also portrait.
         val screens = listOf(Triple(1620, 1080, 1080f / 449f),

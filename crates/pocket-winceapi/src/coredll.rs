@@ -120,6 +120,8 @@ mod message_queue;
 mod text_draw;
 mod window_graphics;
 
+mod pattern_brush;
+
 pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler("coredll.dll", "EqualRect", equal_rect);
     images::register(d);
@@ -767,6 +769,8 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "CreateBitmap", create_bitmap);
     d.register_handler(dll, "SetBitmapBits", set_bitmap_bits);
     d.register_handler(dll, "CreateSolidBrush", create_solid_brush);
+    d.register_handler(dll, "CreatePatternBrush", pattern_brush::create);
+    d.register_handler(dll, "SetBrushOrgEx", pattern_brush::set_origin);
     d.register_handler(dll, "CreatePen", create_pen);
     d.register_handler(dll, "CreatePenIndirect", create_pen_indirect);
     d.register_handler(dll, "GetClipBox", get_clip_box);
@@ -7872,7 +7876,7 @@ fn format_general_float(value: f64, precision: usize) -> String {
     text
 }
 
-fn render_printf(
+pub(crate) fn render_printf(
     ctx: &mut CallCtx<'_>,
     fmt: &str,
     fmt_is_wide: bool,
@@ -11211,7 +11215,11 @@ fn register_class_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErro
         // brush handle is one of our `0xDEAD_xxxx` values.
         let hbr = ctx.cpu.read_u32_le(lpwc + 28).unwrap_or(0);
         ctx.kernel.window_background = class_background_color(ctx, hbr);
-        ctx.kernel.window_background_erase_pending = ctx.kernel.window_background.is_some();
+        ctx.kernel.window_background_erase_pending = ctx.kernel.window_background.is_some()
+            || matches!(
+                ctx.kernel.gdi.get(hbr),
+                Some(pocket_kernel::gdi::GdiObject::PatternBrush(_))
+            );
         if let Ok(buf) = ctx.cpu.read_mem(lpwc + 4, 4) {
             let proc_va = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
             if proc_va != 0 {
@@ -17093,9 +17101,30 @@ fn def_dlg_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 /// Fill the client area with the registered class background brush and
 /// let the controls repaint on top, as a device's `DefWindowProc` plus
 /// display driver would.
+fn window_class_brush_paint(
+    ctx: &CallCtx<'_>,
+    hwnd: u32,
+    dc: u32,
+) -> Option<pocket_kernel::gdi::BrushPaint> {
+    let class = ctx.kernel.window_classes.get(&hwnd)?;
+    let brush = ctx
+        .kernel
+        .gdi
+        .class_values
+        .get(&(class.to_ascii_lowercase(), -10))?;
+    let meta = ctx.kernel.gdi.dc(dc)?;
+    ctx.kernel.gdi.brush_paint(*brush, meta)
+}
+
 fn erase_window_background(ctx: &mut CallCtx<'_>) {
     ctx.kernel.window_background_erase_pending = false;
-    let Some(cr) = ctx.kernel.window_background else {
+    let paint =
+        window_class_brush_paint(ctx, ctx.kernel.active_window, GDI_SCREEN_DC).or_else(|| {
+            ctx.kernel
+                .window_background
+                .map(|color| pocket_kernel::gdi::BrushPaint::Solid(colorref_to_rgb565(color)))
+        });
+    let Some(paint) = paint else {
         return;
     };
     // A guest holding the GAPI framebuffer owns every pixel; erasing
@@ -17103,7 +17132,6 @@ fn erase_window_background(ctx: &mut CallCtx<'_>) {
     if ctx.kernel.fb_mapped {
         return;
     }
-    let rgb = colorref_to_rgb565(cr);
     let (w, h) = (
         ctx.kernel.framebuffer.width as i32,
         ctx.kernel.framebuffer.height as i32,
@@ -17118,7 +17146,7 @@ fn erase_window_background(ctx: &mut CallCtx<'_>) {
             return;
         };
         let mut surf = Surface::Screen(frame);
-        surf.fill_rect(0, 0, w, h, rgb);
+        surf.fill_rect_paint(0, 0, w, h, &paint, rop3::PATCOPY);
     }
     repaint_controls(ctx);
     repaint_status_bar(ctx);
@@ -17148,13 +17176,16 @@ fn erase_child_background(ctx: &mut CallCtx<'_>, hwnd: u32, dc: u32) -> Result<b
             .filter(|c| c.class == ControlClass::Toolbar)
             .map(|_| sys_color(15))
     });
-    let Some(color) = color else {
+    let paint = window_class_brush_paint(ctx, hwnd, dc).or_else(|| {
+        color.map(|color| pocket_kernel::gdi::BrushPaint::Solid(colorref_to_rgb565(color)))
+    });
+    let Some(paint) = paint else {
         return Ok(false);
     };
     sync_dib_from_guest(ctx, dc)?;
     if let Some(mut surf) = surface_for_dc(ctx.kernel, dc) {
         let (w, h) = surf.dimensions();
-        surf.fill_rect(0, 0, w as i32, h as i32, colorref_to_rgb565(color));
+        surf.fill_rect_paint(0, 0, w as i32, h as i32, &paint, rop3::PATCOPY);
         surf.mark_dirty();
     }
     sync_dst_dib_to_guest(ctx, dc)?;
@@ -17432,9 +17463,12 @@ fn draw_points(ctx: &mut CallCtx<'_>, closed: bool) -> Result<DispatchOutcome, K
             (points.iter().map(|p|p.0).min(),points.iter().map(|p|p.1).min(),points.iter().map(|p|p.0).max(),points.iter().map(|p|p.1).max()));
     }
     sync_dib_from_guest(ctx, dc)?;
+    let paint = ctx.kernel.gdi.brush_paint(meta.selected_brush, &meta);
     if let Some(mut surface) = surface_for_dc(ctx.kernel, dc) {
         if closed && meta.selected_brush != STOCK_NULL_BRUSH {
-            surface.polygon(&points, colorref_to_rgb565(meta.brush_color));
+            if let Some(paint) = &paint {
+                surface.polygon_paint(&points, paint);
+            }
         }
         if meta.selected_pen != STOCK_NULL_PEN {
             for pair in points.windows(2) {
@@ -17519,7 +17553,7 @@ fn get_current_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     Ok(DispatchOutcome::ReturnedR0(handle))
 }
 
-fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     // A DirectDraw DC borrows its bitmap and surface pixels until ReleaseDC.
     if ctx
@@ -17640,6 +17674,7 @@ fn surface_for_dc<'a>(
     dc: u32,
 ) -> Option<clipping::ClippedSurface<'a>> {
     let dc_meta = state.gdi.dc(dc)?.clone();
+    state.gdi.resolve_dc_bitmap(&dc_meta);
     let surface = match dc_meta.surface {
         pocket_kernel::gdi::DcSurface::Screen => Surface::Screen(
             state
@@ -17666,16 +17701,24 @@ fn fill_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let t = i32::from_le_bytes([rc[4], rc[5], rc[6], rc[7]]);
     let r = i32::from_le_bytes([rc[8], rc[9], rc[10], rc[11]]);
     let b = i32::from_le_bytes([rc[12], rc[13], rc[14], rc[15]]);
-    let color = ctx
-        .kernel
-        .gdi
-        .brush(hbr)
-        .map(|b| b.color)
-        .unwrap_or(0x00ff_ffff);
-    let rgb = colorref_to_rgb565(color);
+    let Some(dc) = ctx.kernel.gdi.dc(hdc).cloned() else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    let Some(paint) = ctx.kernel.gdi.brush_paint(hbr, &dc) else {
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    };
+    sync_dib_from_guest(ctx, hdc)?;
     if let Some(mut surf) = surface_for_dc(ctx.kernel, hdc) {
-        surf.fill_rect(l, t, r - l, b - t, rgb);
+        surf.fill_rect_paint(
+            l,
+            t,
+            r.saturating_sub(l),
+            b.saturating_sub(t),
+            &paint,
+            rop3::PATCOPY,
+        );
     }
+    sync_dst_dib_to_guest(ctx, hdc)?;
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -17703,8 +17746,9 @@ fn draw_closed_shape(
     let Some(meta) = ctx.kernel.gdi.dc(hdc).cloned() else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
-    let fill =
-        (meta.selected_brush != STOCK_NULL_BRUSH).then(|| colorref_to_rgb565(meta.brush_color));
+    let fill = (meta.selected_brush != STOCK_NULL_BRUSH)
+        .then(|| ctx.kernel.gdi.brush_paint(meta.selected_brush, &meta))
+        .flatten();
     let stroke = (meta.selected_pen != STOCK_NULL_PEN).then(|| {
         (
             colorref_to_rgb565(meta.pen_color),
@@ -17718,13 +17762,25 @@ fn draw_closed_shape(
     sync_dib_from_guest(ctx, hdc)?;
     if let Some(mut surf) = surface_for_dc(ctx.kernel, hdc) {
         if ellipse {
-            surf.ellipse(rect, fill, stroke);
+            surf.ellipse_paint(rect, fill, stroke);
         } else if let Some(corner) = corner {
-            surf.round_rect(rect, corner, fill, stroke);
+            surf.round_rect_paint(rect, corner, fill, stroke);
         } else {
             let [l, t, r, b] = rect.map(i64::from);
             if r > l && b > t {
                 let (sw, sh) = surf.dimensions();
+                if let Some(brush) = fill.as_ref() {
+                    let (x, y) = (l.clamp(0, sw as i64), t.clamp(0, sh as i64));
+                    let (right, bottom) = (r.clamp(0, sw as i64), b.clamp(0, sh as i64));
+                    surf.fill_rect_paint(
+                        x as i32,
+                        y as i32,
+                        (right - x).max(0) as i32,
+                        (bottom - y).max(0) as i32,
+                        brush,
+                        rop3::PATCOPY,
+                    );
+                }
                 let mut paint = |left: i64, top: i64, right: i64, bottom: i64, color: u16| {
                     let (x, y) = (left.max(0).min(sw as i64), top.max(0).min(sh as i64));
                     let (r, b) = (right.max(0).min(sw as i64), bottom.max(0).min(sh as i64));
@@ -17732,9 +17788,6 @@ fn draw_closed_shape(
                         surf.fill_rect(x as i32, y as i32, (r - x) as i32, (b - y) as i32, color);
                     }
                 };
-                if let Some(color) = fill {
-                    paint(l, t, r, b, color);
-                }
                 if let Some((color, width)) = stroke {
                     let w = i64::from(width);
                     paint(l, t, r, (t + w).min(b), color);
@@ -17950,8 +18003,8 @@ fn bit_blt_inner(
         .kernel
         .gdi
         .dc(hdc_dst)
-        .map(|d| colorref_to_rgb565(d.brush_color))
-        .unwrap_or(0);
+        .and_then(|dc| ctx.kernel.gdi.brush_paint(dc.selected_brush, dc))
+        .unwrap_or(pocket_kernel::gdi::BrushPaint::Solid(0));
 
     // ROPs that ignore the source (BLACKNESS, WHITENESS, DSTINVERT,
     // PATCOPY, ...) need no source rectangle at all — real GDI does not
@@ -17962,7 +18015,7 @@ fn bit_blt_inner(
             adapt_panel_to_presentation(ctx, x, y, cx, cy);
         }
         if let Some(mut dst) = surface_for_dc(ctx.kernel, hdc_dst) {
-            dst.fill_rect_rop(x, y, cx, cy, pat, rop);
+            dst.fill_rect_paint(x, y, cx, cy, &pat, rop);
         }
         sync_dst_dib_to_guest(ctx, hdc_dst)?;
         if hdc_dst == GDI_SCREEN_DC {
@@ -18010,8 +18063,8 @@ fn bit_blt_inner(
                 clamp_source_window(x1, y1, cx, cy, full_w, full_h).unwrap_or((x1, y1, cx, cy));
             let dest_x0 = x + (sx0 - x1);
             let dest_y0 = y + (sy0 - y1);
-            dst.blit_from_bytes_rop(
-                dest_x0, dest_y0, 0, 0, cw, ch, &scratch, src_w, src_h, rop, pat,
+            dst.blit_from_bytes_rop_paint(
+                dest_x0, dest_y0, 0, 0, cw, ch, &scratch, src_w, src_h, rop, &pat,
             );
         }
     }
@@ -18054,8 +18107,8 @@ pub(crate) fn stretch_blt_inner(
         .kernel
         .gdi
         .dc(hdc_dst)
-        .map(|d| colorref_to_rgb565(d.brush_color))
-        .unwrap_or(0);
+        .and_then(|dc| ctx.kernel.gdi.brush_paint(dc.selected_brush, dc))
+        .unwrap_or(pocket_kernel::gdi::BrushPaint::Solid(0));
     let mut scratch = std::mem::take(&mut ctx.kernel.bit_blt_src_scratch);
     let mut decode_scratch = std::mem::take(&mut ctx.kernel.dib_decode_scratch);
     let (src_w, src_h, ok) = read_blit_source(ctx, hdc_src, &mut scratch, &mut decode_scratch);
@@ -18085,8 +18138,13 @@ pub(crate) fn stretch_blt_inner(
                         continue;
                     }
                     let source = u16::from_le_bytes([scratch[off], scratch[off + 1]]);
-                    let destination = 0;
-                    let pixel = pocket_kernel::gdi::rop3::apply(rop, pat, source, destination);
+                    let destination = dst.pixel(dx + x, dy + y);
+                    let pixel = pocket_kernel::gdi::rop3::apply(
+                        rop,
+                        pat.sample(dx + x, dy + y),
+                        source,
+                        destination,
+                    );
                     dst.put_pixel(dx + x, dy + y, pixel);
                 }
             }
@@ -18209,6 +18267,7 @@ fn read_blit_source_window(
         scratch.clear();
         return false;
     };
+    ctx.kernel.gdi.resolve_dc_bitmap(&dc);
     let row_bytes = copy_w as usize * 2;
     match dc.surface {
         pocket_kernel::gdi::DcSurface::Screen => {
@@ -18474,6 +18533,7 @@ fn read_blit_source(
             return (0, 0, false);
         }
     };
+    ctx.kernel.gdi.resolve_dc_bitmap(&dc);
     match dc.surface {
         pocket_kernel::gdi::DcSurface::Screen => {
             let Ok(fb) = ctx
@@ -21769,7 +21829,7 @@ fn create_bitmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let bpp = ctx.arg_u32(3)?;
     let bits = ctx.arg_u32(4)?;
     if planes != 1
-        || !matches!(bpp, 1 | 16 | 24 | 32)
+        || !matches!(bpp, 1 | 8 | 16 | 24 | 32)
         || w > 16384
         || h > 16384
         || u64::from(w) * u64::from(h) * 2 > 64 * 1024 * 1024
@@ -21786,6 +21846,9 @@ fn create_bitmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let mut bitmap = pocket_kernel::gdi::Bitmap::new(w, h);
     bitmap.bpp = bpp as u16;
     bitmap.dib_row_stride = stride;
+    if bpp == 8 {
+        bitmap.ddb_indices = Some(vec![0; (w * h) as usize]);
+    }
     if bpp == 1 {
         bitmap.dib_palette = vec![0, 0xffff];
     }
@@ -21797,6 +21860,14 @@ fn create_bitmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
                 return Ok(DispatchOutcome::ReturnedR0(0));
             }
         };
+        if let Some(indices) = &mut bitmap.ddb_indices {
+            for (row, out) in raw
+                .chunks_exact(stride as usize)
+                .zip(indices.chunks_exact_mut(w as usize))
+            {
+                out.copy_from_slice(&row[..w as usize]);
+            }
+        }
         let mut pixels = vec![0; bitmap.pixels.len()];
         decode_dib_window(&bitmap, &raw, 0, 0, w as i32, h as i32, &mut pixels);
         bitmap.pixels = pixels;
@@ -21823,6 +21894,26 @@ fn set_bitmap_bits(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     let Some(target) = ctx.kernel.gdi.bitmap_mut(bitmap) else {
         return Ok(DispatchOutcome::ReturnedR0(0));
     };
+    if target.bpp == 8 && target.dib_bits_va.is_none() {
+        let stride = (target.width + 1) & !1;
+        let expected = stride * target.height;
+        let count = byte_count.min(expected);
+        let data = ctx.cpu.read_mem(bits, count)?;
+        let mut indices = target
+            .ddb_indices
+            .take()
+            .unwrap_or_else(|| vec![0; (target.width * target.height) as usize]);
+        for (offset, byte) in data.into_iter().enumerate() {
+            let x = offset as u32 % stride;
+            let y = offset as u32 / stride;
+            if x < target.width {
+                indices[(y * target.width + x) as usize] = byte;
+            }
+        }
+        target.mark_painted();
+        target.ddb_indices = Some(indices);
+        return Ok(DispatchOutcome::ReturnedR0(count));
+    }
     let expected = target.pixels.len() as u32;
     let count = byte_count.min(expected) as usize;
     let data = ctx.cpu.read_mem(bits, count as u32)?;
@@ -21849,11 +21940,15 @@ fn pat_blt(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         Some(d) => d,
         None => return Ok(DispatchOutcome::ReturnedR0(0)),
     };
-    let rgb = colorref_to_rgb565(dc_meta.brush_color);
+    let paint = ctx
+        .kernel
+        .gdi
+        .brush_paint(dc_meta.selected_brush, &dc_meta)
+        .unwrap_or(pocket_kernel::gdi::BrushPaint::Solid(0));
     if let Some(mut surf) = surface_for_dc(ctx.kernel, hdc) {
         // PatBlt has no source operand, so BLACKNESS/WHITENESS/
         // DSTINVERT/PATINVERT are as common here as PATCOPY.
-        surf.fill_rect_rop(x, y, w, h, rgb, rop);
+        surf.fill_rect_paint(x, y, w, h, &paint, rop);
     }
     sync_dst_dib_to_guest(ctx, hdc)?;
     if hdc == GDI_SCREEN_DC {
@@ -33014,6 +33109,7 @@ mod tests {
             stylus_stick: Default::default(),
             touch_steering: Default::default(),
             virtual_tilt_axes: None,
+            accelerometer_to_arrows: false,
             gapi_keys_queried: false,
             pocketpc_processor: None,
             gapi_action_key: pocket_kernel::gapi::VK_A,

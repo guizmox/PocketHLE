@@ -418,7 +418,9 @@ pub struct PocketLauncher {
     grid_modifiers: [bool; 4],
     running_controls_mode: ControlsMode,
     running_swap_button_groups: bool,
+    running_phone_softkeys: bool,
     running_simulated_tilt: bool,
+    running_accelerometer_aim: bool,
     running_stylus_grid: pocket_library::stylus_grid::StylusGrid,
 }
 
@@ -1051,7 +1053,9 @@ impl PocketLauncher {
             grid_modifiers: [false; 4],
             running_controls_mode: ControlsMode::Normal,
             running_swap_button_groups: false,
+            running_phone_softkeys: false,
             running_simulated_tilt: false,
+            running_accelerometer_aim: false,
             running_stylus_grid: Default::default(),
         }
     }
@@ -3393,21 +3397,57 @@ impl PocketLauncher {
                     });
                 ui.end_row();
                 if !is_gizmondo {
+                    ui.label("Tilt input (accelerometer)");
+                    ui.add_enabled_ui(!draft.accelerometer_arrows.enabled(), |ui| {
+                crate::controller_ui::ComboBox::from_id_source("game_pocketpc_tilt_input")
+                    .selected_text(draft.pocketpc_tilt_input.map_or("Emulator Default", TiltInput::label))
+                    .show_ui(ui, |ui| {
+                        crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_tilt_input, None, "Emulator Default");
+                        for mode in TiltInput::ALL {
+                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_tilt_input, Some(mode), mode.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("Simulated tilt uses direction buttons or the left stick. Applies on the next launch.");
+                });
+                    ui.end_row();
+                } else {
+                    ui.label("Tilt input (accelerometer)");
+                    ui.add_enabled_ui(!draft.accelerometer_arrows.enabled(), |ui| {
+                        ui.label("Use physical accelerometer");
+                    });
+                    ui.end_row();
+                }
+                ui.label(if is_gizmondo {
+                    "Accelerometer → arrows"
+                } else {
+                    "Accelerometer mapping"
+                });
+                let mut sensitivity = pocket_library::AccelerometerArrows::ALL
+                    .iter()
+                    .position(|mode| *mode == draft.accelerometer_arrows)
+                    .unwrap_or(0) as u8;
+                crate::controller_ui::add_enabled(ui, true, egui::Slider::new(&mut sensitivity, 0..=3).integer().custom_formatter(|value, _| pocket_library::AccelerometerArrows::ALL[value.round().clamp(0.0, 3.0) as usize].label().to_owned()))
+                .on_hover_text("Use a real SDL3 device or gamepad accelerometer. Hold it comfortably at launch to set neutral. Tilt input is disabled while this mode is active. Applies on the next launch.");
+                draft.accelerometer_arrows = pocket_library::AccelerometerArrows::ALL[sensitivity as usize];
+                ui.end_row();
+                if !is_gizmondo {
+                    ui.label("Accelerometer output");
+                    ui.add_enabled_ui(draft.accelerometer_arrows.enabled(), |ui| {
+                    crate::controller_ui::ComboBox::from_id_source("accelerometer_output").selected_text(draft.accelerometer_output.label()).show_ui(ui, |ui| {
+                        for mode in [pocket_library::AccelerometerOutput::Arrows, pocket_library::AccelerometerOutput::Stick] { crate::controller_ui::selectable_value(ui, &mut draft.accelerometer_output, mode, mode.label()); }
+                    });
+                }).response.on_hover_text("Stick adjusts aiming through the existing relative-aim controls; it does not activate the visible pointer or touch-grid assignments. Applies on the next launch.");
+                    ui.end_row();
+                }
+                if !is_gizmondo {
+                    ui.label("Phone soft keys");
+                    crate::controller_ui::checkbox(ui, &mut draft.pocketpc_phone_softkeys, "Map Tab/Esc to F1/F2")
+                        .on_hover_text("Send F1 for Tab and F2 for Esc on keyboard, gamepad and on-screen controls. Applies on the next launch.");
+                    ui.end_row();
                     ui.label("Swap action / P buttons");
                     crate::controller_ui::checkbox(ui, &mut draft.pocketpc_swap_button_groups, "Enabled")
                         .on_hover_text("Exchange A/B/C/Action with P1–P4 on the on-screen controls. Also swaps configured keyboard and gamepad inputs. Applies on the next launch.");
-                    ui.end_row();
-                    ui.label("Tilt input (accelerometer)");
-                    crate::controller_ui::ComboBox::from_id_source("game_pocketpc_tilt_input")
-                        .selected_text(draft.pocketpc_tilt_input.map_or("Emulator Default", TiltInput::label))
-                        .show_ui(ui, |ui| {
-                            crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_tilt_input, None, "Emulator Default");
-                            for mode in TiltInput::ALL {
-                                crate::controller_ui::selectable_value(ui, &mut draft.pocketpc_tilt_input, Some(mode), mode.label());
-                            }
-                        })
-                        .response
-                        .on_hover_text("Simulated tilt uses direction buttons or the left stick. Applies on the next launch.");
                     ui.end_row();
                     ui.label("Control mode");
                     let mut mode=draft.controls_mode();
@@ -4152,8 +4192,8 @@ impl PocketLauncher {
             ui.spacing_mut().item_spacing.x = 5.0;
             ui.horizontal(|ui| {
                 for (label, guest) in [
-                    ("TAB", GuestButton::Soft1),
-                    ("ESC", GuestButton::Soft2),
+                    (if self.running_phone_softkeys { "F1" } else { "TAB" }, GuestButton::Soft1),
+                    (if self.running_phone_softkeys { "F2" } else { "ESC" }, GuestButton::Soft2),
                     ("TURBO", GuestButton::Turbo),
                 ] {
                     self.vbutton_size(ui, label, guest, Vec2::new(52.0, 24.0));
@@ -5004,6 +5044,9 @@ impl PocketLauncher {
             self.release_all_keys();
             self.deck_view_press = view_press;
         }
+        self.gamepad_rx.set_accelerometer_enabled(!self.running_simulated_tilt
+            && !(self.live_grid && self.stylus_editor.is_some())
+            && (!self.running_accelerometer_aim || !self.stylus_pointer.pointer));
         self.gamepad_rx.set_output(
             self.gamepad_selected,
             self.screen == Screen::Run
@@ -6381,7 +6424,13 @@ impl PocketLauncher {
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
         self.running_simulated_tilt = !self.running_is_gizmondo
             && game.settings.effective_tilt_input(self.library.config()) != TiltInput::Accelerometer;
-        self.gamepad_rx.set_accelerometer_enabled(!self.running_simulated_tilt);
+        self.running_accelerometer_aim = !self.running_is_gizmondo
+            && game.settings.accelerometer_arrows.enabled()
+            && game.settings.accelerometer_output == pocket_library::AccelerometerOutput::Stick;
+        self.gamepad_rx
+            .set_accelerometer_enabled(!self.running_simulated_tilt);
+        self.running_phone_softkeys =
+            !self.running_is_gizmondo && game.settings.pocketpc_phone_softkeys;
         self.running_swap_button_groups =
             !self.running_is_gizmondo && game.settings.pocketpc_swap_button_groups;
         self.running_controls_mode = if self.running_is_gizmondo {

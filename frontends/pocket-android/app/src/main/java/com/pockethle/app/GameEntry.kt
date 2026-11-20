@@ -57,8 +57,8 @@ data class GameEntry(
 
 enum class TiltInput(val id: String, val label: String) {
     ACCELEROMETER("accelerometer", "Use physical accelerometer"),
-    LEFT_RIGHT("left_right", "Simulate left/right tilt"),
-    FOUR_DIRECTIONS("four_directions", "Simulate tilt in four directions");
+    LEFT_RIGHT("left_right", "Simulate left/right tilt with arrows"),
+    FOUR_DIRECTIONS("four_directions", "Simulate tilt in four directions with arrows");
 
     companion object {
         fun fromId(id: String): TiltInput? = values().firstOrNull { it.id == id }
@@ -85,8 +85,11 @@ data class GameSettings(
     val dpadDeadzone: String = "large",
     val pocketpcTouchSteering: Boolean = false,
     val pocketpcTiltInput: TiltInput? = null,
+    val accelerometerArrows: String = "disabled",
+    val accelerometerOutput: String = "arrows",
     val pocketpcControls: String? = null,
     val pocketpcSwapButtonGroups: Boolean = false,
+    val pocketpcPhoneSoftkeys: Boolean = false,
     val pocketpcStylusGridJson: String = "{}",
     val pocketpcOwnerName: String = "",
     val pocketpcDeviceName: String = "",
@@ -117,8 +120,11 @@ data class GameSettings(
         put("rotation", rotation)
         put("pocketpc_touch_steering", pocketpcTouchSteering)
         put("pocketpc_tilt_input", pocketpcTiltInput?.id ?: JSONObject.NULL)
+        put("accelerometer_arrows", accelerometerArrows)
+        put("accelerometer_output", accelerometerOutput)
         put("pocketpc_controls", pocketpcControls ?: JSONObject.NULL)
         put("pocketpc_swap_button_groups", pocketpcSwapButtonGroups)
+        put("pocketpc_phone_softkeys", pocketpcPhoneSoftkeys)
         put("pocketpc_stylus_grid", JSONObject(pocketpcStylusGridJson))
         put("pocketpc_owner_name", pocketpcOwnerName)
         put("pocketpc_device_name", pocketpcDeviceName)
@@ -160,8 +166,11 @@ data class GameSettings(
             executableHeap = if (obj.isNull("executable_heap")) null else obj.optBoolean("executable_heap"),
             pocketpcTouchSteering = obj.optBoolean("pocketpc_touch_steering", false),
             pocketpcTiltInput = TiltInput.fromId(obj.optString("pocketpc_tilt_input")),
+            accelerometerOutput = obj.optString("accelerometer_output", "arrows").takeIf { it in listOf("arrows", "stick") } ?: "arrows",
+            accelerometerArrows = obj.optString("accelerometer_arrows", "disabled").takeIf { it in listOf("disabled", "low", "medium", "high") } ?: "disabled",
             pocketpcControls = if(obj.isNull("pocketpc_controls")) null else obj.optString("pocketpc_controls"),
             pocketpcSwapButtonGroups = obj.optBoolean("pocketpc_swap_button_groups", false),
+            pocketpcPhoneSoftkeys = obj.optBoolean("pocketpc_phone_softkeys", false),
             pocketpcStylusGridJson = obj.optJSONObject("pocketpc_stylus_grid")?.toString() ?: "{}",
             pocketpcOwnerName = obj.optString("pocketpc_owner_name", ""),
             pocketpcDeviceName = obj.optString("pocketpc_device_name", ""),

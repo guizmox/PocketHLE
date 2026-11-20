@@ -789,3 +789,28 @@ linked native locations by name. Queries and typed/array updates use the same
 per-program correspondence, including after repeated checkpoints. A successful
 guest relink resets it; final program release frees it. Ordinary rendering adds
 no uniform-state readback or GPU/CPU synchronization for this mapping.
+
+## GDI bitmap brushes
+
+CreatePatternBrush copies the source bitmap into a process-owned brush. Brush
+and bitmap lifetimes are independent. Colour patterns repeat in device
+coordinates; monochrome patterns resolve zero bits using the destination DC's
+text colour and one bits using its background colour. SetBrushOrgEx records the
+DC origin, including SaveDC/RestoreDC state.
+
+FillRect, PatBlt, BitBlt/StretchBlt pattern operands, polygons, rectangles,
+ellipses and rounded rectangles share the same brush sampler and existing clip,
+coverage, DIB synchronization and pixel-authority paths. Solid fills and SRCCOPY
+retain their row-oriented fast paths. No application-specific branch is used.
+Owned brush pixels and DC origins are included in the WinCE snapshot section.
+
+References: [Windows CE 3 CreatePatternBrush](https://learn.microsoft.com/previous-versions/ms959964(v=msdn.10))
+and [SetBrushOrgEx](https://learn.microsoft.com/previous-versions/ms961460(v=msdn.10)).
+
+Eight-bit `CreateBitmap` DDBs retain palette indices separately from their RGB565
+cache. Unlike an indexed DIB, their colours come from the drawing DC's current
+palette. Source blits resolve that cache with the source DC; bitmap brushes
+retain their own index copy and sample the destination DC palette. No global
+palette or application-specific colour correction is used. This distinction is
+required by V-Rally's full-frame pattern brushes. `SetBitmapBits` preserves
+WORD-aligned DDB rows and palette-relative indices.

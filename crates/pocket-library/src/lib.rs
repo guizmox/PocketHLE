@@ -646,8 +646,50 @@ impl TiltInput {
     pub fn label(self) -> &'static str {
         match self {
             Self::Accelerometer => "Use physical accelerometer",
-            Self::LeftRight => "Simulate left/right tilt",
-            Self::FourDirections => "Simulate tilt in four directions",
+            Self::LeftRight => "Simulate left/right tilt with arrows",
+            Self::FourDirections => "Simulate tilt in four directions with arrows",
+        }
+    }
+}
+
+/// Host accelerometer to directional keys; independent of the emulated device.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccelerometerArrows {
+    #[default]
+    Disabled,
+    Low,
+    Medium,
+    High,
+}
+impl AccelerometerArrows {
+    pub const ALL: [Self; 4] = [Self::Disabled, Self::Low, Self::Medium, Self::High];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "Disabled",
+            Self::Low => "Low sensitivity",
+            Self::Medium => "Medium sensitivity",
+            Self::High => "High sensitivity",
+        }
+    }
+    pub fn enabled(self) -> bool {
+        self != Self::Disabled
+    }
+}
+
+/// Pocket PC motion output. Stick reuses relative aiming, never grid bindings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccelerometerOutput {
+    #[default]
+    Arrows,
+    Stick,
+}
+impl AccelerometerOutput {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Arrows => "Arrows",
+            Self::Stick => "Stick",
         }
     }
 }
@@ -689,12 +731,19 @@ pub struct GameSettings {
     pub pocketpc_touch_steering: bool,
     #[serde(default)]
     pub pocketpc_tilt_input: Option<TiltInput>,
+    #[serde(default)]
+    pub accelerometer_arrows: AccelerometerArrows,
+    #[serde(default)]
+    pub accelerometer_output: AccelerometerOutput,
     /// None migrates the legacy touch-steering checkbox without changing old games.
     #[serde(default)]
     pub pocketpc_controls: Option<stylus_grid::ControlsMode>,
     /// Exchange action/application button slots and the corresponding physical input bindings.
     #[serde(default)]
     pub pocketpc_swap_button_groups: bool,
+    /// Map the existing Tab/Escape controls to Windows Mobile phone soft keys.
+    #[serde(default)]
+    pub pocketpc_phone_softkeys: bool,
     #[serde(default)]
     pub pocketpc_stylus_grid: stylus_grid::StylusGrid,
     /// Empty strings inherit the emulated PocketPC device identity. Ignored on Gizmondo.
@@ -828,8 +877,12 @@ impl GameSettings {
     }
 
     pub fn effective_tilt_input(&self, config: &LauncherConfig) -> TiltInput {
-        self.pocketpc_tilt_input
-            .unwrap_or(config.pocketpc_tilt_input)
+        if self.accelerometer_arrows.enabled() {
+            TiltInput::Accelerometer
+        } else {
+            self.pocketpc_tilt_input
+                .unwrap_or(config.pocketpc_tilt_input)
+        }
     }
 
     pub fn effective_tilt_axes(
@@ -910,8 +963,11 @@ impl Default for GameSettings {
             frame_rate_limit: None,
             pocketpc_touch_steering: false,
             pocketpc_tilt_input: None,
+            accelerometer_arrows: AccelerometerArrows::Disabled,
+            accelerometer_output: AccelerometerOutput::Arrows,
             pocketpc_controls: None,
             pocketpc_swap_button_groups: false,
+            pocketpc_phone_softkeys: false,
             pocketpc_stylus_grid: Default::default(),
             pocketpc_owner_name: String::new(),
             pocketpc_device_name: String::new(),
@@ -4716,6 +4772,34 @@ fn guess_screen(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn accelerometer_arrows_persist_and_exclude_simulated_tilt() {
+        let config = LauncherConfig::default();
+        for mode in AccelerometerArrows::ALL {
+            let mut settings = GameSettings::default();
+            settings.accelerometer_arrows = mode;
+            settings.pocketpc_tilt_input = Some(TiltInput::FourDirections);
+            let saved = serde_json::to_string(&settings).unwrap();
+            let restored: GameSettings = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.accelerometer_arrows, mode);
+            assert_eq!(
+                restored.effective_tilt_axes(&config).is_none(),
+                mode.enabled()
+            );
+        }
+    }
+
+    #[test]
+    fn phone_softkeys_are_opt_in_and_persist_with_other_game_settings() {
+        let mut settings: GameSettings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.pocketpc_phone_softkeys);
+        settings.pocketpc_phone_softkeys = true;
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["pocketpc_phone_softkeys"], true);
+        let restored: GameSettings = serde_json::from_value(saved).unwrap();
+        assert!(restored.pocketpc_phone_softkeys);
+    }
+
     #[test]
     fn tilt_input_inherits_or_overrides_the_emulator_default() {
         let config: LauncherConfig =

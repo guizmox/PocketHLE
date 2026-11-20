@@ -387,6 +387,18 @@ impl Runner {
                     .unwrap_or_default()
             })
         };
+        hook.phone_softkeys =
+            game.settings.pocketpc_phone_softkeys && !is_gizmondo_game(&game, &library_root);
+        hook.accelerometer_keys.configure(
+            game.settings.accelerometer_arrows,
+            (game.settings.rotation.degrees() / 90) as u8,
+        );
+        if !is_gizmondo_game(&game, &library_root)
+            && game.settings.accelerometer_output == pocket_library::AccelerometerOutput::Stick
+        {
+            hook.accelerometer_keys
+                .set_aim(launcher_config.stylus_stick.clone(), (240, 320), game.settings.controls_mode() == pocket_library::stylus_grid::ControlsMode::Zones);
+        }
         hook.launch_context = Some(LaunchContext {
             #[cfg(feature = "unicorn")]
             config: launcher_config.clone(),
@@ -481,6 +493,7 @@ impl Runner {
         }
         emu.set_gizmondo_audio_compatibility(is_gizmondo);
         if let Some(process) = emu.process_mut() {
+            process.state.accelerometer_to_arrows = game.settings.accelerometer_arrows.enabled();
             if !is_gizmondo {
                 process.state.virtual_tilt_axes =
                     game.settings.effective_tilt_axes(&launcher_config);
@@ -1338,6 +1351,8 @@ struct RunHook {
     user_stop: Arc<AtomicBool>,
     session_error: Arc<Mutex<Option<String>>>,
     launch_context: Option<LaunchContext>,
+    phone_softkeys: bool,
+    accelerometer_keys: pocket_session::input::AccelerometerKeys,
 }
 
 impl RunHook {
@@ -1440,6 +1455,7 @@ impl RunHook {
                             Ok(Ok(())) => {
                                 self.foreground.store(table.process_id(), Ordering::Release);
                                 state.reset_foreground_input();
+                                self.accelerometer_keys.reset();
                                 Ok(request.process_handle)
                             }
                             Ok(Err(error)) => Err(error),
@@ -1521,6 +1537,7 @@ impl RunHook {
                 // Repaint the preserved parent frame even if its counter is static.
                 state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
                 state.reset_foreground_input();
+                self.accelerometer_keys.reset();
             }
             if let Some(table) = state.object_handles.child(request.process_handle) {
                 table.complete_process_exit(exit_code);
@@ -1563,6 +1580,10 @@ impl RunHook {
                             {
                                 continue;
                             }
+                            let ev = pocket_session::input::phone_softkeys(ev, self.phone_softkeys);
+                            let Some(ev) = self.accelerometer_keys.accept(ev) else {
+                                continue;
+                            };
                             match ev {
                                 InputEvent::KeyDown { vk: 0x73 } => {
                                     if !self.geofence_down && self.colors_random_gps.is_some() {
@@ -1607,6 +1628,8 @@ impl RunHook {
                 }
             }
         }
+        self.accelerometer_keys
+            .poll(!media_active && !stop_requested, pending);
         self.stopped_by_user |= self.user_stop.load(Ordering::Acquire);
         if self.stopped_by_user {
             self.stop_all.store(true, Ordering::Release);
@@ -1687,6 +1710,8 @@ impl RunHook {
             user_stop: Arc::new(AtomicBool::new(false)),
             session_error: Arc::new(Mutex::new(None)),
             launch_context: None,
+            phone_softkeys: false,
+            accelerometer_keys: Default::default(),
         }
     }
 }
@@ -1700,12 +1725,14 @@ fn run_compact_framework(
     hook: &mut RunHook,
 ) -> (RunOutcome, u32) {
     let tilt = game.settings.effective_tilt_axes(config);
+    hook.accelerometer_keys.set_size(game.settings.screen.resolve_image(image));
     let mut input = std::collections::VecDeque::new();
     let sender = hook.frame_tx.clone();
     let mut framebuffer = None;
     let result = pocket_netcf::host::run(
         exe,
         pocket_netcf::host::Options {
+            accelerometer_to_arrows: game.settings.accelerometer_arrows.enabled(),
             size: game.settings.screen.resolve_image(image),
             restore: {
                 #[cfg(feature = "unicorn")]
@@ -1796,6 +1823,8 @@ impl FrameHook for RunHook {
         let active = self.foreground.load(Ordering::Acquire) == self.pid;
         let mut stop_requested = if active {
             self.sync_system_media();
+            self.accelerometer_keys
+                .set_size((state.framebuffer.width, state.framebuffer.height));
             let stop = self.drain_input(&mut state.pending_input);
             if !self.media_commands.is_empty() {
                 for command in self.media_commands.drain(..) {

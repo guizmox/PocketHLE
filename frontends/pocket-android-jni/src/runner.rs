@@ -659,6 +659,21 @@ fn run_process_inner(
         })
     };
 
+    hook.phone_softkeys =
+        entry.settings.pocketpc_phone_softkeys && !is_gizmondo_game(entry, library_root);
+    hook.accelerometer_keys.configure(
+        entry.settings.accelerometer_arrows,
+        (entry.settings.rotation.degrees() / 90) as u8,
+    );
+    if !is_gizmondo_game(entry, library_root)
+        && entry.settings.accelerometer_output == pocket_library::AccelerometerOutput::Stick
+    {
+        hook.accelerometer_keys.set_aim(
+            launcher_config.stylus_stick.clone(),
+            (240, 320),
+            entry.settings.controls_mode() == pocket_library::stylus_grid::ControlsMode::Zones,
+        );
+    }
     hook.launch_context = Some(LaunchContext {
         #[cfg(feature = "unicorn")]
         config: launcher_config.clone(),
@@ -731,6 +746,7 @@ fn run_process_inner(
     }
     emu.set_gizmondo_audio_compatibility(is_gizmondo);
     if let Some(process) = emu.process_mut() {
+        process.state.accelerometer_to_arrows = entry.settings.accelerometer_arrows.enabled();
         if !is_gizmondo {
             process.state.virtual_tilt_axes = entry.settings.effective_tilt_axes(&launcher_config);
         }
@@ -1222,70 +1238,82 @@ fn run_compact_framework(
     size: (u32, u32),
 ) -> (String, u32) {
     let tilt = entry.settings.effective_tilt_axes(config);
+    hook.accelerometer_keys.set_size(size);
     let rx = hook.take_input_receiver();
     let stop_all = Arc::clone(&hook.stop_all);
     let state = Arc::clone(&hook.state);
     let mut presented = false;
-    let result = pocket_netcf::host::run(
-        exe,
-        pocket_netcf::host::Options {
-            size,
-            restore: {
-                #[cfg(feature = "unicorn")]
-                {
-                    hook.snapshots.managed_restore.take()
-                }
-                #[cfg(not(feature = "unicorn"))]
-                {
-                    None
-                }
+    let result =
+        pocket_netcf::host::run(
+            exe,
+            pocket_netcf::host::Options {
+                accelerometer_to_arrows: entry.settings.accelerometer_arrows.enabled(),
+                size,
+                restore: {
+                    #[cfg(feature = "unicorn")]
+                    {
+                        hook.snapshots.managed_restore.take()
+                    }
+                    #[cfg(not(feature = "unicorn"))]
+                    {
+                        None
+                    }
+                },
+                save_root: Some(entry.save_dir(library_root)),
+                guest_path: entry
+                    .guest_launch_paths(library_root)
+                    .map(|paths| paths.module_path),
+                tilt,
+                gpu_renderer: config.gpu_renderer,
+                gles_internal_resolution: config.gles_internal_resolution,
+                frame_rate_limit: entry.settings.effective_frame_rate_limit(config),
             },
-            save_root: Some(entry.save_dir(library_root)),
-            guest_path: entry
-                .guest_launch_paths(library_root)
-                .map(|paths| paths.module_path),
-            tilt,
-            gpu_renderer: config.gpu_renderer,
-            gles_internal_resolution: config.gles_internal_resolution,
-            frame_rate_limit: entry.settings.effective_frame_rate_limit(config),
-        },
-        |events, _captures| {
-            if stop_all.load(Ordering::Acquire) {
-                return if state.restore_requested.load(Ordering::Acquire) {
+            |events, _captures| {
+                if stop_all.load(Ordering::Acquire) {
+                    return if state.restore_requested.load(Ordering::Acquire) {
+                        pocket_netcf::host::Poll::Discard
+                    } else {
+                        pocket_netcf::host::Poll::Stop
+                    };
+                }
+                loop {
+                    match rx.try_recv() {
+                        Ok(InputCommand::Input(event)) => {
+                            if let Some(event) = hook.accelerometer_keys.accept(
+                                pocket_session::input::phone_softkeys(event, hook.phone_softkeys),
+                            ) {
+                                events.push(event);
+                            }
+                        }
+                        Ok(InputCommand::Stop) | Err(TryRecvError::Disconnected) => {
+                            return pocket_netcf::host::Poll::Stop
+                        }
+                        Ok(InputCommand::SystemMedia(_)) => {}
+                        Ok(InputCommand::Snapshot { restore }) => hook.snapshot_command(restore),
+                        Err(TryRecvError::Empty) => break,
+                    }
+                }
+                let mut sensor_events = std::collections::VecDeque::new();
+                hook.accelerometer_keys.poll(true, &mut sensor_events);
+                events.extend(sensor_events);
+                #[cfg(feature = "unicorn")]
+                pocket_session::snapshot::queue_managed_captures(hook, _captures);
+                if state.restore_requested.load(Ordering::Acquire) {
                     pocket_netcf::host::Poll::Discard
                 } else {
-                    pocket_netcf::host::Poll::Stop
-                };
-            }
-            loop {
-                match rx.try_recv() {
-                    Ok(InputCommand::Input(event)) => events.push(event),
-                    Ok(InputCommand::Stop) | Err(TryRecvError::Disconnected) => {
-                        return pocket_netcf::host::Poll::Stop
-                    }
-                    Ok(InputCommand::SystemMedia(_)) => {}
-                    Ok(InputCommand::Snapshot { restore }) => hook.snapshot_command(restore),
-                    Err(TryRecvError::Empty) => break,
+                    pocket_netcf::host::Poll::Continue
                 }
-            }
-            #[cfg(feature = "unicorn")]
-            pocket_session::snapshot::queue_managed_captures(hook, _captures);
-            if state.restore_requested.load(Ordering::Acquire) {
-                pocket_netcf::host::Poll::Discard
-            } else {
-                pocket_netcf::host::Poll::Continue
-            }
-        },
-        |frame| {
-            push_frame(&state, FrameSnapshot::from_framebuffer(frame));
-            presented = true;
-        },
-        |audio| {
-            if let Ok(mut slot) = state.audio.lock() {
-                *slot = Some(audio.tap());
-            }
-        },
-    );
+            },
+            |frame| {
+                push_frame(&state, FrameSnapshot::from_framebuffer(frame));
+                presented = true;
+            },
+            |audio| {
+                if let Ok(mut slot) = state.audio.lock() {
+                    *slot = Some(audio.tap());
+                }
+            },
+        );
     if let Ok(mut slot) = state.audio.lock() {
         *slot = None;
     }
@@ -1340,6 +1368,8 @@ struct SessionHook {
     pid: u32,
     children: Vec<ChildJob<(String, u32)>>,
     launch_context: Option<LaunchContext>,
+    phone_softkeys: bool,
+    accelerometer_keys: pocket_session::input::AccelerometerKeys,
     last_frame: u64,
     input_disconnected: bool,
     last_emit_at: Option<Instant>,
@@ -1521,6 +1551,7 @@ impl SessionHook {
                             Ok(Ok(())) => {
                                 self.foreground.store(table.process_id(), Ordering::Release);
                                 state.reset_foreground_input();
+                                self.accelerometer_keys.reset();
                                 Ok(request.process_handle)
                             }
                             Ok(Err(error)) => Err(error),
@@ -1599,6 +1630,7 @@ impl SessionHook {
                 // Repaint the preserved parent frame even if its counter is static.
                 state.framebuffer.frame_counter = state.framebuffer.frame_counter.wrapping_add(1);
                 state.reset_foreground_input();
+                self.accelerometer_keys.reset();
             }
             if let Some(table) = state.object_handles.child(request.process_handle) {
                 table.complete_process_exit(exit_code);
@@ -1664,6 +1696,8 @@ impl SessionHook {
             pid: 1,
             children: Vec::new(),
             launch_context: None,
+            phone_softkeys: false,
+            accelerometer_keys: Default::default(),
             last_frame: 0,
             input_disconnected: false,
             last_emit_at: None,
@@ -1718,6 +1752,10 @@ impl FrameHook for SessionHook {
                             .media_input
                             .capture(ev, media_active, &mut self.media_commands)
                         {
+                            let ev = pocket_session::input::phone_softkeys(ev, self.phone_softkeys);
+                            let Some(ev) = self.accelerometer_keys.accept(ev) else {
+                                continue;
+                            };
                             self.queue_input(
                                 ev,
                                 &kernel.vfs.gps_service(),
@@ -1739,6 +1777,10 @@ impl FrameHook for SessionHook {
                 }
             }
             drop(input);
+            self.accelerometer_keys
+                .set_size((kernel.framebuffer.width, kernel.framebuffer.height));
+            self.accelerometer_keys
+                .poll(!media_active && !stop_requested, &mut kernel.pending_input);
             let status = if self.media_commands.is_empty() {
                 status
             } else {
