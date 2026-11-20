@@ -142,6 +142,10 @@ byte representation. Their Serde reader requests a byte buffer, so bincode can
 read the whole blob into owned storage through the buffered zlib reader. The
 reader still checks section bounds. The subsequent Unicorn restore preserves
 guest addresses, permissions, lazy image residency and deferred memory ranges.
+Executable virtual-TLB promotions use ARMv5/v6's 1 KiB tiny-page granularity,
+independently of the 4 KiB allocation and image pages. Snapshot validation must
+accept these sub-page addresses, while retaining sorted, unique, aligned and
+32-bit-range checks. Chix exercises this distinction during ordinary execution.
 [ARM memory snapshot](../crates/pocket-cpu/src/unicorn_memory_snapshot.rs) ·
 [ARM execution snapshot](../crates/pocket-cpu/src/unicorn_execution_snapshot.rs)
 

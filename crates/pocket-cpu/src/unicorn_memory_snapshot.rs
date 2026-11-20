@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const PAGE: u32 = 4096;
+// ARMv5/v6 tiny pages are 1 KiB (qemu/target/arm/cpu-param.h).
+// TLB fetch promotions use that granularity, independently of our 4 KiB
+// allocation/image pages. Chix snapshots contain entries such as 0x11400.
+const ARM_TLB_PAGE: u64 = 1024;
 const ADDRESS_LIMIT: u64 = 1 << 32;
 
 #[derive(Serialize, Deserialize)]
@@ -283,7 +287,7 @@ impl ArmMemorySnapshot {
                 || tlb
                     .promoted_exec
                     .iter()
-                    .any(|&base| base >= ADDRESS_LIMIT || base % u64::from(PAGE) != 0)
+                    .any(|&base| base >= ADDRESS_LIMIT || base % ARM_TLB_PAGE != 0)
             {
                 return Err(memory_snapshot_error("invalid virtual TLB mapping"));
             }
@@ -314,6 +318,53 @@ fn memory_snapshot_error(error: impl std::fmt::Debug) -> CpuError {
 mod tests {
     use super::*;
     use crate::image_pages::tests::Budget;
+
+    #[test]
+    fn memory_snapshot_restores_executable_arm_tiny_pages() {
+        let mut cpu = UnicornCpu::new().unwrap();
+        cpu.map_region(0x1000, 2 * PAGE, Prot::ALL).unwrap();
+        cpu.add_code_hook(0x2000).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x2000).unwrap();
+        for address in [0x1000, 0x1400, 0x1800, 0x1c00] {
+            cpu.write_mem(address, &[7, 0, 0xa0, 0xe3, 0x1e, 0xff, 0x2f, 0xe1])
+                .unwrap(); // mov r0, #7; bx lr
+            assert_eq!(
+                cpu.run_until_hook(address, 100).unwrap(),
+                StopReason::Hook(0x2000)
+            );
+        }
+        let saved = cpu.capture_arm_memory().unwrap();
+        let tlb = saved
+            .virtual_tlb
+            .as_ref()
+            .expect("ARM virtual TLB required");
+        assert!(tlb.promoted_exec.contains(&0x1400));
+        assert!(tlb.promoted_exec.contains(&0x1800));
+        assert!(tlb.promoted_exec.contains(&0x1c00));
+        saved.validate().unwrap();
+        let bytes = serde_json::to_vec(&saved).unwrap();
+        drop(cpu);
+        let saved = serde_json::from_slice(&bytes).unwrap();
+        let mut restored = UnicornCpu::new().unwrap();
+        restored.restore_arm_memory(saved, Budget::new(0)).unwrap();
+        restored.add_code_hook(0x2000).unwrap();
+        restored.write_reg(ArmReg::Lr, 0x2000).unwrap();
+        for address in [0x1000, 0x1400, 0x1800, 0x1c00] {
+            restored.write_reg(ArmReg::R0, 0).unwrap();
+            assert_eq!(
+                restored.run_until_hook(address, 100).unwrap(),
+                StopReason::Hook(0x2000)
+            );
+            assert_eq!(restored.read_reg(ArmReg::R0).unwrap(), 7);
+        }
+        let mut invalid = restored.capture_arm_memory().unwrap();
+        invalid.virtual_tlb.as_mut().unwrap().promoted_exec = vec![0x1401];
+        assert!(invalid.validate().is_err());
+        invalid.virtual_tlb.as_mut().unwrap().promoted_exec = vec![0x1400, 0x1400];
+        assert!(invalid.validate().is_err());
+        invalid.virtual_tlb.as_mut().unwrap().promoted_exec = vec![ADDRESS_LIMIT];
+        assert!(invalid.validate().is_err());
+    }
 
     #[test]
     fn memory_snapshot_restores_deferred_rgb565_frame_without_padding() {
