@@ -22948,13 +22948,16 @@ fn en_us_lang_id(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 // ---------- random / time ----------
 
 fn rand_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // Microsoft CRT sequence: expose bits 16..30, not the LCG's low bits.
+    // Low bits alternate parity, so successive rand() % 2 calls can select
+    // the same direction forever (Chix retries blocked movement this way).
     let next = ctx
         .kernel
         .random_seed
-        .wrapping_mul(1664525)
-        .wrapping_add(1013904223);
+        .wrapping_mul(214013)
+        .wrapping_add(2531011);
     ctx.kernel.random_seed = next;
-    Ok(DispatchOutcome::ReturnedR0(next & 0x7FFF))
+    Ok(DispatchOutcome::ReturnedR0((next >> 16) & 0x7FFF))
 }
 
 fn srand_handler(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -34071,6 +34074,59 @@ mod tests {
     }
 
     #[test]
+    fn rand_matches_microsoft_crt_seeded_reference_values() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for (seed, expected) in [
+            (1, [41, 18467, 6334, 26500, 19169, 15724, 11478, 29358]),
+            (123, [440, 19053, 23075, 13104, 32363, 3265, 30749, 32678]),
+            (u32::MAX, [35, 29739, 3374, 11141, 31308, 7870, 5253, 2445]),
+        ] {
+            ctx.cpu.write_reg(ArmReg::R0, seed).unwrap();
+            srand_handler(&mut ctx).unwrap();
+            for value in expected {
+                assert_eq!(
+                    rand_handler(&mut ctx).unwrap(),
+                    DispatchOutcome::ReturnedR0(value)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn paired_random_binary_choices_do_not_lock_to_one_direction() {
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        for seed in [0, 1, 5, 123, u32::MAX] {
+            ctx.cpu.write_reg(ArmReg::R0, seed).unwrap();
+            srand_handler(&mut ctx).unwrap();
+            let mut choices = [false; 4];
+            for _ in 0..64 {
+                let DispatchOutcome::ReturnedR0(axis) = rand_handler(&mut ctx).unwrap() else {
+                    panic!("rand did not return an integer");
+                };
+                let DispatchOutcome::ReturnedR0(sign) = rand_handler(&mut ctx).unwrap() else {
+                    panic!("rand did not return an integer");
+                };
+                choices[((axis & 1) * 2 + (sign & 1)) as usize] = true;
+            }
+            assert_eq!(choices, [true; 4], "seed {seed}");
+        }
+    }
+
+    #[test]
     fn srand_override_is_opt_in_and_repeats_the_normal_generator_sequence() {
         let mut cpu = StubCpu::new();
         let mut kernel = fresh_kernel();
@@ -34093,11 +34149,11 @@ mod tests {
             srand_handler(&mut ctx).unwrap();
             assert_eq!(
                 rand_handler(&mut ctx).unwrap(),
-                DispatchOutcome::ReturnedR0(29088)
+                DispatchOutcome::ReturnedR0(54)
             );
             assert_eq!(
                 rand_handler(&mut ctx).unwrap(),
-                DispatchOutcome::ReturnedR0(30847)
+                DispatchOutcome::ReturnedR0(28693)
             );
         }
     }
