@@ -1,6 +1,1 @@
-crates/pocket-kernel/src/gdi.rs
-crates/pocket-kernel/src/kernel_snapshot.rs
-crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/coredll/graphics_tests.rs
-crates/pocket-winceapi/src/dc_state.rs
-docs/AGENTS.md
+crates/pocket-netcf/examples/host_check.rs

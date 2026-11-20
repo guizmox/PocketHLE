@@ -1,4 +1,4 @@
-use pocket_netcf::host::{run, Options};
+use pocket_netcf::host::{run, Options, Poll};
 use std::cell::Cell;
 use std::path::PathBuf;
 
@@ -10,14 +10,22 @@ fn main() -> Result<(), String> {
         &executable,
         Options {
             size: (240, 320),
+            restore: None,
             save_root: None,
             guest_path: None,
             tilt: None,
+            accelerometer_to_arrows: false,
             gpu_renderer: false,
             gles_internal_resolution: 1,
             frame_rate_limit: Some(60),
         },
-        |_| frames.get() < 30,
+        |_, _| {
+            if frames.get() < 30 {
+                Poll::Continue
+            } else {
+                Poll::Stop
+            }
+        },
         |frame| {
             frames.set(frames.get() + 1);
             frame.snapshot_presentation_rgba8888_into(&mut last);
