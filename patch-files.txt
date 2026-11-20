@@ -1,3 +1,6 @@
-crates/pocket-cpu/src/unicorn.rs
-docs/MFC.md
-docs/testing/POCKETPC-MFC-HEAP-2026-11-20.md
+crates/pocket-kernel/src/gdi.rs
+crates/pocket-kernel/src/kernel_snapshot.rs
+crates/pocket-winceapi/src/coredll.rs
+crates/pocket-winceapi/src/coredll/graphics_tests.rs
+crates/pocket-winceapi/src/dc_state.rs
+docs/AGENTS.md

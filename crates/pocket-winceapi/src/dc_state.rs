@@ -22,6 +22,7 @@ fn restore(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let level = ctx.arg_u32(1)? as i32;
     let known = ctx.kernel.gdi.dc(dc).is_some();
     let ok = ctx.kernel.gdi.restore_dc(dc, level);
+    crate::coredll::reclaim_deleted_bitmaps(ctx);
     if !ok {
         crate::coredll::set_thread_error(ctx, if known { 87 } else { 6 });
     }

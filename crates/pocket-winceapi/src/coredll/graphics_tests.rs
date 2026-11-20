@@ -1,7 +1,7 @@
 use super::tests::{fresh_kernel, lifecycle_test_module, scanf_cpu, thunk_at};
 use super::*;
 use pocket_cpu::Cpu;
-use pocket_kernel::{imaging::Image, Framebuffer};
+use pocket_kernel::{imaging::Image, Framebuffer, Heap};
 
 fn call(ctx: &mut CallCtx<'_>, handler: crate::Handler, args: &[u32]) -> u32 {
     let regs = [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3];
@@ -18,6 +18,55 @@ fn call(ctx: &mut CallCtx<'_>, handler: crate::Handler, args: &[u32]) -> u32 {
     match handler(ctx).unwrap() {
         DispatchOutcome::ReturnedR0(v) => v,
         other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn selected_dib_deletion_reclaims_pixels_after_dc_release_or_deselection() {
+    let mut cpu = scanf_cpu();
+    cpu.map_region(0x5000_0000, 0x30000, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let mut kernel = fresh_kernel();
+    // One 320x240 DIB fits, but a leaked second allocation does not.
+    kernel.heap = Heap::new(0x5000_0000, 0x30000);
+    let mut header = [0u8; 40];
+    header[0..4].copy_from_slice(&40u32.to_le_bytes());
+    header[4..8].copy_from_slice(&320i32.to_le_bytes());
+    header[8..12].copy_from_slice(&(-240i32).to_le_bytes());
+    header[12..14].copy_from_slice(&1u16.to_le_bytes());
+    header[14..16].copy_from_slice(&16u16.to_le_bytes());
+    cpu.write_mem(0x2000, &header).unwrap();
+    let thunk = thunk_at(0x70000100);
+    let mut ctx = CallCtx {
+        cpu: &mut cpu,
+        kernel: &mut kernel,
+        thunk: &thunk,
+    };
+    for iteration in 0..48 {
+        let bitmap = call(&mut ctx, create_dib_section, &[0, 0x2000, 0, 0x2100, 0, 0]);
+        assert_ne!(bitmap, 0);
+        let bits = ctx.cpu.read_u32_le(0x2100).unwrap();
+        let dc = call(&mut ctx, create_compatible_dc, &[0]);
+        let old = call(&mut ctx, select_object, &[dc, bitmap]);
+        if iteration % 3 == 2 {
+            ctx.kernel.gdi.save_dc(dc).unwrap();
+        }
+        // The old SDL bundled with Xrick deletes the bitmap while selected.
+        assert_eq!(call(&mut ctx, delete_object, &[bitmap]), 1);
+        assert!(ctx.kernel.gdi.bitmap(bitmap).is_some());
+        assert_eq!(ctx.kernel.heap.msize(bits), Some(153600));
+        if iteration % 3 != 0 {
+            assert_eq!(call(&mut ctx, select_object, &[dc, old]), bitmap);
+            if iteration % 3 == 2 {
+                assert!(ctx.kernel.gdi.bitmap(bitmap).is_some());
+                assert!(ctx.kernel.gdi.restore_dc(dc, -1));
+            } else {
+                assert_eq!(ctx.kernel.heap.msize(bits), None);
+            }
+        }
+        assert_eq!(call(&mut ctx, delete_dc, &[dc]), 1);
+        assert!(ctx.kernel.gdi.bitmap(bitmap).is_none());
+        assert_eq!(ctx.kernel.heap.msize(bits), None);
     }
 }
 fn entry(ty: u32, id: u32, address: u32, raw: &[u8]) -> ResourceEntry {

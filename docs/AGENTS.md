@@ -809,6 +809,14 @@ Inferring the root only from directories that contain a file yields
 
 ## 15. Image and thread memory lifetimes
 
+Guest bitmap deletion can be deferred while a live or saved DC still selects
+the bitmap. Old SDL GAPI builds, including Xrick's SDL.dll, delete their paint
+bitmap before deleting the DC. Accept this request while retaining the bitmap
+and guest DIB pixels, then reclaim both after the last DC reference is released.
+Stock and borrowed DirectDraw bitmaps retain their existing ownership rules.
+The set of pending bitmap deletions is serialized directly with GDI state.
+GDI snapshot field version 2 includes this state.
+
 The ARM EXE loader reserves CPU image pages, completes aliases and IAT
 fixups, then discards the section payloads in Process.image. That object
 retains section metadata; resources move to KernelState.resources. The CPU

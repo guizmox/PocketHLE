@@ -37,7 +37,7 @@ pub struct KernelSnapshot {
     0x0401, 1 => audio: audio::AudioSnapshot;
     0x0402, 1 => gz_files: crate::gz::GzFiles;
     // Graphics.
-    0x0501, 1 => gdi: gdi::GdiSnapshot;
+    0x0501, 2 => gdi: gdi::GdiSnapshot;
     0x0502, 1 => display: framebuffer::DisplaySnapshot;
     0x0503, 1 => fb_mapped: bool;
     0x0504, 1 => guest_fb_pitch: u32;

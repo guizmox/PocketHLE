@@ -420,6 +420,7 @@ pub struct GdiState {
     pub image_decode_frames: Vec<ImageDecodeFrame>,
     pub image_renderers: HashMap<u32, ImageRenderer>,
     saved_dcs: HashMap<u32, Vec<Dc>>,
+    pending_bitmap_deletes: std::collections::HashSet<u32>,
     pub shell_menus: crate::shell_menu::ShellMenus,
     objects: HashMap<u32, GdiObject>,
     next_handle: u32,
@@ -468,6 +469,14 @@ impl GdiSnapshot {
         // In-memory checkpoints also restart host clocks, without serializing
         // first. An unfinished paint must not retain its old pacing anchor.
         self.0.paint_presentations.clear();
+        if self
+            .0
+            .pending_bitmap_deletes
+            .iter()
+            .any(|&handle| is_stock_handle(handle) || self.0.bitmap(handle).is_none())
+        {
+            return Err("invalid saved bitmap deletion".into());
+        }
         for object in self.0.objects.values() {
             if let GdiObject::PatternBrush(pattern) = object {
                 if !pattern.valid() {
@@ -518,6 +527,7 @@ impl GdiState {
             image_decode_frames: Vec::new(),
             image_renderers: HashMap::new(),
             saved_dcs: HashMap::new(),
+            pending_bitmap_deletes: Default::default(),
             shell_menus: Default::default(),
             objects: HashMap::new(),
             next_handle: GDI_HANDLE_BASE,
@@ -790,6 +800,11 @@ impl GdiState {
         if is_stock_handle(handle) || self.system_brushes.values().any(|h| *h == handle) {
             return true;
         }
+        // The collector releases a deferred bitmap together with its guest
+        // pixels. Internal object-table cleanup must not drop just the bitmap.
+        if self.pending_bitmap_deletes.contains(&handle) {
+            return false;
+        }
         // Selected GDI objects remain owned by their DC. In particular the
         // DIB's guest pixel allocation must remain live after a failed delete.
         if self.objects.values().any(|object| {
@@ -802,6 +817,55 @@ impl GdiState {
         }
         self.saved_dcs.remove(&handle);
         self.regions.remove(&handle).is_some() || self.objects.remove(&handle).is_some()
+    }
+
+    fn bitmap_is_referenced(&self, handle: u32) -> bool {
+        self.objects
+            .values()
+            .any(|object| matches!(object, GdiObject::Dc(dc) if dc.selected_bitmap == Some(handle)))
+            || self
+                .saved_dcs
+                .values()
+                .flatten()
+                .any(|dc| dc.selected_bitmap == Some(handle))
+    }
+
+    /// Accept a bitmap deletion without invalidating pixels still used by a DC.
+    /// Older SDL GAPI (including Xrick's DLL) deletes its paint bitmap before
+    /// DeleteDC. GDI's deferred deletion compatibility avoids leaking that DIB.
+    pub fn defer_bitmap_delete(&mut self, handle: u32) -> bool {
+        if is_stock_handle(handle)
+            || self.bitmap(handle).is_none()
+            || !self.bitmap_is_referenced(handle)
+        {
+            return false;
+        }
+        self.pending_bitmap_deletes.insert(handle);
+        true
+    }
+
+    /// Remove deferred bitmaps after their last live or saved DC releases them.
+    /// The API layer owns the guest heap and must free the returned DIB buffers.
+    pub fn collect_deleted_bitmap_bits(&mut self) -> Vec<u32> {
+        if self.pending_bitmap_deletes.is_empty() {
+            return Vec::new();
+        }
+        let ready: Vec<_> = self
+            .pending_bitmap_deletes
+            .iter()
+            .copied()
+            .filter(|&handle| !self.bitmap_is_referenced(handle))
+            .collect();
+        ready
+            .into_iter()
+            .filter_map(|handle| {
+                self.pending_bitmap_deletes.remove(&handle);
+                match self.objects.remove(&handle) {
+                    Some(GdiObject::Bitmap(bitmap)) => bitmap.dib_bits_va,
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     pub fn get(&self, handle: u32) -> Option<&GdiObject> {
@@ -1890,6 +1954,33 @@ mod tests {
         let p = g.create_pen(0x00_ff_ff_ff, 1);
         assert!(g.delete(p));
         assert!(g.get(p).is_none());
+    }
+
+    #[test]
+    fn deferred_bitmap_deletion_survives_saved_dcs_and_snapshot_restore() {
+        let mut g = GdiState::new();
+        let dc = g.create_memory_dc();
+        let bitmap = g.create_compatible_bitmap(4, 3);
+        g.bitmap_mut(bitmap).unwrap().dib_bits_va = Some(0x12340000);
+        let old = g.select_into(dc, bitmap);
+        g.save_dc(dc).unwrap();
+        assert!(g.defer_bitmap_delete(bitmap));
+        g.select_into(dc, old);
+        assert!(g.collect_deleted_bitmap_bits().is_empty());
+
+        let bytes = serde_json::to_vec(&g.capture_snapshot().unwrap()).unwrap();
+        let snapshot: GdiSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let mut restored = snapshot.restore().unwrap();
+        assert!(restored.bitmap(bitmap).is_some());
+        assert!(restored.collect_deleted_bitmap_bits().is_empty());
+        assert!(restored.restore_dc(dc, -1));
+        assert!(restored.collect_deleted_bitmap_bits().is_empty());
+        assert!(restored.delete(dc));
+        assert!(!restored.delete(bitmap));
+        assert_eq!(restored.collect_deleted_bitmap_bits(), vec![0x12340000]);
+        assert!(restored.bitmap(bitmap).is_none());
+        assert!(restored.collect_deleted_bitmap_bits().is_empty());
+        assert!(!restored.defer_bitmap_delete(STOCK_DEFAULT_BITMAP));
     }
 
     #[test]

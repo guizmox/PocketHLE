@@ -17582,7 +17582,14 @@ fn select_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let dc = ctx.arg_u32(0)?;
     let obj = ctx.arg_u32(1)?;
     let prev = ctx.kernel.gdi.select_into(dc, obj);
+    reclaim_deleted_bitmaps(ctx);
     Ok(DispatchOutcome::ReturnedR0(prev))
+}
+
+pub(crate) fn reclaim_deleted_bitmaps(ctx: &mut CallCtx<'_>) {
+    for bits in ctx.kernel.gdi.collect_deleted_bitmap_bits() {
+        ctx.kernel.heap.free(bits);
+    }
 }
 
 fn get_current_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -17619,18 +17626,20 @@ pub(crate) fn delete_object(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, Ke
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     let dib_bits = ctx.kernel.gdi.bitmap(h).and_then(|b| b.dib_bits_va);
-    let deleted = ctx.kernel.gdi.delete(h);
+    let deleted = ctx.kernel.gdi.defer_bitmap_delete(h) || ctx.kernel.gdi.delete(h);
     if deleted && ctx.kernel.gdi.bitmap(h).is_none() {
         if let Some(bits) = dib_bits {
             ctx.kernel.heap.free(bits);
         }
     }
+    reclaim_deleted_bitmaps(ctx);
     Ok(DispatchOutcome::ReturnedR0(u32::from(deleted)))
 }
 
 fn delete_dc(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     let deleted = ctx.kernel.gdi.delete(h);
+    reclaim_deleted_bitmaps(ctx);
     Ok(DispatchOutcome::ReturnedR0(u32::from(deleted)))
 }
 
@@ -19673,6 +19682,7 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
         ctx.kernel.gdi.delete(dc);
     }
     ctx.kernel.gdi.shell_menus.bars.remove(hwnd);
+    reclaim_deleted_bitmaps(ctx);
     ctx.kernel.window_classes.remove(hwnd);
     ctx.kernel.window_titles.remove(hwnd);
     ctx.kernel.window_ids.remove(hwnd);
@@ -27462,6 +27472,7 @@ fn transparent_image(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         read_blit_source(ctx, temporary.unwrap_or(src), &mut pixels, &mut decode);
     if let Some(dc) = temporary {
         ctx.kernel.gdi.delete(dc);
+        reclaim_deleted_bitmaps(ctx);
     }
     let mut success = false;
     if valid {
