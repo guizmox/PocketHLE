@@ -271,6 +271,16 @@ class GameActivity : AppCompatActivity() {
             host.width - safe.right, host.height - safe.bottom))
     }
 
+    private fun requestSnapshot(restore: Boolean) {
+        val handle = session
+        if (snapshotOperationPending || handle == 0L || !activityResumed || !hasWindowFocus()) return
+        if (NativeBridge.nativeRequestSnapshot(handle, restore)) {
+            releaseHeldInput()
+            snapshotControls.busy(true)
+            snapshotOperationPending = true
+        }
+    }
+
     private fun pollSnapshotNotice() {
         if (!snapshotOperationPending) return
         NativeBridge.nativePollSnapshotNotice(session)?.let { raw ->
@@ -428,14 +438,7 @@ class GameActivity : AppCompatActivity() {
         }
         status.visibility = View.GONE
 
-        snapshotControls = SnapshotControls(this, findViewById(android.R.id.content)) { restore ->
-            val handle = session
-            if (handle != 0L && NativeBridge.nativeRequestSnapshot(handle, restore)) {
-                releaseHeldInput()
-                snapshotControls.busy(true)
-                snapshotOperationPending = true
-            }
-        }
+        snapshotControls = SnapshotControls(this, findViewById(android.R.id.content), ::requestSnapshot)
         wireSurfaceTouchInput()
         wireVirtualGamepad()
 
@@ -1452,6 +1455,10 @@ class GameActivity : AppCompatActivity() {
         if (liveGrid?.editing == true) return
         if(requestedVk==DeckInputPolicy.STYLUS_CLICK_COMMAND) {if(handle==session) stylusButton(true);return}
         if (requestedVk == DeckInputPolicy.ROTATION_COMMAND) { if (handle == session) cycleRotation(); return }
+        if (requestedVk == DeckInputPolicy.SAVE_SNAPSHOT_COMMAND || requestedVk == DeckInputPolicy.LOAD_SNAPSHOT_COMMAND) {
+            if (handle == session) requestSnapshot(requestedVk == DeckInputPolicy.LOAD_SNAPSHOT_COMMAND)
+            return
+        }
         if (requestedVk == DeckInputPolicy.SCREENSHOT_COMMAND) return
         if (requestedVk == CenterTapPulse.COMMAND) { tapScreenCenter(handle); return }
         val vk=rotatedDirection(requestedVk)
@@ -1464,7 +1471,7 @@ class GameActivity : AppCompatActivity() {
 
     private fun releaseGuestKey(handle: Long, requestedVk: Int) {
         if(requestedVk==DeckInputPolicy.STYLUS_CLICK_COMMAND) {if(handle==session) stylusButton(false);return}
-        if (requestedVk == CenterTapPulse.COMMAND || requestedVk == DeckInputPolicy.ROTATION_COMMAND || requestedVk == DeckInputPolicy.SCREENSHOT_COMMAND) return
+        if (requestedVk == CenterTapPulse.COMMAND || requestedVk == DeckInputPolicy.ROTATION_COMMAND || requestedVk == DeckInputPolicy.SCREENSHOT_COMMAND || requestedVk == DeckInputPolicy.SAVE_SNAPSHOT_COMMAND || requestedVk == DeckInputPolicy.LOAD_SNAPSHOT_COMMAND) return
         val vk=rotatedDirection(requestedVk)
         val count = heldGuestKeys[vk] ?: return
         if (count <= 1) {

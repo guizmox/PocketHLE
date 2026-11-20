@@ -665,6 +665,17 @@ The issue remains with GetNearestColor implemented. A synthetic worker-draw/main
 poll regression and the existing retained-GAPI tests cover the ownership guard.
 Device-specific presentation and later gameplay still need separate validation.
 
+## Native window repaint and GAPI presentation
+
+A dispatched WM_PAINT is a native window redraw, not an additional game-frame
+boundary. GXEndDraw in that callback publishes real guest pixels through the
+same readback path as other GAPI writes, without a second LCD wait or completed
+frame count. The message ID is captured by DispatchMessage and survives scheduler
+waits and snapshots; it is not inferred from a game's PC, executable name or a
+mutable guest MSG buffer. A nested dispatched timer uses its own message ID and
+keeps normal presentation pacing. Ordinary GXEndDraw calls, including unchanged
+frames, retain their existing pacing, so timer-driven games do not speed up.
+
 ## Paired color capture (desktop diagnostics)
 
 Set `POCKETHLE_COLOR_CAPTURE` to an output directory before launching PocketHLE-Reborn.

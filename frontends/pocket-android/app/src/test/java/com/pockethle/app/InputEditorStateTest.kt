@@ -12,6 +12,34 @@ class InputEditorStateTest {
         )
 
     @Test
+    fun snapshotCommandsAreAssignableToControllerAndPersistForBothProfiles() {
+        for (giz in listOf(false, true)) {
+            val state = draft()
+            for ((id, vk) in listOf(
+                "save_snapshot" to DeckInputPolicy.SAVE_SNAPSHOT_COMMAND,
+                "load_snapshot" to DeckInputPolicy.LOAD_SNAPSHOT_COMMAND,
+            )) {
+                assertTrue(state.visibleButtons(giz, true).contains(id))
+                assertFalse(state.visibleButtons(giz, false).contains(id))
+                assertTrue(state.targets(true, "Misc1", false, giz).contains(id))
+                assertTrue(state.targets(true, "Misc1", true, giz).contains(id))
+                assertFalse(state.targets(false, "Z", false, giz).contains(id))
+                assertFalse(state.assign("Z", false, id, giz))
+                assertFalse(state.assignLong("Z", false, id, giz))
+                assertTrue(state.assign("Misc1", true, id, giz))
+                assertTrue(state.assignLong("Mode", true, id, giz))
+                val restored = InputEditorState(state.json.toString())
+                assertTrue(restored.assigned(id, true, giz, listOf("Misc1", "Mode")))
+                val runtime = InputBindings(
+                    LauncherConfig.default().copy(originalJson = restored.json.toString()), giz,
+                )
+                assertEquals(vk, runtime.controllerKey("Misc1"))
+                assertEquals(vk, runtime.longKey("Mode", true))
+            }
+        }
+    }
+
+    @Test
     fun keyboardDefaultsMatchProfileAndNumberNamesIgnoreShiftCharacters() {
         val state = InputEditorState("{}")
         val ppc = InputBindings(LauncherConfig.default(), false)

@@ -4,7 +4,7 @@
 use super::*;
 type Message = (u32, u32, u32, u32);
 
-fn matches(kernel: &KernelState, m: Message, window: u32, low: u32, high: u32) -> bool {
+pub(super) fn matches(kernel: &KernelState, m: Message, window: u32, low: u32, high: u32) -> bool {
     if m.1 == WM_QUIT {
         return true;
     }
@@ -141,6 +141,9 @@ fn find(ctx: &mut CallCtx<'_>, window: u32, low: u32, high: u32, remove: bool) -
                 return Some(m);
             }
         }
+    }
+    if let Some(paint) = invalidated_window_paint(ctx, window, low, high) {
+        return Some(paint);
     }
     let now = monotonic_ms();
     let timer = ctx

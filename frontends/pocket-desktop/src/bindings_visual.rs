@@ -50,6 +50,8 @@ impl Assignment {
                 RotateScreen => "Rotate",
                 Screenshot => "Screenshot",
                 StylusClick => "Click ×2",
+                SaveSnapshot => "Save Snapshot",
+                LoadSnapshot => "Load Snapshot",
             },
         }
     }
@@ -144,7 +146,7 @@ impl Assignment {
         match self {
             Self::Unbound => Color32::from_gray(90),
             Self::Guest(GuestButton::CenterTap | GuestButton::StylusClick) => GREEN,
-            Self::Guest(GuestButton::RotateScreen | GuestButton::Screenshot) => PURPLE,
+            Self::Guest(GuestButton::RotateScreen | GuestButton::Screenshot | GuestButton::SaveSnapshot | GuestButton::LoadSnapshot) => PURPLE,
             Self::Guest(_) => BLUE,
             Self::Stylus(_) => GREEN,
         }
@@ -262,7 +264,7 @@ fn visible_buttons(gizmondo: bool) -> impl Iterator<Item = GuestButton> {
         let index = GuestButton::ALL.iter().position(|b| b == button).unwrap();
         if gizmondo {
             (index < 16 && *button != GuestButton::Turbo)
-                || matches!(*button, GuestButton::RotateScreen | GuestButton::Screenshot)
+                || matches!(*button, GuestButton::RotateScreen | GuestButton::Screenshot | GuestButton::SaveSnapshot | GuestButton::LoadSnapshot)
         } else {
             index < 11 || index >= 16
         }
@@ -460,6 +462,7 @@ fn assignment_targets(
     std::iter::once(Assignment::Unbound)
         .chain(
             visible_buttons(gizmondo)
+                .filter(|b| controller || !matches!(b, GuestButton::SaveSnapshot | GuestButton::LoadSnapshot))
                 .filter(|b| *b != GuestButton::StylusClick || (!long && !controller))
                 .map(Assignment::Guest),
         )
@@ -1100,6 +1103,7 @@ impl Editor {
         }
         let prefix = pocket_library::input_gestures::binding_key(self.gizmondo, controller, "");
         let missing: Vec<_> = visible_buttons(self.gizmondo)
+            .filter(|b| controller || !matches!(b, GuestButton::SaveSnapshot | GuestButton::LoadSnapshot))
             .filter(|b| if controller { *b != GuestButton::StylusClick } else { !matches!(b, GuestButton::Screenshot | GuestButton::RotateScreen) })
             .filter(|button| {
                 if config.long_press_bindings.iter().any(|(key, b)| {
@@ -1799,6 +1803,32 @@ mod tests {
         ));
         assert!(visible_buttons(false).any(|b| b == GuestButton::Screenshot));
         assert!(visible_buttons(true).any(|b| b == GuestButton::Screenshot));
+    }
+
+    #[test]
+    fn snapshots_are_controller_targets_for_both_profiles_and_survive_reload() {
+        for gizmondo in [false, true] {
+            for button in [GuestButton::SaveSnapshot, GuestButton::LoadSnapshot] {
+                assert!(visible_buttons(gizmondo).any(|b| b == button));
+                for long in [false, true] {
+                    assert!(assignment_targets(gizmondo, true, Some("Mode"), long)
+                        .iter()
+                        .any(|a| matches!(a, Assignment::Guest(b) if *b == button)));
+                    assert!(!assignment_targets(gizmondo, false, Some("Z"), long)
+                        .iter()
+                        .any(|a| matches!(a, Assignment::Guest(b) if *b == button)));
+                }
+                let mut config = LauncherConfig::default();
+                config.short_press_bindings.insert(
+                    pocket_library::input_gestures::binding_key(gizmondo, true, "Mode"),
+                    Some(button),
+                );
+                let restored: LauncherConfig =
+                    serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+                assert!(matches!(controller_assignment(&restored, "Mode", gizmondo),
+                    Assignment::Guest(b) if b == button));
+            }
+        }
     }
 
     #[test]

@@ -71,6 +71,7 @@ pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
             47 => return Some("??0CByteArray@@QAA@XZ".into()),
             177 => return Some("??0CString@@QAA@PBD@Z".into()),
             321 => return Some("??4CString@@QAAABV0@ABV0@@Z".into()),
+            1501 => return Some("?GetRuntimeClass@CObject@@UBAPAUCRuntimeClass@@XZ".into()),
             181 => return Some("??0CString@@QAA@XZ".into()),
             218 => return Some("??1CByteArray@@QAA@XZ".into()),
             297 => return Some("??1CString@@QAA@XZ".into()),
@@ -117,7 +118,7 @@ pub fn lookup_for_arch(dll: &str, ordinal: u16, arch: pocket_cpu::Arch) -> Optio
 pub fn entry_count(dll: &str) -> usize {
     let key = dll.to_ascii_lowercase();
     if key == "mfcce300.dll" {
-        return 11 + crate::mfc::ADDITIONAL_ORDINAL_COUNT;
+        return 12 + crate::mfc::ADDITIONAL_ORDINAL_COUNT;
     }
     if pocket_gles::ordinals::is_gles_dll(&key) {
         return pocket_gles::ordinals::entry_count(&key);

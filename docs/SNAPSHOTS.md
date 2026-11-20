@@ -107,7 +107,7 @@ use this interpreter and snapshot path.
 
 The managed and native payload versions evolve separately; neither has a legacy
 development-format reader. Current native session identity is section version 3,
-WinCE 10, fixed EGL 2, programmable EGL 6 and media 2. Managed payload version is 1.
+WinCE 11, fixed EGL 2, programmable EGL 6 and media 2. Managed payload version is 1.
 Recreate development slots after this change.
 
 ## Restore and ARM block reads
@@ -461,3 +461,12 @@ the session remains live; fatal restore failures use the same dialog without it.
 Desktop uses that same diagnostic payload and controller-aware window.
 
 Validation procedures and platform limits: [phase 6 record](testing/SNAPSHOT-PHASE6-2026-11-19.md) · [phase 7 record](testing/SNAPSHOT-PHASE7-2026-11-19.md) · [native compressed textures](testing/SNAPSHOT-COMPRESSED-2026-11-19.md).
+
+### Native window paint state
+
+WinCE section 11 includes pending client update regions, the message identity
+of each suspended DispatchMessage callback, and the update rectangle retained
+across BeginPaint's erase callback. A slot captured while a repaint is in flight
+therefore keeps the same invalidation and GAPI pacing policy after restore.
+As with earlier development section changes, no legacy kernel-section reader
+is retained; recreate development slots written with older kernel versions.

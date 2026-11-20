@@ -5,6 +5,8 @@ internal object DeckInputPolicy {
     const val STYLUS_CLICK_COMMAND = 0x1003
     const val ROTATION_COMMAND = 0x1001
     const val SCREENSHOT_COMMAND = 0x1002 // Portable config tag; unsupported on Android.
+    const val SAVE_SNAPSHOT_COMMAND = 0x1005
+    const val LOAD_SNAPSHOT_COMMAND = 0x1006
     const val HOLD_MS = 650L
 
     enum class Action {

@@ -373,6 +373,7 @@ pub struct PaintEraseFrame {
     pub thread: usize,
     pub thunk: u32,
     pub frame: crate::GuestCallFrame,
+    pub update_rect: Option<[i32; 4]>,
 }
 
 /// A streamed IMGDECMP call suspended in a guest GETDATAFUNC callback.
@@ -436,7 +437,11 @@ pub struct GdiState {
     pub list_paint_stamps: HashMap<u32, u64>,
     pub paint_erase_frames: Vec<PaintEraseFrame>,
     pub pending_window_erases: std::collections::HashSet<u32>,
-    /// Windows with a generated (rather than explicitly posted) paint in the queue.
+    /// Client-coordinate update regions. Reading WM_PAINT does not validate
+    /// them; BeginPaint, ValidateRect or default painting does.
+    pub pending_window_updates: HashMap<u32, Vec<[i32; 4]>>,
+    /// Generated paints, queued or offered from an outstanding update region.
+    /// Explicitly posted WM_PAINT remains independent of region validation.
     pub generated_window_paints: std::collections::HashSet<u32>,
     pub owner_draw_states: HashMap<u32, (bool, bool, bool, i32, i32)>,
 }
@@ -515,6 +520,7 @@ impl GdiState {
             list_paint_stamps: HashMap::new(),
             paint_erase_frames: Vec::new(),
             pending_window_erases: std::collections::HashSet::new(),
+            pending_window_updates: HashMap::new(),
             generated_window_paints: std::collections::HashSet::new(),
             owner_draw_states: HashMap::new(),
         };

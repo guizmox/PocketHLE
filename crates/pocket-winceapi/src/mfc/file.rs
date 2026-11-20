@@ -114,6 +114,37 @@ fn class_data(ctx: &mut CallCtx<'_>) -> Result<u32, KernelError> {
         .insert(DATA.into(), p);
     Ok(p)
 }
+/// CArchive's base-CFile bridge must not silently bypass guest virtual I/O.
+pub(super) fn archive_handle(ctx: &mut CallCtx<'_>, object: u32) -> Result<u32, KernelError> {
+    let table = word(ctx, object)?;
+    if !ctx
+        .kernel
+        .dynamic_exports
+        .values()
+        .any(|exports| exports.get(DATA) == Some(&table))
+    {
+        return Err(KernelError::Loader(
+            "CArchive requires a base HLE CFile; guest virtual file overrides are unsupported"
+                .into(),
+        ));
+    }
+    let handle = word(ctx, object + 4)?;
+    ctx.kernel
+        .vfs
+        .is_open(handle)
+        .then_some(handle)
+        .ok_or_else(|| io_error("archive file"))
+}
+#[cfg(test)]
+pub(super) fn install_test_exports(kernel: &mut pocket_kernel::KernelState) {
+    let exports = METHODS
+        .iter()
+        .chain(["BaseClass", "RootClass"].iter())
+        .enumerate()
+        .map(|(i, name)| (symbol(name), 0x70000100 + i as u32 * 32))
+        .collect();
+    kernel.dynamic_exports.insert(1, exports);
+}
 fn construct(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let o = ctx.arg_u32(0)?;
     ctx.cpu.check_guest_access(o, 16, pocket_cpu::Prot::WRITE)?;
@@ -127,7 +158,7 @@ fn construct(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 fn runtime(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(class_data(ctx)? + 80))
 }
-fn base_class(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(super) fn base_class(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(class_data(ctx)? + 104))
 }
 fn root_class(_: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -367,15 +398,15 @@ fn write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 fn path(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let out = ctx.arg_u32(0)?;
-    let o = ctx.arg_u32(1)?;
+    let o = ctx.arg_u32(0)?;
+    let out = ctx.arg_u32(1)?;
     let text = strings::value(ctx, o + 12)?;
     new_string(ctx, out, &text)?;
     Ok(DispatchOutcome::ReturnedR0(out))
 }
 fn name_part(ctx: &mut CallCtx<'_>, title: bool) -> Result<DispatchOutcome, KernelError> {
-    let out = ctx.arg_u32(0)?;
-    let o = ctx.arg_u32(1)?;
+    let o = ctx.arg_u32(0)?;
+    let out = ctx.arg_u32(1)?;
     let text = String::from_utf16_lossy(&strings::value(ctx, o + 12)?);
     let name = text.rsplit(['\\', '/']).next().unwrap_or("");
     let name = if title {
@@ -438,13 +469,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.bin"), [0, 0, 0, 87, 1, 2, 3, 4]).unwrap();
         kernel.vfs.mount("\\", dir.path());
-        let exports = METHODS
-            .iter()
-            .chain(["BaseClass", "RootClass"].iter())
-            .enumerate()
-            .map(|(i, name)| (symbol(name), 0x70000100 + i as u32 * 32))
-            .collect();
-        kernel.dynamic_exports.insert(1, exports);
+        install_test_exports(&mut kernel);
         let object = 0x2000;
         call(
             &mut cpu,
@@ -471,6 +496,28 @@ mod tests {
                 &[object, 0x2100, 0x22, 0]
             )),
             1
+        );
+        let path_out = 0x2400;
+        assert_eq!(
+            returned(call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                &symbol("Path"),
+                &[object, path_out]
+            )),
+            path_out
+        );
+        let text = cpu.read_u32_le(path_out).unwrap();
+        assert_eq!(cpu.read_mem(text, path.len() as u32).unwrap(), path);
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "mfcce300.dll",
+            "ord:297",
+            &[path_out],
         );
         let h = cpu.read_u32_le(object + 4).unwrap();
         assert_eq!(kernel.vfs.position(h), Some(0));

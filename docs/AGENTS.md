@@ -347,6 +347,17 @@ Otherwise a default window procedure can clear a frame rendered outside its
 paint handler every 16 ms — Spider-Man - Toxic City exposed that as repeated
 white flashes between its GDI blits.
 
+Real client invalidations are level-triggered independently of the legacy idle
+paint ticks. Reading a generated WM_PAINT does not validate its update region.
+BeginPaint, ValidateRect and default native painting consume the region; internal
+paint requests are one-shot. Input and ordinary posted traffic retain priority.
+The shared GDI state owns region rectangles, and DispatchMessage continuation
+frames retain the dispatched message ID. A GAPI repaint within WM_PAINT follows
+the unpaced GDI update path; it does not spend another game-frame deadline or
+increment the completed game-frame counter. Timer-driven and ordinary GXEndDraw
+presentations keep their LCD pacing, including unchanged frames. Ultima exposed
+both the missing retained update and the extra repaint synchronization.
+
 The default differs by frontend, and this is the trap:
 
 | Frontend | Budget |
@@ -1497,7 +1508,7 @@ allocation/handle ownership and partial-support boundary. Additional ordinal
 names come from the same export tables as their handlers. Ordinary CFile opens
 must not set the VFS append flag. Pattern brushes own pixel copies independently
 of source bitmap handles; paint operations share the existing GDI authority and
-clipping paths. Their pixels and DC origins belong to WinCE snapshot section 10.
+clipping paths. Their pixels and DC origins belong to WinCE snapshot section 11.
 
 ### Host motion mapping ownership
 

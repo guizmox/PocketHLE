@@ -697,7 +697,7 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "InvalidateRect", invalidate_rect);
     d.register_handler(dll, "RedrawWindow", redraw_window);
     d.register_handler(dll, "InvalidateRgn", invalidate_rgn);
-    d.register_constant(dll, "ValidateRect", 1, one_returning);
+    d.register_handler(dll, "ValidateRect", validate_rect);
     d.register_handler(dll, "GetSystemMetrics", get_system_metrics);
     d.register_handler(dll, "GetClientRect", get_client_rect);
     d.register_handler(dll, "WindowFromPoint", window_from_point);
@@ -12061,7 +12061,9 @@ fn show_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 
 fn update_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
-    queue_window_paint(ctx.kernel, hwnd);
+    if ctx.kernel.gdi.pending_window_updates.contains_key(&hwnd) {
+        queue_generated_paint(ctx.kernel, hwnd, false);
+    }
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
@@ -13773,7 +13775,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
         hwnd, message, wparam, lparam, wnd_proc
     );
     use pocket_cpu::regs::ArmReg;
-    let frame = pocket_kernel::DispatchMessageFrame::capture(ctx.cpu)?;
+    let frame = pocket_kernel::DispatchMessageFrame::capture(ctx.cpu, message)?;
     ctx.kernel
         .message_frames
         .entry(owner)
@@ -15613,7 +15615,7 @@ fn posted_message_belongs_to(
 
 fn take_posted_message_at(kernel: &mut KernelState, index: usize) -> Option<(u32, u32, u32, u32)> {
     let message = kernel.posted_messages.remove(index)?;
-    if message.1 == WM_PAINT {
+    if message.1 == WM_PAINT && !kernel.gdi.pending_window_updates.contains_key(&message.0) {
         kernel.gdi.generated_window_paints.remove(&message.0);
     }
     Some(message)
@@ -15677,7 +15679,9 @@ fn next_queued_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u
 }
 
 fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
-    next_queued_message_if_due(ctx).or_else(|| synthetic_message_if_due(ctx))
+    next_queued_message_if_due(ctx)
+        .or_else(|| invalidated_window_paint(ctx, 0, 0, 0))
+        .or_else(|| synthetic_message_if_due(ctx))
 }
 
 /// A fabricated paint must not manufacture a permanently nonempty queue.
@@ -15687,8 +15691,9 @@ fn next_message_if_due(ctx: &mut CallCtx<'_>) -> Option<(u32, u32, u32, u32)> {
 /// A PM_NOREMOVE preview stays in pending_message until actually removed,
 /// so repeated previews cannot consume this idle opportunity prematurely.
 fn next_peek_message_if_due(ctx: &mut CallCtx<'_>, preview: bool) -> Option<(u32, u32, u32, u32)> {
-    if let Some(message) =
-        next_queued_message_if_due(ctx).or_else(|| timer_message_if_due(ctx, true))
+    if let Some(message) = next_queued_message_if_due(ctx)
+        .or_else(|| invalidated_window_paint(ctx, 0, 0, 0))
+        .or_else(|| timer_message_if_due(ctx, true))
     {
         return Some(message);
     }
@@ -15825,6 +15830,10 @@ fn get_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
         // GetMessageW blocks with lpMsg still live. Re-entering the thunk
         // must preserve r0-r3; otherwise r0 becomes NULL and the queued
         // message is consumed into address 0 when the worker wakes.
+        if let Some((hwnd, msg, wp, lp)) = invalidated_window_paint(ctx, 0, 0, 0) {
+            write_retrieved_message(ctx, lp_msg, hwnd, msg, wp, lp)?;
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
         if let Some((hwnd, msg, wp, lp)) = timer_message_if_due(ctx, true) {
             write_retrieved_message(ctx, lp_msg, hwnd, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(1));
@@ -15968,6 +15977,10 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
             write_retrieved_message(ctx, lp_msg, hwnd, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(1));
         }
+        if let Some((hwnd, msg, wp, lp)) = invalidated_window_paint(ctx, 0, 0, 0) {
+            write_retrieved_message(ctx, lp_msg, hwnd, msg, wp, lp)?;
+            return Ok(DispatchOutcome::ReturnedR0(1));
+        }
         if let Some((hwnd, msg, wp, lp)) = timer_message_if_due(ctx, remove_mode & 1 != 0) {
             write_retrieved_message(ctx, lp_msg, hwnd, msg, wp, lp)?;
             return Ok(DispatchOutcome::ReturnedR0(1));
@@ -16024,7 +16037,23 @@ fn peek_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
         addressed.3,
     )?;
     if remove_mode & 1 == 0 {
-        ctx.kernel.pending_message = Some(addressed);
+        // An invalid region remains pending independently of MSG storage.
+        // Caching that generated paint would leave a stale preview after
+        // BeginPaint/ValidateRect; explicit and legacy messages still cache.
+        if addressed.1 != WM_PAINT
+            || !ctx
+                .kernel
+                .gdi
+                .generated_window_paints
+                .contains(&addressed.0)
+            || !ctx
+                .kernel
+                .gdi
+                .pending_window_updates
+                .contains_key(&addressed.0)
+        {
+            ctx.kernel.pending_message = Some(addressed);
+        }
     } else {
         ctx.kernel.synthetic_message_count += 1;
     }
@@ -16855,6 +16884,9 @@ fn def_window_proc_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
         return Ok(outcome);
     }
     let hwnd = ctx.arg_u32(0)?;
+    if ctx.arg_u32(1)? == WM_PAINT {
+        validate_window_paint(ctx.kernel, hwnd);
+    }
     if ctx.kernel.controls.get(hwnd).is_none() {
         match ctx.arg_u32(1)? {
             0x0c => {
@@ -17198,9 +17230,12 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         f.thread == ctx.kernel.current_thread && f.thunk == ctx.thunk.thunk_va && f.frame.sp == sp
     });
     let mut erase_unhandled = false;
+    let mut resumed_update = None;
     if resumed {
         erase_unhandled = ctx.cpu.read_reg(ArmReg::R0)? == 0;
-        let f = ctx.kernel.gdi.paint_erase_frames.pop().unwrap().frame;
+        let saved = ctx.kernel.gdi.paint_erase_frames.pop().unwrap();
+        resumed_update = saved.update_rect;
+        let f = saved.frame;
         for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
             .into_iter()
             .zip(f.args)
@@ -17214,6 +17249,16 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // class-brush erase, then fill the PAINTSTRUCT fields games read.
     let hwnd = ctx.arg_u32(0)?;
     let lp_paint = ctx.arg_u32(1)?;
+    let update = resumed_update.or_else(|| {
+        ctx.kernel
+            .gdi
+            .pending_window_updates
+            .get(&hwnd)
+            .map(|r| window_graphics::bounds(r))
+    });
+    if !resumed {
+        validate_window_paint(ctx.kernel, hwnd);
+    }
     let dc = window_dc(ctx, hwnd);
     if !resumed && dc != GDI_SCREEN_DC && ctx.kernel.gdi.pending_window_erases.remove(&hwnd) {
         if let Some(proc) = ctx
@@ -17235,6 +17280,7 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
                     thread: ctx.kernel.current_thread,
                     thunk: ctx.thunk.thunk_va,
                     frame,
+                    update_rect: update,
                 });
             ctx.cpu.write_reg(ArmReg::R0, hwnd)?;
             ctx.cpu.write_reg(ArmReg::R1, WM_ERASEBKGND)?;
@@ -17267,11 +17313,10 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         buf[0..4].copy_from_slice(&dc.to_le_bytes());
         buf[4..8]
             .copy_from_slice(&u32::from(erase || scroll_erased || erase_unhandled).to_le_bytes());
-        // rcPaint = (0,0, screen width, screen height)
-        buf[8..12].copy_from_slice(&0u32.to_le_bytes());
-        buf[12..16].copy_from_slice(&0u32.to_le_bytes());
-        buf[16..20].copy_from_slice(&screen_w.to_le_bytes());
-        buf[20..24].copy_from_slice(&screen_h.to_le_bytes());
+        let rect = update.unwrap_or([0, 0, screen_w as i32, screen_h as i32]);
+        for (i, value) in rect.into_iter().enumerate() {
+            buf[8 + i * 4..12 + i * 4].copy_from_slice(&value.to_le_bytes());
+        }
         ctx.cpu.write_mem(lp_paint, &buf)?;
     }
     Ok(DispatchOutcome::ReturnedR0(dc))
@@ -19597,6 +19642,7 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     ctx.kernel.timers.retain(|key, _| key.1 != *hwnd);
     ctx.kernel.posted_messages.retain(|msg| msg.0 != *hwnd);
     ctx.kernel.gdi.generated_window_paints.remove(hwnd);
+    ctx.kernel.gdi.pending_window_updates.remove(hwnd);
     ctx.kernel.window_rects.remove(hwnd);
     ctx.kernel.window_menus.remove(hwnd);
     ctx.kernel
@@ -20169,8 +20215,22 @@ fn get_version(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 /// one to notice a repaint. `bErase = TRUE` is remembered for the next
 /// paint; fabricated periodic paints alone do not erase the screen.
 pub(crate) fn queue_window_paint(kernel: &mut KernelState, hwnd: u32) {
-    if kernel.window_procs.contains_key(&hwnd)
-        && window_is_visible(kernel, hwnd)
+    queue_generated_paint(kernel, hwnd, true);
+}
+
+fn queue_generated_paint(kernel: &mut KernelState, hwnd: u32, invalidate: bool) {
+    if !kernel.window_procs.contains_key(&hwnd) {
+        return;
+    }
+    if invalidate {
+        if let Some((width, height)) = window_client_size(kernel, hwnd) {
+            kernel
+                .gdi
+                .pending_window_updates
+                .insert(hwnd, vec![[0, 0, width, height]]);
+        }
+    }
+    if window_is_visible(kernel, hwnd)
         && kernel.posted_messages.len() < 256
         && !kernel
             .posted_messages
@@ -20180,6 +20240,38 @@ pub(crate) fn queue_window_paint(kernel: &mut KernelState, hwnd: u32) {
         kernel.posted_messages.push_back((hwnd, WM_PAINT, 0, 0));
         kernel.gdi.generated_window_paints.insert(hwnd);
     }
+}
+
+/// A real invalidation is level-triggered. Ultima's WM_PAINT handler draws
+/// through GAPI without BeginPaint: polling must keep offering that update,
+/// while input and explicitly posted messages remain higher priority.
+fn invalidated_window_paint(
+    ctx: &mut CallCtx<'_>,
+    window: u32,
+    low: u32,
+    high: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let hwnd = ctx
+        .kernel
+        .gdi
+        .pending_window_updates
+        .keys()
+        .copied()
+        .filter(|hwnd| window_is_visible(ctx.kernel, *hwnd))
+        .filter(|hwnd| {
+            ctx.kernel.window_threads.get(hwnd).copied().unwrap_or(0) == ctx.kernel.current_thread
+        })
+        .filter(|hwnd| {
+            message_queue::matches(ctx.kernel, (*hwnd, WM_PAINT, 0, 0), window, low, high)
+        })
+        .min()?;
+    ctx.kernel.gdi.generated_window_paints.insert(hwnd);
+    Some((hwnd, WM_PAINT, 0, 0))
+}
+
+fn validate_window_paint(kernel: &mut KernelState, hwnd: u32) {
+    kernel.gdi.pending_window_updates.remove(&hwnd);
+    cancel_generated_paint(kernel, hwnd);
 }
 
 fn cancel_generated_paint(kernel: &mut KernelState, hwnd: u32) {
@@ -20284,7 +20376,7 @@ fn redraw_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     windows.sort_unstable();
     for window in windows {
         if flags & (VALIDATE | NO_INTERNAL_PAINT) != 0 && !empty {
-            cancel_generated_paint(ctx.kernel, window);
+            validate_window_paint(ctx.kernel, window);
         }
         if flags & NO_ERASE != 0 {
             ctx.kernel.gdi.pending_window_erases.remove(&window);
@@ -20296,7 +20388,7 @@ fn redraw_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
             || flags & (INTERNAL_PAINT | NO_INTERNAL_PAINT) == INTERNAL_PAINT
         {
             // Use the existing full-client update queue, like UpdateWindow.
-            queue_window_paint(ctx.kernel, window);
+            queue_generated_paint(ctx.kernel, window, flags & INVALIDATE != 0);
             if flags & (INVALIDATE | ERASE | NO_ERASE) == INVALIDATE | ERASE && !empty {
                 ctx.kernel.gdi.pending_window_erases.insert(window);
                 if window == FAKE_HWND {
@@ -20308,10 +20400,71 @@ fn redraw_window(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::ReturnedR0(1))
 }
 
+fn validate_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let hwnd = ctx.arg_u32(0)?;
+    if window_client_size(ctx.kernel, hwnd).is_none() {
+        set_thread_error(ctx, 1400); // ERROR_INVALID_WINDOW_HANDLE
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let rect = ctx.arg_u32(1)?;
+    if rect == 0 {
+        validate_window_paint(ctx.kernel, hwnd);
+    } else {
+        let bytes = ctx.cpu.read_mem(rect, 16)?;
+        let area: [i32; 4] = std::array::from_fn(|i| {
+            i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+        });
+        if let Some(pending) = ctx.kernel.gdi.pending_window_updates.get_mut(&hwnd) {
+            *pending = pending
+                .iter()
+                .flat_map(|old| window_graphics::subtract(*old, area))
+                .collect();
+            if pending.is_empty() {
+                validate_window_paint(ctx.kernel, hwnd);
+            }
+        }
+    }
+    Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn invalidate_window_area(kernel: &mut KernelState, hwnd: u32, area: [i32; 4]) -> bool {
+    let Some((width, height)) = window_client_size(kernel, hwnd) else {
+        return false;
+    };
+    let area = window_graphics::intersection(area, [0, 0, width, height]);
+    if area == [0; 4] {
+        return false;
+    }
+    let pending = kernel.gdi.pending_window_updates.entry(hwnd).or_default();
+    // Keep the union disjoint. Repeated invalidations of the same area must
+    // not accumulate allocations while an application leaves it pending.
+    let mut additions = vec![area];
+    for old in pending.iter() {
+        additions = additions
+            .into_iter()
+            .flat_map(|new| window_graphics::subtract(new, *old))
+            .collect();
+        if additions.is_empty() {
+            break;
+        }
+    }
+    pending.extend(additions);
+    queue_generated_paint(kernel, hwnd, false);
+    true
+}
+
 fn invalidate_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
-    queue_window_paint(ctx.kernel, hwnd);
-    let _rect = ctx.arg_u32(1)?;
+    let rect = ctx.arg_u32(1)?;
+    if rect == 0 {
+        queue_window_paint(ctx.kernel, hwnd);
+    } else {
+        let bytes = ctx.cpu.read_mem(rect, 16)?;
+        let area = std::array::from_fn(|i| {
+            i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
+        });
+        invalidate_window_area(ctx.kernel, hwnd, area);
+    }
     if ctx.arg_u32(2)? != 0 {
         ctx.kernel.gdi.pending_window_erases.insert(hwnd);
     }
@@ -20363,18 +20516,28 @@ fn invalidate_rgn(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError>
 
 /// `BOOL GetUpdateRect(HWND hWnd, LPRECT lpRect, BOOL bErase)`.
 ///
-/// The synthetic message pump delivers a WM_PAINT for the emulated
-/// panel, but it does not maintain a native window-region object. A
-/// guest that checks this function before BeginPaint therefore used to
-/// discard every paint message and leave frame_counter at zero. Report
-/// the pending full-screen update and its rectangle instead.
+/// The full-client invalidation model shares its pending state with both
+/// message pumps. An internal/explicit paint alone does not create a region.
 fn get_update_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let _hwnd = ctx.arg_u32(0)?;
+    let hwnd = ctx.arg_u32(0)?;
     let lp_rect = ctx.arg_u32(1)?;
-    let _erase = ctx.arg_u32(2)?;
-    let (width, height) = screen_dims(ctx);
-    write_rect(ctx, lp_rect, width as i32, height as i32)?;
-    Ok(DispatchOutcome::ReturnedR0(1))
+    let rect = ctx
+        .kernel
+        .gdi
+        .pending_window_updates
+        .get(&hwnd)
+        .map(|r| window_graphics::bounds(r))
+        .unwrap_or([0; 4]);
+    if lp_rect != 0 {
+        ctx.cpu.write_mem(
+            lp_rect,
+            &rect
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(u32::from(rect != [0; 4])))
 }
 
 fn write_rect(ctx: &mut CallCtx<'_>, rect_ptr: u32, w: i32, h: i32) -> Result<(), KernelError> {
@@ -20452,6 +20615,34 @@ fn window_from_point(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     Ok(DispatchOutcome::ReturnedR0(FAKE_HWND))
 }
 
+fn window_client_size(kernel: &KernelState, hwnd: u32) -> Option<(i32, i32)> {
+    if let Some(child) = kernel.controls.get(hwnd) {
+        return Some((
+            child.w.max(0),
+            if child.class == ControlClass::ComboBox {
+                child.choice_closed_height()
+            } else {
+                child.h
+            }
+            .max(0),
+        ));
+    }
+    if let Some(panel) = kernel.controls.panel(hwnd) {
+        let frame = 2 * i32::from(panel.border);
+        return Some((
+            (panel.w - frame).max(0),
+            (panel.h - frame - panel.caption_h()).max(0),
+        ));
+    }
+    if let Some(rect) = kernel.window_rects.get(&hwnd) {
+        return Some((rect.2.max(0), rect.3.max(0)));
+    }
+    (hwnd == FAKE_HWND).then_some((
+        kernel.framebuffer.width as i32,
+        kernel.framebuffer.height as i32,
+    ))
+}
+
 fn get_client_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     // GetClientRect(hWnd, lpRect) -> BOOL. A control's client rect is
     // its own size with the origin at zero, not the whole screen — and a
@@ -20459,47 +20650,9 @@ fn get_client_rect(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError
     // a DialogProc laying itself out asks for.
     let hwnd = ctx.arg_u32(0)?;
     let lp_rect = ctx.arg_u32(1)?;
-    let (w, h) = match ctx.kernel.controls.get(hwnd) {
-        Some(child) => (
-            child.w,
-            if child.class == ControlClass::ComboBox {
-                child.choice_closed_height()
-            } else {
-                child.h
-            },
-        ),
-        None => match ctx.kernel.controls.panel(hwnd) {
-            Some(panel) => {
-                let frame = 2 * i32::from(panel.border);
-                (panel.w - frame, panel.h - frame - panel.caption_h())
-            }
-            None if hwnd == FAKE_HWND && !ctx.kernel.window_rects.contains_key(&hwnd) => {
-                // The synthetic top-level window is the one panel-less
-                // handle every guest is allowed to ask about: answer
-                // with the whole display.
-                let (w, h) = screen_dims(ctx);
-                (w as i32, h as i32)
-            }
-            None if ctx.kernel.window_rects.contains_key(&hwnd) => {
-                let rect = ctx.kernel.window_rects[&hwnd];
-                (rect.2.max(0), rect.3.max(0))
-            }
-            None => {
-                // Any other unknown window — including the NULL that
-                // GetDesktopWindow() hands back on Windows CE — is not
-                // a real window: real WinCE fails the call, zeroes the
-                // rect and returns FALSE. Answering TRUE with the whole
-                // screen made Bubble Breaker's menu layout loop (which
-                // asks for the desktop's client height once per
-                // iteration, expecting the failure) spin forever and
-                // never reach its first paint.
-                log::trace!("GetClientRect(hwnd=0x{hwnd:08x}) -> FALSE (unknown window)");
-                if lp_rect != 0 {
-                    write_rect(ctx, lp_rect, 0, 0)?;
-                }
-                return Ok(DispatchOutcome::ReturnedR0(0));
-            }
-        },
+    let Some((w, h)) = window_client_size(ctx.kernel, hwnd) else {
+        write_rect(ctx, lp_rect, 0, 0)?;
+        return Ok(DispatchOutcome::ReturnedR0(0));
     };
     write_rect(ctx, lp_rect, w, h)?;
     Ok(DispatchOutcome::ReturnedR0(1))
@@ -43918,6 +44071,213 @@ mod pocket_shell_geometry_tests {
             assert_eq!(size >> 16, ctx.cpu.read_u32_le(0x180c).unwrap());
             assert_eq!(size >> 16, expected_height);
         }
+    }
+
+    #[test]
+    fn invalidated_paint_survives_peek_modes_until_validation_without_starving_input() {
+        let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
+        kernel.window_procs.insert(FAKE_HWND, 0x4000);
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        kernel.synthetic_message_budget = 0;
+        kernel.fb_mapped = true;
+        kernel.controls.direct_surface_hwnd = FAKE_HWND;
+        queue_window_paint(&mut kernel, FAKE_HWND);
+        let initial = kernel.framebuffer.frame_counter;
+        for mode in [0, 0, 1, 1] {
+            assert_eq!(
+                crate::bluetooth::tests::call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "coredll.dll",
+                    "PeekMessageW",
+                    &[0x2000, 0, 0, 0, mode]
+                ),
+                DispatchOutcome::ReturnedR0(1)
+            );
+            assert_eq!(cpu.read_u32_le(0x2004).unwrap(), WM_PAINT);
+        }
+        kernel
+            .pending_input
+            .push_back(InputEvent::PointerDown { x: 40, y: 50 });
+        crate::bluetooth::tests::call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "PeekMessageW",
+            &[0x2000, 0, 0, 0, 1],
+        );
+        assert_eq!(cpu.read_u32_le(0x2004).unwrap(), WM_LBUTTONDOWN);
+        // A filtered input-only poll never mistakes a pending paint for input.
+        assert_eq!(
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "PeekMessageW",
+                &[0x2000, 0, 0x200, 0x209, 3]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(kernel.framebuffer.frame_counter, initial);
+        crate::bluetooth::tests::call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "ValidateRect",
+            &[FAKE_HWND, 0],
+        );
+        assert_eq!(
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "PeekMessageW",
+                &[0x2000, 0, 0, 0, 3]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
+
+    #[test]
+    fn begin_paint_consumes_update_region_but_not_a_real_posted_paint() {
+        let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
+        kernel.window_procs.insert(FAKE_HWND, 0x4000);
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        queue_window_paint(&mut kernel, FAKE_HWND);
+        assert!(enqueue_window_message(
+            &mut kernel,
+            FAKE_HWND,
+            WM_PAINT,
+            7,
+            8
+        ));
+        assert_eq!(
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "GetUpdateRect",
+                &[FAKE_HWND, 0x2000, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        crate::bluetooth::tests::call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "BeginPaint",
+            &[FAKE_HWND, 0x2100],
+        );
+        assert!(kernel
+            .posted_messages
+            .contains(&(FAKE_HWND, WM_PAINT, 7, 8)));
+        assert_eq!(
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "GetUpdateRect",
+                &[FAKE_HWND, 0x2000, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+        assert_eq!(cpu.read_mem(0x2000, 16).unwrap(), [0; 16]);
+    }
+
+    #[test]
+    fn update_rectangle_queries_and_partial_validation_share_real_region_geometry() {
+        let (mut cpu, mut kernel, mut dispatcher) = crate::bluetooth::tests::setup();
+        kernel.window_procs.insert(FAKE_HWND, 0x4000);
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        let write = |cpu: &mut dyn Cpu, at, rect: [i32; 4]| {
+            cpu.write_mem(
+                at,
+                &rect
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        };
+        write(&mut cpu, 0x2000, [-5, -5, 20, 30]);
+        for _ in 0..3 {
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "InvalidateRect",
+                &[FAKE_HWND, 0x2000, 0],
+            );
+        }
+        assert_eq!(
+            kernel.gdi.pending_window_updates[&FAKE_HWND],
+            vec![[0, 0, 20, 30]]
+        );
+        write(&mut cpu, 0x2000, [0, 0, 10, 30]);
+        crate::bluetooth::tests::call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "ValidateRect",
+            &[FAKE_HWND, 0x2000],
+        );
+        crate::bluetooth::tests::call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "GetUpdateRect",
+            &[FAKE_HWND, 0x2100, 0],
+        );
+        assert_eq!(
+            cpu.read_mem(0x2100, 16).unwrap(),
+            [10i32, 0, 20, 30]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            crate::bluetooth::tests::call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "coredll.dll",
+                "ValidateRect",
+                &[0, 0]
+            ),
+            DispatchOutcome::ReturnedR0(0)
+        );
+    }
+
+    #[test]
+    fn internal_paint_is_one_shot_and_does_not_create_an_update_region() {
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        kernel.window_procs.insert(FAKE_HWND, 0x4000);
+        kernel.window_visibility.insert(FAKE_HWND, true);
+        queue_generated_paint(&mut kernel, FAKE_HWND, false);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            take_posted_message(&mut ctx),
+            Some((FAKE_HWND, WM_PAINT, 0, 0))
+        );
+        assert_eq!(take_posted_message(&mut ctx), None);
+        assert_eq!(invalidated_window_paint(&mut ctx, 0, 0, 0), None);
     }
 
     #[test]

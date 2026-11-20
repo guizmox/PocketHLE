@@ -1669,7 +1669,7 @@ impl PocketLauncher {
                     .chain(self.held.pointer.iter())
                     .chain(self.held.gamepad.iter())
                 {
-                    if !matches!(*vk, pocket_library::center_tap::COMMAND | pocket_library::keybindings::ROTATION_COMMAND | pocket_library::keybindings::SCREENSHOT_COMMAND | pocket_library::keybindings::STYLUS_CLICK_COMMAND) { recording.observe(InputEvent::KeyDown { vk: *vk }); }
+                    if !matches!(*vk, pocket_library::center_tap::COMMAND | pocket_library::keybindings::ROTATION_COMMAND | pocket_library::keybindings::SCREENSHOT_COMMAND | pocket_library::keybindings::STYLUS_CLICK_COMMAND | pocket_library::keybindings::SAVE_SNAPSHOT_COMMAND | pocket_library::keybindings::LOAD_SNAPSHOT_COMMAND) { recording.observe(InputEvent::KeyDown { vk: *vk }); }
                 }
                 recording.observe(InputEvent::TouchSteeringPosition {
                     x: self.steering_axes.0,
@@ -4863,7 +4863,9 @@ impl PocketLauncher {
             InputEvent::KeyDown {
                 vk:
                     vk @ (pocket_library::keybindings::ROTATION_COMMAND
-                    | pocket_library::keybindings::SCREENSHOT_COMMAND),
+                    | pocket_library::keybindings::SCREENSHOT_COMMAND
+                    | pocket_library::keybindings::SAVE_SNAPSHOT_COMMAND
+                    | pocket_library::keybindings::LOAD_SNAPSHOT_COMMAND),
             } => {
                 if self.screen == Screen::Run {
                     self.pending_binding_commands.borrow_mut().push(vk);
@@ -4873,7 +4875,9 @@ impl PocketLauncher {
             InputEvent::KeyUp {
                 vk:
                     pocket_library::keybindings::ROTATION_COMMAND
-                    | pocket_library::keybindings::SCREENSHOT_COMMAND,
+                    | pocket_library::keybindings::SCREENSHOT_COMMAND
+                    | pocket_library::keybindings::SAVE_SNAPSHOT_COMMAND
+                    | pocket_library::keybindings::LOAD_SNAPSHOT_COMMAND,
             } => return,
             InputEvent::KeyDown {
                 vk: pocket_library::center_tap::COMMAND,
@@ -6606,6 +6610,8 @@ impl eframe::App for PocketLauncher {
             match command {
                 pocket_library::keybindings::STYLUS_CLICK_COMMAND => self.stylus_button(true),
                 pocket_library::keybindings::STYLUS_RELEASE_COMMAND => self.stylus_button(false),
+                pocket_library::keybindings::SAVE_SNAPSHOT_COMMAND => self.save_game_snapshot(),
+                pocket_library::keybindings::LOAD_SNAPSHOT_COMMAND => self.restore_game_snapshot(),
                 pocket_library::keybindings::ROTATION_COMMAND => self.cycle_rotation(ctx),
                 pocket_library::keybindings::SCREENSHOT_COMMAND if self.last_frame_snapshot.is_some() => self.capture_screenshot(),
                 _ => {}

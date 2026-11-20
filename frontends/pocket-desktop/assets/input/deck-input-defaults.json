@@ -150,6 +150,14 @@
     {
       "button": "stylus_click",
       "keys": []
+    },
+    {
+      "button": "save_snapshot",
+      "keys": []
+    },
+    {
+      "button": "load_snapshot",
+      "keys": []
     }
   ],
   "ppc_overrides": {
@@ -189,6 +197,8 @@
     "center_tap": 4096,
     "rotate_screen": 4097,
     "screenshot": 4098,
-    "stylus_click": 4099
+    "stylus_click": 4099,
+    "save_snapshot": 4101,
+    "load_snapshot": 4102
   }
 }

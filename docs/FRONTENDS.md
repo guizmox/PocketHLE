@@ -33,6 +33,12 @@ ARM backend. Android uses the same snapshot engine. Each game has one slot.
 - **Restore Snapshot** (F6) loads the slot for the running or selected game.
   If the game has no snapshot, F6 leaves the session as it is.
 
+Controller bindings on desktop and Android include **Save Snapshot** and
+**Load Snapshot** in Unassigned commands, for both device profiles. They use
+the same snapshot actions and feedback as the existing buttons. Keyboard F5/F6
+remain reserved. Mapping Tab/Esc/Turbo to F1/F2/5 also applies to existing
+controller assignments, including key release.
+
 Hover over the snapshot buttons to see the saved UTC timestamp. PocketHLE
 creates `games/<id>/snapshots/snapshot-01.bin` on the first successful save,
 alongside the game's `extracted` and `saves` directories. Encoding and disk

@@ -282,6 +282,17 @@ fn gx_end_draw(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     if !ctx.kernel.fb_mapped {
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
+    let repaint = ctx
+        .kernel
+        .message_frames
+        .get(&ctx.kernel.current_thread)
+        .and_then(|frames| frames.last())
+        .is_some_and(|frame| frame.message == 0x000f);
+    if repaint {
+        readback_framebuffer(ctx)?;
+        ctx.kernel.gx_draw_active = false;
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
     // GXEndDraw presents to the same modeled LCD as DirectDraw and EGL.
     // Without this, a timer-driven GAPI game (Snails) advances its animation
     // at hundreds of frames/s even though the frontend only shows 60 Hz.
@@ -1021,6 +1032,49 @@ pub(crate) mod tests {
             FB_BYTES as usize
         );
     }
+    #[test]
+    fn dispatched_window_repaint_publishes_pixels_without_a_second_game_frame_deadline() {
+        use std::time::{Duration, Instant};
+        let mut cpu = StubCpu::new();
+        let mut kernel = fresh_kernel();
+        let thunk = dummy_thunk();
+        cpu.write_reg(ArmReg::Sp, 0x4000).unwrap();
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        gx_open_display(&mut ctx).unwrap();
+        let anchor = Instant::now() + Duration::from_secs(60);
+        ctx.kernel.framebuffer.directdraw.last_present = Some(anchor);
+        ctx.kernel.message_frames.insert(
+            0,
+            vec![pocket_kernel::DispatchMessageFrame::capture(ctx.cpu, 0x000f).unwrap()],
+        );
+        ctx.cpu.write_mem(SYNTHETIC_FB_BASE, &[0x1f, 0xf8]).unwrap();
+        assert_eq!(
+            gx_end_draw(&mut ctx).unwrap(),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(
+            &ctx.kernel.framebuffer.resident_cpu().unwrap().pixels[..2],
+            &[0x1f, 0xf8]
+        );
+        assert_eq!(ctx.kernel.framebuffer.directdraw.last_present, Some(anchor));
+        assert_eq!(ctx.kernel.framebuffer.presentation_stats.completed(), 0);
+        assert!(ctx.kernel.framebuffer.directdraw.pending.is_empty());
+        // A timer callback nested in that paint still represents game work.
+        ctx.kernel
+            .message_frames
+            .get_mut(&0)
+            .unwrap()
+            .push(pocket_kernel::DispatchMessageFrame::capture(ctx.cpu, 0x0113).unwrap());
+        assert_eq!(
+            gx_end_draw(&mut ctx).unwrap(),
+            DispatchOutcome::JumpTo(thunk.thunk_va)
+        );
+    }
+
     #[test]
     fn end_draw_waits_before_readback_and_paces_unchanged_frames() {
         use pocket_kernel::framebuffer::DirectDrawTiming;

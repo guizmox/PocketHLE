@@ -85,11 +85,13 @@ pub enum GuestButton {
     RotateScreen,
     Screenshot,
     StylusClick,
+    SaveSnapshot,
+    LoadSnapshot,
 }
 
 impl GuestButton {
     /// Every button, in the order the settings UI lists them.
-    pub const ALL: [GuestButton; 24] = [
+    pub const ALL: [GuestButton; 26] = [
         GuestButton::DpadUp,
         GuestButton::DpadDown,
         GuestButton::DpadLeft,
@@ -114,6 +116,8 @@ impl GuestButton {
         GuestButton::RotateScreen,
         GuestButton::Screenshot,
         GuestButton::StylusClick,
+        GuestButton::SaveSnapshot,
+        GuestButton::LoadSnapshot,
     ];
 
     /// Guest VK for device buttons, or a host-command tag consumed by frontends.
@@ -144,6 +148,8 @@ impl GuestButton {
             GuestButton::RotateScreen => ROTATION_COMMAND,
             GuestButton::Screenshot => SCREENSHOT_COMMAND,
             GuestButton::StylusClick => STYLUS_CLICK_COMMAND,
+            GuestButton::SaveSnapshot => SAVE_SNAPSHOT_COMMAND,
+            GuestButton::LoadSnapshot => LOAD_SNAPSHOT_COMMAND,
         }
     }
 
@@ -173,6 +179,8 @@ impl GuestButton {
             GuestButton::RotateScreen => "Rotation",
             GuestButton::Screenshot => "Screenshot",
             GuestButton::StylusClick => "Stylus click / mode",
+            GuestButton::SaveSnapshot => "Save Snapshot",
+            GuestButton::LoadSnapshot => "Load Snapshot",
         }
     }
 
@@ -209,7 +217,9 @@ impl GuestButton {
             | GuestButton::CenterTap
             | GuestButton::RotateScreen
             | GuestButton::Screenshot
-            | GuestButton::StylusClick => &[],
+            | GuestButton::StylusClick
+            | GuestButton::SaveSnapshot
+            | GuestButton::LoadSnapshot => &[],
         }
     }
 }
@@ -220,6 +230,8 @@ pub const ROTATION_COMMAND: u16 = 0x1001;
 pub const SCREENSHOT_COMMAND: u16 = 0x1002;
 pub const STYLUS_CLICK_COMMAND: u16 = 0x1003;
 pub const STYLUS_RELEASE_COMMAND: u16 = 0x1004;
+pub const SAVE_SNAPSHOT_COMMAND: u16 = 0x1005;
+pub const LOAD_SNAPSHOT_COMMAND: u16 = 0x1006;
 
 pub fn reserved_host_key(key: &str) -> bool {
     matches!(

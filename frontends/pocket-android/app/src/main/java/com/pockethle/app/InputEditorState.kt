@@ -29,9 +29,10 @@ internal class InputEditorState(raw: String) {
 
     init { stylus.remove("enabled");stylus.remove("controller") }
 
-    fun visibleButtons(gizmondo: Boolean) =
+    fun visibleButtons(gizmondo: Boolean, controller: Boolean = true) =
         InputBindings.buttons.keys
             .filter { it != "screenshot" }
+            .filter { controller || it !in listOf("save_snapshot", "load_snapshot") }
             .filter {
                 if (gizmondo) !it.startsWith("pocket_pc_app") && it != "turbo" && it != "center_tap" && it != "stylus_click"
                 else !it.startsWith("giz_piano")
@@ -39,7 +40,7 @@ internal class InputEditorState(raw: String) {
 
     fun targets(pad: Boolean, input: String?, long: Boolean, gizmondo: Boolean): List<String?> =
         listOf<String?>(null) +
-            visibleButtons(gizmondo).filter { it!="stylus_click" || (!long && !pad) } +
+            visibleButtons(gizmondo, pad).filter { it!="stylus_click" || (!long && !pad) } +
             if (
                 !gizmondo &&
                     !long &&
@@ -202,7 +203,7 @@ internal class InputEditorState(raw: String) {
         if (target=="stylus_click" || fixed(input, pad, gizmondo) || (!pad && input == "Escape")) return false
         val key = InputGestures.bindingKey(gizmondo, pad, input)
         if (target == null) longPress.remove(key)
-        else if (target in visibleButtons(gizmondo)) {
+        else if (target in visibleButtons(gizmondo, pad)) {
             if (pad && same(json.optString("gamepad_fullscreen"), input, true))
                 json.put("gamepad_fullscreen", JSONObject.NULL)
             longPress.put(key, target)
@@ -264,6 +265,7 @@ internal class InputEditorState(raw: String) {
     }
 
     fun assign(input: String, pad: Boolean, target: String?, gizmondo: Boolean? = null): Boolean {
+        if (!pad && target in listOf("save_snapshot", "load_snapshot")) return false
         if ((pad && target=="stylus_click") || target == "screenshot" || (gizmondo == true && target in listOf("center_tap","stylus_click")) || (pad && target?.startsWith("stylus:") == true)) return false
         if (fixed(input, pad, gizmondo ?: false)) return false
         if (!pad && DeckInputPolicy.reservedKey(input)) return false

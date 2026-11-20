@@ -1,4 +1,5 @@
 //! The CE3 MFC byte-array and Unicode CString ABI. No application-specific state.
+mod archive;
 mod file;
 mod gdi;
 mod strings;
@@ -13,6 +14,7 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
     for &(ordinal, name, handler) in strings::EXPORTS
         .iter()
         .chain(file::EXPORTS)
+        .chain(archive::EXPORTS)
         .chain(gdi::EXPORTS)
     {
         for alias in [format!("ord:{ordinal}"), format!("#{ordinal}"), name.into()] {
@@ -34,11 +36,17 @@ pub(crate) fn register(d: &mut WinCeDispatcher) {
             byte_array_set_at_grow,
         ),
         (181, "??0CString@@QAA@XZ", string_new),
+        (
+            1501,
+            "?GetRuntimeClass@CObject@@UBAPAUCRuntimeClass@@XZ",
+            file::base_class,
+        ),
         (177, "??0CString@@QAA@PBD@Z", string_from_ansi),
         (321, "??4CString@@QAAABV0@ABV0@@Z", string_assign),
         (297, "??1CString@@QAA@XZ", string_delete),
     ] {
         d.register_handler("mfcce300.dll", &format!("ord:{ordinal}"), handler);
+        d.register_handler("mfcce300.dll", &format!("#{ordinal}"), handler);
         d.register_handler("mfcce300.dll", name, handler);
     }
     // Private guest-callable virtual methods, emitted by the standard thunk loader.
@@ -50,11 +58,12 @@ pub(crate) fn additional_ordinal_name(ordinal: u16) -> Option<&'static str> {
     strings::EXPORTS
         .iter()
         .chain(file::EXPORTS)
+        .chain(archive::EXPORTS)
         .chain(gdi::EXPORTS)
         .find_map(|&(number, name, _)| (number == ordinal).then_some(name))
 }
 pub(crate) const ADDITIONAL_ORDINAL_COUNT: usize =
-    strings::EXPORTS.len() + file::EXPORTS.len() + gdi::EXPORTS.len();
+    strings::EXPORTS.len() + file::EXPORTS.len() + archive::EXPORTS.len() + gdi::EXPORTS.len();
 
 fn word(ctx: &mut CallCtx<'_>, p: u32) -> Result<u32, KernelError> {
     Ok(u32::from_le_bytes(
@@ -212,11 +221,28 @@ fn runtime_class(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     let table = word(ctx, o)?;
     Ok(DispatchOutcome::ReturnedR0(table + 16))
 }
-fn serialize(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    // Explicitly unsupported until CArchive is emulated; never pretend to save data.
-    Err(KernelError::Loader(
-        "MFC CByteArray::Serialize requires CArchive support".into(),
-    ))
+fn serialize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let (object, stream) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
+    if archive::loading(ctx, stream)? {
+        let size = archive::read_size(ctx, stream)?;
+        resize(ctx, object, size, -1)?;
+        let data = word(ctx, object + 4)?;
+        if archive::read_bytes(ctx, stream, data, size)? != size {
+            return Err(KernelError::Loader(
+                "MFC CByteArray: truncated archive".into(),
+            ));
+        }
+    } else {
+        let data = word(ctx, object + 4)?;
+        let size = word(ctx, object + 8)?;
+        let capacity = word(ctx, object + 12)?;
+        if size > capacity {
+            return Err(KernelError::Loader("MFC CByteArray: corrupt size".into()));
+        }
+        archive::write_size(ctx, stream, size)?;
+        archive::write_bytes(ctx, stream, data, size)?;
+    }
+    Ok(DispatchOutcome::ReturnedR0(0))
 }
 fn new_string(ctx: &mut CallCtx<'_>, object: u32, text: &[u16]) -> Result<(), KernelError> {
     let len = u32::try_from(text.len())

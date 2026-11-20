@@ -875,6 +875,8 @@ pub struct GuestCallFrame {
 /// Registers saved by the DispatchMessage guest callback boundary.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DispatchMessageFrame {
+    /// Message being dispatched, retained across cooperative waits and snapshots.
+    pub message: u32,
     pub args: [u32; 4],
     pub lr: u32,
     pub sp: u32,
@@ -893,12 +895,13 @@ impl DispatchMessageFrame {
         ArmReg::R11,
     ];
 
-    pub fn capture(cpu: &mut dyn Cpu) -> Result<Self, KernelError> {
+    pub fn capture(cpu: &mut dyn Cpu, message: u32) -> Result<Self, KernelError> {
         let mut nonvolatile = [0; 8];
         for (value, reg) in nonvolatile.iter_mut().zip(Self::NONVOLATILE) {
             *value = cpu.read_reg(reg)?;
         }
         Ok(Self {
+            message,
             args: [
                 cpu.read_reg(ArmReg::R0)?,
                 cpu.read_reg(ArmReg::R1)?,
@@ -6909,6 +6912,7 @@ mod tests {
         process.state.message_frames.insert(
             0,
             vec![DispatchMessageFrame {
+                message: 0,
                 args: [0x1234, 2, 0, 0],
                 sp: 0x2222,
                 lr: 0x3333,
@@ -6946,6 +6950,7 @@ mod tests {
         process.state.message_frames.insert(
             0,
             vec![DispatchMessageFrame {
+                message: 0,
                 args: [0x1234, 2, 0, 0],
                 sp: 0x2222,
                 lr: 0x3333,

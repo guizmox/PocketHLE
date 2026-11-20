@@ -587,7 +587,7 @@ class InputSettingsActivity : HostKeyActivity() {
         summary(summaryPanel, pad)
         val inputs = (diagram.controls.mapNotNull { it.input } + state.savedInputs(pad)).distinct()
         val missing =
-            state.visibleButtons(gizmondo).filter {
+            state.visibleButtons(gizmondo, pad).filter {
                 if (pad) it != "stylus_click" else it != "rotate_screen"
             }.filter { target ->
                 !state.assigned(target, pad, gizmondo, inputs)

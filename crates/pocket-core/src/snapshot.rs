@@ -207,7 +207,7 @@ impl SessionSnapshot {
             match (id, version) {
                 (SESSION, 3) => session = Some(read_section(&mut section)?),
                 (ARM, 1) => cpu = Some(read_section(&mut section)?),
-                (KERNEL, 10) => kernel = Some(read_section(&mut section)?),
+                (KERNEL, 11) => kernel = Some(read_section(&mut section)?),
                 (EGL_FIXED, EGL_FIXED_VERSION) => egl = Some(read_section(&mut section)?),
                 (MEDIA, 2) => media = Some(read_section(&mut section)?),
                 (EGL_PROGRAMMABLE, EGL_PROGRAMMABLE_VERSION) => {
@@ -300,7 +300,7 @@ fn write_section(
     } else if id == EGL_PROGRAMMABLE {
         EGL_PROGRAMMABLE_VERSION
     } else if id == KERNEL {
-        10
+        11
     } else if id == SESSION {
         3
     } else if id == MEDIA {
@@ -1195,6 +1195,42 @@ mod tests {
         let timing = &destination.process().unwrap().state.framebuffer.directdraw;
         assert_eq!(timing.frame_rate_limit, Some(60));
         assert_eq!(timing.pending.len(), 1);
+    }
+
+    #[test]
+    fn persisted_snapshot_keeps_window_update_regions_and_dispatched_message_identity() {
+        let mut source = fixture(3);
+        let frame =
+            pocket_kernel::DispatchMessageFrame::capture(source.cpu.as_mut(), 0x000f).unwrap();
+        let state = &mut source.process.as_mut().unwrap().state;
+        state
+            .gdi
+            .pending_window_updates
+            .insert(0xdead0001, vec![[0, 0, 320, 240]]);
+        state.gdi.generated_window_paints.insert(0xdead0001);
+        state.message_frames.insert(0, vec![frame]);
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11004,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        let state = &destination.process().unwrap().state;
+        assert!(state.gdi.pending_window_updates.contains_key(&0xdead0001));
+        assert!(state.gdi.generated_window_paints.contains(&0xdead0001));
+        assert_eq!(state.message_frames[&0][0].message, 0x000f);
+        assert_eq!(state.message_frames[&0][0].args, frame.args);
     }
 
     #[test]

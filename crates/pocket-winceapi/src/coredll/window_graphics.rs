@@ -152,7 +152,7 @@ fn write_rect_value(ctx: &mut CallCtx<'_>, p: u32, r: [i32; 4]) -> Result<(), Ke
     }
     Ok(())
 }
-fn intersection(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
+pub(super) fn intersection(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     let r = [
         a[0].max(b[0]),
         a[1].max(b[1]),
@@ -165,7 +165,7 @@ fn intersection(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         r
     }
 }
-fn subtract(a: [i32; 4], b: [i32; 4]) -> Vec<[i32; 4]> {
+pub(super) fn subtract(a: [i32; 4], b: [i32; 4]) -> Vec<[i32; 4]> {
     if a[0] >= a[2] || a[1] >= a[3] {
         return vec![];
     }
@@ -183,7 +183,7 @@ fn subtract(a: [i32; 4], b: [i32; 4]) -> Vec<[i32; 4]> {
     .filter(|r| r[0] < r[2] && r[1] < r[3])
     .collect()
 }
-fn bounds(rects: &[[i32; 4]]) -> [i32; 4] {
+pub(super) fn bounds(rects: &[[i32; 4]]) -> [i32; 4] {
     rects
         .iter()
         .copied()

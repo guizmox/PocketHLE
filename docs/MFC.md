@@ -19,6 +19,9 @@ table; the dispatcher and ordinal-name resolver reuse those same tables.
 
 | Ordinal | Operation |
 | --- | --- |
+| 38 / 212 | CArchive constructor / destructor |
+| 2135 / 2142 / 2582 / 2588 | CArchive Read / ReadCount / Write / WriteCount |
+| 1501 | CObject GetRuntimeClass |
 | 97 / 242 | CFile constructor / destructor |
 | 175 | CString copy constructor |
 | 324 / 361 / 366 | Assign wide string / concatenate / append |
@@ -29,8 +32,8 @@ table; the dispatcher and ordinal-name resolver reuse those same tables.
 
 Existing CString, CByteArray and global new/delete exports retain their own
 contracts. This is a partial MFC surface, not a claim of full MFC support.
-CArchive serialization, exception throwing and unimplemented runtime-class
-exports remain outside this bridge. Failed CFile I/O reports an explicit handler
+General MFC object-graph serialization, exception throwing and unimplemented
+runtime-class exports remain outside this bridge. Failed CFile I/O reports an explicit handler
 error rather than pretending that data was read or written.
 
 ## Object ownership
@@ -58,10 +61,24 @@ and CString resources. CGdiObject operations attach actual GDI handles, detach
 before deletion, and reuse the normal DeleteObject implementation and selected
 object protections.
 
+A CArchive is a 68-byte guest object over a base CFile. Its buffer, read/write
+cursors and filename remain in guest memory, including advances made by compiled
+inline operators. Loading rewinds unread buffered bytes on destruction; storing
+flushes pending bytes. Caller buffers are retained and owned buffers are freed.
+Count serialization uses the native 16-bit count / 0xffff plus 32-bit encoding.
+CByteArray serialization uses this stream and real VFS bytes. Snapshot capture
+already covers the guest object, heap and VFS cursor; no host archive cache is
+introduced. Guest CFile subclasses with virtual I/O overrides and general MFC
+object-graph serialization remain unsupported and report an explicit error.
+
 ## Validation
 
 Tests cover CString sharing/detachment, termination and allocation release;
 CFile initial cursor, real file reads, length query, seek/truncate and teardown;
+buffered CArchive read/write, inline cursor advance, read-ahead rewind,
+caller-buffer ownership, count encoding and CByteArray file round-trip;
 and MFC attachment/deletion of real GDI objects. The application startup evidence
 and remaining limitations are maintained in
 [PocketPC startup validation](testing/POCKETPC-STARTUP-2026-11-19.md).
+
+Ultima archive and held-stylus validation: [20 November 2026](testing/ULTIMA-2026-11-20.md).

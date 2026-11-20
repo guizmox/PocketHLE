@@ -118,6 +118,8 @@ internal class InputBindings(private val config: LauncherConfig, private val giz
                 "stylus_click" to ("Stylus click / mode" to DeckInputPolicy.STYLUS_CLICK_COMMAND),
                 "rotate_screen" to ("Rotation" to DeckInputPolicy.ROTATION_COMMAND),
                 "screenshot" to ("Screenshot" to DeckInputPolicy.SCREENSHOT_COMMAND),
+                "save_snapshot" to ("Save Snapshot" to DeckInputPolicy.SAVE_SNAPSHOT_COMMAND),
+                "load_snapshot" to ("Load Snapshot" to DeckInputPolicy.LOAD_SNAPSHOT_COMMAND),
             )
 
         fun defaultKeyboard() =
