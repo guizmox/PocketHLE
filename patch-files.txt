@@ -1,2 +1,3 @@
-crates/pocket-winceapi/src/coredll.rs
-docs/testing/CHIX-RAND-2026-11-20.md
+crates/pocket-cpu/src/unicorn.rs
+docs/MFC.md
+docs/testing/POCKETPC-MFC-HEAP-2026-11-20.md

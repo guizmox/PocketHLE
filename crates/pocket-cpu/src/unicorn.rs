@@ -42,9 +42,8 @@ struct GuestMap {
     /// `(start, end_exclusive, executable)` for every successful
     /// [`Cpu::map_region`], kept sorted by `start`.
     regions: Vec<(u64, u64, bool)>,
-    /// Pages promoted to executable at run time because the guest was
-    /// caught fetching from them even though their mapping is not
-    /// executable, kept sorted.
+    /// Pages seen by an instruction fetch, kept sorted. Executable-capable
+    /// data mappings retain the data-store path until actual code is fetched.
     promoted_exec: Vec<u64>,
     /// Explicit VirtualAlloc permissions take precedence over compatibility
     /// promotion of old heap/code arenas. Latest range overrides earlier ones.
@@ -295,7 +294,7 @@ fn install_virtual_tlb(
         // nor become executable via the legacy data-code promotion path.
         let deferred_fetch = kind == MemType::FETCH && deferred.borrow().pending(page as u32);
         let mut map = regions.borrow_mut();
-        let Some(region_exec) = map.region_for(page) else {
+        let Some(_) = map.region_for(page) else {
             *sink.borrow_mut() = Some((format!("{kind:?} unmapped"), page));
             return None;
         };
@@ -339,15 +338,15 @@ fn install_virtual_tlb(
         if deferred_fetch {
             return Some(TlbEntry { paddr: page, perms });
         }
-        if region_exec || map.is_promoted_exec(page) {
+        if map.is_promoted_exec(page) {
             perms |= UcProt::EXEC;
         } else if kind == MemType::FETCH {
-            // A guest running code out of a page it mapped as data —
-            // a runtime-built trampoline — has to keep working.
-            // Remembering the promotion is also what keeps QEMU
-            // invalidating that page's translations on later writes:
-            // an entry with no code address would let stores go
-            // inline and leave stale translated code behind.
+            // The mapping's executable permission is not evidence that data
+            // on this page has ever been code. Advertise EXEC to the TLB on
+            // its first instruction fetch, including legacy heap trampolines.
+            // Keep it afterwards so guest writes invalidate translated code;
+            // code generation also re-arms existing physical aliases. Native
+            // mapping permissions and explicit protection checks stay intact.
             map.promote_exec(page);
             perms |= UcProt::EXEC;
         }
@@ -1755,6 +1754,52 @@ mod tests {
         map.insert(0x2000, 0x1000, true);
         assert_eq!(map.region_for(0x2000), Some(true));
     }
+    #[test]
+    fn executable_capable_data_is_promoted_on_fetch_and_tracks_guest_code_writes() {
+        let mut cpu = UnicornCpu::new_for_arch(Arch::Arm).unwrap();
+        cpu.map_region(0x1000, 0x1000, Prot::ALL).unwrap();
+        cpu.map_region(0x100000, 0x1000, Prot::ALL).unwrap();
+        // Store an instruction into an as-yet data-only executable mapping.
+        cpu.write_mem(0x1000, &[0x00, 0x30, 0x81, 0xe5, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        cpu.write_mem(0x100100, &[0x01, 0x00, 0xa0, 0xe3, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        cpu.add_code_hook(0x1800).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x1800).unwrap();
+        cpu.write_reg(ArmReg::R1, 0x100100).unwrap();
+        cpu.write_reg(ArmReg::R3, 0xe3a00007).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 100).unwrap(),
+            StopReason::Hook(0x1800)
+        );
+        let Some(map) = cpu.guest_map.as_ref() else {
+            panic!("virtual TLB required");
+        };
+        assert!(!map.borrow().is_promoted_exec(0x100000));
+        assert_eq!(
+            cpu.run_until_hook(0x100100, 100).unwrap(),
+            StopReason::Hook(0x1800)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 7);
+        assert!(cpu
+            .guest_map
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .is_promoted_exec(0x100000));
+        // A real guest write must invalidate the block created by that fetch.
+        cpu.write_reg(ArmReg::R3, 0xe3a00009).unwrap();
+        assert_eq!(
+            cpu.run_until_hook(0x1000, 100).unwrap(),
+            StopReason::Hook(0x1800)
+        );
+        assert_eq!(
+            cpu.run_until_hook(0x100100, 100).unwrap(),
+            StopReason::Hook(0x1800)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), 9);
+    }
+
     #[test]
     fn executable_data_fast_stores_rearm_when_code_is_generated_through_an_alias() {
         let mut uc: Unicorn<'_, ()> = Unicorn::new(UcArch::ARM, Mode::LITTLE_ENDIAN).unwrap();

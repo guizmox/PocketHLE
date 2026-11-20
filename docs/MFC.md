@@ -36,6 +36,23 @@ General MFC object-graph serialization, exception throwing and unimplemented
 runtime-class exports remain outside this bridge. Failed CFile I/O reports an explicit handler
 error rather than pretending that data was read or written.
 
+## Application framework boundary
+
+Games that use CWinApp, CFrameWnd, CDialog and message maps require more than
+CString/file/archive operations. The current HLE bridge does not implement their
+application framework. AfxGetModuleState alone is not sufficient: module/thread
+state, application and window initialization, guest virtual methods, resource
+dialogs, message routing and imported C++ class-data objects must agree.
+
+A native-free implementation should extend this MFC owner over the existing
+WinCE window/GDI/VFS services, sharing one object/ownership model on Desktop and
+Android. Generated method tables and module state must survive checkpoints,
+without application-specific setup, fabricated class data or success stubs.
+
+A supplied retail ARM `mfcce300.dll` can currently exercise that framework through
+the existing whole-runtime path. This is a reference/fallback, not an HLE port.
+See [EverQuest/Leo startup evidence and remaining HLE scope](testing/POCKETPC-MFC-HEAP-2026-11-20.md).
+
 ## Object ownership
 
 A CString is one guest pointer. Its data is preceded by three 32-bit fields:
