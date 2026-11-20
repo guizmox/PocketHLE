@@ -2,7 +2,7 @@
 
 These records preserve their original dates, environments, test counts and
 limits. They are evidence for the recorded revisions, not current build recipes
-or certification of PocketHLE 0.4.6. Some original reports remain in their supplied
+or certification of the current release. Some original reports remain in their supplied
 language. Superseded commands and delivery ZIP references are retained only as
 historical context; use [Build and release](../BUILD.md), the
 [HARDWARE DIAG manual](../../tools/hardware-diag/README.md) and

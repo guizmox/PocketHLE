@@ -197,23 +197,6 @@ All records below are required and currently use payload version 1.
 
 ## Validation on 20 November 2026
 
-The cumulative source passed 1260 Rust unit tests: 36 core, 420 kernel,
-799 WinCE API and 5 shared snapshot codec tests. 37 context/hardware tests
-remain ignored. The frozen process fixture passed a cold kernel restore with
-its pending GDI update region and suspended message identity intact. Its SHA-256
-is `36a5efca0e46b36360dce2ebe06072bb8ab4ee211cb34e55e9e8fbdef74d48fd`
-(57970 bytes, compressed synthetic metadata; no game assets).
-
-Real guest executables were captured to container-12 native streams and
-restored in fresh emulator processes: Stuntcar Extreme (Gizmondo/GLES1), MoonGBA
-(PocketPC/GDI), and Electopia (PocketPC/GLES2, 800×480). The restored render loops
-continued without a CPU exception. The first Electopia probe omitted its GLES2
-profile and reached an initialization error; after matching the launcher's GPU
-profile/screen setup, the actual GLES2 capture and cold restore passed. No
-product launch workaround was needed. Diagnostic code and game snapshots are
-excluded from the source archive.
-
-Desktop and Android JNI host checks passed with Unicorn and optional host
-audio/static-video features disabled. Rust 1.90 formatting and whitespace checks
-passed. Native graphics runs use headless Mesa, not physical Android/Windows
-hardware. No fresh APK or native ABI release build is claimed here.
+The dated test counts, frozen-fixture identity and native capture/restore
+results are preserved in the [WinCE 12 validation record](testing/SNAPSHOT-WINCE12-2026-11-20.md).
+They describe that run, not a guarantee for every later revision or host.

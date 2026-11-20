@@ -222,9 +222,10 @@ shared desktop/Android implementation use the same rule.
 Eligible triangles are rasterized twice: this has a real GPU cost, or CPU cost
 in software mode. Nearby hidden opaque surfaces within the tolerance can become
 visible or change overlap order in other Intel-profile games. Generic and NVIDIA
-profiles do not enable this Intel approximation. See the
-[THPS2 validation record](../proof/thps2-hangar/README.md) for before/after images,
-measured costs and the limits of local testing.
+profiles do not enable this Intel approximation. The previously referenced
+`proof/thps2-hangar` capture is not present in this repository. No reproducible
+before/after image or timing claim is established by that missing record;
+validate the approximation on the target workload when changing it.
 
 ## Native fixed-point vertex attributes
 
@@ -478,16 +479,14 @@ for the image-driven root Run update, preserving explicit UI requests and
 ordinary menu behavior. The fix does not remove glFlush, cache WGL lookups,
 change fences or require a diagnostic launcher.
 
-Windows GTX1650 keyboard validation reported about 60 received snapshots/s and
-about 10 ms/s context-detach time, versus about 20 snapshots/s and 925 ms/s before.
-These are one hardware reproduction and CPU wall-time observations, not a general
-GPU benchmark. Intel UHD fullscreen also reproduced the original symptom.
+The original hardware measurements are retained in
+[graphics evidence](history/GRAPHICS-EVIDENCE.md#desktop-input-stutter).
 
 The controller complement changes SDL publication wakes while retaining every
 analog value and button transition. The wheel/touch complement defers Run-mode
 wheel and touch-Moved redraws; touch start/end/cancel remain immediate. These
-complements passed targeted software tests but their hardware validation is still
-pending in this session. Do not report them as confirmed Switch Pro/touch fixes.
+complements require separate controller/touch hardware validation; the keyboard
+measurements do not establish their behavior on every input device.
 Android uses a separate frontend and is not covered by the eframe correction.
 
 ## Validation and compatibility boundaries
@@ -557,13 +556,9 @@ it is separate from CPU pixel preparation and from asynchronous GPU execution.
 No GL finish, CPU fence wait or unconditional readback is added. Snapshot pool
 pressure can still select the established CPU path.
 
-Local validation covers native GL/GLES pixel/backlight/row-order equivalence,
-a producer on another thread, three consumer recreations with retained-image
-readback, bounded mailboxes, static-image CPU recovery, wire decoding and the ARM
-runner regressions. Android UI/factory Kotlin sources are type-checked against
-Android API classes. A complete APK and Samsung/ANGLE runtime validation are
-still required; this is not a measured device FPS guarantee or recovery from a
-real device-wide EGL_CONTEXT_LOST event.
+The [recorded transport checks](history/GRAPHICS-EVIDENCE.md#android-shared-presentation)
+distinguish headless/type checks from APK and physical-device validation. They
+are not a device FPS guarantee or proof of recovery from device-wide context loss.
 
 ## Android packed CPU-origin images
 
@@ -595,13 +590,9 @@ The new opt-in `shared_snapshot_wall` span covers native shared snapshot export,
 so another 1x/2x capture can distinguish export cost from explicit pixel readback.
 It is inclusive of host activation/copy/fence submission, not GPU busy time.
 
-Validation compares all 65,536 colors for backlight 1..31, neutral fallback
-values and odd-width rows against integer CPU results through native ES3 on
-Mesa. Snapshot tests verify immutable packed bytes/brightness and unchanged
-logical/high-resolution geometry; protocol and xBRZ-expansion tests preserve
-legacy packets. Full APK/device validation remains pending. This extension is
-not a claim to have resolved the separately reported 8 FPS at 1x versus 20 FPS
-at 2x; those runs still need their presentation/readback diagnostics correlated.
+The [recorded packed-image checks](history/GRAPHICS-EVIDENCE.md#android-packed-images)
+cover headless ES3 color equivalence and protocol tests, not physical-device
+performance or a diagnosis of unrelated sparse-frame/thermal stalls.
 
 ## Native image-decoder dependencies and zlib streams
 
@@ -780,15 +771,9 @@ in RGB565 textures or attachments and does not implement missing dithering.
 
 ### Snapshot-reference test correction
 
-The previously reported RGB565 snapshot/reduction discrepancy was traced to a
-malformed test fixture. It set the renderer's RGB565 policy, then replaced the
-actual attachment with GL_RGBA storage before taking an RGB565 snapshot. The
-reference and snapshot consequently started from different color precisions.
-The fixture now uploads in the actual attachment format, checks the GL error,
-and also covers 320x240 at 2x on desktop GL and GLES. No RGB565 production
-reduction arithmetic was changed to make this test pass. The corrected fixture
-also passes against the unmodified production code of commit 9bebfb5b.
-
+The historical fixture error and the scope of its correction are recorded in
+[graphics evidence](history/GRAPHICS-EVIDENCE.md#rgb565-snapshot-fixture-correction).
+This was a test correction, not a production RGB565 arithmetic change.
 
 ## Persistent programmable checkpoints
 

@@ -258,7 +258,7 @@ class GameSettingsActivity : HostKeyActivity() {
                 entryValues = arrayOf("inherit", "10", "15", "20", "30", "45", "60", "120", "unlimited")
                 value = current.frameRateLimit ?: "inherit"
                 summaryProvider = androidx.preference.Preference.SummaryProvider<ListPreference> { pref ->
-                    "${pref.entry ?: inheritedLimitLabel}. Maximum game FPS, or Unlimited. Emulator default inherits the global limit. GAPI / DirectDraw / OpenGL ES; GDI-only drawing is not capped. Restart the game to apply."
+                    "${pref.entry ?: inheritedLimitLabel}. Maximum game FPS, or Unlimited. Emulator default inherits the global limit. Completed GDI / GAPI / DirectDraw / OpenGL ES presentations; intermediate updates may be coalesced. Restart the game to apply."
                 }
                 setOnPreferenceChangeListener { _, newValue ->
                     current = current.copy(frameRateLimit = newValue.toString().takeUnless { it == "inherit" })

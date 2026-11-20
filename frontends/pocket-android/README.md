@@ -5,7 +5,8 @@ using Unicorn and static FFmpeg. This directory is the app source, not a second
 owner of settings or build policy.
 
 - [Build, WSL2, APK packaging and signing](../../docs/BUILD.md#android)
-- [Settings, touch layouts and automatic display fitting](../../docs/FRONTENDS.md)
+- [All emulator and per-game options](../../docs/OPTIONS.md)
+- [Settings workflows, touch layouts and automatic display fitting](../../docs/FRONTENDS.md)
 - [Rendering, filters and per-game GPU profiles](../../docs/GPU.md)
 - [Graphics log collection](../../docs/ANDROID-GRAPHICS-DIAGNOSTICS.md)
 - [Gizmondo services, shell profiles and Colors](../../docs/GIZMONDO.md)

@@ -283,7 +283,7 @@ set is external state; this guide does not assert which tag is currently deploye
 ### Release-check validation
 
 Rust and Android share `crates/pocket-library/tests/data/releases.json`, covering
-14 version and asset cases. Rust also tests platform selection and Linux package
+version and asset cases. Rust also tests platform selection and Linux package
 formats. Android runs its JUnit cases in `tools/build-android-apk.sh` before APK
 assembly; the normal CI already invokes that script. Full native packaging and
 physical-device/browser interaction remain checks for the target builds.

@@ -1,9 +1,10 @@
 # Reported compatibility and test library
 
-This inventory covers **144 entries (87 PocketPC / Windows Mobile and 57
+This inventory covers **153 entries (96 PocketPC / Windows Mobile and 57
 Gizmondo)**. It includes games, prototypes, demos, benchmarks, utilities and
 other emulators. Variants remain separate entries under their supplied display
-names.
+names. The catalogue was updated from the supplied library export on
+2026-11-20 while retaining earlier entries.
 
 For detailed reported Gizmondo results and known issues, use the
 [Gizmondo compatibility table](GIZMONDO.md#reported-game-compatibility).
@@ -16,9 +17,19 @@ legacy Gizmondo title IDs and collection markers for older entries.
 
 ## PocketPC / Windows Mobile
 
-**87 entries reported working** by the maintainer on 2026-11-12. The report
+**96 catalogue entries**. Of these, **87 were reported working** by the
+maintainer on 2026-11-12. That report
 does not specify the PocketHLE-Reborn revision, host platform, test duration or
 coverage for each title.
+
+Nine additional catalogue entries come from the library export supplied on
+2026-11-20. Catalogue presence alone does not establish playability; no new
+test result is claimed for these additions.
+
+The two GoForce demo imports retain their supplied names and distinct IDs
+(`goforce5500demos` and `goforcedemos`); this does not prove different binary
+versions. SC15 Demos remains from the earlier report although it is absent
+from the new export.
 
 * Age of Empires
 * Anthelion
@@ -26,6 +37,7 @@ coverage for each title.
 * Aspyr Media THPS2
 * Astraware Brad Mitchum
 * Caywen Kevtris 2
+* CG DiamondBeerV2
 * Chix
 * Chopper Alley
 * Chopper Fight 1.0
@@ -34,6 +46,7 @@ coverage for each title.
 * Cops &amp; Robbers
 * CrazyKart
 * Cube 2004
+* Detector Veles1
 * Dgles Goforce Shw
 * Diesel FPS Technology DEMO
 * Doom 2700G
@@ -48,10 +61,13 @@ coverage for each title.
 * FPSE CE
 * Gameloft Ferrari GT Evolution Demo
 * Gameloft Prince of Persia
+* Gameloft SA Brothers in arms 3D
 * Gapi Benchmark V2 0 Arm
 * Geo Rally 2005
 * GeoRally EX
 * GhostWorld
+* GoForce 5500 Demos
+* Goforce 5500 Demos
 * GXmark
 * HTC Teeter
 * Infectious Ground
@@ -62,9 +78,11 @@ coverage for each title.
 * Kishonti Ltd GLBenchmark 1.1.6
 * Kursk
 * Leo's Flight Simulator
+* Machine Works Prey3D
 * Metalion
 * Mini-Dogfight 1.2
 * Mini-Kayak 1.1
+* Moongba Eng 2 4 0
 * Motocross Stunt Racer
 * MotoGear
 * NFS
@@ -103,7 +121,9 @@ coverage for each title.
 * Tomb Raider
 * Tots'N'Togs
 * TrailBlazer [pack by iChanz]
+* Ultima Underworld
 * Undead
+* V-Rally
 * Warcraft 2
 * Worms
 * Yeti X51v

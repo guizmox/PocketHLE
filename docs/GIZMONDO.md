@@ -3,7 +3,8 @@
 Use Gizmondo options globally or in per-game settings where offered. Hardware
 access switches apply at the next launch; the guest starts the actual service.
 Windows/Linux share the desktop settings UI, but native hardware bridges are
-platform-specific. See [DESKTOP-PARITY.md](FRONTENDS.md#windowslinux-native-service-parity).
+platform-specific. See [native service parity](FRONTENDS.md#windowslinux-native-service-parity) and
+the [Gizmondo settings reference](OPTIONS.md#global-gizmondo-options).
 
 - [Imports](#imports-and-game-information) and [collection ZIPs](#gzga-collection-zip-imports)
 - [Bluetooth](#bluetooth), [GPS](#gps), [camera](#camera) and [controls](#controls-vibration-and-brightness)

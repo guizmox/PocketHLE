@@ -10,6 +10,7 @@ retain their spelling.
 | Task | Guide |
 | --- | --- |
 | Install on Steam Deck through Proton | [Steam Deck](STEAMDECK.md) |
+| Find every exposed emulator and per-game setting | [Settings reference](OPTIONS.md) |
 | Configure games, controls, touch layouts and the desktop toolbar | [Frontends](FRONTENDS.md) |
 | Run supported managed Pocket PC games | [.NET Compact Framework](FRONTENDS.md#net-compact-framework-games) |
 | Find reported titles and the limits of compatibility evidence | [Compatibility](COMPATIBILITY.md) |
@@ -25,6 +26,7 @@ retain their spelling.
 | Rendering, EGL/NV execution, pixel ownership, resolution, filters and pacing | [Graphics](GPU.md) |
 | Windows CE 3 ARM MFC object ABI and ownership | [MFC bridge](MFC.md) |
 | Shared Desktop/Android snapshot format, restore pipeline and handle coverage | [Snapshot internals](SNAPSHOTS.md) |
+| WinCE record IDs, required/optional fields and format evolution | [WinCE snapshot records](SNAPSHOT-WINCE-FORMAT.md) |
 
 The root [README](../README.md) is the project overview. Contributor entry points
 remain [AGENTS.md](../AGENTS.md) and [CLAUDE.md](../CLAUDE.md); neither is another
@@ -45,8 +47,10 @@ Keep operating instructions beside tools that are distributed or used separately
 - [FFmpeg](../third-party/ffmpeg/README.md) and
   [OpenH264](../third-party/openh264/README.md): source provenance and relinking
   notices. License texts remain with the corresponding dependency.
-- [proof](../proof/) and [validation](../validation/) contain dated runs/logs.
-  They are evidence, not current user instructions.
+- [Validation index](testing/README.md), [proof index](../proof/README.md) and
+  [validation artifacts](../validation/README.md) distinguish recorded campaigns
+  from current instructions. See the [documentation audit](testing/DOCUMENTATION-AUDIT-2026-11-20.md)
+  for this cleanup's scope and checks.
 
 ## Historical records
 

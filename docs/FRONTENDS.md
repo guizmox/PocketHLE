@@ -4,7 +4,7 @@ Current settings and input policy for desktop, Deck and Android. Build/signing
 instructions belong to [Build and release](BUILD.md); Deck installation belongs
 to [Steam Deck](STEAMDECK.md). Graphics execution belongs to [Graphics](GPU.md).
 
-- [Experimental desktop snapshots](#experimental-desktop-snapshots)
+- [Experimental snapshots](#experimental-snapshots)
 - [Launch profiles](#desktop-runtime-launch-profiles) and [toolbar](#desktop-button-toolbar)
 - [Library data](#adding-data-to-an-installed-game), [removal](#removing-library-games) and [captures](#desktop-capture-gallery)
 - [Image fitting](#image-geometry-and-input) and [Android touch controls](#android-controls)
@@ -24,7 +24,8 @@ its existing behavior. This policy uses native window state, not game identities
 or graphics profiles. The initial shell strip is composed only once an application
 window exists; startup work-area queries still reserve its usual height.
 
-## Experimental desktop snapshots
+<a id="experimental-desktop-snapshots"></a>
+## Experimental snapshots
 
 Snapshots are available on Windows and Linux desktop builds with the Unicorn
 ARM backend. Android uses the same snapshot engine. Each game has one slot.
@@ -109,14 +110,18 @@ reconnect to the current native backend without resending requests.
 Windows Bluetooth Classic ports and sockets retain received data, then report
 a disconnected transport after restore. Pending discovery is cancelled and
 outbound writes are never replayed. New connections use the current real service.
-This does not restore a live radio/network peer. Providers without receive
-checkpoint support and Compact Framework remain outside this profile; capture
-reports unsupported live resources. The snapshot controls are desktop-only.
+This does not restore a live radio/network peer. Live Bluetooth checkpoints for
+Compact Framework sessions and providers without receive checkpoint support
+remain unsupported; capture reports the unsupported resource. This restriction
+does not exclude other supported Compact Framework snapshots or Android controls.
 
-See [Desktop snapshot internals](SNAPSHOTS.md) for the file layout, ARM block
+See [Shared snapshot internals](SNAPSHOTS.md) for the file layout, ARM block
 reads, handle coverage and graphics restore path.
 
 ## Shared settings
+
+The complete [settings reference](OPTIONS.md) owns the option lists, choices and
+platform differences. This guide owns the workflows and input behavior.
 
 Windows/Linux use the same desktop source. Android mirrors the shared JSON
 contract; changing an Android setting must not discard unrelated or unknown
@@ -162,8 +167,8 @@ Desktop and Android offer Gizmondo supersampling and camera, Bluetooth, GPS and
 Internet/data bridges, initialized from the saved configuration. Supersampling
 uses the global OpenGL ES setting. Enabling it from **Native** selects **2×**
 for 320×240 and 240×320 surfaces and enables **GPU rendering**. An existing
-multiplier and resolution scope are preserved. The same global options apply
-to Pocket PC games using the GLES 1.x host OpenGL path. Hardware choices
+multiplier and resolution scope are preserved. The same global internal-resolution options apply
+to Pocket PC games using host OpenGL for GLES 1.x or GLES 2.0. Hardware choices
 remain subject to host permissions.
 
 Android additionally offers Gizmondo Normal/Big directional controls and control
@@ -1154,3 +1159,24 @@ with the display-axis correction. The conversion, filtering, keyboard merging
 and aiming output live once in `pocket-session::input`; the frontends supply
 samples and UI, not separate conversion implementations. Hardware operation
 still depends on the connected device exposing an accelerometer.
+
+## Session diagnostics
+
+Desktop and Android use the shared diagnostic model for launch failures, CPU/API
+errors and snapshot failures. The dialog provides **Show details**, **Copy
+diagnostic** and **Return to library**; a nonfatal snapshot failure also allows
+**Continue** when the current session remains usable. Controller navigation uses
+the same focus/confirm rules as other dialogs.
+
+An explicit frontend stop does not open an error dialog. A runtime exception
+remains an error regardless of the guest exit code. During the two-second startup
+window, a nonzero exit or captured guest stderr can explain an initialization
+failure. A zero exit alone is insufficient evidence of a failure. After startup,
+a guest's normal exit, including a nonzero application-defined exit code, is not
+classified as a crash without a runtime error. Warnings from host-context
+teardown alone do not identify the cause of an earlier guest exit.
+
+The classifier lives in
+[`session_diagnostic.rs`](../crates/pocket-library/src/session_diagnostic.rs).
+It cannot diagnose a guest that silently abandons initialization without an
+observable error; report the executable, settings and full log in that case.

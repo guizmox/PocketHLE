@@ -10,13 +10,13 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 ## Compatibility evidence
 
 > [!IMPORTANT]
-> The screenshots above are representative game references supplied for the project presentation. The checked-in, reproducible emulator proof currently covers Asphalt 4 WVGA and Call of Duty 2's title-screen boot through the OpenGL ES layer. Zuma Deluxe and Bejeweled have game-specific compatibility work in the codebase, but should not be described as fully verified here without a corresponding checked-in run capture.
+> The screenshots in the [project overview](README.md#games-tested) are presentation references. Reproduction notes under [proof](proof/README.md) describe narrower recorded runs, such as Asphalt 4 WVGA and Call of Duty 2's title-screen boot. A screenshot, a compatibility entry or a targeted fix does not establish a full playthrough or current cross-platform compatibility.
 
 Additional compatibility probes and rendering captures are available under [`proof/`](proof), including Asphalt 2 3D, Crazy Taxi, Diamond Twister, Splinter Cell Conviction and other Windows Mobile titles.
 
-The [maintainer's compatibility and test library](docs/COMPATIBILITY.md) lists
-**87 PocketPC / Windows Mobile entries reported working** on 2026-11-12
-and **57 Gizmondo entries**. It includes games, demos, benchmarks and utilities.
+The [maintainer's compatibility and test library](docs/COMPATIBILITY.md) records
+reported titles, dates and evidence limits. It includes games, demos, benchmarks
+and utilities; the catalogue is not a current all-platform certification.
 
 ## Status
 
@@ -34,6 +34,7 @@ PocketHLE-Reborn can currently:
 * present GDI and GAPI software framebuffers, use host OpenGL by default for GLES 1.x with a PocketHLE-Reborn software fallback, and use host OpenGL for GLES 2.0;
 * keep supported OpenGL ES frames on the GPU from rendering through desktop presentation, avoiding CPU pixel readback and re-upload;
 * run a shared game library with per-game settings on desktop and Android;
+* save and restore one experimental snapshot slot per game for supported native ARM and Compact Framework sessions through a shared Desktop/Android engine;
 * build Linux, Windows and Android artifacts through GitHub Actions.
 
 The desktop frontend offers fullscreen (F12), screenshots (F10), video
@@ -42,7 +43,8 @@ offer global rendering options. Both GLES profiles support Native,
 2×, 3× and 4× internal resolution, with a checkbox to include surfaces other
 than 320×240 and 240×320. The Android frontend offers per-game settings,
 orientation controls and on-screen controls. See the [frontend guide](docs/FRONTENDS.md) and
-[GPU guide](docs/GPU.md) for platform-specific behavior.
+[GPU guide](docs/GPU.md) for platform-specific behavior. The [settings reference](docs/OPTIONS.md)
+lists all exposed emulator and per-game choices separately for PocketPC and Gizmondo.
 
 Gizmondo profiles can use host Bluetooth Classic for supported RFCOMM workflows.
 GTShell image transfer from Windows to Android is confirmed.
@@ -184,9 +186,18 @@ Desktop and Android share the `pocket-library` model:
     └── <sanitized-id>/
         ├── game.json
         ├── source.cab
-        └── extracted/
-            └── ... game files ...
+        ├── extracted/
+        │   └── ... installed game files ...
+        ├── saves/
+        │   └── my-documents/
+        └── snapshots/
+            └── snapshot-01.bin
 ```
+
+`source.cab` is present for retained CAB inputs; other import types need not
+produce it. Save directories and the snapshot slot are created when needed.
+Snapshot files are separate from the game's ordinary saves. See
+[snapshot coverage and file rollback](docs/SNAPSHOTS.md).
 
 On Linux and Windows, the default library uses `Documents/PocketHLE-Reborn`
 when available, or the platform data directory. On first use, PocketHLE-Reborn

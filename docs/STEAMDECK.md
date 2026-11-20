@@ -60,7 +60,8 @@ Menu remains the reserved filter shortcut, including in the library. L1/L2 move 
 wrapping through Gizmondo, PocketPC and Recordings. Selection stays in view.
 
 The game menu contains Information, Play, Rename, Settings, Add/Replace Data,
-Remove and Game ID. A accepts;
+Switch Launch Executable, Remove and Game ID. Add/Replace Data and the executable
+switch are PocketPC-only actions. A accepts;
 B returns to the parent menu, then closes it. In settings, up/down moves focus,
 left/right adjusts sliders and A activates the selected control. Dropdowns use
 up/down, A to accept and B to cancel. Pages scroll to keep focus visible.
@@ -91,7 +92,8 @@ input and select a guest command. Reset, short/long precedence, draft saving,
 physical feedback and the complete workflow are maintained in
 [the shared input-editor reference](FRONTENDS.md#visual-input-editor--desktop-and-android).
 
-The toolbar groups Game library, Settings, Features and About. Directions follow
+The toolbar groups Game library, Settings, Features, Snapshot and About.
+The [settings reference](OPTIONS.md) lists shared and Desktop-specific options. Directions follow
 its two-row layout; A activates and L3 switches toolbar/page. Finger scrolling
 and mouse/trackpad selection retain the page offset; controller navigation reveals
 its target. The post-import **PocketPC launch settings** prompt directly uses

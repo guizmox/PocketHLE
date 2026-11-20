@@ -2,7 +2,7 @@
 
 Desktop and Android checkpoint native ARM WinCE sessions, including concurrently
 running processes, and supported Compact Framework interpreter sessions. Gizmondo and Pocket PC share the serializer and restore path. See
-[the frontend guide](FRONTENDS.md#experimental-desktop-snapshots) for commands
+[the frontend guide](FRONTENDS.md#experimental-snapshots) for commands
 and slot locations.
 
 ## Capture and write
@@ -30,7 +30,7 @@ the writer starts.
 | --- | --- |
 | Slot header | Eight-byte magic `PHSNAP01` and a little-endian 64-bit UTC timestamp in Unix milliseconds. |
 | Backend header | `PHSECT01` for ARM sections or `PHCFSE01` for managed version 1; followed by one zlib stream. |
-| Native stream | Little-endian 16-bit section count, then each section's 16-bit tag, 16-bit version, 64-bit byte length and fixed-integer bincode payload. |
+| Native stream | Little-endian 16-bit section count, then each section's 16-bit tag, 16-bit version, 64-bit byte length and owner-defined payload. WinCE uses the record envelope below; typed record and other section payloads use fixed-integer bincode. |
 | Managed stream | Little-endian 64-bit payload length and a versioned fixed-integer bincode document, using the same bounded codec, zlib and buffered I/O implementation. |
 
 Session identity and continuation, ARM execution, WinCE kernel (including mapped sections), fixed-function

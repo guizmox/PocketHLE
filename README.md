@@ -32,6 +32,7 @@ j92580498-max, to make the two projects easy to distinguish.
 | --- | --- |
 | Install and import a game | [Using PocketHLE-Reborn](README-DETAILED.md#using) |
 | Set up a Steam Deck | [Steam Deck guide](docs/STEAMDECK.md) |
+| Find emulator, PocketPC and Gizmondo options | [Settings reference](docs/OPTIONS.md) |
 | Configure controls or run a .NET game | [Frontend guide](docs/FRONTENDS.md) |
 | Build or contribute | [Build and release](docs/BUILD.md) · [Architecture](docs/AGENTS.md) |
 | Read the detailed project guide | [Compatibility evidence, status, architecture and roadmap](README-DETAILED.md) |

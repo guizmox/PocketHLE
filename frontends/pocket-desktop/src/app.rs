@@ -3573,7 +3573,7 @@ impl PocketLauncher {
                 ui.vertical(|ui| {
                     ui.set_max_width(380.0);
                     ui.add(egui::Label::new("Maximum game FPS, or Unlimited. Emulator default inherits the global limit; an explicit value overrides it. Restart the game to apply.").wrap(true))
-                        .on_hover_text("Caps GAPI, DirectDraw and OpenGL ES presentations, not video recording FPS. GDI-only drawing is not capped. A cap does not speed up a slow game.");
+                        .on_hover_text("Caps completed GDI, GAPI, DirectDraw and OpenGL ES presentations, not video recording FPS. Intermediate updates may be coalesced. A cap does not speed up a slow game.");
                 });
                 ui.end_row();
                 if !is_gizmondo {

@@ -53,7 +53,7 @@ refactor.
    independent consumers assume this: `WinCeDispatcher::resolve_handler`,
    `native_thunks::native_thunk_for`, `Dispatcher::constant_for`, and the
    hard-coded DLL list in `Process::map_into`
-   (`crates/pocket-kernel/src/lib.rs:1620`). CeGCC images write the bare
+   (`crates/pocket-kernel/src/lib.rs`). CeGCC images write the bare
    name (`COREDLL`), so `pocket-pe` normalizes it at the loader boundary —
    see section 7.
 2. **`Dispatcher::constant_for` must be deterministic per thunk.** The
@@ -83,7 +83,7 @@ refactor.
 7. **Worker threads never receive the window queue's synthetic traffic.**
    A worker running its own pump would dispatch forever and the thread
    that actually renders would never get the CPU back
-   (`crates/pocket-winceapi/src/coredll.rs:6686` and `:6743`).
+   (the message handlers in `crates/pocket-winceapi/src/coredll.rs`).
 8. **`arch_all` is deliberately disabled on `unicorn-engine`.** Enabling
    it breaks the Android NDK cross-compile on QEMU's x86 `cpuid.h`.
 9. **`CreateThread` returns to its creator; it never enters the new
@@ -219,7 +219,7 @@ and read-only package files. Check the dispatched API, since an installer can
 import functions it never invokes. Commit registry changes only after the
 callbacks complete successfully.
 
-`Process::map_into` (`crates/pocket-kernel/src/lib.rs:1453`) is the whole
+`Process::map_into` (`crates/pocket-kernel/src/lib.rs`) is the whole
 load path. In order:
 
 1. Map each section at `image_base + virtual_address`, honouring the
@@ -246,16 +246,17 @@ Strategy 2 is why invariant 2 exists: `constant_for` is consulted once,
 at load time, and its answer is frozen into guest memory. Reserve this strategy
 for answers that are independent of mutable state.
 
-The dynamic-export DLL list in step 6 is hard-coded at
-`crates/pocket-kernel/src/lib.rs:1620`: `coredll.dll`, `commctrl.dll`,
-`gx.dll`, `ddraw.dll`, `libgles_cm.dll`, `libgles_cl.dll`, `hss.dll`.
-Adding a module to `pocket-winceapi` without adding it here means
-`GetProcAddress` on it returns `NULL`.
+The dynamic-export DLL list in step 6 is maintained in `Process::map_into` /
+`map_into_with_executable_heap` in `crates/pocket-kernel/src/lib.rs`. It includes
+the EGL/GLES2, sensor, shell, networking and utility modules as well as core
+WinCE, GAPI, DirectDraw and GLES1 modules. Consult that list and the dispatcher's
+`dynamic_names` tables when adding an HLE module; handler registration alone
+does not create a dynamically discoverable export.
 
 
 ## 5. Dispatch
 
-A `Thunk` (`crates/pocket-kernel/src/lib.rs:1211`) is the unit of
+A `Thunk` (`crates/pocket-kernel/src/lib.rs`) is the unit of
 identity for an intercepted import:
 
 ```rust
@@ -268,22 +269,23 @@ pub struct Thunk {
 }
 ```
 
-A handler returns a `DispatchOutcome` (`:521`):
+A handler returns a `DispatchOutcome` (defined in `crates/pocket-kernel/src/lib.rs`):
 
 | Variant | Meaning |
 | --- | --- |
 | `ReturnedR0(u32)` | Normal return. `void` handlers return 0; the guest ignores it. |
 | `ReturnedR0R1(u32, u32)` | 64-bit return, low word in r0. |
 | `JumpTo(va)` | Resume the guest at `va` instead of `LR`. Used to block modally by re-entering the same thunk — see `message_box_w`. |
-| `Halt(reason)` | Stop the run loop. `ExitProcess`, `TerminateProcess`. |
+| `Halt` | Stop the run loop. `ExitProcess`, `TerminateProcess`. |
+| `Unimplemented` | Missing handler outcome; the kernel logs the missing API and supplies its fallback return. This is not implemented API semantics. |
 
 **`resolve_handler` memoizes by `thunk_va` and import identity, including negative results**
-(`crates/pocket-winceapi/src/lib.rs:280`). Runtime DLL slots may be reused after `FreeLibrary`: the cached DLL,
+(`crates/pocket-winceapi/src/lib.rs`). Runtime DLL slots may be reused after `FreeLibrary`: the cached DLL,
 binding and friendly name must still match before a cached handler is used.
 Changed import metadata at the same address replaces the cache entry. Handler
 registration explicitly clears the cache.
 Unresolved lookups fall back to `ignored_dll` → `ignored_dll_stub`.
-`IGNORED_DLLS` (`:83`) currently holds only the `fmodce` prefix, with a
+`IGNORED_DLLS` in `crates/pocket-winceapi/src/lib.rs` currently holds only the `fmodce` prefix, with a
 `FSOUND_GetVersion` → `0x4070_0000` override so version checks pass.
 
 WinCE `coredll`, `aygshell` and the GLES libraries are frequently imported
@@ -337,8 +339,7 @@ Hello, World! / OK" message box, accepts Enter, and halts through
 There is no host message queue. `GetMessageW` and `PeekMessageW`
 fabricate `WM_PAINT` / `WM_TIMER` traffic, and once
 `synthetic_message_count` reaches `synthetic_message_budget` they
-fabricate `WM_QUIT` (`crates/pocket-winceapi/src/coredll.rs:6682` and
-`:6739`). The guest then runs its own perfectly ordinary shutdown.
+fabricate `WM_QUIT` (the message handlers in `crates/pocket-winceapi/src/coredll.rs`). The guest then runs its own perfectly ordinary shutdown.
 
 A fabricated periodic `WM_PAINT` is not itself a background-erase request.
 `DefWindowProcW` paints the class brush on the initial paint or after
@@ -363,8 +364,8 @@ The default differs by frontend, and this is the trap:
 | Frontend | Budget |
 | --- | --- |
 | `pocket-cli` | **240 for most games** (`--message-budget`, `0` = unlimited); Cops & Robbers is auto-unlimited when the option is omitted |
-| `pocket-desktop` | 0 — unlimited (`src/runner.rs:159`) |
-| `pocket-android-jni` | 0 — unlimited (`src/runner.rs:332`) |
+| `pocket-desktop` | 0 — unlimited (`src/runner.rs`) |
+| `pocket-android-jni` | 0 — unlimited (`src/runner.rs`) |
 
 Cops & Robbers is the CLI exception: its GLU startup continues processing
 messages past the 240-message cap. The cap sends `WM_QUIT` while the game is
@@ -388,7 +389,7 @@ the emulator was working and the CLI's cap was the whole story. The
 default stays at 240 deliberately — it keeps headless and CI runs bounded.
 
 **A guest that ignores `WM_QUIT` is halted rather than answered forever.**
-`quit_or_halt` (`coredll.rs:7211`) hands out the quit and, once the budget
+`quit_or_halt` (`coredll.rs`) hands out the quit and, once the budget
 has been spent for `QUIT_POLL_GRACE` = 64 further polls, ends the run.
 X-Forge (Ball Busters, Sticky Balls) only acts on a `WM_QUIT` that came
 from `GetMessage`; the one its `PeekMessage` pump receives is dispatched
@@ -403,7 +404,7 @@ while tearing down, so 64 is slack, not a second budget.
 edge — key down, later key up — but a guest that samples input by polling
 for `WM_KEYDOWN` sees one message and treats the key as tapped, which is
 why menus navigated fine and nothing was playable. `key_repeat_if_due`
-(`coredll.rs:7455`) fabricates a `WM_KEYDOWN` with lParam bit 30 (the
+(`coredll.rs`) fabricates a `WM_KEYDOWN` with lParam bit 30 (the
 "previous state was down" auto-repeat flag) for each key in
 `KernelState::held_keys`, after `KEY_REPEAT_DELAY_MS` = 400 and then every
 `KEY_REPEAT_INTERVAL_MS` = 33, round-robin across the held set so two
@@ -429,7 +430,7 @@ for the message-polling half of the input path.
 `pocket-core` drives fixed slices of guest execution. Each slice: run the
 CPU until the slice budget is spent or a hook fires, refresh the User
 KData tick fields, then `sync_guest_framebuffer`. `--max-slices` bounds
-the run (checked at `crates/pocket-kernel/src/lib.rs:2060`); `--max-frames`
+the run (checked at `crates/pocket-kernel/src/lib.rs`); `--max-frames`
 bounds the frames captured. A `Halt` outcome ends the loop immediately.
 
 Frame-indexed `--tap` / `--key` inputs stay queued until their target
@@ -439,9 +440,9 @@ after its press has been queued, so a future release cannot cancel an
 undelivered press. Far-future presses stay queued, so a later-menu action
 cannot land on Cops & Robbers' startup sound prompt.
 
-`message_box_w` (`coredll.rs:8928`) is modal by re-entering its own thunk
+`message_box_w` (`coredll.rs`) is modal by re-entering its own thunk
 via `JumpTo(ctx.thunk.thunk_va)`, capped at `MESSAGE_BOX_MAX_SPINS`
-= 100 000 (`:8912`). Hundreds of identical `MessageBoxW ... status:"trampoline"`
+= 100 000. Hundreds of identical `MessageBoxW ... status:"trampoline"`
 records in a trace are that mechanism working, not a spin — they are what
 lets the host present frames while the box is up.
 
@@ -504,7 +505,7 @@ any storage API. Three pieces make that work, all reached from
 **`Vol:` is a handle on a volume, not a file.** CE exposes every mounted
 volume as a `Vol:` pseudo-file inside it, so `CreateFileW("\\SD Card\\Vol:")`
 returns something `DeviceIoControl` accepts for storage queries
-(`crates/pocket-kernel/src/vfs.rs:32`). `Vfs` keeps those handles in a
+(`crates/pocket-kernel/src/vfs.rs`). `Vfs` keeps those handles in a
 table of their own, apart from open files — nothing reads or writes them,
 and each carries the mount it named so a query can answer about *that*
 volume.
@@ -524,7 +525,7 @@ path, forced non-zero: arbitrary, but stable across runs.
 fills a `STORAGE_IDENTIFICATION`: four DWORDs — size, flags, then *byte
 offsets from the start of the header* to a manufacturer and a serial
 string — followed by the strings. Two details are load-bearing
-(`coredll.rs:1945`):
+(`coredll.rs`):
 
 - The strings do not fit in the bare header, so the first call fails with
   the required size in `dwSize`; the caller reallocates and asks again.
