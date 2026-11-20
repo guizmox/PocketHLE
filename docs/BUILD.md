@@ -268,6 +268,7 @@ download, automatic installation, EXE replacement or APK installation request.
 
 1. Increase `[workspace.package].version` in root Cargo.toml and refresh the
    workspace-package versions in Cargo.lock without upgrading unrelated dependencies.
+   Every workspace crate, including `pocket-netcf`, inherits this release version.
    For Android distribution also increase `versionCode`; `versionName` and
    `BuildConfig.UPDATE_VERSION` derive from the root Cargo version.
 2. Build and validate the packages from that commit with CI.

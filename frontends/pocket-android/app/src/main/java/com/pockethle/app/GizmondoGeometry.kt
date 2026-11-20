@@ -26,7 +26,8 @@ internal data class GizmondoGeometry(
             val toolbar = (0..4).map { rect(start + it * 52f * unit, 8f * dp, 44f * unit, toolbarHeight) } +
                 listOf(rect(start + 280f * unit, 8f * dp, 64f * unit, toolbarHeight),
                     rect(start + 352f * unit, 8f * dp, 64f * unit, toolbarHeight))
-            val shoulderTop = 8f * dp + toolbarHeight + 4f * dp
+            // Lower L1/R1 slightly; the existing height budget preserves the gap below.
+            val shoulderTop = 8f * dp + toolbarHeight + 12f * dp
             // Keep both thumb groups on screen, including short and narrow displays.
             val factor = minOf(if (big) 4f / 3f else 1f,
                 ((w / dp - 36f) / 276f).coerceAtLeast(0.1f),

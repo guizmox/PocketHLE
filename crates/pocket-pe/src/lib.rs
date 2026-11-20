@@ -196,6 +196,70 @@ pub fn file_version_resource(bytes: &[u8]) -> Option<&[u8]> {
     bytes.get(start..start.checked_add(entry.size as usize)?)
 }
 
+/// Read launcher metadata without allocating a guest virtual image or its BSS.
+#[derive(Debug)]
+pub struct FileMetadata {
+    pub machine: u16,
+    pub imports: Vec<ImportSymbol>,
+    pub high_resolution_aware: bool,
+}
+
+pub fn file_metadata(bytes: &[u8]) -> Result<FileMetadata, LoadError> {
+    let pe = parse_wince_pe(bytes)?;
+    let machine = pe.header.coff_header.machine;
+    if pe.is_64
+        || !matches!(
+            machine,
+            machine::ARM
+                | machine::THUMB
+                | machine::ARMNT
+                | machine::I386
+                | machine::MIPS_R3000
+                | machine::MIPS_R4000
+        )
+    {
+        return Err(LoadError::UnsupportedMachine(machine));
+    }
+    let imports = collect_imports(bytes, &pe)?;
+    let high_resolution_aware = collect_resources(bytes, &pe)
+        .unwrap_or_default()
+        .iter()
+        .any(|r| {
+            if !matches!(&r.ty, ResourceKey::Name(s) if s == "CEUX")
+                || !matches!(&r.name, ResourceKey::Name(s) if s == "HI_RES_AWARE")
+                || r.size < 2
+            {
+                return false;
+            }
+            pe.sections.iter().any(|section| {
+                let Some(offset) = r.data_rva.checked_sub(section.virtual_address) else {
+                    return false;
+                };
+                if u64::from(section.pointer_to_raw_data) + u64::from(section.size_of_raw_data)
+                    > bytes.len() as u64
+                {
+                    return false;
+                }
+                // Match the loaded-image bounds, including truncated raw sections.
+                if offset
+                    .checked_add(2)
+                    .is_none_or(|end| end > section.virtual_size.min(section.size_of_raw_data))
+                {
+                    return false;
+                }
+                let Some(start) = section.pointer_to_raw_data.checked_add(offset) else {
+                    return false;
+                };
+                bytes.get(start as usize..(start as usize).saturating_add(2)) == Some(&[1, 0][..])
+            })
+        });
+    Ok(FileMetadata {
+        machine,
+        imports,
+        high_resolution_aware,
+    })
+}
+
 /// Parse and lay out a PE32 image from raw bytes.
 pub fn load_bytes(bytes: &[u8]) -> Result<LoadedImage, LoadError> {
     load_bytes_inner(bytes, None)

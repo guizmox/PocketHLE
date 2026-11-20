@@ -258,10 +258,11 @@ impl GameEntry {
         if is_gizmondo_game(self, root) {
             return (320, 240);
         }
-        let image = (self.settings.screen == ScreenPref::Portrait)
-            .then(|| pocket_pe::load_file(self.launch_path(root)).ok())
-            .flatten();
-        self.settings.screen.resolve_image(image.as_ref())
+        if self.settings.screen == ScreenPref::Portrait {
+            analysis::default_screen_size_cached(&self.launch_path(root))
+        } else {
+            self.settings.screen.size()
+        }
     }
 
     /// Path to this game's directory, relative to the library root.
@@ -741,7 +742,7 @@ pub struct GameSettings {
     /// Exchange action/application button slots and the corresponding physical input bindings.
     #[serde(default)]
     pub pocketpc_swap_button_groups: bool,
-    /// Map the existing Tab/Escape controls to Windows Mobile phone soft keys.
+    /// Map Tab/Escape/Turbo to Windows Mobile phone context keys and numeric 5.
     #[serde(default)]
     pub pocketpc_phone_softkeys: bool,
     #[serde(default)]
@@ -2169,7 +2170,20 @@ impl Library {
             let mut migrated = false;
             // Upgrade ID placeholders and corrected catalogue names.
             // Other user-edited names are preserved.
-            if let Some(id) = game_gizmondo_title_id(game, &self.root) {
+            let title_candidate = is_gizmondo_title_id(&game.display_name)
+                || [
+                    "Copilot Navigation 2005",
+                    "Copilot UK",
+                    "Catapult (may 2005)",
+                    "Agaju (oct 2005)",
+                    "Agaju (october 2005)",
+                ]
+                .iter()
+                .any(|name| game.display_name.eq_ignore_ascii_case(name));
+            if let Some(id) = title_candidate
+                .then(|| game_gizmondo_title_id(game, &self.root))
+                .flatten()
+            {
                 let corrected_date = match id.as_str() {
                     "GZAP200001" => ["Copilot Navigation 2005", "Copilot UK"]
                         .iter()
@@ -4558,9 +4572,6 @@ const EMULATED_GLES_DRIVERS: [&str; 2] = ["libgles_cm.dll", "libgles_cl.dll"];
 pub fn accelerated_renderer_build(shortcut_target: &Path) -> Option<PathBuf> {
     let dir = shortcut_target.parent()?;
     let stem = shortcut_target.file_stem()?.to_str()?.to_ascii_lowercase();
-    if imported_gles_driver(shortcut_target).is_some() {
-        return None;
-    }
     // WinCE file names are case-insensitive and a cabinet writes
     // whatever case it likes, so match on lower-cased names throughout.
     let entries: Vec<(String, PathBuf)> = fs::read_dir(dir)
@@ -4572,6 +4583,17 @@ pub fn accelerated_renderer_build(shortcut_target: &Path) -> Option<PathBuf> {
             Some((name, path))
         })
         .collect();
+    // Usually there is no accelerated sibling. Do not read/map the main PE just
+    // to discover that: the same check is also used while drawing library cards.
+    if !entries.iter().any(|(_, path)| {
+        path.file_stem().and_then(|s| s.to_str()).is_some_and(|s| {
+            let candidate = s.to_ascii_lowercase();
+            candidate != stem && candidate.starts_with(&stem)
+        })
+    }) || imported_gles_driver(shortcut_target).is_some()
+    {
+        return None;
+    }
     let mut best: Option<(bool, String, PathBuf)> = None;
     for (name, path) in &entries {
         let candidate = match path.file_stem().and_then(|s| s.to_str()) {
@@ -4672,12 +4694,7 @@ fn apply_import_gpu_default(entry: &mut GameEntry, game_dir: &Path) {
 }
 
 fn imported_gles_driver(path: &Path) -> Option<String> {
-    let image = pocket_pe::load_file(path).ok()?;
-    image
-        .imports
-        .iter()
-        .map(|import| import.dll.to_ascii_lowercase())
-        .find(|dll| EMULATED_GLES_DRIVERS.contains(&dll.as_str()))
+    analysis::imported_gles_driver_cached(path)
 }
 
 fn now_unix_seconds() -> i64 {
@@ -7375,6 +7392,69 @@ mod tests {
         }
         let found = find_resource_companion_cabs(&root.join("wwp.CAB"));
         assert_eq!(found, vec![root.join("wwp-res.CAB")]);
+    }
+
+    #[test]
+    fn catalogue_metadata_matches_loaded_resources_without_mapping_large_bss() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("game.exe");
+        write_pe_importing(&path, &["coredll.dll", "libGLES_CM.dll"]);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.resize(0x600, 0);
+        let put = |data: &mut Vec<u8>, offset: usize, value: u32| {
+            data[offset..offset + 4].copy_from_slice(&value.to_le_bytes())
+        };
+        put(&mut bytes, 0x178 + 8, 0x400);
+        put(&mut bytes, 0x178 + 16, 0x400);
+        put(&mut bytes, 0x98 + 112, 0x1100);
+        put(&mut bytes, 0x98 + 116, 0x100);
+        bytes[0x300 + 12..0x300 + 14].copy_from_slice(&1u16.to_le_bytes());
+        put(&mut bytes, 0x300 + 16, 0x8000_0060);
+        put(&mut bytes, 0x300 + 20, 0x8000_0018);
+        bytes[0x318 + 12..0x318 + 14].copy_from_slice(&1u16.to_le_bytes());
+        put(&mut bytes, 0x318 + 16, 0x8000_0070);
+        put(&mut bytes, 0x318 + 20, 0x8000_0030);
+        bytes[0x330 + 14..0x330 + 16].copy_from_slice(&1u16.to_le_bytes());
+        put(&mut bytes, 0x330 + 16, 1033);
+        put(&mut bytes, 0x330 + 20, 0x48);
+        put(&mut bytes, 0x348, 0x1200);
+        put(&mut bytes, 0x34c, 2);
+        for (at, name) in [(0x360, "CEUX"), (0x370, "HI_RES_AWARE")] {
+            let text: Vec<_> = name.encode_utf16().collect();
+            bytes[at..at + 2].copy_from_slice(&(text.len() as u16).to_le_bytes());
+            for (i, ch) in text.into_iter().enumerate() {
+                bytes[at + 2 + i * 2..at + 4 + i * 2].copy_from_slice(&ch.to_le_bytes());
+            }
+        }
+        for flag in [0u16, 1] {
+            bytes[0x400..0x402].copy_from_slice(&flag.to_le_bytes());
+            let metadata = pocket_pe::file_metadata(&bytes).unwrap();
+            let image = pocket_pe::load_bytes(&bytes).unwrap();
+            assert_eq!(metadata.machine, image.machine);
+            assert_eq!(
+                format!("{:?}", metadata.imports),
+                format!("{:?}", image.imports)
+            );
+            assert_eq!(metadata.high_resolution_aware, flag == 1);
+            assert_eq!(
+                ScreenPref::Portrait.resolve_image(Some(&image)),
+                if flag == 1 { (480, 640) } else { (240, 320) }
+            );
+        }
+        // A real image of this size would allocate 512 MiB during ordinary load.
+        put(&mut bytes, 0x178 + 8, 0x2000_0000);
+        assert!(
+            pocket_pe::file_metadata(&bytes)
+                .unwrap()
+                .high_resolution_aware
+        );
+        // Missing raw section bytes must not fabricate a high-resolution marker.
+        bytes.truncate(0x500);
+        assert!(
+            !pocket_pe::file_metadata(&bytes)
+                .unwrap()
+                .high_resolution_aware
+        );
     }
 
     #[test]

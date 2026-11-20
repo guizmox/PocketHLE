@@ -117,9 +117,9 @@ class GameSettingsActivity : HostKeyActivity() {
                 controlsCategory.addPreference(viewGrid)
                 updateEditor()
                 controlsCategory.addPreference(androidx.preference.SwitchPreferenceCompat(requireContext()).apply {
-                    key="pocketpc_phone_softkeys"; title="Map Tab/Esc to F1/F2"; isPersistent=false
+                    key="pocketpc_phone_softkeys"; title="Map Tab/Esc/Turbo to F1/F2/5"; isPersistent=false
                     isChecked=current.pocketpcPhoneSoftkeys
-                    summary="Send F1 for Tab and F2 for Esc on keyboard, gamepad and on-screen controls. Restart the game to apply."
+                    summary="Send F1 for Tab, F2 for Esc and 5 for Turbo on keyboard, gamepad and on-screen controls. Restart the game to apply."
                     setOnPreferenceChangeListener { _, value ->
                         current=current.copy(pocketpcPhoneSoftkeys=value as Boolean)
                         writeGameSettings();true

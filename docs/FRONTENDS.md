@@ -1081,10 +1081,11 @@ input/playback backend and are not obsolete merely because they mention SDL2.
 
 ### PocketPC phone soft keys
 
-Per-game **Controls → Map Tab/Esc to F1/F2** changes Tab to the Windows Mobile
+Per-game **Controls → Map Tab/Esc/Turbo to F1/F2/5** changes Tab to the Windows Mobile
 left context key (`VK_F1`, `0x70`) and Escape to the right context key (`VK_F2`,
-`0x71`). It is disabled by default, applies on the next launch, and is not
-available for Gizmondo. Classic and Controller touch layouts display **F1/F2**
+`0x71`), and Turbo (`VK_F3`, `0x72`) to the digit **5** (`0x35`). It is disabled
+by default, applies on the next launch, and is not
+available for Gizmondo. Classic and Controller touch layouts display **F1/F2/5**
 when enabled; existing keyboard and gamepad assignments continue to use the
 same commands. The shared Rust session adapter converts press and release
 before delivery to native or managed guests on Desktop and Android. Pointer
@@ -1105,7 +1106,9 @@ The Android Gizmondo function bar keeps its horizontal fit and button widths,
 with its original height reduced by one third. Vector icons fit the measured
 button bounds; Exit/Full text is capped to that height. Shoulders and the reserved
 game viewport start below the resized bar. Big controls and overflow do not
-change the bar size.
+change the bar size. L1/R1 sit 8 dp lower beneath the function bar. The existing
+height budget retains the gap above the D-pad and action buttons, including on
+short displays. Painting and touch targets use the same rectangles.
 
 ### Physical accelerometer mapping
 

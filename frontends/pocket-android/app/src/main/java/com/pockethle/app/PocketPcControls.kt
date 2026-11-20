@@ -100,6 +100,10 @@ class PocketPcControls(context: Context, attrs: AttributeSet? = null) : ViewGrou
             text=if(settings.pocketpcPhoneSoftkeys) "F2" else "Esc"
             contentDescription=if(settings.pocketpcPhoneSoftkeys) "Right soft key (F2)" else "Escape"
         }
+        keys.getValue(R.id.btn_turbo).apply {
+            text=if(settings.pocketpcPhoneSoftkeys) "5" else "Turbo"
+            contentDescription=if(settings.pocketpcPhoneSoftkeys) "Numeric key 5" else "Turbo"
+        }
         swapButtonGroups = settings.pocketpcSwapButtonGroups
         controllerLayout = config.pocketpcTouchLayout == "controller"
         bigDirectionalControls = config.pocketpcControlsSize == "big"

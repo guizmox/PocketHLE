@@ -1,7 +1,7 @@
 //! Host input adaptation shared by Desktop and Android before guest delivery.
 use pocket_core::kernel::InputEvent;
 
-/// The setting changes the established Tab/Escape controls, not the GAPI key
+/// The setting changes Tab/Escape/Turbo controls, not the GAPI key
 /// table or any other key. Configure once per launch, including child processes.
 /// Both edges must pass through the same mapping so releases cannot get stuck.
 pub fn phone_softkeys(event: InputEvent, enabled: bool) -> InputEvent {
@@ -11,6 +11,7 @@ pub fn phone_softkeys(event: InputEvent, enabled: bool) -> InputEvent {
     let key = |vk| match vk {
         0x09 => 0x70,
         0x1b => 0x71,
+        0x72 => 0x35,
         _ => vk,
     };
     match event {
@@ -30,6 +31,8 @@ mod tests {
             for (vk, mapped) in [
                 (0x09, 0x70),
                 (0x1b, 0x71),
+                (0x72, 0x35),
+                (0x35, 0x35),
                 (0x0d, 0x0d),
                 (0xc1, 0xc1),
                 (0x26, 0x26),

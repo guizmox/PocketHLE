@@ -27,6 +27,8 @@ pub fn detect_graphics_api(path: &std::path::Path) -> Option<&'static str> {
 struct ModuleGraphics {
     label: Option<&'static str>,
     dependencies: std::collections::BTreeSet<String>,
+    high_resolution_aware: bool,
+    imported_gles: Option<String>,
 }
 
 const GLES_2: &str = "OpenGL ES 2.0 CM";
@@ -66,7 +68,7 @@ const GRAPHICS_PRIORITY: &[&str] = &[
 
 fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
     let bytes = std::fs::read(path).ok()?;
-    let image = pocket_pe::load_bytes(&bytes).ok()?;
+    let image = pocket_pe::file_metadata(&bytes).ok()?;
     let managed = pocket_netcf::graphics_api(&bytes);
     let mut imports = image.imports;
     // Use the same bundled COREDLL ordinal maps as the runtime, not game names.
@@ -104,7 +106,16 @@ fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
             }
         }
     }
-    let strings = binary_strings(&bytes);
+    let dynamic = imports.iter().any(|i| matches!(&i.binding, pocket_pe::ImportBinding::Name(name) if matches!(name.to_ascii_lowercase().as_str(), "loadlibraryw" | "loadlibrarya" | "loadlibraryexw" | "loadlibraryexa" | "getprocaddressw" | "getprocaddressa" | "getprocaddress")));
+    let strings = if dynamic {
+        binary_strings(&bytes)
+    } else {
+        Vec::new()
+    };
+    let imported_gles = imports
+        .iter()
+        .map(|i| i.dll.to_ascii_lowercase())
+        .find(|dll| crate::EMULATED_GLES_DRIVERS.contains(&dll.as_str()));
     let mut dependencies: std::collections::BTreeSet<_> = imports
         .iter()
         .filter_map(|import| dll_basename(&import.dll))
@@ -127,6 +138,8 @@ fn read_graphics_module(path: &std::path::Path) -> Option<ModuleGraphics> {
     });
     let label = managed.or(label);
     Some(ModuleGraphics {
+        high_resolution_aware: image.high_resolution_aware,
+        imported_gles,
         label,
         dependencies,
     })
@@ -225,14 +238,67 @@ impl<T: Clone> GraphicsApiCache<T> {
         label
     }
 }
-pub fn detect_graphics_api_cached(path: &std::path::Path) -> Option<&'static str> {
+fn graphics_cache() -> std::sync::MutexGuard<'static, GraphicsApiCache<Option<ModuleGraphics>>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<GraphicsApiCache<Option<ModuleGraphics>>>> =
         std::sync::OnceLock::new();
-    let mut cache = CACHE
+    CACHE
         .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(|e| e.into_inner())
+}
+pub(crate) fn imported_gles_driver_cached(path: &std::path::Path) -> Option<String> {
+    graphics_cache()
+        .get(path, read_graphics_module)?
+        .imported_gles
+}
+pub(crate) fn default_screen_size_cached(path: &std::path::Path) -> (u32, u32) {
+    if graphics_cache()
+        .get(path, read_graphics_module)
+        .is_some_and(|m| m.high_resolution_aware)
+    {
+        (480, 640)
+    } else {
+        (240, 320)
+    }
+}
+pub fn detect_graphics_api_cached(path: &std::path::Path) -> Option<&'static str> {
+    let mut cache = graphics_cache();
     detect_from_modules(path, |module| cache.get(module, read_graphics_module))
+}
+
+/// Catalogue identity is resolved once; ordinary Pocket PC cards do not need
+/// a second recursive search for a Gizmondo serial that will never be displayed.
+pub fn game_card_identity(game: &GameEntry, root: &std::path::Path) -> (bool, Option<String>) {
+    let gizmondo = is_gizmondo_game(game, root);
+    (
+        gizmondo,
+        gizmondo
+            .then(|| game_gizmondo_title_id(game, root))
+            .flatten(),
+    )
+}
+
+/// Both frontends use the actual launch variant once for the card caption.
+/// Changing the selected EXE, adding/removing a sibling, or replacing a local
+/// graphics DLL still uses the existing detection and metadata invalidation.
+pub fn game_card_display(
+    game: &GameEntry,
+    root: &std::path::Path,
+    gizmondo: bool,
+) -> ((u32, u32), Option<&'static str>) {
+    let path = game.launch_path(root);
+    let size = if gizmondo {
+        (320, 240)
+    } else if game.settings.screen == crate::ScreenPref::Portrait {
+        default_screen_size_cached(&path)
+    } else {
+        game.settings.screen.size()
+    };
+    let api = match detect_graphics_api_cached(&path) {
+        Some(GLES_LEGACY_CM) if gizmondo => Some("OpenGL ES 1.0 CM"),
+        api => api,
+    };
+    (size, api)
 }
 
 pub fn game_graphics_api(game: &GameEntry, root: &std::path::Path) -> Option<&'static str> {
@@ -1158,6 +1224,8 @@ mod catalogue_cache_tests {
                 panic!("unreferenced DLL was scanned")
             };
             Some(ModuleGraphics {
+                high_resolution_aware: false,
+                imported_gles: None,
                 label,
                 dependencies: (path == main)
                     .then(|| "graphics.dll".into())

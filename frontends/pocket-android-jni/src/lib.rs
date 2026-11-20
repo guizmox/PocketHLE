@@ -181,15 +181,16 @@ pub extern "system" fn Java_com_pockethle_app_NativeBridge_listGames<'local>(
             .iter()
             .map(|game| {
                 let mut value = serde_json::to_value(game)?;
-                value["is_gizmondo"] = pocket_library::is_gizmondo_game(game, &root).into();
-                value["title_id"] =
-                    serde_json::to_value(pocket_library::game_gizmondo_title_id(game, &root))?;
-                let (width, height) = game.resolved_screen_size(&root);
+                let (gizmondo, title_id) =
+                    pocket_library::analysis::game_card_identity(game, &root);
+                value["is_gizmondo"] = gizmondo.into();
+                value["title_id"] = serde_json::to_value(title_id)?;
+                let ((width, height), graphics_api) =
+                    pocket_library::analysis::game_card_display(game, &root, gizmondo);
                 value["screen_width"] = width.into();
                 value["screen_height"] = height.into();
                 value["custom_settings"] = game.settings.has_custom_settings(lib.config()).into();
-                value["graphics_api"] =
-                    serde_json::to_value(pocket_library::analysis::game_graphics_api(game, &root))?;
+                value["graphics_api"] = serde_json::to_value(graphics_api)?;
                 Ok(value)
             })
             .collect::<Result<Vec<serde_json::Value>, serde_json::Error>>()?;

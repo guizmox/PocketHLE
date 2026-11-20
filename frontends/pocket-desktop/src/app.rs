@@ -12,7 +12,7 @@ use add_data_prompt::DataPrompt;
 #[path = "title_scroll.rs"]
 mod title_scroll;
 use pocket_library::stylus_grid::{ControlsMode, GridRouter, HostInput};
-use pocket_library::{analyze_game, game_gizmondo_title_id, GameAnalysis};
+use pocket_library::{analyze_game, GameAnalysis};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use stylus_controls_ui::StylusEditor;
@@ -2240,10 +2240,7 @@ impl PocketLauncher {
         self.game_card_metadata
             .entry(game.id.clone())
             .or_insert_with(|| {
-                (
-                    is_gizmondo_game(game, self.library.root()),
-                    game_gizmondo_title_id(game, self.library.root()),
-                )
+                pocket_library::analysis::game_card_identity(game, self.library.root())
             })
             .clone()
     }
@@ -2463,8 +2460,7 @@ impl PocketLauncher {
         let ((width, height), graphics_api) = match self.screen_cache.get(&game.id) {
             Some((pref, size, api)) if *pref == game.settings.screen => (*size, *api),
             _ => {
-                let size = game.resolved_screen_size(self.library.root());
-                let api = pocket_library::analysis::game_graphics_api(game, self.library.root());
+                let (size, api) = pocket_library::analysis::game_card_display(game, self.library.root(), giz);
                 self.screen_cache
                     .insert(game.id.clone(), (game.settings.screen, size, api));
                 (size, api)
@@ -3442,8 +3438,8 @@ impl PocketLauncher {
                 }
                 if !is_gizmondo {
                     ui.label("Phone soft keys");
-                    crate::controller_ui::checkbox(ui, &mut draft.pocketpc_phone_softkeys, "Map Tab/Esc to F1/F2")
-                        .on_hover_text("Send F1 for Tab and F2 for Esc on keyboard, gamepad and on-screen controls. Applies on the next launch.");
+                    crate::controller_ui::checkbox(ui, &mut draft.pocketpc_phone_softkeys, "Map Tab/Esc/Turbo to F1/F2/5")
+                        .on_hover_text("Send F1 for Tab, F2 for Esc and 5 for Turbo on keyboard, gamepad and on-screen controls. Applies on the next launch.");
                     ui.end_row();
                     ui.label("Swap action / P buttons");
                     crate::controller_ui::checkbox(ui, &mut draft.pocketpc_swap_button_groups, "Enabled")
@@ -4194,7 +4190,7 @@ impl PocketLauncher {
                 for (label, guest) in [
                     (if self.running_phone_softkeys { "F1" } else { "TAB" }, GuestButton::Soft1),
                     (if self.running_phone_softkeys { "F2" } else { "ESC" }, GuestButton::Soft2),
-                    ("TURBO", GuestButton::Turbo),
+                    (if self.running_phone_softkeys { "5" } else { "TURBO" }, GuestButton::Turbo),
                 ] {
                     self.vbutton_size(ui, label, guest, Vec2::new(52.0, 24.0));
                 }
