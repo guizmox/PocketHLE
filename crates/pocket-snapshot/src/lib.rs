@@ -1,5 +1,6 @@
 //! Shared bounded serialization/compression for native and managed checkpoints.
 //! The owner defines section IDs and versions; no backend resources live here.
+pub mod fields;
 use bincode::Options;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 pub const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;

@@ -2,6 +2,8 @@ Cargo.lock
 Cargo.toml
 PATCH-README.md
 crates/pocket-core/src/snapshot.rs
+crates/pocket-core/tests/fixtures/wince12-process-v1.bin
+crates/pocket-kernel/Cargo.toml
 crates/pocket-kernel/src/audio.rs
 crates/pocket-kernel/src/gdi.rs
 crates/pocket-kernel/src/gdi_pattern.rs
@@ -18,10 +20,13 @@ crates/pocket-netcf/src/host.rs
 crates/pocket-pe/src/lib.rs
 crates/pocket-session/src/input.rs
 crates/pocket-session/src/lib.rs
+crates/pocket-snapshot/src/fields.rs
+crates/pocket-snapshot/src/lib.rs
 crates/pocket-winceapi/data/aygshell-ordinals.json
 crates/pocket-winceapi/src/aygshell.rs
 crates/pocket-winceapi/src/coredll.rs
 crates/pocket-winceapi/src/coredll/message_queue.rs
+crates/pocket-winceapi/src/coredll/paint_presentation.rs
 crates/pocket-winceapi/src/coredll/pattern_brush.rs
 crates/pocket-winceapi/src/coredll/window_graphics.rs
 crates/pocket-winceapi/src/gx.rs
@@ -38,10 +43,12 @@ docs/FRONTENDS.md
 docs/GPU.md
 docs/MFC.md
 docs/README.md
+docs/SNAPSHOT-WINCE-FORMAT.md
 docs/SNAPSHOTS.md
 docs/testing/POCKETPC-GAPI-2026-11-19.md
 docs/testing/POCKETPC-STARTUP-2026-11-19.md
 docs/testing/ULTIMA-2026-11-20.md
+docs/testing/VRALLY-2026-11-20.md
 frontends/pocket-android-jni/src/lib.rs
 frontends/pocket-android-jni/src/runner.rs
 frontends/pocket-android/app/build.gradle.kts

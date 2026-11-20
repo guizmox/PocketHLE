@@ -46,6 +46,22 @@ skip unknown optional sections and rejects unknown required sections.
 [Shared format/compression](../crates/pocket-snapshot/src/lib.rs) ·
 [Managed state](../crates/pocket-netcf/src/runtime_snapshot.rs)
 
+## Independently versioned WinCE records
+
+WinCE container 12 replaces the monolithic section-11 payload with 117 stable,
+length-bounded typed records, grouped by domain ID. New optional records use
+explicit safe defaults; required data and unsupported versions fail preflight.
+An owner can migrate a single record through a scoped decoder without copying
+the whole kernel format or adding a PocketPC/Gizmondo branch. Individual nested
+payloads still require a version/migration when their representation changes.
+The writer keeps only a small length directory; records stream through the same
+buffered zlib I/O. Capture/restore resource ownership and validation are shared
+and unchanged. This transition requires recreating section-11 development slots;
+there is no legacy monolithic reader. Future changes must keep the new reference
+fixtures passing or explicitly document why faithful migration is impossible.
+
+[Format, record registry and evolution rules](SNAPSHOT-WINCE-FORMAT.md).
+
 ## Verified restore and emulation requirements
 
 Both GUIs use `prepare_async` from the shared archive module. Decode and checksum
@@ -105,9 +121,9 @@ being mistaken for part of the restored session. Android reattaches the original
 JNI input channel after every cold replacement. All managed Android applications
 use this interpreter and snapshot path.
 
-The managed and native payload versions evolve separately; neither has a legacy
-development-format reader. Current native session identity is section version 3,
-WinCE 11, fixed EGL 2, programmable EGL 6 and media 2. Managed payload version is 1.
+The managed and native payload versions evolve separately. Legacy development
+containers are not retained; new WinCE record payloads can use scoped migrations. Current native session identity is section version 3,
+WinCE 12, fixed EGL 2, programmable EGL 6 and media 2. Managed payload version is 1.
 Recreate development slots after this change.
 
 ## Restore and ARM block reads
@@ -363,9 +379,8 @@ snapshot, never in the frame loop. Unsupported resources keep the previous slot.
 Large ARM, mapped-file, RAM-store and native GLES2 byte arrays use `serde_bytes`
 with bincode's length-prefixed byte representation. This requests bulk writes
 and reads through the buffered zlib stream instead of visiting each byte.
-The session section is version 2, WinCE section version 8, media section version 2
-fixed-function EGL section version 2, and programmable EGL section version 6. Development snapshots using earlier
-section versions must be recreated.
+The current section versions are listed above; the WinCE payload now uses
+independently versioned records. The bulk byte representation remains unchanged.
 
 [Fixed-function EGL](../crates/pocket-winceapi/src/gles/snapshot.rs) ·
 [GLES 2.0 resource checkpoint](../crates/pocket-winceapi/src/gles2/renderer/checkpoint.rs) ·
@@ -399,9 +414,10 @@ An undersized `Z_FINISH` can be retried after restore. Reset, terminal checksum
 errors and the `Z_NEED_DICT` negotiation state survive too; this does not add
 an `inflateSetDictionary` API. Guest output/state permissions are checked before
 decoder progress or destruction, so an invalid output cannot silently consume
-input. Dependency changes which alter the serialized decoder layout require a
-WinCE section version change. No compatibility reader for development version 6
-is retained.
+input. Dependency changes which alter the serialized decoder layout require a version
+change and scoped conversion for the zlib record (`0x0307`), or an explicit
+rejection if faithful conversion is impossible. They no longer require changing
+the whole WinCE container.
 
 A supplied native `zlib.dll` remains native ARM code, as described in
 [Graphics](GPU.md#native-image-decoder-dependencies-and-zlib-streams). Its state
@@ -464,9 +480,15 @@ Validation procedures and platform limits: [phase 6 record](testing/SNAPSHOT-PHA
 
 ### Native window paint state
 
-WinCE section 11 includes pending client update regions, the message identity
+The GDI record in WinCE 12 includes pending client update regions, the message identity
 of each suspended DispatchMessage callback, and the update rectangle retained
 across BeginPaint's erase callback. A slot captured while a repaint is in flight
 therefore keeps the same invalidation and GAPI pacing policy after restore.
+The optional native GDI FPS ceiling also keeps transient BeginPaint/EndPaint
+host revision anchors. These anchors are excluded from serialized state and
+cleared on direct in-memory restore too; a restored partial paint may complete
+without its first ceiling check. Guest pixels, invalid regions and callback
+continuations remain saved. This host-only bookkeeping does not change section
+12 or require new snapshots by itself.
 As with earlier development section changes, no legacy kernel-section reader
 is retained; recreate development slots written with older kernel versions.

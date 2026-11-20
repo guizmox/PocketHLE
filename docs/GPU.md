@@ -453,6 +453,18 @@ there is no fixed 16 ms ceiling on explicit EGL/GX/DirectDraw presents. Without
 an explicit presentation boundary, Unlimited coalesces intermediate dirty GDI
 updates at 60 Hz to avoid treating every blit as a complete image.
 
+A positive game limit also paces changed native window painting at the paired
+BeginPaint/EndPaint boundary. Drawing operations within that transaction are
+not individually paced. Empty, hidden/offscreen and unrelated memory-only
+paints do not wait, and an actual GX/EGL/DirectDraw presentation within the
+transaction already pays the limit. Unlimited and the absence of a selected
+cap keep their previous behavior. Native paint updates remain IPS telemetry;
+this boundary does not manufacture completed game-frame counts. V-Rally's
+self-invalidating paint loop advances its panorama once per update, so merely
+coalescing its display while allowing hundreds of guest paints per second
+does not control that animation. See the
+[measured investigation](testing/VRALLY-2026-11-20.md).
+
 ## Input-induced desktop stutter
 
 The clean fix uses native frame-ready notifications and a coalescing mailbox.

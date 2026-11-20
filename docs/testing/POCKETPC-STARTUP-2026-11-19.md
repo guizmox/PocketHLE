@@ -171,7 +171,13 @@ uses versionCode 24. No third-party dependencies were upgraded for this bump.
 
 ### V-Rally steering follow-up: presentation boundary
 
-The supplied steering video is still an open visual report. A 64-second real ARM
+The [20 November follow-up](VRALLY-2026-11-20.md) records the subsequent
+resource and independent ARM checks, then identifies excessive update cadence
+in a self-invalidating paint loop. The generic GDI paint FPS ceiling addresses
+that timing problem; no V-Rally-specific runtime rule is included. The
+paragraph below records the earlier pixel-boundary investigation.
+
+A 64-second real ARM
 run entered a race and exercised left/right steering. Captures taken immediately
 after `CreateBitmap` were compared with the following displayed frame, using
 the selected logical palette and the display's RGB565 quantization. All twelve

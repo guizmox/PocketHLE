@@ -37,6 +37,7 @@ cpal = { version = "0.15", optional = true }
 rmp3 = { version = "0.3.1", features = ["std"] }
 quick-xml = "0.39"
 
+pocket-snapshot = { path = "../pocket-snapshot" }
 pocket-cpu = { path = "../pocket-cpu" }
 pocket-pe = { path = "../pocket-pe" }
 

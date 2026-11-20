@@ -18,6 +18,7 @@ const SECTION_REQUIRED: u16 = 1 << 15;
 const SESSION: u16 = SECTION_REQUIRED | 1;
 const ARM: u16 = SECTION_REQUIRED | 2;
 const KERNEL: u16 = SECTION_REQUIRED | 3;
+const KERNEL_VERSION: u16 = 12;
 const EGL_FIXED: u16 = SECTION_REQUIRED | 4;
 const EGL_FIXED_VERSION: u16 = 2;
 const MEDIA: u16 = SECTION_REQUIRED | 5;
@@ -144,7 +145,12 @@ impl SessionSnapshot {
             ),
         )?;
         write_section(&mut buffered, &mut remaining, ARM, &self.cpu)?;
-        write_section(&mut buffered, &mut remaining, KERNEL, &self.kernel)?;
+        let kernel = pocket_snapshot::fields::Plan::new(&self.kernel)?;
+        consume_budget(&mut remaining, kernel.encoded_len())?;
+        buffered.write_all(&KERNEL.to_le_bytes())?;
+        buffered.write_all(&KERNEL_VERSION.to_le_bytes())?;
+        buffered.write_all(&kernel.encoded_len().to_le_bytes())?;
+        kernel.write(&mut buffered)?;
         write_section(&mut buffered, &mut remaining, EGL_FIXED, &self.egl)?;
         write_section(&mut buffered, &mut remaining, MEDIA, &self.media)?;
         if let Some(programmable) = &self.programmable {
@@ -207,7 +213,15 @@ impl SessionSnapshot {
             match (id, version) {
                 (SESSION, 3) => session = Some(read_section(&mut section)?),
                 (ARM, 1) => cpu = Some(read_section(&mut section)?),
-                (KERNEL, 11) => kernel = Some(read_section(&mut section)?),
+                (KERNEL, KERNEL_VERSION) => {
+                    use pocket_snapshot::fields::FieldSet;
+                    kernel = Some(KernelSnapshot::read_archive(&mut section)?);
+                }
+                (KERNEL, _) => {
+                    return Err(invalid(format!(
+                        "unsupported WinCE snapshot container {version}; create a new snapshot"
+                    )))
+                }
                 (EGL_FIXED, EGL_FIXED_VERSION) => egl = Some(read_section(&mut section)?),
                 (MEDIA, 2) => media = Some(read_section(&mut section)?),
                 (EGL_PROGRAMMABLE, EGL_PROGRAMMABLE_VERSION) => {
@@ -299,8 +313,6 @@ fn write_section(
         EGL_FIXED_VERSION
     } else if id == EGL_PROGRAMMABLE {
         EGL_PROGRAMMABLE_VERSION
-    } else if id == KERNEL {
-        11
     } else if id == SESSION {
         3
     } else if id == MEDIA {
@@ -1114,6 +1126,59 @@ mod tests {
     }
 
     #[test]
+    fn kernel_records_evolve_inside_the_same_native_session_envelope() {
+        let mut source = fixture(3);
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11004,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write_sections(&mut bytes).unwrap();
+        let mut at = 2;
+        while u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) != KERNEL {
+            at += 12 + u64::from_le_bytes(bytes[at + 4..at + 12].try_into().unwrap()) as usize;
+        }
+        let len = u64::from_le_bytes(bytes[at + 4..at + 12].try_into().unwrap()) as usize;
+        let body = at + 12;
+        let count = u16::from_le_bytes(bytes[body..body + 2].try_into().unwrap());
+        let mut extended = bytes.clone();
+        let mut field = Vec::new();
+        pocket_snapshot::fields::write_value(
+            &mut field,
+            pocket_snapshot::fields::Header {
+                id: 0x7f01,
+                version: 1,
+                len: 4,
+            },
+            &42u32,
+        )
+        .unwrap();
+        extended.splice(body + len..body + len, field);
+        extended[body..body + 2].copy_from_slice(&(count + 1).to_le_bytes());
+        extended[at + 4..at + 12].copy_from_slice(&((len + 16) as u64).to_le_bytes());
+        let restored = SessionSnapshot::read_sections(&mut extended.as_slice()).unwrap();
+        let mut destination = fixture(3);
+        destination.restore_snapshot(restored).unwrap();
+        extended[body + len..body + len + 2].copy_from_slice(&0xff01u16.to_le_bytes());
+        assert!(SessionSnapshot::read_sections(&mut extended.as_slice())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("required state record"));
+        bytes[at + 2..at + 4].copy_from_slice(&11u16.to_le_bytes());
+        assert!(SessionSnapshot::read_sections(&mut bytes.as_slice())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("WinCE snapshot container 11"));
+    }
+
+    #[test]
     fn unknown_required_sections_are_rejected_and_optional_sections_are_skipped() {
         let section = |id: u16, len: u64, body: &[u8]| {
             let mut bytes = 1u16.to_le_bytes().to_vec();
@@ -1195,6 +1260,28 @@ mod tests {
         let timing = &destination.process().unwrap().state.framebuffer.directdraw;
         assert_eq!(timing.frame_rate_limit, Some(60));
         assert_eq!(timing.pending.len(), 1);
+    }
+
+    #[test]
+    fn frozen_wince12_process_reference_restores_guest_state() {
+        use pocket_snapshot::fields::FieldSet;
+        let bytes = include_bytes!("../tests/fixtures/wince12-process-v1.bin");
+        let saved = pocket_snapshot::read_stream(bytes.as_slice(), b"PHKW12G1", |input| {
+            KernelSnapshot::read_archive(input)
+        })
+        .unwrap();
+        let mut destination = fixture(3);
+        saved
+            .restore(&mut destination.process.as_mut().unwrap().state)
+            .unwrap();
+        let state = &destination.process().unwrap().state;
+        assert_eq!(
+            state.gdi.pending_window_updates[&0xdead0001],
+            vec![[0, 0, 320, 240]]
+        );
+        assert!(state.gdi.generated_window_paints.contains(&0xdead0001));
+        assert_eq!(state.message_frames[&0][0].message, 0x000f);
+        assert_eq!(state.image_base, 0x10000);
     }
 
     #[test]

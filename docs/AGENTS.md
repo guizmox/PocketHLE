@@ -1432,6 +1432,13 @@ They apply automatically when their rendering path is used. Renderer choice and
 the PocketPC NV extension compatibility gate remain separate supported settings;
 these optimizations do not add game-specific overrides or change frame limits.
 
+Native BeginPaint/EndPaint transactions honor a positive selected game frame
+limit once after real visible drawing. Per-operation GDI writes stay unpaced;
+an actual GX/EGL/DirectDraw presentation in that transaction suppresses another
+wait. Host paint pacing anchors are transient and are cleared on both serialized
+and direct in-memory snapshot restore. Keep window invalidation/guest callback
+state separate from these host-only timing anchors.
+
 ## Reference resources
 
 This document collects external resources that are useful when working on
@@ -1521,3 +1528,13 @@ not archived guest state: it prevents simultaneous guest HTC/SEN sensor delivery
 Do not serialize host neutral positions or asserted motion commands. Stick output
 uses `StylusAim`, not the grid router or visible-pointer state. See the
 [frontend guide](FRONTENDS.md#physical-accelerometer-mapping) for user behavior.
+
+### WinCE snapshot schema evolution
+
+The process checkpoint uses WinCE container 12 with stable independently
+versioned records; its schema is declared alongside KernelSnapshot. Never
+renumber/reuse an ID or silently default missing guest resources. Host-only
+cache fixes should not alter payloads. Change a record version and add a local
+conversion when its nested bincode representation changes; optional extensions
+need explicit safe defaults. Preserve the synthetic reference fixture and
+compatibility tests. See [the format contract](SNAPSHOT-WINCE-FORMAT.md).

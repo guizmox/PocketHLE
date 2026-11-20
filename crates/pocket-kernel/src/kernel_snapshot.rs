@@ -12,125 +12,137 @@ struct ProcessFamily {
     results: HashMap<(usize, u32, u32), Result<u32, u32>>,
 }
 
-#[derive(Serialize, Deserialize)]
+// Stable IDs: high byte is the domain, low byte the field. Never renumber or
+// reuse an ID; bump only the affected record version when its payload changes.
+pocket_snapshot::snapshot_fields! {
 pub struct KernelSnapshot {
-    heap: HeapSnapshot,
-    vfs: vfs::VfsFileSnapshot,
-    mappings: Option<file_mapping::MappingSnapshot>,
-    handles: handles::HandleSnapshot,
-    registry: registry::RegistryProcessSnapshot,
-    crypto: crypto::CryptoState,
-    msxml: msxml::MsxmlState,
-    sdl: sdl::SdlState,
-    serial: serial::SerialSnapshot,
-    cedb: cedb::ContactSnapshot,
-    internet: internet::InternetSnapshot,
-    audio: audio::AudioSnapshot,
-    gdi: gdi::GdiSnapshot,
-    display: framebuffer::DisplaySnapshot,
-    schedule: ScheduleSnapshot,
-    zlib: zlib::ZlibStreams,
-    memory_profile: Option<(u32, u32)>,
-    module_path: String,
-    process_launch_enabled: bool,
-    family: ProcessFamily,
-    command_line_cache: Option<u32>,
-    command_line: Option<String>,
-    next_process_id: u32,
-    random_seed: u32,
-    resources: Vec<ResourceEntry>,
-    image_base: u32,
-    image_size: u32,
-    image_entry: u32,
-    dynamic_exports: HashMap<u32, HashMap<String, u32>>,
-    image_imports: Vec<pocket_pe::ImportSymbol>,
-    gles_local_ordinals: HashMap<String, HashMap<u16, String>>,
-    runtime_thunks: HashMap<u32, Thunk>,
-    module_attach_frames: Vec<ModuleAttachFrame>,
-    static_module_roots: Vec<u32>,
-    dll_notification_frame: Option<dll_lifecycle::DllNotificationFrame>,
-    next_module_handle: u32,
-    modules: Vec<LoadedModule>,
-    next_module_base: u32,
-    free_module_bases: Vec<u32>,
-    fb_mapped: bool,
-    guest_fb_pitch: u32,
-    direct_fb_frames: u64,
-    gapi_column_major: bool,
-    gx_last_pushed_counter: u64,
-    gx_draw_active: bool,
-    gx_draw_thread: usize,
-    gx_explicit_present: bool,
-    gx_guest_signature: Option<u64>,
-    gles_strings: std::collections::HashMap<String, u32>,
-    wnd_proc: u32,
-    window_class_procs: HashMap<String, u32>,
-    window_background: Option<u32>,
-    window_background_erase_pending: bool,
-    pending_create: Option<(u32, u32)>,
-    pending_startup: std::collections::VecDeque<(u32, u32, u32)>,
-    find_handles: HashMap<u32, std::collections::VecDeque<(String, u64, bool, u32)>>,
-    next_find_handle: u32,
-    window_procs: HashMap<u32, u32>,
-    window_userdata: HashMap<u32, u32>,
-    window_classes: HashMap<u32, String>,
-    window_titles: HashMap<u32, String>,
-    window_class_controls: HashMap<String, controls::ControlClass>,
-    control_class_prototypes: HashMap<(usize, u32), controls::ControlClass>,
-    window_styles: HashMap<u32, (u32, u32)>,
-    window_parents: HashMap<u32, u32>,
-    window_threads: HashMap<u32, usize>,
-    window_input_contexts: HashMap<u32, u32>,
-    window_rects: HashMap<u32, (i32, i32, i32, i32)>,
-    window_dcs: HashMap<u32, u32>,
-    window_visibility: HashMap<u32, bool>,
-    window_user_data: u32,
-    synthetic_create_sent: bool,
-    synthetic_size_sent: bool,
-    create_frame: Option<WindowCallbackFrame>,
-    create_frame_hwnd: u32,
-    create_frame_stack: Vec<(WindowCallbackFrame, CreateStage, u32)>,
-    create_stage: CreateStage,
-    dialog_frame: Option<GuestCallFrame>,
-    dialog_frame_hwnd: u32,
-    active_window: u32,
-    window_ids: HashMap<u32, u32>,
-    scroll_info: HashMap<(u32, u32), [i32; 5]>,
-    window_extra: HashMap<(u32, i32), u32>,
-    dialog_default_frames: Vec<(usize, u32, GuestCallFrame)>,
-    dialog_frame_stack: Vec<(GuestCallFrame, u32)>,
-    parked_dialog_callbacks: HashMap<usize, DialogCallbackState>,
-    window_destroy_frames: Vec<WindowDestroyFrame>,
-    control_notify_frames: Vec<ControlNotifyFrame>,
-    gesture_frames: Vec<(usize, u32, GuestCallFrame, u32)>,
-    dialog_key_frames: Vec<DialogKeyFrame>,
-    accelerator_frames: Vec<(usize, u32, GuestCallFrame)>,
-    shell_status: Option<u32>,
-    status_bar: Option<StatusBar>,
-    controls: controls::Controls,
-    modal: Option<msgbox::MessageBox>,
-    shell_keyboard: shell_keyboard::ShellKeyboard,
-    message_box_spins: u32,
-    modal_dialog: Option<ModalDialog>,
-    gapi_keys_queried: bool,
-    pocketpc_processor: Option<processor_info::PocketPcProcessor>,
-    gapi_action_key: u16,
-    legacy_winsock: desktop_services::LegacyWinsock,
-    notification_icons: HashMap<(u32, u32), desktop_services::NotificationIcon>,
-    winsock_last_errors: HashMap<usize, u32>,
-    gz_files: crate::gz::GzFiles,
-    msg_queues: HashMap<u32, MsgQueue>,
-    next_msg_queue_handle: u32,
-    registry_notifications: registry::QueueNotifications,
-    power_notifications: power::Notifications,
-    device_notification_queues: HashMap<u32, u32>,
-    next_device_notification: u32,
-    battery_alerts: power::GizmondoAlerts,
-    menus: HashMap<u32, HashMap<u32, u32>>,
-    menu_items: HashMap<u32, Vec<MenuItem>>,
-    window_menus: HashMap<u32, u32>,
-    next_menu_handle: u32,
-    sub_menus: HashMap<(u32, u32), u32>,
+    // Memory.
+    0x0101, 1 => heap: HeapSnapshot;
+    0x0102, 1 => memory_profile: Option<(u32, u32)>;
+    // Files and handles.
+    0x0201, 1 => vfs: vfs::VfsFileSnapshot;
+    0x0202, 1 => mappings: Option<file_mapping::MappingSnapshot>;
+    0x0203, 1 => handles: handles::HandleSnapshot;
+    0x0204, 1 => find_handles: HashMap<u32, std::collections::VecDeque<(String, u64, bool, u32)>>;
+    0x0205, 1 => next_find_handle: u32;
+    // Process services.
+    0x0301, 1 => registry: registry::RegistryProcessSnapshot;
+    0x0302, 1 => crypto: crypto::CryptoState;
+    0x0303, 1 => msxml: msxml::MsxmlState;
+    0x0304, 1 => sdl: sdl::SdlState;
+    0x0305, 1 => cedb: cedb::ContactSnapshot;
+    0x0306, 1 => internet: internet::InternetSnapshot;
+    0x0307, 1 => zlib: zlib::ZlibStreams;
+    // Media.
+    0x0401, 1 => audio: audio::AudioSnapshot;
+    0x0402, 1 => gz_files: crate::gz::GzFiles;
+    // Graphics.
+    0x0501, 1 => gdi: gdi::GdiSnapshot;
+    0x0502, 1 => display: framebuffer::DisplaySnapshot;
+    0x0503, 1 => fb_mapped: bool;
+    0x0504, 1 => guest_fb_pitch: u32;
+    0x0505, 1 => direct_fb_frames: u64;
+    0x0506, 1 => gapi_column_major: bool;
+    0x0507, 1 => gx_last_pushed_counter: u64;
+    0x0508, 1 => gx_draw_active: bool;
+    0x0509, 1 => gx_draw_thread: usize;
+    0x050a, 1 => gx_explicit_present: bool;
+    0x050b, 1 => gx_guest_signature: Option<u64>;
+    0x050c, 1 => gles_strings: std::collections::HashMap<String, u32>;
+    0x050d, 1 => gapi_keys_queried: bool;
+    0x050e, 1 => gapi_action_key: u16;
+    // Scheduler and continuations.
+    0x0601, 1 => schedule: ScheduleSnapshot;
+    // Process and modules.
+    0x0701, 1 => module_path: String;
+    0x0702, 1 => process_launch_enabled: bool;
+    0x0703, 1 => family: ProcessFamily;
+    0x0704, 1 => command_line_cache: Option<u32>;
+    0x0705, 1 => command_line: Option<String>;
+    0x0706, 1 => next_process_id: u32;
+    0x0707, 1 => random_seed: u32;
+    0x0708, 1 => resources: Vec<ResourceEntry>;
+    0x0709, 1 => image_base: u32;
+    0x070a, 1 => image_size: u32;
+    0x070b, 1 => image_entry: u32;
+    0x070c, 1 => dynamic_exports: HashMap<u32, HashMap<String, u32>>;
+    0x070d, 1 => image_imports: Vec<pocket_pe::ImportSymbol>;
+    0x070e, 1 => gles_local_ordinals: HashMap<String, HashMap<u16, String>>;
+    0x070f, 1 => runtime_thunks: HashMap<u32, Thunk>;
+    0x0710, 1 => module_attach_frames: Vec<ModuleAttachFrame>;
+    0x0711, 1 => static_module_roots: Vec<u32>;
+    0x0712, 1 => dll_notification_frame: Option<dll_lifecycle::DllNotificationFrame>;
+    0x0713, 1 => next_module_handle: u32;
+    0x0714, 1 => modules: Vec<LoadedModule>;
+    0x0715, 1 => next_module_base: u32;
+    0x0716, 1 => free_module_bases: Vec<u32>;
+    // Windows and shell.
+    0x0801, 1 => wnd_proc: u32;
+    0x0802, 1 => window_class_procs: HashMap<String, u32>;
+    0x0803, 1 => window_background: Option<u32>;
+    0x0804, 1 => window_background_erase_pending: bool;
+    0x0805, 1 => pending_create: Option<(u32, u32)>;
+    0x0806, 1 => pending_startup: std::collections::VecDeque<(u32, u32, u32)>;
+    0x0807, 1 => window_procs: HashMap<u32, u32>;
+    0x0808, 1 => window_userdata: HashMap<u32, u32>;
+    0x0809, 1 => window_classes: HashMap<u32, String>;
+    0x080a, 1 => window_titles: HashMap<u32, String>;
+    0x080b, 1 => window_class_controls: HashMap<String, controls::ControlClass>;
+    0x080c, 1 => control_class_prototypes: HashMap<(usize, u32), controls::ControlClass>;
+    0x080d, 1 => window_styles: HashMap<u32, (u32, u32)>;
+    0x080e, 1 => window_parents: HashMap<u32, u32>;
+    0x080f, 1 => window_threads: HashMap<u32, usize>;
+    0x0810, 1 => window_input_contexts: HashMap<u32, u32>;
+    0x0811, 1 => window_rects: HashMap<u32, (i32, i32, i32, i32)>;
+    0x0812, 1 => window_dcs: HashMap<u32, u32>;
+    0x0813, 1 => window_visibility: HashMap<u32, bool>;
+    0x0814, 1 => window_user_data: u32;
+    0x0815, 1 => synthetic_create_sent: bool;
+    0x0816, 1 => synthetic_size_sent: bool;
+    0x0817, 1 => create_frame: Option<WindowCallbackFrame>;
+    0x0818, 1 => create_frame_hwnd: u32;
+    0x0819, 1 => create_frame_stack: Vec<(WindowCallbackFrame, CreateStage, u32)>;
+    0x081a, 1 => create_stage: CreateStage;
+    0x081b, 1 => dialog_frame: Option<GuestCallFrame>;
+    0x081c, 1 => dialog_frame_hwnd: u32;
+    0x081d, 1 => active_window: u32;
+    0x081e, 1 => window_ids: HashMap<u32, u32>;
+    0x081f, 1 => scroll_info: HashMap<(u32, u32), [i32; 5]>;
+    0x0820, 1 => window_extra: HashMap<(u32, i32), u32>;
+    0x0821, 1 => dialog_default_frames: Vec<(usize, u32, GuestCallFrame)>;
+    0x0822, 1 => dialog_frame_stack: Vec<(GuestCallFrame, u32)>;
+    0x0823, 1 => parked_dialog_callbacks: HashMap<usize, DialogCallbackState>;
+    0x0824, 1 => window_destroy_frames: Vec<WindowDestroyFrame>;
+    0x0825, 1 => control_notify_frames: Vec<ControlNotifyFrame>;
+    0x0826, 1 => gesture_frames: Vec<(usize, u32, GuestCallFrame, u32)>;
+    0x0827, 1 => dialog_key_frames: Vec<DialogKeyFrame>;
+    0x0828, 1 => accelerator_frames: Vec<(usize, u32, GuestCallFrame)>;
+    0x0829, 1 => shell_status: Option<u32>;
+    0x082a, 1 => status_bar: Option<StatusBar>;
+    0x082b, 1 => controls: controls::Controls;
+    0x082c, 1 => modal: Option<msgbox::MessageBox>;
+    0x082d, 1 => shell_keyboard: shell_keyboard::ShellKeyboard;
+    0x082e, 1 => message_box_spins: u32;
+    0x082f, 1 => modal_dialog: Option<ModalDialog>;
+    0x0830, 1 => notification_icons: HashMap<(u32, u32), desktop_services::NotificationIcon>;
+    0x0831, 1 => menus: HashMap<u32, HashMap<u32, u32>>;
+    0x0832, 1 => menu_items: HashMap<u32, Vec<MenuItem>>;
+    0x0833, 1 => window_menus: HashMap<u32, u32>;
+    0x0834, 1 => next_menu_handle: u32;
+    0x0835, 1 => sub_menus: HashMap<(u32, u32), u32>;
+    // Devices and notifications.
+    0x0901, 1 => serial: serial::SerialSnapshot;
+    0x0902, 1 => pocketpc_processor: Option<processor_info::PocketPcProcessor>;
+    0x0903, 1 => legacy_winsock: desktop_services::LegacyWinsock;
+    0x0904, 1 => winsock_last_errors: HashMap<usize, u32>;
+    0x0905, 1 => msg_queues: HashMap<u32, MsgQueue>;
+    0x0906, 1 => next_msg_queue_handle: u32;
+    0x0907, 1 => registry_notifications: registry::QueueNotifications;
+    0x0908, 1 => power_notifications: power::Notifications;
+    0x0909, 1 => device_notification_queues: HashMap<u32, u32>;
+    0x090a, 1 => next_device_notification: u32;
+    0x090b, 1 => battery_alerts: power::GizmondoAlerts;
+}
 }
 
 impl KernelState {

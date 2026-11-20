@@ -443,7 +443,19 @@ pub struct GdiState {
     /// Generated paints, queued or offered from an outstanding update region.
     /// Explicitly posted WM_PAINT remains independent of region validation.
     pub generated_window_paints: std::collections::HashSet<u32>,
+    /// Host-only pacing anchors for paired native BeginPaint/EndPaint calls.
+    /// Restoring a partial paint drops its first ceiling check, not guest state.
+    #[serde(skip)]
+    pub paint_presentations: HashMap<(usize, u32), PaintPresentation>,
     pub owner_draw_states: HashMap<u32, (bool, bool, bool, i32, i32)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PaintPresentation {
+    pub dc: u32,
+    pub bitmap_revision: Option<(u32, u64)>,
+    pub framebuffer_revision: u64,
+    pub completed_presentations: u64,
 }
 
 /// GDI object namespace rebuilt from guest state. Host font outlines must
@@ -452,7 +464,10 @@ pub struct GdiState {
 pub struct GdiSnapshot(GdiState);
 
 impl GdiSnapshot {
-    pub fn restore(self) -> Result<GdiState, String> {
+    pub fn restore(mut self) -> Result<GdiState, String> {
+        // In-memory checkpoints also restart host clocks, without serializing
+        // first. An unfinished paint must not retain its old pacing anchor.
+        self.0.paint_presentations.clear();
         for object in self.0.objects.values() {
             if let GdiObject::PatternBrush(pattern) = object {
                 if !pattern.valid() {
@@ -522,6 +537,7 @@ impl GdiState {
             pending_window_erases: std::collections::HashSet::new(),
             pending_window_updates: HashMap::new(),
             generated_window_paints: std::collections::HashSet::new(),
+            paint_presentations: HashMap::new(),
             owner_draw_states: HashMap::new(),
         };
         // Pre-register stock objects so SelectObject(GetStockObject(...))

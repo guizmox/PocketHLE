@@ -117,6 +117,7 @@ const PAINTSTRUCT_BYTES: u32 = 32;
 mod graphics_tests;
 pub(crate) mod images;
 mod message_queue;
+mod paint_presentation;
 mod text_draw;
 mod window_graphics;
 
@@ -17260,6 +17261,9 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         validate_window_paint(ctx.kernel, hwnd);
     }
     let dc = window_dc(ctx, hwnd);
+    if !resumed {
+        paint_presentation::begin(ctx, hwnd, dc);
+    }
     if !resumed && dc != GDI_SCREEN_DC && ctx.kernel.gdi.pending_window_erases.remove(&hwnd) {
         if let Some(proc) = ctx
             .kernel
@@ -17323,6 +17327,9 @@ fn begin_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 
 fn end_paint(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    if let Some(outcome) = paint_presentation::finish(ctx)? {
+        return Ok(outcome);
+    }
     // Mapping GAPI display memory does not disable GDI: an application can
     // use GAPI for one screen and native WM_PAINT for the next. Publish real
     // backing changes even while that mapping exists. The paint revision
@@ -19643,6 +19650,10 @@ fn discard_window_metadata(ctx: &mut CallCtx<'_>, hwnd: &u32) {
     ctx.kernel.posted_messages.retain(|msg| msg.0 != *hwnd);
     ctx.kernel.gdi.generated_window_paints.remove(hwnd);
     ctx.kernel.gdi.pending_window_updates.remove(hwnd);
+    ctx.kernel
+        .gdi
+        .paint_presentations
+        .retain(|(_, owner), _| owner != hwnd);
     ctx.kernel.window_rects.remove(hwnd);
     ctx.kernel.window_menus.remove(hwnd);
     ctx.kernel
