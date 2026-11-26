@@ -329,6 +329,25 @@ pub trait Cpu: std::any::Any {
     fn read_reg(&mut self, reg: regs::ArmReg) -> Result<u32, CpuError>;
     fn write_reg(&mut self, reg: regs::ArmReg, value: u32) -> Result<(), CpuError>;
 
+    /// Read a six-word WinCE call at its dispatch boundary. Only the two
+    /// required stack words are read, with the backend's argument-home offset.
+    /// Backends may batch register access without caching values across calls.
+    fn read_args6(&mut self) -> Result<[u32; 6], CpuError> {
+        let mut args = [0; 6];
+        for (index, value) in args[..4].iter_mut().enumerate() {
+            *value = self.read_arg(index as u8)?;
+        }
+        let sp = self.read_reg(regs::ArmReg::Sp)?;
+        let base = sp
+            .checked_add(self.stack_arg_offset())
+            .ok_or(CpuError::BadMemory { va: sp, size: 8 })?;
+        let mut bytes = [0; 8];
+        self.read_mem_into(base, &mut bytes)?;
+        args[4] = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+        args[5] = u32::from_le_bytes(bytes[4..].try_into().unwrap());
+        Ok(args)
+    }
+
     fn read_arg(&mut self, index: u8) -> Result<u32, CpuError> {
         let reg = match index {
             0 => regs::ArmReg::R0,

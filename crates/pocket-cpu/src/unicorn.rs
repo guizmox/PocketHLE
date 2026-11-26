@@ -1015,6 +1015,46 @@ impl Cpu for UnicornCpu {
             .map_err(|e| CpuError::Backend(format!("reg_read: {e:?}")))
     }
 
+    fn read_args6(&mut self) -> Result<[u32; 6], CpuError> {
+        let mut ids = [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3, ArmReg::Sp].map(|reg| {
+            match self.arch {
+                Arch::Arm => map_arm_reg(reg) as i32,
+                Arch::Mips => map_mips_reg(reg) as i32,
+            }
+        });
+        let mut values = [0u32; 5];
+        let mut pointers = values.each_mut().map(|value| (value as *mut u32).cast());
+        // SAFETY: both supported backends expose 32-bit argument registers
+        // and SP. Each output has its own live, correctly sized stack slot;
+        // Unicorn consumes these pointers synchronously and retains none.
+        // Its allocating Rust batch wrapper is intentionally avoided here.
+        let status = unsafe {
+            ::unicorn_engine::uc_reg_read_batch(
+                self.uc.get_handle(),
+                ids.as_mut_ptr(),
+                pointers.as_mut_ptr(),
+                5,
+            )
+        };
+        if status != ::unicorn_engine::unicorn_const::uc_error::OK {
+            return Err(CpuError::Backend(format!("call register read: {status:?}")));
+        }
+        let sp = values[4];
+        let base = sp
+            .checked_add(self.stack_arg_offset())
+            .ok_or(CpuError::BadMemory { va: sp, size: 8 })?;
+        let mut bytes = [0; 8];
+        self.read_mem_into(base, &mut bytes)?;
+        Ok([
+            values[0],
+            values[1],
+            values[2],
+            values[3],
+            u32::from_le_bytes(bytes[..4].try_into().unwrap()),
+            u32::from_le_bytes(bytes[4..].try_into().unwrap()),
+        ])
+    }
+
     fn read_fpscr(&mut self) -> Result<u32, CpuError> {
         if self.arch != Arch::Arm {
             return Ok(0);
@@ -1164,6 +1204,59 @@ impl Cpu for UnicornCpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn six_call_arguments_preserve_arm_and_mips_abi_across_stack_pages() {
+        for arch in [Arch::Arm, Arch::Mips] {
+            let mut cpu = UnicornCpu::new_for_arch(arch).unwrap();
+            cpu.map_region(0x4000, 0x2000, Prot::READ | Prot::WRITE)
+                .unwrap();
+            let expected: [u32; 6] = [
+                0x89abcdef, 0x76543210, 0x80000000, 0xffffffff, 0x10203040, 0xfedcba98,
+            ];
+            for (index, &value) in expected[..4].iter().enumerate() {
+                cpu.write_arg(index as u8, value).unwrap();
+            }
+            let sp = 0x4ffc - cpu.stack_arg_offset();
+            cpu.write_reg(ArmReg::Sp, sp).unwrap();
+            cpu.write_mem(
+                0x4ffc,
+                &expected[4..]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert_eq!(cpu.read_args6().unwrap(), expected, "{arch:?}");
+            assert_eq!(cpu.read_reg(ArmReg::Sp).unwrap(), sp);
+            for (index, &value) in expected[..4].iter().enumerate() {
+                assert_eq!(cpu.read_arg(index as u8).unwrap(), value);
+            }
+            // A later call must see new registers and stack data.
+            cpu.write_arg(0, 7).unwrap();
+            cpu.write_mem(0x5000, &9u32.to_le_bytes()).unwrap();
+            let fresh = cpu.read_args6().unwrap();
+            assert_eq!((fresh[0], fresh[5]), (7, 9));
+            cpu.unmap_region(0x5000, 0x1000).unwrap();
+            assert!(
+                cpu.read_args6().is_err(),
+                "missing sixth argument: {arch:?}"
+            );
+            cpu.write_reg(ArmReg::Sp, u32::MAX - 3).unwrap();
+            assert!(cpu.read_args6().is_err(), "stack overflow: {arch:?}");
+        }
+    }
+
+    #[test]
+    fn six_call_arguments_do_not_read_past_the_required_stack_words() {
+        let mut cpu = UnicornCpu::new().unwrap();
+        cpu.map_region(0x4000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x4ff8).unwrap();
+        cpu.write_mem(0x4ff8, &[5, 0, 0, 0, 6, 0, 0, 0]).unwrap();
+        assert_eq!(&cpu.read_args6().unwrap()[4..], &[5, 6]);
+        assert!(cpu.read_u8(0x5000).is_err());
+    }
 
     #[test]
     fn timed_inline_divisions_resume_without_skipping_hooks_or_repeating_results() {

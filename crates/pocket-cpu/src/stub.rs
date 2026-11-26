@@ -321,6 +321,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_six_argument_reader_uses_only_the_required_stack_words() {
+        let mut cpu = StubCpu::new();
+        cpu.map_region(0x4000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        cpu.write_reg(ArmReg::Sp, 0x4ff8).unwrap();
+        for index in 0..4 {
+            cpu.write_arg(index, u32::from(index) + 1).unwrap();
+        }
+        cpu.write_mem(0x4ff8, &[5, 0, 0, 0, 6, 0, 0, 0]).unwrap();
+        assert_eq!(cpu.read_args6().unwrap(), [1, 2, 3, 4, 5, 6]);
+        cpu.write_reg(ArmReg::Sp, 0x4ffc).unwrap();
+        assert!(cpu.read_args6().is_err());
+    }
+
+    #[test]
     fn unmapping_is_atomic_and_reuse_drops_old_code_hooks() {
         let mut cpu = StubCpu::new();
         cpu.map_region(0x1000, 0x2000, Prot::ALL).unwrap();

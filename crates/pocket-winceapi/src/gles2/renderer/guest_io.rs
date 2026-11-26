@@ -7,6 +7,53 @@ pub(super) struct GlIo<'a, 'b> {
     name: &'a str,
     names: &'a mut ObjectNames,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pocket_cpu::{regs::ArmReg, Cpu};
+    use pocket_kernel::Thunk;
+    use pocket_pe::ImportBinding;
+
+    #[test]
+    fn vertex_pointer_arguments_remain_values_after_object_name_remapping() {
+        let (mut cpu, mut kernel, _) = crate::bluetooth::tests::setup();
+        let thunk = Thunk {
+            thunk_va: 0,
+            iat_va: 0,
+            dll: "libglesv2.dll".into(),
+            binding: ImportBinding::Name("glVertexAttribPointer".into()),
+            friendly_name: Some("glVertexAttribPointer".into()),
+        };
+        let expected = [2, 3, 0x1406, 0xff, 24, 0x80000020];
+        for (index, &value) in expected[..4].iter().enumerate() {
+            cpu.write_arg(index as u8, value).unwrap();
+        }
+        cpu.write_mem(0x4000, &24u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x4004, &0x80000020u32.to_le_bytes()).unwrap();
+        let mut names = ObjectNames::default();
+        names.assign(Kind::Buffer, 101, Some(2)).unwrap();
+        assert!(names.remapped);
+        let mut ctx = CallCtx {
+            cpu: &mut cpu,
+            kernel: &mut kernel,
+            thunk: &thunk,
+        };
+        assert_eq!(
+            GlIo::live(&mut ctx, "glVertexAttribPointer", &mut names)
+                .args6()
+                .unwrap(),
+            expected
+        );
+        // No persistent per-call cache: new declarations see changed values.
+        ctx.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        ctx.cpu.write_mem(0x4004, &64u32.to_le_bytes()).unwrap();
+        let fresh = GlIo::live(&mut ctx, "glVertexAttribPointer", &mut names)
+            .args6()
+            .unwrap();
+        assert_eq!((fresh[0], fresh[5]), (1, 64));
+    }
+}
 impl<'a, 'b> GlIo<'a, 'b> {
     pub(super) fn live(
         ctx: &'a mut CallCtx<'b>,
@@ -22,6 +69,20 @@ impl<'a, 'b> GlIo<'a, 'b> {
         } else {
             raw
         })
+    }
+    // Electopia repeatedly declares six-argument vertex attributes. Group the
+    // register reads and the two stack words without changing name remapping
+    // or speculatively touching a seventh argument.
+    pub(super) fn args6(&mut self) -> Result<[u32; 6]> {
+        let mut args = self.ctx.cpu.read_args6()?;
+        if self.names.remapped {
+            for (index, value) in args.iter_mut().enumerate() {
+                if let Some(kind) = Kind::argument(self.name, index as u8) {
+                    *value = self.names.host(kind, *value);
+                }
+            }
+        }
+        Ok(args)
     }
     pub(super) fn read_mem(&mut self, address: u32, size: u32) -> Result<Vec<u8>> {
         Ok(self.ctx.cpu.read_mem(address, size)?)

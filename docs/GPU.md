@@ -137,6 +137,13 @@ for GLSL 1.20.
   storage until updated or deleted. The application can reuse them across
   draws and swaps.
 
+`glVertexAttribPointer` reads its six arguments with one register batch and one
+eight-byte stack read on Unicorn. The CPU fallback preserves ARM and MIPS O32
+argument placement, and object-name remapping still runs on the resulting values.
+This reduces argument-fetch overhead in workloads such as Electopia without
+caching guest arguments or skipping native attribute declarations. Memory faults,
+render state and snapshot payloads retain their existing ownership boundaries.
+
 For Electopia, select **Generic OpenGL ES (2.0, Common)** and
 **800×480 (WVGA landscape)**. The CLI accepts both `--gles2` and the
 existing `--adreno200` flag.

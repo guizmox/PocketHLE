@@ -1288,8 +1288,15 @@ impl Renderer {
                 gl!(index => u32, values.as_ptr().cast() => *const f32);
             }
             "glVertexAttribPointer" => {
-                let (index, size, kind, normalized, stride, address) =
-                    (u!(0), i!(1), u!(2), u!(3) as u8, i!(4), u!(5));
+                let args = ctx.args6()?;
+                let (index, size, kind, normalized, stride, address) = (
+                    args[0],
+                    args[1] as i32,
+                    args[2],
+                    args[3] as u8,
+                    args[4] as i32,
+                    args[5],
+                );
                 let component = match kind {
                     0x1400 | 0x1401 => 1,
                     0x1402 | 0x1403 => 2,
