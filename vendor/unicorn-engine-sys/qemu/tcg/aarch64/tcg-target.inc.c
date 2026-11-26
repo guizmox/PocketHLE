@@ -1008,6 +1008,12 @@ static void tcg_out_movi(TCGContext *s, TCGType type, TCGReg rd,
     int s0, s1;
     AArch64Insn opc;
 
+    if ((type == TCG_TYPE_I32 || type == TCG_TYPE_I64) && rd >= 32) {
+        tcg_out_movi(s, type, TCG_REG_TMP, value);
+        tcg_out_insn(s, 3605, INS, 0, rd, TCG_REG_TMP, 4 << type, 0);
+        return;
+    }
+
     switch (type) {
     case TCG_TYPE_I32:
     case TCG_TYPE_I64:
@@ -1135,7 +1141,8 @@ static bool tcg_out_mov(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg)
             tcg_out_movr(s, type, ret, arg);
             break;
         } else if (ret < 32) {
-            tcg_out_insn(s, 3605, UMOV, type, ret, arg, 0, 0);
+            /* imm5 selects the scalar lane width, not byte lane zero. */
+            tcg_out_insn(s, 3605, UMOV, type, ret, arg, 4 << type, 0);
             break;
         } else if (arg < 32) {
             tcg_out_insn(s, 3605, INS, 0, ret, arg, 4 << type, 0);
@@ -2270,6 +2277,28 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc,
         tcg_out_mb(s, a0);
         break;
 
+    case INDEX_op_pocket_fadd32_i32:
+    case INDEX_op_pocket_fsub32_i32:
+    case INDEX_op_pocket_fmul32_i32:
+        /* FADD/FSUB/FMUL Sd,Sn,Sm; scalar RN, no contraction. */
+        tcg_out32(s, (opc == INDEX_op_pocket_fadd32_i32 ? 0x1e202800 :
+                     opc == INDEX_op_pocket_fsub32_i32 ? 0x1e203800 : 0x1e200800)
+                     | ((a2 & 31) << 16) | ((a1 & 31) << 5) | (a0 & 31));
+        break;
+    case INDEX_op_pocket_fadd64_i64:
+    case INDEX_op_pocket_fsub64_i64:
+    case INDEX_op_pocket_fmul64_i64:
+        /* FADD/FSUB/FMUL Dd,Dn,Dm: genuine double precision. */
+        tcg_out32(s, (opc == INDEX_op_pocket_fadd64_i64 ? 0x1e602800 :
+                     opc == INDEX_op_pocket_fsub64_i64 ? 0x1e603800 : 0x1e600800)
+                     | ((a2 & 31) << 16) | ((a1 & 31) << 5) | (a0 & 31));
+        break;
+    case INDEX_op_pocket_fp_control_i32:
+        tcg_out32(s, 0xd53b4400 | a0); /* mrs Xd,FPCR */
+        /* Only the default FPCR is eligible, conservatively including new
+         * control bits (FIZ/AH) as well as rounding, traps and FZ/DN. */
+        break;
+
     case INDEX_op_mov_i32:  /* Always emitted via tcg_out_mov.  */
     case INDEX_op_mov_i64:
     case INDEX_op_movi_i32: /* Always emitted via tcg_out_movi.  */
@@ -2696,6 +2725,16 @@ static const TCGTargetOpDef *tcg_target_op_def(TCGOpcode op)
     case INDEX_op_brcond_i32:
     case INDEX_op_brcond_i64:
         return &r_rA;
+
+    case INDEX_op_pocket_fadd32_i32:
+    case INDEX_op_pocket_fsub32_i32:
+    case INDEX_op_pocket_fmul32_i32:
+    case INDEX_op_pocket_fadd64_i64:
+    case INDEX_op_pocket_fsub64_i64:
+    case INDEX_op_pocket_fmul64_i64:
+        return &w_w_w;
+    case INDEX_op_pocket_fp_control_i32:
+        return &r;
 
     case INDEX_op_movcond_i32:
     case INDEX_op_movcond_i64:

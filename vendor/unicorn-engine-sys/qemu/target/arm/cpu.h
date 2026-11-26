@@ -3806,13 +3806,24 @@ static inline void arm_get_tb_cpu_state_fast(CPUARMState *env, target_ulong *pc,
     }
     *pc = env->regs[15];
     *cs_base = 0;
-    FIELD_DP32(flags, TBFLAG_A32, VECLEN, env->vfp.vec_len, flags);
-    FIELD_DP32(flags, TBFLAG_A32, VECSTRIDE, env->vfp.vec_stride, flags);
-    if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
-        FIELD_DP32(flags, TBFLAG_A32, VFPEN, 1, flags);
-    }
-    FIELD_DP32(flags, TBFLAG_AM32, THUMB, env->thumb, flags);
-    FIELD_DP32(flags, TBFLAG_AM32, CONDEXEC, env->condexec_bits, flags);
+    /* These dynamic fields are disjoint. Build them once instead of a
+     * serial chain of bitfield replacements; no CPU state is cached here.
+     * VFPEN is only ORed in, matching the original partially cached flag. */
+    const uint32_t dynamic_mask = R_TBFLAG_A32_VECLEN_MASK |
+        R_TBFLAG_A32_VECSTRIDE_MASK | R_TBFLAG_AM32_THUMB_MASK |
+        R_TBFLAG_AM32_CONDEXEC_MASK;
+    uint32_t dynamic =
+        (((uint32_t)env->vfp.vec_len << R_TBFLAG_A32_VECLEN_SHIFT) &
+         R_TBFLAG_A32_VECLEN_MASK) |
+        (((uint32_t)env->vfp.vec_stride << R_TBFLAG_A32_VECSTRIDE_SHIFT) &
+         R_TBFLAG_A32_VECSTRIDE_MASK) |
+        ((env->thumb << R_TBFLAG_AM32_THUMB_SHIFT) &
+         R_TBFLAG_AM32_THUMB_MASK) |
+        ((env->condexec_bits << R_TBFLAG_AM32_CONDEXEC_SHIFT) &
+         R_TBFLAG_AM32_CONDEXEC_MASK) |
+        (((env->vfp.xregs[ARM_VFP_FPEXC] >> 30) & 1u) <<
+         R_TBFLAG_A32_VFPEN_SHIFT);
+    flags = (flags & ~dynamic_mask) | dynamic;
     *pflags = flags;
 #endif
 }

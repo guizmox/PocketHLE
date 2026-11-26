@@ -11801,6 +11801,115 @@ static const TranslatorOps thumb_translator_ops = {
     .pc_sync            = arm_pc_sync
 };
 
+/* Block-local forwarding of S0-S31 stores to later loads.
+ * Every architectural store remains present. No guest memory is cached.
+ * A helper, control-flow boundary, opaque write or guest memory operation
+ * invalidates the table. Reassigning a source temporary kills its entries.
+ * This runs before TCG optimization/liveness, so new move dependencies are
+ * visible to the normal allocator. It owns no state beyond this translation.
+ */
+static TCGArg pocket_vfp_copy_source(TCGContext *ctx, TCGArg src,
+                                    const bool *alias_valid,
+                                    const TCGArg *alias_source,
+                                    const unsigned *alias_version,
+                                    const unsigned *version)
+{
+    size_t index = arg_temp(src) - ctx->temps;
+    if (alias_valid[index]) {
+        TCGArg origin = alias_source[index];
+        size_t origin_index = arg_temp(origin) - ctx->temps;
+        if (alias_version[index] == version[origin_index]) {
+            return origin;
+        }
+    }
+    return src;
+}
+
+static void pocket_forward_vfp32(TCGContext *ctx)
+{
+    bool valid[32] = { false };
+    TCGArg value[32] = { 0 };
+    /* VMOV often first copies a GPR into a short-lived translation temp.
+     * Track its origin, otherwise reusing that temp loses the opportunity.
+     * An origin's generation must still match when its alias is consumed. */
+    bool alias_valid[TCG_MAX_TEMPS] = { false };
+    TCGArg alias_source[TCG_MAX_TEMPS] = { 0 };
+    unsigned alias_version[TCG_MAX_TEMPS] = { 0 };
+    unsigned version[TCG_MAX_TEMPS] = { 0 };
+    TCGArg env = tcgv_ptr_arg(ctx, ctx->cpu_env);
+    TCGOp *op;
+    int i, j;
+
+    QTAILQ_FOREACH(op, &ctx->ops, link) {
+        const TCGOpDef *def;
+        TCGArg origin = 0;
+        int slot = -1;
+        TCGOpcode opc = op->opc;
+
+        /* Metadata is not a runtime observer. Actual trace hooks emit calls
+         * and therefore invalidate the table below. */
+        if (opc == INDEX_op_insn_start) {
+            continue;
+        }
+        if ((opc == INDEX_op_ld_i32 || opc == INDEX_op_st_i32) &&
+            op->args[1] == env) {
+            for (i = 0; i < 32; i++) {
+                if (op->args[2] == (TCGArg)vfp_reg_offset(false, i)) {
+                    slot = i;
+                    break;
+                }
+            }
+        }
+        if (opc == INDEX_op_st_i32 && slot >= 0) {
+            valid[slot] = true;
+            value[slot] = pocket_vfp_copy_source(ctx, op->args[0],
+                alias_valid, alias_source, alias_version, version);
+            continue;
+        }
+        if (opc == INDEX_op_ld_i32 && slot >= 0 && valid[slot]) {
+            op->opc = INDEX_op_mov_i32;
+            op->args[1] = value[slot];
+            op->param1 = op->param2 = 0;
+            opc = INDEX_op_mov_i32;
+        }
+        def = &ctx->tcg_op_defs[opc];
+        if (opc == INDEX_op_call ||
+            (def->flags & (TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS |
+                           TCG_OPF_BB_END | TCG_OPF_BB_EXIT)) ||
+            def->nb_oargs == 0) {
+            /* Includes all other stores (64-bit/vector aliases), labels,
+             * conditional branches and callbacks even if marked NO_RWG. */
+            memset(valid, 0, sizeof(valid));
+            memset(alias_valid, 0, sizeof(alias_valid));
+            continue;
+        }
+        if (opc == INDEX_op_mov_i32) {
+            if (op->args[0] == op->args[1]) {
+                continue;
+            }
+            origin = pocket_vfp_copy_source(ctx, op->args[1],
+                alias_valid, alias_source, alias_version, version);
+        }
+        for (j = 0; j < def->nb_oargs; j++) {
+            size_t output = arg_temp(op->args[j]) - ctx->temps;
+            version[output]++;
+            alias_valid[output] = false;
+            for (i = 0; i < 32; i++) {
+                if (valid[i] && value[i] == op->args[j]) {
+                    valid[i] = false;
+                }
+            }
+        }
+        if (opc == INDEX_op_mov_i32 && origin != op->args[0]) {
+            size_t output = arg_temp(op->args[0]) - ctx->temps;
+            size_t input = arg_temp(origin) - ctx->temps;
+            alias_valid[output] = true;
+            alias_source[output] = origin;
+            alias_version[output] = version[input];
+        }
+    }
+}
+
 /* generate intermediate code for basic block 'tb'.  */
 void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns)
 {
@@ -11817,6 +11926,9 @@ void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns)
 #endif
 
     translator_loop(ops, &dc.base, cpu, tb, max_insns);
+    if (!dc.aarch64) {
+        pocket_forward_vfp32(cpu->uc->tcg_ctx);
+    }
 }
 
 void restore_state_to_opc(CPUARMState *env, TranslationBlock *tb,

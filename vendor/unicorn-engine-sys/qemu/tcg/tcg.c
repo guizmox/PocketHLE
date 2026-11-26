@@ -1173,6 +1173,19 @@ bool tcg_op_supported(TCGOpcode op)
     case INDEX_op_qemu_st_i64:
         return true;
 
+    case INDEX_op_pocket_fp_control_i32:
+    case INDEX_op_pocket_fadd32_i32:
+    case INDEX_op_pocket_fsub32_i32:
+    case INDEX_op_pocket_fmul32_i32:
+    case INDEX_op_pocket_fadd64_i64:
+    case INDEX_op_pocket_fsub64_i64:
+    case INDEX_op_pocket_fmul64_i64:
+#if TCG_TARGET_HAS_pocket_scalar_fp
+        return TCG_TARGET_HAS_v128;
+#else
+        return false;
+#endif
+
     case INDEX_op_goto_ptr:
         return TCG_TARGET_HAS_goto_ptr;
 

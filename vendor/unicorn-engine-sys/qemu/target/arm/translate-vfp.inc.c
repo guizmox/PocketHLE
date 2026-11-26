@@ -1684,14 +1684,188 @@ static bool trans_VNMLA_dp(DisasContext *s, arg_VNMLA_dp *a)
     return do_vfp_3op_dp(s, gen_VNMLA_dp, a->vd, a->vn, a->vm, true);
 }
 
+/* Native scalar arithmetic follows SoftFloat's conservative hardfloat
+ * domain. Unsupported hosts and all exceptional/control cases retain the
+ * complete helper. Guest and host controls are checked on every operation. */
+static bool pocket_direct_fp_supported(TCGOpcode opc)
+{
+    return tcg_op_supported(opc) &&
+           tcg_op_supported(INDEX_op_pocket_fp_control_i32);
+}
+
+static void gen_pocket_guest_fp_guard(TCGContext *ctx, TCGv_ptr status,
+                                      TCGv_i32 test, TCGLabel *slow)
+{
+    /* These adjacent bytes are loaded together without aliasing C objects.
+     * Keep the byte-order choice explicit for non-little-endian hosts. */
+    QEMU_BUILD_BUG_ON(offsetof(float_status, float_exception_flags) !=
+                      offsetof(float_status, float_rounding_mode) + 1);
+    QEMU_BUILD_BUG_ON(float_round_nearest_even != 0 || float_flag_inexact != 32);
+    tcg_gen_ld16u_i32(ctx, test, status,
+                     offsetof(float_status, float_rounding_mode));
+#ifdef HOST_WORDS_BIGENDIAN
+    tcg_gen_andi_i32(ctx, test, test, 0xff20);
+    tcg_gen_brcondi_i32(ctx, TCG_COND_NE, test, 0x0020, slow);
+#else
+    tcg_gen_andi_i32(ctx, test, test, 0x20ff);
+    tcg_gen_brcondi_i32(ctx, TCG_COND_NE, test, 0x2000, slow);
+#endif
+
+}
+
+static void gen_pocket_f32(TCGContext *ctx, TCGv_i32 vd, TCGv_i32 vn,
+                           TCGv_i32 vm, TCGv_ptr fpst, TCGOpcode opc,
+                           VFPGen3OpSPFn *fallback)
+{
+    if (!pocket_direct_fp_supported(opc)) {
+        fallback(ctx, vd, vn, vm, fpst);
+        return;
+    }
+
+    /* Locals deliberately survive slow-path/merge basic-block boundaries.
+     * The original operands are retained for the post-result fallback. */
+    TCGv_i32 a = tcg_temp_local_new_i32(ctx);
+    TCGv_i32 b = tcg_temp_local_new_i32(ctx);
+    TCGv_i32 result = tcg_temp_local_new_i32(ctx);
+    TCGv_ptr status = tcg_temp_local_new_ptr(ctx);
+    TCGv_i32 test = tcg_temp_new_i32(ctx);
+    TCGLabel *slow = gen_new_label(ctx);
+    TCGLabel *done = gen_new_label(ctx);
+    tcg_gen_mov_i32(ctx, a, vn);
+    tcg_gen_mov_i32(ctx, b, vm);
+    tcg_gen_addi_ptr(ctx, status, fpst, 0);
+
+    gen_pocket_guest_fp_guard(ctx, status, test, slow);
+
+    /* exp==0 and exp==255 are the only excluded exponent fields. Adding
+     * one exponent unit then testing the high seven exponent bits rejects
+     * both, without depending on sign or mantissa. */
+    tcg_gen_addi_i32(ctx, test, a, 0x00800000);
+    tcg_gen_andi_i32(ctx, test, test, 0x7f000000);
+    tcg_gen_brcondi_i32(ctx, TCG_COND_EQ, test, 0, slow);
+    tcg_gen_addi_i32(ctx, test, b, 0x00800000);
+    tcg_gen_andi_i32(ctx, test, test, 0x7f000000);
+    tcg_gen_brcondi_i32(ctx, TCG_COND_EQ, test, 0, slow);
+
+    /* This pure control read neither changes host state nor requires a
+     * guest-global synchronization. The generated result is consumed here. */
+    tcg_gen_op1_i32(ctx, INDEX_op_pocket_fp_control_i32, test);
+    tcg_gen_brcondi_i32(ctx, TCG_COND_NE, test, 0, slow);
+    tcg_gen_op3_i32(ctx, opc, result, a, b);
+    tcg_gen_andi_i32(ctx, test, result, 0x7fffffff);
+    tcg_gen_subi_i32(ctx, test, test, 0x00800001);
+    tcg_gen_brcondi_i32(ctx, TCG_COND_GEU, test, 0x7effffff, slow);
+    tcg_gen_br(ctx, done);
+    gen_set_label(ctx, slow);
+    fallback(ctx, result, a, b, status);
+    gen_set_label(ctx, done);
+    tcg_gen_mov_i32(ctx, vd, result);
+    tcg_temp_free_i32(ctx, test);
+    tcg_temp_free_ptr(ctx, status);
+    tcg_temp_free_i32(ctx, result);
+    tcg_temp_free_i32(ctx, b);
+    tcg_temp_free_i32(ctx, a);
+}
+
+static void gen_pocket_muls(TCGContext *ctx, TCGv_i32 vd, TCGv_i32 vn,
+                            TCGv_i32 vm, TCGv_ptr fpst)
+{
+    gen_pocket_f32(ctx, vd, vn, vm, fpst,
+                     INDEX_op_pocket_fmul32_i32, gen_helper_vfp_muls);
+}
+
+static void gen_pocket_adds(TCGContext *ctx, TCGv_i32 vd, TCGv_i32 vn,
+                            TCGv_i32 vm, TCGv_ptr fpst)
+{
+    gen_pocket_f32(ctx, vd, vn, vm, fpst,
+                     INDEX_op_pocket_fadd32_i32, gen_helper_vfp_adds);
+}
+
+static void gen_pocket_subs(TCGContext *ctx, TCGv_i32 vd, TCGv_i32 vn,
+                            TCGv_i32 vm, TCGv_ptr fpst)
+{
+    gen_pocket_f32(ctx, vd, vn, vm, fpst,
+                     INDEX_op_pocket_fsub32_i32, gen_helper_vfp_subs);
+}
+
+static void gen_pocket_f64(TCGContext *ctx, TCGv_i64 vd, TCGv_i64 vn,
+                           TCGv_i64 vm, TCGv_ptr fpst, TCGOpcode opc,
+                           VFPGen3OpDPFn *fallback)
+{
+    if (!pocket_direct_fp_supported(opc)) {
+        fallback(ctx, vd, vn, vm, fpst);
+        return;
+    }
+    TCGv_i64 a = tcg_temp_local_new_i64(ctx);
+    TCGv_i64 b = tcg_temp_local_new_i64(ctx);
+    TCGv_i64 result = tcg_temp_local_new_i64(ctx);
+    TCGv_ptr status = tcg_temp_local_new_ptr(ctx);
+    TCGv_i64 test = tcg_temp_new_i64(ctx);
+    TCGv_i32 control = tcg_temp_new_i32(ctx);
+    TCGLabel *slow = gen_new_label(ctx);
+    TCGLabel *done = gen_new_label(ctx);
+    tcg_gen_mov_i64(ctx, a, vn);
+    tcg_gen_mov_i64(ctx, b, vm);
+    tcg_gen_addi_ptr(ctx, status, fpst, 0);
+    gen_pocket_guest_fp_guard(ctx, status, control, slow);
+
+    /* The same normal-exponent test as F32, with the binary64 field width.
+     * Never narrow operands/results to single precision. */
+    tcg_gen_addi_i64(ctx, test, a, UINT64_C(0x0010000000000000));
+    tcg_gen_andi_i64(ctx, test, test, UINT64_C(0x7fe0000000000000));
+    tcg_gen_brcondi_i64(ctx, TCG_COND_EQ, test, 0, slow);
+    tcg_gen_addi_i64(ctx, test, b, UINT64_C(0x0010000000000000));
+    tcg_gen_andi_i64(ctx, test, test, UINT64_C(0x7fe0000000000000));
+    tcg_gen_brcondi_i64(ctx, TCG_COND_EQ, test, 0, slow);
+    tcg_gen_op1_i32(ctx, INDEX_op_pocket_fp_control_i32, control);
+    tcg_gen_brcondi_i32(ctx, TCG_COND_NE, control, 0, slow);
+    tcg_gen_op3_i64(ctx, opc, result, a, b);
+    tcg_gen_andi_i64(ctx, test, result, UINT64_C(0x7fffffffffffffff));
+    tcg_gen_subi_i64(ctx, test, test, UINT64_C(0x0010000000000001));
+    tcg_gen_brcondi_i64(ctx, TCG_COND_GEU, test,
+                       UINT64_C(0x7fdfffffffffffff), slow);
+    tcg_gen_br(ctx, done);
+    gen_set_label(ctx, slow);
+    fallback(ctx, result, a, b, status);
+    gen_set_label(ctx, done);
+    tcg_gen_mov_i64(ctx, vd, result);
+    tcg_temp_free_i32(ctx, control);
+    tcg_temp_free_i64(ctx, test);
+    tcg_temp_free_ptr(ctx, status);
+    tcg_temp_free_i64(ctx, result);
+    tcg_temp_free_i64(ctx, b);
+    tcg_temp_free_i64(ctx, a);
+}
+
+static void gen_pocket_addd(TCGContext *ctx, TCGv_i64 vd, TCGv_i64 vn,
+                            TCGv_i64 vm, TCGv_ptr fpst)
+{
+    gen_pocket_f64(ctx, vd, vn, vm, fpst,
+                   INDEX_op_pocket_fadd64_i64, gen_helper_vfp_addd);
+}
+
+static void gen_pocket_muld(TCGContext *ctx, TCGv_i64 vd, TCGv_i64 vn,
+                            TCGv_i64 vm, TCGv_ptr fpst)
+{
+    gen_pocket_f64(ctx, vd, vn, vm, fpst,
+                   INDEX_op_pocket_fmul64_i64, gen_helper_vfp_muld);
+}
+
+static void gen_pocket_subd(TCGContext *ctx, TCGv_i64 vd, TCGv_i64 vn,
+                            TCGv_i64 vm, TCGv_ptr fpst)
+{
+    gen_pocket_f64(ctx, vd, vn, vm, fpst,
+                   INDEX_op_pocket_fsub64_i64, gen_helper_vfp_subd);
+}
+
 static bool trans_VMUL_sp(DisasContext *s, arg_VMUL_sp *a)
 {
-    return do_vfp_3op_sp(s, gen_helper_vfp_muls, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_sp(s, gen_pocket_muls, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VMUL_dp(DisasContext *s, arg_VMUL_dp *a)
 {
-    return do_vfp_3op_dp(s, gen_helper_vfp_muld, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_dp(s, gen_pocket_muld, a->vd, a->vn, a->vm, false);
 }
 
 static void gen_VNMUL_sp(TCGContext *tcg_ctx, TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
@@ -1720,22 +1894,22 @@ static bool trans_VNMUL_dp(DisasContext *s, arg_VNMUL_dp *a)
 
 static bool trans_VADD_sp(DisasContext *s, arg_VADD_sp *a)
 {
-    return do_vfp_3op_sp(s, gen_helper_vfp_adds, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_sp(s, gen_pocket_adds, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VADD_dp(DisasContext *s, arg_VADD_dp *a)
 {
-    return do_vfp_3op_dp(s, gen_helper_vfp_addd, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_dp(s, gen_pocket_addd, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VSUB_sp(DisasContext *s, arg_VSUB_sp *a)
 {
-    return do_vfp_3op_sp(s, gen_helper_vfp_subs, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_sp(s, gen_pocket_subs, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VSUB_dp(DisasContext *s, arg_VSUB_dp *a)
 {
-    return do_vfp_3op_dp(s, gen_helper_vfp_subd, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_dp(s, gen_pocket_subd, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VDIV_sp(DisasContext *s, arg_VDIV_sp *a)

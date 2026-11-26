@@ -58,6 +58,9 @@ typedef enum {
 #define TCG_TARGET_CALL_ALIGN_ARGS      1
 #define TCG_TARGET_CALL_STACK_OFFSET    0
 
+/* Scalar F32/F64 uses baseline AArch64 FP/SIMD registers and instructions. */
+#define TCG_TARGET_HAS_pocket_scalar_fp 1
+
 /* optional instructions */
 #define TCG_TARGET_HAS_div_i32          1
 #define TCG_TARGET_HAS_rem_i32          1

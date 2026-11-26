@@ -1330,6 +1330,24 @@ These changes do not change the emulated CPU speed, FPS limit or FPS counter.
 | Responsive thread scheduling | Recheck ready guest workers promptly when the main thread blocks in `GetMessageW`, using the existing wait continuation. |
 | Extended jump cache | Always use the build's full jump cache, consistently for lookup, insertion and invalidation. Standard builds have 65,536 entries. |
 | Batched image page loading | Deferred image accesses always use the batch materializer, retaining page budgets, permissions and unload behavior. |
+| Guarded ARM scalar floating point | Emit native VADD/VSUB/VMUL in F32 and F64 on x86-64 with AVX and AArch64 hosts, using complete VFP helpers outside the checked domain or on unsupported hosts. |
+| Block-local ARM VFP forwarding | Reuse exact S0-S31 store values within a basic block while retaining architectural stores; invalidate on calls, control flow, guest memory operations, opaque writes and source reassignment. |
+
+Scalar F32/F64 arithmetic checks guest nearest-even rounding, an already-set
+sticky inexact flag and compatible host FP controls on every operation. Only normal
+finite inputs and normal results strictly above the minimum-normal boundary
+of their own format use native arithmetic. NaNs, infinities, signed zeros,
+subnormals, underflow,
+overflow and other rounding/control cases use the complete helper with the
+original operands. Addition, subtraction and multiplication remain separate,
+never fused. Double-precision operations retain all 64 bits; they are never
+narrowed to single precision.
+Subtraction retains the original operand order; cancellation and signed-zero
+results use the complete subtraction helper.
+Host control settings are read, not changed. There is no cross-operation guard
+cache, environment selector or experimental mode. MIPS translation is unchanged.
+The forwarding pass has translation-only bookkeeping and keeps no state across
+blocks, processes or snapshots. No snapshot-format change is introduced.
 
 The old private Unicorn optimization control, conservative RAM flag, legacy jump
 execution/helper routines and message-pump specialization have been removed.
@@ -1355,12 +1373,21 @@ Its header contains a standalone build command. Rust CPU tests cover the ARM
 virtual-TLB integration, MIPS execution and image-page lifecycle/budget behavior.
 Configuration tests verify that old optimization switches are discarded.
 
+`crates/pocket-kernel/tests/scalar_f32.rs` and `scalar_f64.rs` cover scalar
+result/exception edges,
+in-block FPSCR changes and register-forwarding boundaries. Run it with
+`cargo test -p pocket-kernel --no-default-features --features unicorn-tests --test scalar_f32 --test scalar_f64`.
+
 ### Retained ARM-specific optimizations
 
 These are architecture-guarded fast paths, not user switches:
 
 - Recompute dynamic ARM/Thumb/IT/VFP inputs for the ARM TB lookup key; retain
-  fallback for XScale, M-profile, debugging and AArch64 states.
+  fallback for XScale, M-profile, debugging and AArch64 states. Pack disjoint
+  dynamic fields with unsigned masks and one merge into the cached flags;
+  preserve the original OR-only VFPEN handling. Do not cache dynamic CPU state.
+  `tools/tests/unicorn-tb-state.c` checks repeated same-PC execution across
+  VFP enable/disable, scalar stride and Thumb IT-state changes.
 - Use the finite normal float32-to-int32 truncation fast path only in its checked
   magnitude range, preserving inexact flags and generic exceptional/boundary cases.
 - Permit inter-page direct ARM chaining only after the identity virtual-TLB

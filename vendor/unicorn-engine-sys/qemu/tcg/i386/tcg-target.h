@@ -174,6 +174,8 @@ extern bool have_avx2;
 #endif
 
 /* We do not support older SSE systems, only beginning with AVX1.  */
+/* Scalar F32/F64 emission requires the AVX register transfer path and a 64-bit host. */
+#define TCG_TARGET_HAS_pocket_scalar_fp (TCG_TARGET_REG_BITS == 64)
 #define TCG_TARGET_HAS_v64              have_avx1
 #define TCG_TARGET_HAS_v128             have_avx1
 #define TCG_TARGET_HAS_v256             have_avx2

@@ -62,6 +62,17 @@ DEF(st8_i32, 0, 2, 1, 0)
 DEF(st16_i32, 0, 2, 1, 0)
 DEF(st_i32, 0, 2, 1, 0)
 /* arith */
+/* Guarded scalar f32/f64 bit-pattern operations. Other hosts retain helpers. */
+#ifndef TCG_TARGET_HAS_pocket_scalar_fp
+#define TCG_TARGET_HAS_pocket_scalar_fp 0
+#endif
+DEF(pocket_fp_control_i32, 1, 0, 0, IMPL(TCG_TARGET_HAS_pocket_scalar_fp))
+DEF(pocket_fadd32_i32, 1, 2, 0, IMPL(TCG_TARGET_HAS_pocket_scalar_fp))
+DEF(pocket_fsub32_i32, 1, 2, 0, IMPL(TCG_TARGET_HAS_pocket_scalar_fp))
+DEF(pocket_fmul32_i32, 1, 2, 0, IMPL(TCG_TARGET_HAS_pocket_scalar_fp))
+DEF(pocket_fadd64_i64, 1, 2, 0, IMPL64 | IMPL(TCG_TARGET_HAS_pocket_scalar_fp))
+DEF(pocket_fsub64_i64, 1, 2, 0, IMPL64 | IMPL(TCG_TARGET_HAS_pocket_scalar_fp))
+DEF(pocket_fmul64_i64, 1, 2, 0, IMPL64 | IMPL(TCG_TARGET_HAS_pocket_scalar_fp))
 DEF(add_i32, 1, 2, 0, 0)
 DEF(sub_i32, 1, 2, 0, 0)
 DEF(mul_i32, 1, 2, 0, 0)

@@ -2354,6 +2354,38 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc,
         }
         break;
 
+    case INDEX_op_pocket_fp_control_i32:
+        /* Outgoing-call scratch area is reserved by the TCG prologue and is
+         * disjoint from spill slots. No helper call is active here. */
+        tcg_out_modrm_offset(s, 0xae | P_EXT, 3, TCG_REG_ESP, 0); /* stmxcsr */
+        tcg_out_ld(s, TCG_TYPE_I32, a0, TCG_REG_ESP, 0);
+        tgen_arithi(s, ARITH_AND, a0, 0xffc0, 0);
+        tgen_arithi(s, ARITH_XOR, a0, 0x1f80, 0);
+        break;
+
+    case INDEX_op_pocket_fadd32_i32:
+        /* vaddss: scalar, separate rounding, no helper call. */
+        tcg_out_vex_modrm(s, 0x58 | P_EXT | P_SIMDF3, a0, a1, a2);
+        break;
+    case INDEX_op_pocket_fsub32_i32:
+        /* vsubss preserves operand order; NaNs/cancellation use the helper. */
+        tcg_out_vex_modrm(s, 0x5c | P_EXT | P_SIMDF3, a0, a1, a2);
+        break;
+    case INDEX_op_pocket_fmul32_i32:
+        /* vmulss: intentionally not fused with a neighbouring add. */
+        tcg_out_vex_modrm(s, 0x59 | P_EXT | P_SIMDF3, a0, a1, a2);
+        break;
+
+    case INDEX_op_pocket_fadd64_i64:
+        tcg_out_vex_modrm(s, 0x58 | P_EXT | P_SIMDF2, a0, a1, a2);
+        break;
+    case INDEX_op_pocket_fsub64_i64:
+        tcg_out_vex_modrm(s, 0x5c | P_EXT | P_SIMDF2, a0, a1, a2);
+        break;
+    case INDEX_op_pocket_fmul64_i64:
+        tcg_out_vex_modrm(s, 0x59 | P_EXT | P_SIMDF2, a0, a1, a2);
+        break;
+
     OP_32_64(add):
         /* For 3-operand addition, use LEA.  */
         if (a0 != a1) {
@@ -3023,6 +3055,17 @@ static const TCGTargetOpDef *tcg_target_op_def(TCGOpcode op)
         return &ri_r;
     case INDEX_op_st_i64:
         return &re_r;
+
+    case INDEX_op_pocket_fp_control_i32:
+        return &r;
+
+    case INDEX_op_pocket_fadd32_i32:
+    case INDEX_op_pocket_fsub32_i32:
+    case INDEX_op_pocket_fmul32_i32:
+    case INDEX_op_pocket_fadd64_i64:
+    case INDEX_op_pocket_fsub64_i64:
+    case INDEX_op_pocket_fmul64_i64:
+        return &x_x_x;
 
     case INDEX_op_add_i32:
     case INDEX_op_add_i64:
