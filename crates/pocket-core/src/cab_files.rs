@@ -24,10 +24,11 @@ pub(super) fn complete(vfs: &mut Vfs, root: &Path, install_dir: &str) -> Result<
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
         if entry.file_type()?.is_file()
-            && entry
-                .path()
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("000"))
+            && (entry.file_name().eq_ignore_ascii_case("_setup.xml")
+                || entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("000")))
         {
             ensure!(
                 entry.metadata()?.len() <= 8 * 1024 * 1024,
@@ -40,10 +41,19 @@ pub(super) fn complete(vfs: &mut Vfs, root: &Path, install_dir: &str) -> Result<
     ensure!(headers.len() <= 16, "Too many CAB install headers");
     let mut installed = 0;
     for path in headers {
+        if path
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("_setup.xml"))
+        {
+            let script = pocket_cab::WinCeSetupScript::parse_bytes(&std::fs::read(path)?);
+            install_directories(vfs, &script.install_dirs, install_dir)?;
+            continue;
+        }
         let header = WinCeInstallHeader::parse_file(&path)?;
         if !header.structured {
             continue; // Never infer system-file destinations from string scans.
         }
+        install_directories(vfs, &header.directories, install_dir)?;
         for file in &header.files {
             if under(&file.destination, install_dir) {
                 continue; // Already exposed by the application's install mount.
@@ -106,6 +116,41 @@ pub(super) fn complete(vfs: &mut Vfs, root: &Path, install_dir: &str) -> Result<
         }
     }
     Ok(installed)
+}
+
+fn install_directories(vfs: &Vfs, directories: &[String], install_dir: &str) -> Result<()> {
+    // DIRS also contains empty application folders (LeoFS's Stn). Create
+    // them through the mounted writable overlay, never the source package.
+    let mut directories = directories.to_vec();
+    directories.sort_by_key(|path| (path.matches('\\').count(), path.to_ascii_lowercase()));
+    for directory in directories.iter().filter(|p| under(p, install_dir)) {
+        ensure!(
+            directory.starts_with('\\')
+                && !directory.contains(['\0', '/', ':'])
+                && directory.split('\\').all(|p| p != "." && p != ".."),
+            "Invalid CAB directory"
+        );
+        let mut path = install_dir.trim_end_matches('\\').to_string();
+        let suffix = directory
+            .get(path.len()..)
+            .context("Invalid CAB directory prefix")?;
+        for part in suffix.split('\\').filter(|p| !p.is_empty()) {
+            path.push('\\');
+            path.push_str(part);
+            match vfs.attributes(&path) {
+                Ok(attrs) if attrs & 0x10 != 0 => continue,
+                Ok(_) => anyhow::bail!("CAB directory is occupied by a file: {path}"),
+                Err(2 | 3) => {}
+                Err(error) => {
+                    anyhow::bail!("Cannot inspect CAB directory {path}: WinCE error {error}")
+                }
+            }
+            vfs.create_directory(&path).map_err(|error| {
+                anyhow::anyhow!("Cannot install CAB directory {path}: WinCE error {error}")
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -193,6 +238,38 @@ mod tests {
             b"initial bytes"
         );
     }
+    #[test]
+    fn empty_install_directories_are_repaired_in_the_save_overlay_without_replacing_user_data() {
+        let package = tempfile::tempdir().unwrap();
+        let saves = tempfile::tempdir().unwrap();
+        let mut vfs = Vfs::new();
+        vfs.mount_read_only(r"\Program Files\Example\", package.path());
+        vfs.mount_save_dir(r"\Program Files\Example\", saves.path());
+        let directories = vec![
+            r"\Program Files\Example\Stn\nested\".into(),
+            r"\Program Files\Example\".into(),
+            r"\Program Files\Example2\other\".into(),
+        ];
+        install_directories(&vfs, &directories, r"\Program Files\Example\").unwrap();
+        let folder = vfs.resolve(r"\Program Files\Example\Stn").unwrap();
+        let nested = vfs.resolve(r"\Program Files\Example\Stn\nested").unwrap();
+        assert!(folder.starts_with(saves.path()));
+        assert!(nested.is_dir());
+        assert_eq!(std::fs::read_dir(package.path()).unwrap().count(), 0);
+        std::fs::write(folder.join("user.stn"), b"pilot").unwrap();
+        for _ in 0..16 {
+            install_directories(&vfs, &directories, r"\Program Files\Example\").unwrap();
+        }
+        assert_eq!(std::fs::read(folder.join("user.stn")).unwrap(), b"pilot");
+        assert_eq!(std::fs::read_dir(saves.path()).unwrap().count(), 1);
+        assert!(install_directories(
+            &vfs,
+            &[r"\Program Files\Example\..\escape".into()],
+            r"\Program Files\Example\"
+        )
+        .is_err());
+    }
+
     #[test]
     fn install_directory_test_observes_component_boundaries() {
         assert!(under(

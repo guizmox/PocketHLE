@@ -2,16 +2,47 @@
 //! Buffer pointers remain guest-visible: compiled inline stream operators and
 //! snapshots must observe exactly the same cursor as out-of-line Read/Write.
 use super::*;
+#[cfg(test)]
 use pocket_kernel::vfs::SeekKind;
+#[path = "archive_codec.rs"]
+mod codec;
+#[path = "archive_stream.rs"]
+mod stream;
+use codec::{read_count, read_string, write_count, write_string};
+pub(super) use codec::{READ_COUNT, READ_STRING, WRITE_COUNT, WRITE_STRING};
+use stream::{close, construct, destruct, fill_buffer, flush as flush_call, read, write};
+pub(super) use stream::{READ, WRITE};
 
 pub(super) const EXPORTS: &[(u16, &str, crate::Handler)] = &[
+    (550, "?Abort@CArchive@@QAAXXZ", abort),
+    (851, "?Close@CArchive@@QAAXXZ", close),
+    (1166, "?Flush@CArchive@@QAAXXZ", flush_call),
     (38, "??0CArchive@@QAA@PAVCFile@@IHPAX@Z", construct),
     (212, "??1CArchive@@QAA@XZ", destruct),
     (2135, "?Read@CArchive@@QAAIPAXI@Z", read),
+    (1150, "?FillBuffer@CArchive@@QAAXI@Z", fill_buffer),
     (2142, "?ReadCount@CArchive@@QAAKXZ", read_count),
+    (335, "??5@YAAAVCArchive@@AAV0@AAVCString@@@Z", read_string),
+    (338, "??6@YAAAVCArchive@@AAV0@ABVCString@@@Z", write_string),
     (2582, "?Write@CArchive@@QAAXPBXI@Z", write),
     (2588, "?WriteCount@CArchive@@QAAXK@Z", write_count),
 ];
+pub(super) const CONSTRUCT: &str = "__PocketHLE_MFC_ArchiveConstruct";
+pub(super) const DESTRUCT: &str = "__PocketHLE_MFC_ArchiveDestruct";
+pub(super) const CLOSE: &str = "__PocketHLE_MFC_ArchiveClose";
+pub(super) const ABORT: &str = "__PocketHLE_MFC_ArchiveAbort";
+pub(super) fn register(d: &mut WinCeDispatcher) {
+    stream::register(d);
+    codec::register(d);
+    for (name, handler) in [
+        (CONSTRUCT, construct as crate::Handler),
+        (DESTRUCT, destruct),
+        (CLOSE, close),
+        (ABORT, abort),
+    ] {
+        d.register_handler("coredll.dll", name, handler);
+    }
+}
 const SIZE: u32 = 68;
 const MODE: u32 = 20;
 const USER_BUFFER: u32 = 24;
@@ -21,18 +52,25 @@ const CURRENT: u32 = 36;
 const END: u32 = 40;
 const BASE: u32 = 44;
 
-fn error(detail: &str) -> KernelError {
+pub(super) fn error(detail: &str) -> KernelError {
     KernelError::Loader(format!("MFC CArchive: {detail}"))
+}
+pub(super) fn fault(ctx: &mut CallCtx<'_>, archive: u32, cause: u32) -> KernelError {
+    match strings::value(ctx, archive + 16) {
+        Ok(path) => super::io_exceptions::fault(super::io_exceptions::ARCHIVE, cause, 0, path),
+        Err(e) => e,
+    }
+}
+fn mutable_archive(ctx: &mut CallCtx<'_>, archive: u32) -> Result<(), KernelError> {
+    ctx.cpu.check_guest_access(
+        archive,
+        SIZE,
+        pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+    )?;
+    Ok(())
 }
 pub(super) fn loading(ctx: &mut CallCtx<'_>, archive: u32) -> Result<bool, KernelError> {
     Ok(word(ctx, archive + MODE)? & 1 != 0)
-}
-fn file_handle(ctx: &mut CallCtx<'_>, archive: u32) -> Result<u32, KernelError> {
-    let file = word(ctx, archive + FILE)?;
-    if file == 0 {
-        return Err(error("closed archive"));
-    }
-    file::archive_handle(ctx, file)
 }
 fn buffer(ctx: &mut CallCtx<'_>, archive: u32) -> Result<(u32, u32, u32, u32), KernelError> {
     let base = word(ctx, archive + BASE)?;
@@ -47,244 +85,21 @@ fn buffer(ctx: &mut CallCtx<'_>, archive: u32) -> Result<(u32, u32, u32, u32), K
     }
     Ok((base, current, end, capacity))
 }
-fn construct(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let archive = ctx.arg_u32(0)?;
-    let file = ctx.arg_u32(1)?;
-    let mode = ctx.arg_u32(2)?;
-    let requested = ctx.arg_u32(3)? as i32;
-    let supplied = ctx.arg_u32(4)?;
-    ctx.cpu
-        .check_guest_access(archive, SIZE, pocket_cpu::Prot::WRITE)?;
-    file::archive_handle(ctx, file)?;
-    let text = strings::value(ctx, file + 12)?;
-    let capacity = requested.max(128) as u32;
-    let user = supplied != 0 && requested >= 128;
-    let base = if user {
-        supplied
-    } else {
-        alloc(ctx, capacity)?
-    };
-    let result: Result<(), KernelError> = (|| {
-        let end = base
-            .checked_add(capacity)
-            .ok_or_else(|| error("buffer address overflow"))?;
-        ctx.cpu.check_guest_access(
-            base,
-            capacity,
-            pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
-        )?;
-        ctx.cpu.write_mem(archive, &[0; SIZE as usize])?;
-        new_string(ctx, archive + 16, &text)?;
-        for (offset, value) in [
-            (4, 1),
-            (12, u32::MAX),
-            (MODE, mode),
-            (USER_BUFFER, u32::from(user)),
-            (CAPACITY, capacity),
-            (FILE, file),
-            (CURRENT, if mode & 1 != 0 { end } else { base }),
-            (END, end),
-            (BASE, base),
-            (60, if mode & 1 != 0 { 64 } else { 16 }),
-            (64, 137),
-        ] {
-            put(ctx, archive + offset, value)?;
-        }
-        Ok(())
-    })();
-    if result.is_err() && !user {
-        ctx.kernel.heap.free(base);
-    }
-    result?;
-    Ok(DispatchOutcome::ReturnedR0(archive))
-}
-
-pub(super) fn read_bytes(
-    ctx: &mut CallCtx<'_>,
-    archive: u32,
-    dst: u32,
-    count: u32,
-) -> Result<u32, KernelError> {
-    if !loading(ctx, archive)? {
-        return Err(error("read on a storing archive"));
-    }
-    let handle = file_handle(ctx, archive)?;
-    if count == 0 {
-        return Ok(0);
-    }
-    ctx.cpu
-        .check_guest_access(dst, count, pocket_cpu::Prot::WRITE)?;
-    let mut copied = 0;
-    while copied < count {
-        let (base, current, end, capacity) = buffer(ctx, archive)?;
-        let available = end - current;
-        if available != 0 {
-            let n = available.min(count - copied).min(65536);
-            let bytes = ctx.cpu.read_mem(current, n)?;
-            ctx.cpu.write_mem(dst + copied, &bytes)?;
-            put(ctx, archive + CURRENT, current + n)?;
-            copied += n;
-            continue;
-        }
-        // Refill the same guest allocation; inline operators can consume it
-        // after this call. VFS cursor includes unread bytes until Flush/close.
-        let mut bytes = vec![0; capacity.min(65536) as usize];
-        let n = ctx
-            .kernel
-            .vfs
-            .read(handle, &mut bytes)
-            .ok_or_else(|| error("file read failed"))? as u32;
-        ctx.cpu.write_mem(base, &bytes[..n as usize])?;
-        put(ctx, archive + CURRENT, base)?;
-        put(ctx, archive + END, base + n)?;
-        if n == 0 {
-            break;
-        }
-    }
-    Ok(copied)
-}
-pub(super) fn write_bytes(
-    ctx: &mut CallCtx<'_>,
-    archive: u32,
-    src: u32,
-    count: u32,
-) -> Result<(), KernelError> {
-    if loading(ctx, archive)? {
-        return Err(error("write on a loading archive"));
-    }
-    file_handle(ctx, archive)?;
-    if count == 0 {
-        return Ok(());
-    }
-    ctx.cpu
-        .check_guest_access(src, count, pocket_cpu::Prot::READ)?;
-    let mut copied = 0;
-    while copied < count {
-        let (_, current, end, _) = buffer(ctx, archive)?;
-        let available = end - current;
-        if available == 0 {
-            flush(ctx, archive)?;
-            continue;
-        }
-        let n = available.min(count - copied).min(65536);
-        let bytes = ctx.cpu.read_mem(src + copied, n)?;
-        ctx.cpu.write_mem(current, &bytes)?;
-        put(ctx, archive + CURRENT, current + n)?;
-        copied += n;
-    }
-    Ok(())
-}
-fn flush(ctx: &mut CallCtx<'_>, archive: u32) -> Result<(), KernelError> {
-    let handle = file_handle(ctx, archive)?;
-    let (base, current, end, capacity) = buffer(ctx, archive)?;
-    if loading(ctx, archive)? {
-        ctx.kernel
-            .vfs
-            .seek(handle, -i64::from(end - current), SeekKind::Current)
-            .ok_or_else(|| error("file rewind failed"))?;
-        put(ctx, archive + CURRENT, base)?;
-        put(ctx, archive + END, base)?;
-    } else {
-        let mut written = 0;
-        while written < current - base {
-            let n = (current - base - written).min(65536);
-            let bytes = ctx.cpu.read_mem(base + written, n)?;
-            if ctx.kernel.vfs.write(handle, &bytes) != Some(n as usize) {
-                return Err(error("file write failed"));
-            }
-            written += n;
-        }
-        put(ctx, archive + CURRENT, base)?;
-        put(ctx, archive + END, base + capacity)?;
-    }
-    Ok(())
-}
-fn destruct(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let archive = ctx.arg_u32(0)?;
-    if word(ctx, archive + FILE)? != 0 && word(ctx, archive + MODE)? & 2 == 0 {
-        flush(ctx, archive)?;
-    }
-    let base = word(ctx, archive + BASE)?;
-    if word(ctx, archive + USER_BUFFER)? == 0 && base != 0 {
-        ctx.kernel.heap.free(base);
-    }
-    for offset in [FILE, CURRENT, END, BASE] {
-        put(ctx, archive + offset, 0)?;
-    }
-    release_string(ctx, archive + 16)?;
-    Ok(DispatchOutcome::ReturnedR0(archive))
-}
-fn read(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (archive, dst, n) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?);
-    Ok(DispatchOutcome::ReturnedR0(read_bytes(
-        ctx, archive, dst, n,
-    )?))
-}
-fn write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (archive, src, n) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?, ctx.arg_u32(2)?);
-    write_bytes(ctx, archive, src, n)?;
-    Ok(DispatchOutcome::ReturnedR0(0))
-}
-pub(super) fn read_size(ctx: &mut CallCtx<'_>, archive: u32) -> Result<u32, KernelError> {
-    // Use a temporary guest slot so the ordinary buffered read is the single
-    // cursor implementation, including EOF and inline-operator interoperability.
-    let slot = alloc(ctx, 4)?;
-    let result = (|| {
-        if read_bytes(ctx, archive, slot, 2)? != 2 {
-            return Err(error("truncated count"));
-        }
-        let n = u32::from(ctx.cpu.read_u16_le(slot)?);
-        if n != 0xffff {
-            return Ok(n);
-        }
-        if read_bytes(ctx, archive, slot, 4)? != 4 {
-            return Err(error("truncated wide count"));
-        }
-        word(ctx, slot)
-    })();
-    ctx.kernel.heap.free(slot);
-    result
-}
-pub(super) fn write_size(ctx: &mut CallCtx<'_>, archive: u32, n: u32) -> Result<(), KernelError> {
-    let slot = alloc(ctx, 6)?;
-    let result = (|| {
-        if n < 0xffff {
-            ctx.cpu.write_mem(slot, &(n as u16).to_le_bytes())?;
-            write_bytes(ctx, archive, slot, 2)
-        } else {
-            ctx.cpu.write_mem(slot, &[0xff, 0xff])?;
-            put(ctx, slot + 2, n)?;
-            write_bytes(ctx, archive, slot, 6)
-        }
-    })();
-    ctx.kernel.heap.free(slot);
-    result
-}
-fn read_count(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let archive = ctx.arg_u32(0)?;
-    Ok(DispatchOutcome::ReturnedR0(read_size(ctx, archive)?))
-}
-fn write_count(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let (archive, n) = (ctx.arg_u32(0)?, ctx.arg_u32(1)?);
-    write_size(ctx, archive, n)?;
-    Ok(DispatchOutcome::ReturnedR0(0))
-}
-
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use crate::bluetooth::tests::{call, setup};
+    use crate::bluetooth::tests::setup;
     use pocket_cpu::{stub::StubCpu, Cpu, Prot};
     use pocket_kernel::KernelState;
 
-    struct Fixture {
-        cpu: StubCpu,
-        kernel: KernelState,
-        dispatcher: WinCeDispatcher,
-        directory: tempfile::TempDir,
+    pub(in crate::mfc) struct Fixture {
+        pub(in crate::mfc) cpu: StubCpu,
+        pub(in crate::mfc) kernel: KernelState,
+        pub(in crate::mfc) dispatcher: WinCeDispatcher,
+        pub(in crate::mfc) directory: tempfile::TempDir,
     }
     impl Fixture {
-        fn new(bytes: &[u8]) -> Self {
+        pub(in crate::mfc) fn new(bytes: &[u8]) -> Self {
             let (mut cpu, mut kernel, dispatcher) = setup();
             cpu.map_region(0x50000000, 0x200000, Prot::READ | Prot::WRITE)
                 .unwrap();
@@ -315,31 +130,179 @@ mod tests {
                 .unwrap();
             fixture
         }
-        fn call(&mut self, name: &str, args: &[u32]) -> u32 {
-            let DispatchOutcome::ReturnedR0(value) = call(
+        pub(in crate::mfc) fn call(&mut self, name: &str, args: &[u32]) -> u32 {
+            use super::super::window_dispatch::tests::{drive_with, entry};
+            use pocket_cpu::regs::ArmReg;
+            let sp = self.cpu.read_reg(ArmReg::Sp).unwrap();
+            for (i, value) in args.iter().enumerate() {
+                if i < 4 {
+                    self.cpu.write_arg(i as u8, *value).unwrap();
+                } else {
+                    self.cpu
+                        .write_mem(
+                            sp + self.cpu.stack_arg_offset() + (i as u32 - 4) * 4,
+                            &value.to_le_bytes(),
+                        )
+                        .unwrap();
+                }
+            }
+            let start = if let Some(ordinal) = name.strip_prefix("ord:") {
+                entry(ordinal.parse().unwrap())
+            } else {
+                pocket_kernel::Thunk {
+                    thunk_va: 0x70000000,
+                    iat_va: 0,
+                    dll: "coredll.dll".into(),
+                    binding: pocket_pe::ImportBinding::Name(name.into()),
+                    friendly_name: None,
+                }
+            };
+            drive_with(
                 &mut self.cpu,
                 &mut self.kernel,
                 &mut self.dispatcher,
-                "mfcce300.dll",
-                name,
-                args,
-            ) else {
-                panic!("unexpected result");
-            };
-            value
+                start,
+                8192,
+                |pc, _, _, _| panic!("unexpected guest callback {pc:x}"),
+            )
         }
-        fn word(&mut self, at: u32) -> u32 {
+        pub(in crate::mfc) fn word(&mut self, at: u32) -> u32 {
             self.cpu.read_u32_le(at).unwrap()
         }
-        fn handle(&mut self) -> u32 {
+        pub(in crate::mfc) fn handle(&mut self) -> u32 {
             self.word(0x2004)
         }
-        fn construct(&mut self, mode: u32, supplied: u32) {
+        pub(in crate::mfc) fn construct(&mut self, mode: u32, supplied: u32) {
             assert_eq!(
                 self.call("ord:38", &[0x2300, 0x2000, mode, 128, supplied]),
                 0x2300
             );
         }
+    }
+    fn failure(f: &mut Fixture, ordinal: u16, args: &[u32]) -> KernelError {
+        use pocket_kernel::Dispatcher;
+        for (i, value) in args.iter().enumerate() {
+            f.cpu.write_arg(i as u8, *value).unwrap();
+        }
+        f.dispatcher
+            .dispatch(
+                &mut f.cpu,
+                &super::super::window_dispatch::tests::entry(ordinal),
+                &mut f.kernel,
+            )
+            .unwrap_err()
+    }
+    #[test]
+    fn protected_archive_buffer_fails_before_refill_consumes_vfs_input() {
+        let mut f = Fixture::new(&[1, 2, 3, 4]);
+        f.construct(1, 0x3000);
+        let handle = f.handle();
+        let cursor = f.word(0x2300 + CURRENT);
+        let free = f.kernel.heap.free_bytes();
+        f.cpu.protect_region(0x3000, 0x1000, Prot::READ).unwrap();
+        failure(&mut f, 2135, &[0x2300, 0x2800, 4]);
+        assert_eq!(f.kernel.vfs.position(handle), Some(0));
+        assert_eq!(f.word(0x2300 + CURRENT), cursor);
+        assert_eq!(f.kernel.heap.free_bytes(), free);
+        assert!(f.kernel.vfs.is_open(handle));
+        f.cpu
+            .protect_region(0x3000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        assert_eq!(f.call("ord:2135", &[0x2300, 0x2800, 4]), 4);
+        assert_eq!(f.cpu.read_mem(0x2800, 4).unwrap(), [1, 2, 3, 4]);
+    }
+    #[test]
+    fn string_input_checks_output_before_io_and_keeps_locked_storage_when_reusable() {
+        let mut f = Fixture::new(&[0xff, 0xfe, 0xff, 1, 65, 0]);
+        f.call("ord:181", &[0x3000]);
+        f.call("ord:1233", &[0x3000, 8]);
+        let locked = f.call("ord:1733", &[0x3000]);
+        f.construct(1, 0);
+        let handle = f.handle();
+        let free = f.kernel.heap.free_bytes();
+        f.cpu.protect_region(0x3000, 0x1000, Prot::READ).unwrap();
+        failure(&mut f, 335, &[0x2300, 0x3000]);
+        assert_eq!(f.kernel.vfs.position(handle), Some(0));
+        assert_eq!(f.kernel.heap.free_bytes(), free);
+        f.cpu
+            .protect_region(0x3000, 0x1000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        assert_eq!(f.call("ord:335", &[0x2300, 0x3000]), 0x2300);
+        assert_eq!(f.word(0x3000), locked);
+        assert_eq!(f.word(locked - 12), u32::MAX);
+        assert_eq!(f.word(locked - 8), 1);
+        assert_eq!(f.cpu.read_mem(locked, 4).unwrap(), [65, 0, 0, 0]);
+        assert_eq!(f.kernel.heap.free_bytes(), free);
+    }
+    #[test]
+    fn archived_strings_decode_ansi_unicode_and_long_lengths_without_leaking_buffers() {
+        for (prefix, text, expected) in [
+            (vec![3], vec![b'A', 0xe9, b'Z'], vec![65u16, 233, 90]),
+            (
+                vec![0xff, 0xfe, 0xff, 3],
+                vec![65, 0, 0x3d, 0xd8, 0x00, 0xde],
+                vec![65, 0xd83d, 0xde00],
+            ),
+            (
+                vec![0xff, 0xfe, 0xff, 0xff, 0xff, 0xff, 0, 1, 0, 0],
+                vec![65, 0].repeat(256),
+                vec![65; 256],
+            ),
+        ] {
+            let mut bytes = prefix;
+            bytes.extend_from_slice(&text);
+            let mut f = Fixture::new(&bytes);
+            let free = f.kernel.heap.free_bytes();
+            f.call("ord:181", &[0x2500]);
+            f.construct(1, 0);
+            assert_eq!(f.call("ord:335", &[0x2300, 0x2500]), 0x2300);
+            let pointer = f.word(0x2500);
+            assert_eq!(f.word(pointer - 8), expected.len() as u32);
+            assert_eq!(
+                f.cpu.read_mem(pointer, expected.len() as u32 * 2).unwrap(),
+                expected
+                    .iter()
+                    .flat_map(|ch| ch.to_le_bytes())
+                    .collect::<Vec<_>>()
+            );
+            f.call("ord:212", &[0x2300]);
+            let handle = f.handle();
+            f.kernel.vfs.seek(handle, 0, SeekKind::Begin).unwrap();
+            f.construct(0, 0);
+            assert_eq!(f.call("ord:338", &[0x2300, 0x2500]), 0x2300);
+            f.call("ord:212", &[0x2300]);
+            let encoded = std::fs::read(f.directory.path().join("archive.bin")).unwrap();
+            assert_eq!(&encoded[..3], &[0xff, 0xfe, 0xff]);
+            f.kernel.vfs.seek(handle, 0, SeekKind::Begin).unwrap();
+            f.construct(1, 0);
+            assert_eq!(f.call("ord:335", &[0x2300, 0x2500]), 0x2300);
+            f.call("ord:212", &[0x2300]);
+            f.call("ord:297", &[0x2500]);
+            assert_eq!(f.kernel.heap.free_bytes(), free);
+        }
+    }
+    #[test]
+    fn fill_buffer_preserves_unread_inline_data_and_keeps_the_real_file_cursor() {
+        let bytes: Vec<u8> = (0..300).map(|i| i as u8).collect();
+        let mut f = Fixture::new(&bytes);
+        f.construct(1, 0);
+        f.call("ord:2135", &[0x2300, 0x2800, 126]);
+        let current = f.word(0x2300 + CURRENT);
+        assert_eq!(f.cpu.read_mem(current, 2).unwrap(), bytes[126..128]);
+        f.call("ord:1150", &[0x2300, 4]);
+        let current = f.word(0x2300 + CURRENT);
+        assert_eq!(f.cpu.read_mem(current, 8).unwrap(), bytes[126..134]);
+        assert_eq!(f.word(0x2300 + END) - current, 128);
+        let handle = f.handle();
+        assert_eq!(f.kernel.vfs.position(handle), Some(254));
+        // Consume four bytes inline; Read must start at the same cursor.
+        f.cpu
+            .write_mem(0x2300 + CURRENT, &(current + 4).to_le_bytes())
+            .unwrap();
+        f.call("ord:2135", &[0x2300, 0x2800, 3]);
+        assert_eq!(f.cpu.read_mem(0x2800, 3).unwrap(), bytes[130..133]);
+        f.call("ord:212", &[0x2300]);
+        assert_eq!(f.kernel.vfs.position(handle), Some(133));
     }
     #[test]
     fn loading_shares_inline_cursor_rewinds_readahead_and_releases_owned_buffer() {
@@ -405,14 +368,7 @@ mod tests {
                 .unwrap();
         }
         f.construct(0, 0);
-        call(
-            &mut f.cpu,
-            &mut f.kernel,
-            &mut f.dispatcher,
-            "coredll.dll",
-            SERIALIZE,
-            &[0x2500, 0x2300],
-        );
+        f.call("__PocketHLE_MFC_Class:CByteArray:2", &[0x2500, 0x2300]);
         f.call("ord:212", &[0x2300]);
         let stored = std::fs::read(f.directory.path().join("archive.bin")).unwrap();
         assert_eq!(&stored[..2], &300u16.to_le_bytes());
@@ -420,14 +376,7 @@ mod tests {
         let handle = f.handle();
         f.kernel.vfs.seek(handle, 0, SeekKind::Begin).unwrap();
         f.construct(1, 0);
-        call(
-            &mut f.cpu,
-            &mut f.kernel,
-            &mut f.dispatcher,
-            "coredll.dll",
-            SERIALIZE,
-            &[0x2600, 0x2300],
-        );
+        f.call("__PocketHLE_MFC_Class:CByteArray:2", &[0x2600, 0x2300]);
         assert_eq!(f.word(0x2608), 300);
         let restored = f.word(0x2604);
         assert_eq!(f.cpu.read_mem(restored, 300).unwrap(), data);
@@ -455,5 +404,140 @@ mod tests {
         assert_eq!(f.cpu.read_mem(0x2800, 700).unwrap(), bytes);
         f.call("ord:212", &[0x2300]);
         assert_eq!(f.kernel.vfs.position(handle), Some(700));
+    }
+    #[test]
+    fn word_array_growth_and_archive_round_trip_use_element_counts_not_byte_counts() {
+        let mut f = Fixture::new(&[]);
+        f.call("ord:207", &[0x2100]);
+        let baseline = f.kernel.heap.free_bytes();
+        f.call("ord:2311", &[0x2100, 2, 0x1234]);
+        f.call("ord:2419", &[0x2100, 100, u32::MAX]);
+        let data = f.word(0x2104);
+        assert_eq!(f.cpu.read_mem(data, 6).unwrap(), [0, 0, 0, 0, 0x34, 0x12]);
+        f.call("ord:2419", &[0x2100, 3, u32::MAX]);
+        f.construct(0, 0);
+        f.call("ord:2294", &[0x2100, 0x2300]);
+        f.call("ord:212", &[0x2300]);
+        assert_eq!(
+            std::fs::read(f.directory.path().join("archive.bin")).unwrap(),
+            [3, 0, 0, 0, 0, 0, 0x34, 0x12]
+        );
+        f.call("ord:2419", &[0x2100, 0, u32::MAX]);
+        let handle = f.handle();
+        f.kernel.vfs.seek(handle, 0, SeekKind::Begin).unwrap();
+        f.construct(1, 0);
+        f.call("ord:2294", &[0x2100, 0x2300]);
+        f.call("ord:212", &[0x2300]);
+        assert_eq!(f.word(0x2108), 3);
+        let data = f.word(0x2104);
+        assert_eq!(f.cpu.read_mem(data, 6).unwrap(), [0, 0, 0, 0, 0x34, 0x12]);
+        f.call("ord:314", &[0x2100]);
+        assert_eq!(f.kernel.heap.free_bytes(), baseline);
+    }
+}
+
+fn abort(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let archive = ctx.arg_u32(0)?;
+    mutable_archive(ctx, archive)?;
+    super::archive_graph::release(ctx, archive)?;
+    if word(ctx, archive + USER_BUFFER)? == 0 {
+        let base = word(ctx, archive + BASE)?;
+        if base != 0 {
+            ctx.kernel.heap.free(base);
+        }
+        put(ctx, archive + BASE, 0)?;
+        put(ctx, archive + CURRENT, 0)?;
+    }
+    put(ctx, archive + FILE, 0)?;
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::tests::Fixture;
+    use pocket_cpu::Cpu;
+    use pocket_kernel::vfs::SeekKind;
+    fn wide(f: &mut Fixture, p: u32, text: &str) {
+        let bytes: Vec<_> = text
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        f.cpu.write_mem(p, &bytes).unwrap();
+    }
+    #[test]
+    fn string_arrays_round_trip_unicode_elements_and_release_each_owned_string() {
+        let mut f = Fixture::new(&[]);
+        f.call("ord:182", &[0x2500]);
+        let baseline = f.kernel.heap.free_bytes();
+        let expected = ["alpha", "", "café 🚗"];
+        for _ in 0..3 {
+            for (i, text) in expected.iter().enumerate() {
+                wide(&mut f, 0x3000, text);
+                f.call("ord:2309", &[0x2500, i as u32, 0x3000]);
+            }
+            f.construct(0, 0);
+            f.call("ord:2292", &[0x2500, 0x2300]);
+            f.call("ord:212", &[0x2300]);
+            f.call("ord:2417", &[0x2500, 0, u32::MAX]);
+            let handle = f.handle();
+            f.kernel.vfs.seek(handle, 0, SeekKind::Begin).unwrap();
+            f.construct(1, 0);
+            f.call("ord:2292", &[0x2500, 0x2300]);
+            f.call("ord:212", &[0x2300]);
+            assert_eq!(f.word(0x2508), 3);
+            let data = f.word(0x2504);
+            for (i, text) in expected.iter().enumerate() {
+                let p = f.word(data + i as u32 * 4);
+                let n = f.word(p - 8);
+                let bytes = f.cpu.read_mem(p, n * 2).unwrap();
+                let units: Vec<_> = bytes
+                    .chunks_exact(2)
+                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                    .collect();
+                assert_eq!(String::from_utf16(&units).unwrap(), *text);
+            }
+            f.call("ord:2417", &[0x2500, 0, u32::MAX]);
+            f.kernel.vfs.seek(handle, 0, SeekKind::Begin).unwrap();
+            assert_eq!(f.kernel.heap.free_bytes(), baseline);
+        }
+        f.call("ord:298", &[0x2500]);
+    }
+    #[test]
+    fn string_object_map_uses_archive_graph_and_releases_temporary_keys_on_every_load() {
+        let mut f = Fixture::new(&[]);
+        f.call("ord:123", &[0x2500, 2]);
+        // The CE3 TRY context is process/thread metadata, not a serializer leak.
+        f.call("ord:2649", &[]);
+        let baseline = f.kernel.heap.free_bytes();
+        for _ in 0..3 {
+            for text in ["alpha", "café"] {
+                wide(&mut f, 0x3000, text);
+                let slot = f.call("ord:354", &[0x2500, 0x3000]);
+                f.cpu.write_mem(slot, &0u32.to_le_bytes()).unwrap();
+            }
+            f.construct(0, 0);
+            f.call("ord:2286", &[0x2500, 0x2300]);
+            f.call("ord:212", &[0x2300]);
+            let bytes = std::fs::read(f.directory.path().join("archive.bin")).unwrap();
+            assert_eq!(&bytes[..2], &2u16.to_le_bytes());
+            f.call("ord:2176", &[0x2500]);
+            let handle = f.handle();
+            f.kernel.vfs.seek(handle, 0, SeekKind::Begin).unwrap();
+            f.construct(1, 0);
+            f.call("ord:2286", &[0x2500, 0x2300]);
+            f.call("ord:212", &[0x2300]);
+            assert_eq!(f.word(0x250c), 2);
+            for text in ["alpha", "café"] {
+                wide(&mut f, 0x3000, text);
+                f.cpu.write_mem(0x3100, &u32::MAX.to_le_bytes()).unwrap();
+                assert_eq!(f.call("ord:1740", &[0x2500, 0x3000, 0x3100]), 1);
+                assert_eq!(f.word(0x3100), 0);
+            }
+            f.call("ord:2176", &[0x2500]);
+            f.kernel.vfs.seek(handle, 0, SeekKind::Begin).unwrap();
+            assert_eq!(f.kernel.heap.free_bytes(), baseline);
+        }
+        f.call("ord:259", &[0x2500]);
     }
 }

@@ -12,6 +12,109 @@ mod tests {
     use crate::bluetooth::tests::{call, setup};
     use pocket_cpu::Cpu;
     #[test]
+    fn geometry_sends_size_before_return_and_keeps_nested_frames_separate() {
+        let (mut cpu, mut k, mut d) = setup();
+        let hwnd = 0xdead1001;
+        k.window_rects.insert(hwnd, (0, 0, 0, 0));
+        k.window_procs.insert(hwnd, 0x2100);
+        k.window_threads.insert(hwnd, 0);
+        cpu.write_reg(ArmReg::Lr, 0x1234).unwrap();
+        let args = [hwnd, 0, 3, 4, 240, 268, 0x14];
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SetWindowPos",
+                &args
+            ),
+            DispatchOutcome::JumpTo(0x2100)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::R1).unwrap(), 5);
+        assert_eq!(cpu.read_reg(ArmReg::R3).unwrap(), 240 | (268 << 16));
+        assert_eq!(k.window_rects[&hwnd], (3, 4, 240, 268));
+        assert!(!k.posted_messages.iter().any(|m| m.0 == hwnd && m.1 == 5));
+        // A nested call to the same import has a lower SP and must run once.
+        cpu.write_reg(ArmReg::Sp, 0x3f00).unwrap();
+        cpu.write_reg(ArmReg::Lr, 0x2345).unwrap();
+        cpu.write_mem(0x3f00, &200u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x3f04, &100u32.to_le_bytes()).unwrap();
+        cpu.write_mem(0x3f08, &0x14u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SetWindowPos",
+                &[hwnd, 0, 3, 4]
+            ),
+            DispatchOutcome::JumpTo(0x2100)
+        );
+        assert_eq!(k.notify_message_frames.len(), 2);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SetWindowPos",
+                &[99]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x2345);
+        assert_eq!(k.notify_message_frames.len(), 1);
+        cpu.write_reg(ArmReg::Sp, 0x4000).unwrap();
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SetWindowPos",
+                &[99]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x1234);
+        assert_eq!(cpu.read_reg(ArmReg::R0).unwrap(), hwnd);
+        assert!(k.notify_message_frames.is_empty());
+        assert_eq!(k.window_rects[&hwnd], (3, 4, 200, 100));
+        // An unchanged size must not notify again.
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "MoveWindow",
+                &[hwnd, 8, 9, 200, 100, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        // Another owner receives a queued message, never the wrong TLS context.
+        k.window_threads.insert(hwnd, 1);
+        assert_eq!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "MoveWindow",
+                &[hwnd, 8, 9, 300, 150, 0]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        assert!(k
+            .posted_messages
+            .iter()
+            .any(|m| *m == (hwnd, 5, 0, 300 | (150 << 16))));
+        assert!(k.notify_message_frames.is_empty());
+    }
+
+    #[test]
     fn ce_notify_builtin_owner_draw_retires_its_nested_callback_and_scratch() {
         let (mut cpu, mut k, mut d) = setup();
         cpu.map_region(
@@ -143,6 +246,57 @@ fn restore(ctx: &mut CallCtx<'_>, frame: GuestCallFrame) -> Result<(), KernelErr
     ctx.cpu.write_reg(ArmReg::Lr, frame.lr)?;
     Ok(())
 }
+/// Resume one same-thread message sent by a window geometry API. The existing
+/// notification continuation also participates in scheduler snapshots and thread
+/// teardown; an empty recipient list means the sole callback is already running.
+pub(crate) fn finish_window_call(
+    ctx: &mut CallCtx<'_>,
+) -> Result<Option<DispatchOutcome>, KernelError> {
+    let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
+    let Some(index) = ctx.kernel.notify_message_frames.iter().rposition(|state| {
+        state.thread == ctx.kernel.current_thread
+            && state.thunk == ctx.thunk.thunk_va
+            && state.frame.sp == sp
+            && state.recipients.is_empty()
+    }) else {
+        return Ok(None);
+    };
+    let state = ctx.kernel.notify_message_frames.remove(index);
+    restore(ctx, state.frame)?;
+    Ok(Some(DispatchOutcome::ReturnedR0(1)))
+}
+
+pub(crate) fn begin_window_call(
+    ctx: &mut CallCtx<'_>,
+    proc: u32,
+    message: [u32; 4],
+) -> Result<DispatchOutcome, KernelError> {
+    let frame = GuestCallFrame {
+        args: [
+            ctx.arg_u32(0)?,
+            ctx.arg_u32(1)?,
+            ctx.arg_u32(2)?,
+            ctx.arg_u32(3)?,
+        ],
+        sp: ctx.cpu.read_reg(ArmReg::Sp)?,
+        lr: ctx.cpu.read_reg(ArmReg::Lr)?,
+    };
+    for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+        .into_iter()
+        .zip(message)
+    {
+        ctx.cpu.write_reg(reg, value)?;
+    }
+    ctx.cpu.write_reg(ArmReg::Lr, ctx.thunk.thunk_va)?;
+    ctx.kernel.notify_message_frames.push(NotifyMessageFrame {
+        thread: ctx.kernel.current_thread,
+        thunk: ctx.thunk.thunk_va,
+        frame,
+        recipients: Vec::new(),
+    });
+    Ok(DispatchOutcome::JumpTo(proc))
+}
+
 fn fail(ctx: &mut CallCtx<'_>, code: u32) -> Result<DispatchOutcome, KernelError> {
     crate::coredll::set_thread_error(ctx, code);
     Ok(DispatchOutcome::ReturnedR0(0))

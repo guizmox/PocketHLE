@@ -31,6 +31,56 @@ struct Popup {
     selected: usize,
     first: usize,
 }
+/// Toolbar records own their resource-loaded strips; caller HBITMAPs stay borrowed.
+/// Labels live in the menu projection, never as retained guest text pointers.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Toolbar {
+    pub state: crate::controls::ToolbarState,
+    pub owned_bitmaps: Vec<u32>,
+    pub strings: Vec<Vec<u16>>,
+}
+impl Toolbar {
+    pub fn validate(&self, gdi: &GdiState, projected_items: usize) -> Result<(), String> {
+        let state = &self.state;
+        if self.strings.len() > 4096 || self.strings.iter().any(|s| s.len() > 4096) {
+            return Err("invalid saved toolbar string pool".into());
+        }
+        let dimensions = [
+            state.button_size.0,
+            state.button_size.1,
+            state.bitmap_size.0,
+            state.bitmap_size.1,
+        ];
+        if state.buttons.len() != projected_items
+            || state.buttons.len() > 4096
+            || state.bitmaps.len() > 4096
+            || dimensions.iter().any(|&v| !(1..=4096).contains(&v))
+            || state.pressed.is_some_and(|i| i >= state.buttons.len())
+        {
+            return Err("invalid saved shell toolbar".into());
+        }
+        let mut images = 0u32;
+        for &(bitmap, count) in &state.bitmaps {
+            images = images
+                .checked_add(count)
+                .filter(|&n| n <= 4096)
+                .ok_or("invalid saved toolbar image count")?;
+            if count == 0 || gdi.bitmap(bitmap).is_none() {
+                return Err("missing saved toolbar bitmap".into());
+            }
+        }
+        let mut owned = std::collections::HashSet::new();
+        for &bitmap in &self.owned_bitmaps {
+            if !owned.insert(bitmap)
+                || !state.bitmaps.iter().any(|b| b.0 == bitmap)
+                || crate::gdi::is_stock_handle(bitmap)
+            {
+                return Err("invalid saved toolbar bitmap ownership".into());
+            }
+        }
+        Ok(())
+    }
+}
 /// Explicit shell z-order requests override automatic native-window coverage.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TaskbarVisibility {
@@ -157,6 +207,14 @@ impl ShellMenus {
         surface.fill_rect(0, HEIGHT - 1, width, 1, 0x3d5b);
     }
 
+    /// End only this bar's popup tracking before its owned menu state disappears.
+    pub fn remove_bar(&mut self, handle: u32) -> Option<Bar> {
+        if self.active == handle {
+            self.close();
+            self.captured = false;
+        }
+        self.bars.remove(&handle)
+    }
     pub fn close(&mut self) {
         if let Some(t) = self.tracking.as_mut() {
             t.result.get_or_insert(0);
@@ -217,12 +275,24 @@ impl ShellMenus {
         bar: &Bar,
         menus: &HashMap<u32, Vec<MenuItem>>,
         width: i32,
+        toolbar: Option<&Toolbar>,
     ) -> Vec<(i32, i32)> {
         let items = menus.get(&bar.menu).map(Vec::as_slice).unwrap_or(&[]);
         let available = (width - if bar.sip { 26 } else { 0 }).max(0);
         let desired: Vec<i32> = items
             .iter()
-            .map(|i| (label(i).len() as i32 * 6 + 10).max(24))
+            .enumerate()
+            .map(|(index, i)| {
+                if let Some(b) = toolbar.and_then(|t| t.state.buttons.get(index)) {
+                    if b[2] & 8 != 0 {
+                        return 0;
+                    }
+                    if b[2] & 0x100 != 0 {
+                        return (b[0] as i32).clamp(1, 4096);
+                    }
+                }
+                (label(i).len() as i32 * 6 + 10).max(24)
+            })
             .collect();
         let total: i32 = desired.iter().sum();
         let mut x = 0;
@@ -230,7 +300,7 @@ impl ShellMenus {
             .iter()
             .enumerate()
             .map(|(i, d)| {
-                let end = if i + 1 == desired.len() {
+                let end = if i + 1 == desired.len() && toolbar.is_none() {
                     available
                 } else if total > available {
                     desired[..=i].iter().sum::<i32>() * available / total
@@ -242,6 +312,20 @@ impl ShellMenus {
                 result
             })
             .collect()
+    }
+    pub fn item_rect(
+        &self,
+        handle: u32,
+        index: usize,
+        width: i32,
+        menus: &HashMap<u32, Vec<MenuItem>>,
+        toolbars: &HashMap<u32, Toolbar>,
+    ) -> Option<[i32; 4]> {
+        let bar = self.bars.get(&handle)?;
+        let (x, w) = *self
+            .titles(bar, menus, width, toolbars.get(&handle))
+            .get(index)?;
+        (w > 0).then_some([x, 0, x + w, HEIGHT])
     }
     fn activate(
         &mut self,
@@ -312,6 +396,7 @@ impl ShellMenus {
         height: i32,
         menus: &HashMap<u32, Vec<MenuItem>>,
         states: &HashMap<u32, HashMap<u32, u32>>,
+        toolbars: &HashMap<u32, Toolbar>,
     ) -> Option<Action> {
         if !self.bars.contains_key(&handle) {
             self.close();
@@ -332,7 +417,7 @@ impl ShellMenus {
                         return Some(Action::Sip);
                     }
                     let index = self
-                        .titles(bar, menus, width)
+                        .titles(bar, menus, width, toolbars.get(&handle))
                         .iter()
                         .position(|(a, w)| x >= *a && x < *a + *w);
                     if index.is_some_and(|i| {
@@ -451,13 +536,31 @@ impl ShellMenus {
             surface.fill_rect(0, y, w, HEIGHT, bar.background);
             surface.fill_rect(0, y, w, 1, 0x8410);
             if let Some(items) = menus.get(&bar.menu) {
-                for (index, (item, (x, width))) in
-                    items.iter().zip(self.titles(bar, menus, w)).enumerate()
+                for (index, (item, (x, width))) in items
+                    .iter()
+                    .zip(self.titles(bar, menus, w, gdi.shell_toolbars.get(&handle)))
+                    .enumerate()
                 {
+                    if width <= 0 {
+                        continue;
+                    }
+                    let button = gdi
+                        .shell_toolbars
+                        .get(&handle)
+                        .and_then(|t| t.state.buttons.get(index));
+                    if button.is_some_and(|b| b[2] & 0x100 != 0) {
+                        continue;
+                    }
                     let active =
                         self.active == handle && self.column == index && !self.path.is_empty();
                     if active {
                         surface.fill_rect(x, y + 1, width, HEIGHT - 1, 0x0010);
+                    }
+                    if let (Some(toolbar), Some(button)) = (gdi.shell_toolbars.get(&handle), button)
+                    {
+                        toolbar
+                            .state
+                            .draw_image(surface, gdi, button[0], x + 4, y + 5);
                     }
                     text::layout(font.as_ref(), &label(item)).draw(
                         surface,
@@ -570,9 +673,43 @@ mod tests {
         (shell, menus, states)
     }
     #[test]
+    fn removing_a_bar_cancels_only_its_own_popup_and_pointer_capture() {
+        let (mut shell, menus, states) = fixture();
+        shell.bars.insert(
+            2,
+            Bar {
+                owner: 8,
+                menu: 10,
+                sip: false,
+                background: 0,
+            },
+        );
+        assert_eq!(
+            shell.input(
+                1,
+                InputEvent::PointerDown { x: 10, y: 306 },
+                240,
+                320,
+                &menus,
+                &states,
+                &HashMap::new()
+            ),
+            Some(Action::Open(7, 11))
+        );
+        assert!(!shell.path.is_empty());
+        assert!(shell.captured);
+        shell.remove_bar(2);
+        assert_eq!(shell.active, 1);
+        assert!(!shell.path.is_empty());
+        shell.remove_bar(1);
+        assert_eq!(shell.active, 0);
+        assert!(shell.path.is_empty());
+        assert!(!shell.captured);
+    }
+    #[test]
     fn shell_menu_pointer_opens_nested_menu_and_dispatches_real_command() {
         let (mut shell, menus, states) = fixture();
-        let mut input = |ev| shell.input(1, ev, 240, 320, &menus, &states);
+        let mut input = |ev| shell.input(1, ev, 240, 320, &menus, &states, &HashMap::new());
         assert_eq!(
             input(InputEvent::PointerDown { x: 10, y: 306 }),
             Some(Action::Open(7, 11))
@@ -655,7 +792,8 @@ mod tests {
                 240,
                 320,
                 &menus,
-                &states
+                &states,
+                &HashMap::new()
             ),
             None
         );
@@ -667,6 +805,7 @@ mod tests {
             320,
             &menus,
             &states,
+            &HashMap::new(),
         );
         assert_eq!(
             shell.input(
@@ -675,7 +814,8 @@ mod tests {
                 240,
                 320,
                 &menus,
-                &states
+                &states,
+                &HashMap::new()
             ),
             Some(Action::Command(7, 82))
         );
@@ -691,7 +831,8 @@ mod tests {
                     240,
                     320,
                     &menus,
-                    &states
+                    &states,
+                    &HashMap::new()
                 ),
                 Some(expected)
             );
@@ -702,7 +843,8 @@ mod tests {
                     240,
                     320,
                     &menus,
-                    &states
+                    &states,
+                    &HashMap::new()
                 ),
                 Some(Action::Consumed)
             );
@@ -725,6 +867,7 @@ mod tests {
             320,
             &menus,
             &states,
+            &HashMap::new(),
         );
         shell.input(
             1,
@@ -733,6 +876,7 @@ mod tests {
             320,
             &menus,
             &states,
+            &HashMap::new(),
         );
         let mut fb = crate::Framebuffer::new(240, 320);
         shell.render(
@@ -754,6 +898,7 @@ mod tests {
             320,
             &menus,
             &states,
+            &HashMap::new(),
         );
         assert_eq!(
             shell.input(
@@ -762,7 +907,8 @@ mod tests {
                 240,
                 320,
                 &menus,
-                &states
+                &states,
+                &HashMap::new()
             ),
             Some(Action::Consumed)
         );

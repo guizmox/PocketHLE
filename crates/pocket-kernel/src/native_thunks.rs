@@ -1,5 +1,5 @@
 //! Native ARM/VFP thunks for pure-arithmetic and pure-memory CRT
-//! helpers.
+//! helpers, plus stateless WinCE RECT operations.
 //!
 //! Pocket PC binaries are built with the soft-float ABI, so any
 //! floating-point op turns into a call to a `coredll.dll` helper
@@ -51,6 +51,8 @@
 /// instruction of every thunk and as harmless padding for the
 /// otherwise-unused tail of each 32-byte slot.
 const BX_LR: u32 = 0xE12F_FF1E;
+
+mod rectangles;
 
 /// Register-only MIPS runtime thunks for architectures supported by Unicorn.
 pub fn mips_thunk_for(dll: &str, name: &str) -> Option<[u32; 8]> {
@@ -127,7 +129,7 @@ const BYTE_COPY: [u32; 8] = [
 /// Shared bounded-copy helper in the synthetic tick page or a DLL thunk pool.
 /// Aligned 4/16-byte copies load all source words before storing. Other small
 /// copies choose the direction needed for memmove, without touching neighbours.
-pub const SMALL_COPY_HELPER_BYTES: u32 = 0x300;
+pub const SMALL_COPY_HELPER_BYTES: u32 = 0x400;
 const COPY_SELECTOR_OFFSET: u32 = 0x200;
 pub const SMALL_COPY_HELPER: u32 = TICK_PAGE_VA + 0x100;
 pub fn install_small_copy_helper(
@@ -197,7 +199,8 @@ pub fn install_small_copy_helper_at(
     )?;
     install_int64_double(cpu, address + 0x100, true)?;
     install_int64_double(cpu, address + 0x180, false)?;
-    install_copy_selector(cpu, address + COPY_SELECTOR_OFFSET)
+    install_copy_selector(cpu, address + COPY_SELECTOR_OFFSET)?;
+    rectangles::install(cpu, address)
 }
 
 /// IP holds the caller's hooked fallback. Keep R0-R2 untouched until the copy
@@ -292,6 +295,9 @@ pub fn native_thunk_with_helper(
     address: u32,
     helper: u32,
 ) -> Option<[u32; 8]> {
+    if dll.eq_ignore_ascii_case("coredll.dll") && matches!(name, "InflateRect" | "PtInRect") {
+        return rectangles::thunk(name, address, helper);
+    }
     if dll.eq_ignore_ascii_case("coredll.dll") && matches!(name, "__i64tod" | "__u64tod") {
         let target = helper + if name == "__i64tod" { 0x100 } else { 0x180 };
         let delta = i64::from(target) - (i64::from(address) + 8);

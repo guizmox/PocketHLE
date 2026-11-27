@@ -3,7 +3,7 @@ use crate::{coredll, CallCtx};
 use pocket_cpu::regs::ArmReg;
 use pocket_kernel::{DispatchOutcome, GuestCallFrame, InputEvent, KernelError};
 
-pub(super) fn recognize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn recognize(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let sp = ctx.cpu.read_reg(ArmReg::Sp)?;
     let thunk = ctx.thunk.thunk_va;
     let thread = ctx.kernel.current_thread;

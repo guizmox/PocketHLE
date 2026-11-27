@@ -66,24 +66,7 @@ static ORDINAL_TABLES: Lazy<HashMap<String, HashMap<u16, String>>> = Lazy::new(|
 pub fn lookup(dll: &str, ordinal: u16) -> Option<String> {
     let key = dll.to_ascii_lowercase();
     if key == "mfcce300.dll" {
-        match ordinal {
-            644 => return Some("?AfxGetModuleState@@YAPAVAFX_MODULE_STATE@@XZ".into()),
-            47 => return Some("??0CByteArray@@QAA@XZ".into()),
-            177 => return Some("??0CString@@QAA@PBD@Z".into()),
-            321 => return Some("??4CString@@QAAABV0@ABV0@@Z".into()),
-            1501 => return Some("?GetRuntimeClass@CObject@@UBAPAUCRuntimeClass@@XZ".into()),
-            181 => return Some("??0CString@@QAA@XZ".into()),
-            218 => return Some("??1CByteArray@@QAA@XZ".into()),
-            297 => return Some("??1CString@@QAA@XZ".into()),
-            2304 => return Some("?SetAtGrow@CByteArray@@QAAXHE@Z".into()),
-            2413 => return Some("?SetSize@CByteArray@@QAAXHH@Z".into()),
-            315 => return Some("??2@YAPAXI@Z".into()),
-            317 => return Some("??3@YAXPAX@Z".into()),
-            _ => {}
-        }
-        if let Some(name) = crate::mfc::additional_ordinal_name(ordinal) {
-            return Some(name.into());
-        }
+        return crate::mfc::ordinal_name(ordinal).map(str::to_owned);
     }
     // The OpenGL ES client libraries keep their tables in
     // `pocket-gles`, next to the implementation they describe.
@@ -118,7 +101,7 @@ pub fn lookup_for_arch(dll: &str, ordinal: u16, arch: pocket_cpu::Arch) -> Optio
 pub fn entry_count(dll: &str) -> usize {
     let key = dll.to_ascii_lowercase();
     if key == "mfcce300.dll" {
-        return 12 + crate::mfc::ADDITIONAL_ORDINAL_COUNT;
+        return crate::mfc::ORDINAL_COUNT;
     }
     if pocket_gles::ordinals::is_gles_dll(&key) {
         return pocket_gles::ordinals::entry_count(&key);

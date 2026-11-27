@@ -4,7 +4,10 @@ use pocket_library::add_data::{Destination, PreparedData};
 use std::path::PathBuf;
 
 pub(super) enum DataPrompt {
-    Destination { id: String, path: PathBuf },
+    Destination {
+        id: String,
+        path: PathBuf,
+    },
     Zip {
         id: String,
         path: PathBuf,

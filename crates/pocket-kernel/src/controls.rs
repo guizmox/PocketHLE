@@ -18,8 +18,17 @@
 //! itself after the parent's `WM_PAINT` — the same "control owns its
 //! pixels" reasoning as [`crate::StatusBar`].
 
+mod checks;
+mod cursor;
+pub mod doc_list;
+pub mod edit;
+mod edit_control;
+pub mod edit_layout;
+pub use cursor::{system_cursor, system_cursor_handle, SystemCursor};
+
 use crate::font;
 use crate::gdi::Surface;
+use edit::EditState;
 
 /// Which built-in window class a control was created from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -77,6 +86,8 @@ const BS_DEFPUSHBUTTON: u32 = 0x0001;
 const BS_CHECKBOX: u32 = 0x0002;
 const BS_AUTOCHECKBOX: u32 = 0x0003;
 const BS_RADIOBUTTON: u32 = 0x0004;
+const BS_3STATE: u32 = 0x0005;
+const BS_AUTO3STATE: u32 = 0x0006;
 /// `BS_GROUPBOX` — not a button at all: an etched frame with its
 /// caption let into the top-left of the border. Solitaire's Options
 /// dialog uses three (Draw, Scoring, Card back), each enclosing the
@@ -403,6 +414,10 @@ pub struct ChildWindow {
     pub pressed: bool,
     /// `BM_SETCHECK` state of a check box or radio button.
     pub checked: bool,
+    /// Stored separately by optional record 0x0837; keep the original control
+    /// record byte-compatible with existing snapshots.
+    #[serde(skip)]
+    pub indeterminate: bool,
     pub list_items: Vec<(String, u32)>,
     pub list_images: Vec<i32>,
     pub list_image_lists: [u32; 3],
@@ -432,6 +447,8 @@ pub struct ChildWindow {
     pub track_ticks: Vec<i32>,
     pub toolbar: ToolbarState,
     pub tab: TabState,
+    #[serde(skip)]
+    pub edit: EditState,
 }
 
 /// Native tab items keep guest application data separate from their labels.
@@ -500,6 +517,43 @@ impl Default for ToolbarState {
             bitmaps: Vec::new(),
             native_paint: false,
             pressed: None,
+        }
+    }
+}
+impl ToolbarState {
+    pub fn draw_image(
+        &self,
+        surface: &mut Surface<'_>,
+        gdi: &crate::gdi::GdiState,
+        mut index: u32,
+        x: i32,
+        y: i32,
+    ) {
+        for &(handle, count) in &self.bitmaps {
+            if index >= count {
+                index -= count;
+                continue;
+            }
+            if let Some(image) = gdi
+                .bitmap(handle)
+                .and_then(crate::imaging::Image::from_bitmap)
+            {
+                let (iw, ih) = self.bitmap_size;
+                let sx = i64::from(index) * i64::from(iw);
+                for yy in 0..ih.min(image.height as i32) {
+                    for xx in 0..iw.min(image.width as i32) {
+                        let source_x = sx + i64::from(xx);
+                        if source_x >= 0 && source_x < i64::from(image.width) {
+                            let pixel =
+                                image.pixels[(yy as u32 * image.width + source_x as u32) as usize];
+                            if pixel != ChildWindow::FACE {
+                                surface.put_pixel(x + xx, y + yy, pixel);
+                            }
+                        }
+                    }
+                }
+            }
+            break;
         }
     }
 }
@@ -1033,6 +1087,8 @@ impl ChildWindow {
     pub fn is_push_button(&self) -> bool {
         matches!(self.button_type(), Some(t) if t != BS_CHECKBOX
             && t != BS_AUTOCHECKBOX
+            && t != BS_3STATE
+            && t != BS_AUTO3STATE
             && t != BS_RADIOBUTTON
             && t != BS_AUTORADIOBUTTON
             && t != BS_GROUPBOX)
@@ -1053,7 +1109,7 @@ impl ChildWindow {
     pub fn is_auto_check(&self) -> bool {
         matches!(
             self.button_type(),
-            Some(BS_AUTOCHECKBOX) | Some(BS_AUTORADIOBUTTON)
+            Some(BS_AUTOCHECKBOX) | Some(BS_AUTORADIOBUTTON) | Some(BS_AUTO3STATE)
         )
     }
 
@@ -1064,6 +1120,8 @@ impl ChildWindow {
             self.button_type(),
             Some(BS_CHECKBOX)
                 | Some(BS_AUTOCHECKBOX)
+                | Some(BS_3STATE)
+                | Some(BS_AUTO3STATE)
                 | Some(BS_RADIOBUTTON)
                 | Some(BS_AUTORADIOBUTTON)
         )
@@ -1165,35 +1223,15 @@ impl ChildWindow {
                     (Self::LIGHT, Self::SHADOW)
                 };
                 draw_edge(surf, x, self.y, width, self.toolbar.button_size.1, tl, br);
-                let mut index = b[0];
-                for &(handle, count) in &self.toolbar.bitmaps {
-                    if index >= count {
-                        index -= count;
-                        continue;
-                    }
-                    if let Some(image) = gdi
-                        .and_then(|g| g.bitmap(handle))
-                        .and_then(crate::imaging::Image::from_bitmap)
-                    {
-                        let (iw, ih) = self.toolbar.bitmap_size;
-                        let sx = index as i32 * iw;
-                        let (dx, dy) = (
-                            x + (width - iw) / 2 + i32::from(pressed),
-                            self.y + (self.toolbar.button_size.1 - ih) / 2 + i32::from(pressed),
-                        );
-                        for yy in 0..ih.min(image.height as i32) {
-                            for xx in 0..iw.min(image.width as i32) {
-                                if sx + xx >= 0 && sx + xx < image.width as i32 {
-                                    let pixel = image.pixels
-                                        [(yy as u32 * image.width + (sx + xx) as u32) as usize];
-                                    if pixel != Self::FACE {
-                                        surf.put_pixel(dx + xx, dy + yy, pixel);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    break;
+                if let Some(gdi) = gdi {
+                    let (iw, ih) = self.toolbar.bitmap_size;
+                    self.toolbar.draw_image(
+                        surf,
+                        gdi,
+                        b[0],
+                        x + (width - iw) / 2 + i32::from(pressed),
+                        self.y + (self.toolbar.button_size.1 - ih) / 2 + i32::from(pressed),
+                    );
                 }
             }
             x += width;
@@ -1362,25 +1400,29 @@ impl ChildWindow {
                 }
             }
         }
-        let color = if focused { 0x001f } else { 0x7bef };
-        if vertical {
-            surf.fill_rect(
-                self.x + self.w / 2,
-                self.y + 5,
-                2,
-                (self.h - 10).max(0),
-                0x7bef,
-            );
-            surf.fill_rect(self.x + 2, self.y + offset, (self.w - 4).max(0), 10, color);
+        // The native slider uses the system button face, including while
+        // focused. Focus is a separate dotted frame, not a blue thumb. This
+        // shared path paints LeoFS's vertical and Kevtris's horizontal sliders.
+        let channel = if vertical {
+            (self.x + self.w / 2, self.y + 5, 2, (self.h - 10).max(0))
         } else {
-            surf.fill_rect(
-                self.x + 5,
-                self.y + self.h / 2,
-                (self.w - 10).max(0),
-                2,
-                0x7bef,
-            );
-            surf.fill_rect(self.x + offset, self.y + 2, 10, (self.h - 4).max(0), color);
+            (self.x + 5, self.y + self.h / 2, (self.w - 10).max(0), 2)
+        };
+        let (x, y, w, h) = channel;
+        surf.fill_rect(x, y, w, h, Self::FACE);
+        draw_edge(surf, x, y, w, h, Self::SHADOW, Self::LIGHT);
+        if self.style & 0x80 == 0 {
+            // TBS_NOTHUMB
+            let (x, y, w, h) = if vertical {
+                (self.x + 2, self.y + offset, (self.w - 4).max(0), 10)
+            } else {
+                (self.x + offset, self.y + 2, 10, (self.h - 4).max(0))
+            };
+            surf.fill_rect(x, y, w, h, Self::FACE);
+            draw_edge(surf, x, y, w, h, Self::LIGHT, Self::SHADOW);
+        }
+        if focused {
+            dotted_rect(surf, self.x, self.y, self.w, self.h, Self::TEXT);
         }
     }
 
@@ -1733,7 +1775,17 @@ impl ChildWindow {
         if self.checked {
             // A filled core rather than a literal tick: at 12 px with a
             // 6x8 font there is no room for a convincing check glyph.
-            surf.fill_rect(self.x + 3, box_y + 3, side - 6, side - 6, Self::TEXT);
+            surf.fill_rect(
+                self.x + 3,
+                box_y + 3,
+                side - 6,
+                side - 6,
+                if self.indeterminate {
+                    Self::SHADOW
+                } else {
+                    Self::TEXT
+                },
+            );
         }
         let tx = self.x + side + 4;
         let ty = self.y + ((self.h - crate::text::layout(face, &[]).height) / 2).max(0);
@@ -1768,40 +1820,7 @@ impl ChildWindow {
         if inner_w <= 0 {
             return;
         }
-        // `ES_AUTOHSCROLL` behaviour: once the text outruns the field
-        // the caret stays visible, so it is the *tail* that shows.
-        let mut shown = self.text.clone();
-        while !shown.is_empty()
-            && crate::text::layout(face, &shown.encode_utf16().collect::<Vec<_>>()).width > inner_w
-        {
-            shown.remove(0);
-        }
-        let line = crate::text::layout(face, &shown.encode_utf16().collect::<Vec<_>>());
-        let ty = self.y + ((self.h - crate::text::layout(face, &[]).height) / 2).max(1);
-        line.draw(
-            surf,
-            self.x + 3,
-            ty,
-            Self::TEXT,
-            [
-                self.x + 3,
-                self.y + 1,
-                self.x + self.w - 2,
-                self.y + self.h - 1,
-            ],
-        );
-        if focused {
-            let caret_x = self.x + 3 + line.width;
-            if caret_x < self.x + self.w - 1 {
-                surf.fill_rect(
-                    caret_x,
-                    ty,
-                    1,
-                    crate::text::layout(face, &[]).height,
-                    Self::TEXT,
-                );
-            }
-        }
+        self.render_edit_text(surf, focused, face);
     }
 
     fn render_static(&self, surf: &mut Surface<'_>, face: Option<&crate::gdi::Font>) {
@@ -2020,6 +2039,8 @@ pub struct FileDialog {
 /// Every built-in control the guest has created, plus the focus.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Controls {
+    #[serde(skip)]
+    pub doc_lists: std::collections::HashMap<u32, doc_list::DocList>,
     /// Latest consumed stylus position in screen coordinates.
     pub cursor_position: (i32, i32),
     /// Guest cursor selected by SetCursor. Zero means no selected cursor.
@@ -2060,6 +2081,7 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            doc_lists: Default::default(),
             cursor_position: (0, 0),
             cursor_handle: 0,
             ime_open_contexts: Default::default(),
@@ -2135,6 +2157,7 @@ impl Controls {
             enabled: style & WS_DISABLED == 0,
             pressed: false,
             checked: false,
+            indeterminate: false,
             list_items: Vec::new(),
             list_images: Vec::new(),
             list_image_lists: [0; 3],
@@ -2167,6 +2190,7 @@ impl Controls {
             track_ticks: Vec::new(),
             toolbar: ToolbarState::default(),
             tab: TabState::default(),
+            edit: EditState::default(),
         });
         hwnd
     }
@@ -2312,6 +2336,54 @@ impl Controls {
     }
 
     /// `GetDlgItem`: find a control by its parent and id.
+    pub fn snapshot_edits(&self) -> std::collections::HashMap<u32, EditState> {
+        self.children
+            .iter()
+            .filter(|c| c.class == ControlClass::Edit && c.edit != EditState::default())
+            .map(|c| (c.hwnd, c.edit.clone()))
+            .collect()
+    }
+    pub fn validate_edits(
+        &self,
+        edits: &std::collections::HashMap<u32, EditState>,
+    ) -> Result<(), String> {
+        if edits.keys().any(|hwnd| {
+            self.get(*hwnd)
+                .is_none_or(|c| c.class != ControlClass::Edit)
+        }) {
+            return Err("checkpoint EDIT state has no matching edit control".into());
+        }
+        for (hwnd, edit) in edits {
+            let control = self.get(*hwnd).unwrap();
+            let valid_selection = |selection: Option<(u32, u32)>, text: &str| {
+                selection.is_none_or(|(start, end)| {
+                    start.max(end) as usize <= text.encode_utf16().count()
+                })
+            };
+            if edit.first_line > 0x100000
+                || edit.scroll_x < 0
+                || edit.scroll_x > 0x10000000
+                || edit.limit > 0x7ffffffe
+                || edit.tab_stops.len() > 1024
+                || edit.tab_stops.iter().any(|stop| *stop <= 0)
+                || edit.tab_stops.windows(2).any(|pair| pair[0] >= pair[1])
+                || !valid_selection(edit.selection, &control.text)
+                || edit.undo.as_ref().is_some_and(|(text, selection)| {
+                    text.encode_utf16().count() > 0x100000 || !valid_selection(*selection, text)
+                })
+            {
+                return Err("checkpoint EDIT state exceeds its supported extent".into());
+            }
+        }
+        Ok(())
+    }
+    pub fn restore_edits(&mut self, edits: std::collections::HashMap<u32, EditState>) {
+        for (hwnd, edit) in edits {
+            if let Some(child) = self.get_mut(hwnd).filter(|c| c.class == ControlClass::Edit) {
+                child.edit = edit;
+            }
+        }
+    }
     pub fn children_of(&self, parent: u32) -> Vec<u32> {
         self.children
             .iter()
@@ -2341,7 +2413,7 @@ impl Controls {
             if child.parent != parent || child.id < first || child.id > last {
                 continue;
             }
-            child.checked = child.id == check;
+            child.set_check_state(u32::from(child.id == check));
             hit += 1;
         }
         hit
@@ -2367,6 +2439,7 @@ impl Controls {
 
     /// Drop a control and anything that referred to it.
     pub fn destroy(&mut self, hwnd: u32) {
+        self.doc_lists.remove(&hwnd);
         self.recognized_holds
             .retain(|(_, owner, _, _)| *owner != hwnd);
         self.pointer_capture.retain(|_, owner| *owner != hwnd);
@@ -2407,6 +2480,16 @@ impl Controls {
                 child.pressed = false;
             }
             self.capture = 0;
+        }
+    }
+    /// Cancel transient control input without changing its persistent value.
+    pub fn cancel_input(&mut self, hwnd: u32) {
+        if self.capture == hwnd {
+            self.capture = 0;
+        }
+        if let Some(c) = self.get_mut(hwnd) {
+            c.pressed = false;
+            c.choice_open = false;
         }
     }
     pub fn window_handles(&self) -> impl Iterator<Item = u32> + '_ {
@@ -2509,12 +2592,45 @@ impl Controls {
 
     /// Stylus down. Takes the focus, and arms a push button.
     pub fn pointer_down(&mut self, x: i32, y: i32) -> Option<ControlAction> {
+        self.pointer_down_impl(x, y, None)
+    }
+    pub fn pointer_down_with_fonts(
+        &mut self,
+        x: i32,
+        y: i32,
+        gdi: &crate::gdi::GdiState,
+    ) -> Option<ControlAction> {
+        self.pointer_down_impl(x, y, Some(gdi))
+    }
+    fn pointer_down_impl(
+        &mut self,
+        x: i32,
+        y: i32,
+        gdi: Option<&crate::gdi::GdiState>,
+    ) -> Option<ControlAction> {
         let hwnd = self.hit_test(x, y)?;
         let origin = self
             .get(hwnd)
             .map(|c| self.parent_origin(c.parent))
             .unwrap_or((0, 0));
+        let face = gdi.and_then(|g| {
+            self.get(hwnd)
+                .and_then(|c| crate::text::selected(g, c.font))
+        });
         let child = self.get_mut(hwnd)?;
+        if child.class == ControlClass::Edit {
+            if child.enabled {
+                child.edit_hit(
+                    x - origin.0 - child.x,
+                    y - origin.1 - child.y,
+                    false,
+                    face.as_ref(),
+                );
+                self.focus = hwnd;
+                self.capture = hwnd;
+            }
+            return Some(ControlAction::Consumed);
+        }
         if child.class == ControlClass::Tab {
             if !child.enabled {
                 return Some(ControlAction::Consumed);
@@ -2628,10 +2744,40 @@ impl Controls {
         Some(ControlAction::Consumed)
     }
 
+    pub fn pointer_move_with_fonts(
+        &mut self,
+        x: i32,
+        y: i32,
+        gdi: &crate::gdi::GdiState,
+    ) -> Option<ControlAction> {
+        let hwnd = self.capture;
+        let child = self
+            .get(hwnd)
+            .filter(|c| c.class == ControlClass::Edit && c.enabled)?;
+        let origin = self.parent_origin(child.parent);
+        let face = crate::text::selected(gdi, child.font);
+        let child = self.get_mut(hwnd)?;
+        child.edit_hit(
+            x - origin.0 - child.x,
+            y - origin.1 - child.y,
+            true,
+            face.as_ref(),
+        );
+        Some(ControlAction::Consumed)
+    }
+
     /// Stylus up. A button only notifies its parent when the release
     /// lands back inside the rectangle the press started in.
     pub fn pointer_up(&mut self, x: i32, y: i32) -> Option<ControlAction> {
         let hwnd = self.capture;
+        if self
+            .get(hwnd)
+            .is_some_and(|c| c.class == ControlClass::Edit)
+        {
+            self.capture = 0;
+            return Some(ControlAction::Consumed);
+        }
+
         if let Some(c) = self.get(hwnd).filter(|c| c.class == ControlClass::ListView) {
             let (ox, oy) = self.parent_origin(c.parent);
             let row = c.list_item_at_point(x - ox - c.x, y - oy - c.y);
@@ -2702,7 +2848,7 @@ impl Controls {
             return Some(ControlAction::Consumed);
         }
         if child.is_auto_check() {
-            child.checked = !child.checked;
+            child.advance_check();
         }
         Some(ControlAction::Clicked {
             parent: child.parent,
@@ -2722,6 +2868,24 @@ impl Controls {
     /// area, so no control can be under it, and it has to arm even
     /// though it is chrome rather than a child window.
     pub fn pointer_down_in(&mut self, parent: u32, x: i32, y: i32) -> Option<ControlAction> {
+        self.pointer_down_in_impl(parent, x, y, None)
+    }
+    pub fn pointer_down_in_with_fonts(
+        &mut self,
+        parent: u32,
+        x: i32,
+        y: i32,
+        gdi: &crate::gdi::GdiState,
+    ) -> Option<ControlAction> {
+        self.pointer_down_in_impl(parent, x, y, Some(gdi))
+    }
+    fn pointer_down_in_impl(
+        &mut self,
+        parent: u32,
+        x: i32,
+        y: i32,
+        gdi: Option<&crate::gdi::GdiState>,
+    ) -> Option<ControlAction> {
         if let Some(panel) = self.panel_mut(parent) {
             if panel.ok_box_contains(x, y) {
                 panel.ok_pressed = true;
@@ -2730,7 +2894,7 @@ impl Controls {
         }
         match self.hit_test(x, y) {
             Some(hwnd) if self.get(hwnd).map(|c| c.parent) == Some(parent) => {
-                self.pointer_down(x, y)
+                self.pointer_down_impl(x, y, gdi)
             }
             _ => Some(ControlAction::Consumed),
         }
@@ -2852,6 +3016,24 @@ impl Controls {
     /// nothing here, in which case the caller passes it to the
     /// application as usual.
     pub fn key_down(&mut self, vk: u16) -> Option<ControlAction> {
+        self.key_down_impl(vk, false, false, None)
+    }
+    pub fn key_down_with_modifiers(
+        &mut self,
+        vk: u16,
+        shift: bool,
+        control: bool,
+        gdi: &crate::gdi::GdiState,
+    ) -> Option<ControlAction> {
+        self.key_down_impl(vk, shift, control, Some(gdi))
+    }
+    fn key_down_impl(
+        &mut self,
+        vk: u16,
+        shift: bool,
+        control: bool,
+        gdi: Option<&crate::gdi::GdiState>,
+    ) -> Option<ControlAction> {
         const VK_BACK: u16 = 0x08;
         const VK_RETURN: u16 = 0x0D;
         const VK_SPACE: u16 = 0x20;
@@ -2860,6 +3042,10 @@ impl Controls {
         if !self.get(focus).is_some_and(|c| self.is_showing(c)) {
             return None;
         }
+        let face = gdi.and_then(|g| {
+            self.get(focus)
+                .and_then(|c| crate::text::selected(g, c.font))
+        });
         let child = self.get_mut(focus)?;
         if !child.enabled {
             // `SetFocus` on a disabled control is not something Win32
@@ -2963,17 +3149,37 @@ impl Controls {
                 })
             }
             ControlClass::Edit => {
-                if vk == VK_BACK {
-                    child.text.pop();
+                if child.edit_navigate(vk, shift, control, face.as_ref()) {
                     return Some(ControlAction::Consumed);
                 }
-                let ch = vk_to_char(vk)?;
-                child.text.push(ch);
-                Some(ControlAction::Consumed)
+                if control {
+                    return None;
+                }
+                let changed = if vk == VK_BACK || vk == 0x2e {
+                    child.edit_delete(vk == VK_BACK, face.as_ref())
+                } else if child.style & 0x800 != 0 {
+                    false
+                } else {
+                    let insertion = match vk {
+                        VK_RETURN if child.style & 4 != 0 => "\r\n".into(),
+                        9 if child.style & 4 != 0 => "\t".into(),
+                        _ => vk_to_char(vk)?.to_string(),
+                    };
+                    let changed = child.edit.replace(&mut child.text, &insertion, false);
+                    if changed {
+                        child.edit_scroll_caret(face.as_ref());
+                    }
+                    changed
+                };
+                Some(if changed {
+                    child.edit_changed()
+                } else {
+                    ControlAction::Consumed
+                })
             }
             ControlClass::Button if vk == VK_SPACE || vk == VK_RETURN => {
                 if child.is_auto_check() {
-                    child.checked = !child.checked;
+                    child.advance_check();
                 }
                 Some(ControlAction::Clicked {
                     parent: child.parent,
@@ -3357,6 +3563,49 @@ mod tests {
         c.render_track(&mut Surface::Bitmap(&mut none), false);
         assert_eq!(color(&none, 23, 0), 0xffff);
         assert_eq!(color(&none, 23, 29), 0xffff);
+    }
+
+    #[test]
+    fn standard_trackbar_keeps_native_face_parent_brush_and_hidden_thumb_in_both_orientations() {
+        for vertical in [false, true] {
+            let (w, h) = if vertical { (30, 100) } else { (100, 30) };
+            let mut control = standard_test_control(
+                ControlClass::TrackBar,
+                if vertical { 2 } else { 0 },
+                "",
+                w,
+                h,
+            );
+            control.track_pos = 50;
+            control.background_color = Some(0x00404040);
+            let pixel = |bitmap: &Bitmap, along: usize, across: usize| {
+                let (x, y) = if vertical {
+                    (across, along)
+                } else {
+                    (along, across)
+                };
+                let offset = (y * w as usize + x) * 2;
+                u16::from_le_bytes(bitmap.pixels[offset..offset + 2].try_into().unwrap())
+            };
+            for focused in [false, true] {
+                let mut bitmap = standard_canvas(w as u32, h as u32);
+                control.render(&mut Surface::Bitmap(&mut bitmap), focused);
+                assert_eq!(pixel(&bitmap, 50, 10), ChildWindow::FACE);
+                assert_eq!(pixel(&bitmap, 45, 10), ChildWindow::LIGHT);
+                assert_eq!(pixel(&bitmap, 54, 10), ChildWindow::SHADOW);
+                assert_eq!(
+                    pixel(&bitmap, 30, 10),
+                    crate::framebuffer::colorref_to_rgb565(0x00404040)
+                );
+            }
+            control.style |= 0x80;
+            let mut bitmap = standard_canvas(w as u32, h as u32);
+            control.render(&mut Surface::Bitmap(&mut bitmap), false);
+            assert_eq!(
+                pixel(&bitmap, 50, 10),
+                crate::framebuffer::colorref_to_rgb565(0x00404040)
+            );
+        }
     }
 
     const PUSH: u32 = WS_VISIBLE;
@@ -3796,11 +4045,17 @@ mod tests {
         ctrls.pointer_down(70, 150);
         assert_eq!(ctrls.focus, edit);
         for vk in [0x41u16, 0x42, 0x20, 0x39] {
-            assert_eq!(ctrls.key_down(vk), Some(ControlAction::Consumed));
+            assert_eq!(
+                ctrls.key_down(vk),
+                Some(ctrls.get(edit).unwrap().edit_changed())
+            );
         }
         assert_eq!(ctrls.get(edit).unwrap().text, "ab 9");
         // VK_BACK rubs out the last character.
-        assert_eq!(ctrls.key_down(0x08), Some(ControlAction::Consumed));
+        assert_eq!(
+            ctrls.key_down(0x08),
+            Some(ctrls.get(edit).unwrap().edit_changed())
+        );
         assert_eq!(ctrls.get(edit).unwrap().text, "ab ");
     }
 

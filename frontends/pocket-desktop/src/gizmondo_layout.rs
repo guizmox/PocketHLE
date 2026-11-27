@@ -37,12 +37,7 @@ pub struct Layout {
     pub dpad: BoxRect,
     pub actions: [BoxRect; 4], // Stop,Rewind,Forward,Play
 }
-pub fn calculate(
-    size: [f32; 2],
-    native: [u32; 2],
-    dpi: f32,
-    maximum: Option<u32>,
-) -> Layout {
+pub fn calculate(size: [f32; 2], native: [u32; 2], dpi: f32, maximum: Option<u32>) -> Layout {
     let w = size[0].max(1.0);
     let h = size[1].max(1.0);
     let dpi = dpi.max(0.25);

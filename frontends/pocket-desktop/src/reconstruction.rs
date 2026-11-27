@@ -5,7 +5,10 @@ use eframe::glow::{self, HasContext};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PresentationPath {
     GpuShared,
-    Cpu { reason: &'static str, format: &'static str },
+    Cpu {
+        reason: &'static str,
+        format: &'static str,
+    },
     Retained(&'static str),
     Failed,
 }
@@ -397,14 +400,18 @@ impl Reconstruction {
         frame: &FrameSnapshot,
     ) -> Result<&'static str, String> {
         let rgba;
-        let (pixels, format, pixel_type, label) = if let Some(rgb565) =
-            frame.rgb565.as_ref().filter(|_| !gl.version().is_embedded)
-        {
-            (rgb565.as_ref(), glow::RGB, glow::UNSIGNED_SHORT_5_6_5, "RGB565")
-        } else {
-            rgba = frame.cpu_rgba()?;
-            (rgba.as_ref(), glow::RGBA, glow::UNSIGNED_BYTE, "RGBA8")
-        };
+        let (pixels, format, pixel_type, label) =
+            if let Some(rgb565) = frame.rgb565.as_ref().filter(|_| !gl.version().is_embedded) {
+                (
+                    rgb565.as_ref(),
+                    glow::RGB,
+                    glow::UNSIGNED_SHORT_5_6_5,
+                    "RGB565",
+                )
+            } else {
+                rgba = frame.cpu_rgba()?;
+                (rgba.as_ref(), glow::RGBA, glow::UNSIGNED_BYTE, "RGBA8")
+            };
         let size = [frame.texture_width, frame.texture_height];
         // The ordinary CPU-only presenter keeps its existing single texture.
         // Once shared conversion is used, both upload paths commit a spare
@@ -528,7 +535,10 @@ impl Reconstruction {
                     std::num::NonZeroU32::new(name).map(glow::NativeTexture),
                 );
                 gl.uniform_1_i32(gl.get_uniform_location(program, "u_source").as_ref(), 0);
-                gl.uniform_1_i32(gl.get_uniform_location(program, "u_rgb565").as_ref(), i32::from(source.is_rgb565()));
+                gl.uniform_1_i32(
+                    gl.get_uniform_location(program, "u_rgb565").as_ref(),
+                    i32::from(source.is_rgb565()),
+                );
                 gl.uniform_2_f32(
                     gl.get_uniform_location(program, "u_size").as_ref(),
                     size[0] as f32,

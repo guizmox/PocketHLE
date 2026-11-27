@@ -21,7 +21,7 @@ fn string(ctx: &mut CallCtx<'_>, ptr: u32, max: u32) -> Result<String, KernelErr
         .trim_end_matches('\0')
         .to_string())
 }
-fn join(dir: &str, name: &str) -> String {
+pub(super) fn join(dir: &str, name: &str) -> String {
     let path = if name.starts_with(['\\', '/']) {
         name.to_string()
     } else {

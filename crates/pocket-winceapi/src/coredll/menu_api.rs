@@ -4,13 +4,24 @@ use pocket_kernel::MenuItem;
 fn ret(v: u32) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(v))
 }
-fn alloc(k: &mut KernelState, items: Vec<MenuItem>) -> u32 {
-    let h = k.next_menu_handle;
-    k.next_menu_handle = h.wrapping_add(1);
-    k.menus.insert(h, items.iter().map(|i| (i.id, 0)).collect());
-    k.menu_items.insert(h, items);
-    h
+pub(crate) fn alloc(k: &mut KernelState, items: Vec<MenuItem>) -> u32 {
+    let mut handle = k.next_menu_handle;
+    while handle == 0 || k.menus.contains_key(&handle) || k.menu_items.contains_key(&handle) {
+        let Some(next) = handle.checked_add(1) else {
+            return 0;
+        };
+        handle = next;
+    }
+    let Some(next) = handle.checked_add(1) else {
+        return 0;
+    };
+    k.next_menu_handle = next;
+    k.menus
+        .insert(handle, items.iter().map(|i| (i.id, 0)).collect());
+    k.menu_items.insert(handle, items);
+    handle
 }
+
 #[derive(Default)]
 struct Parsed {
     item: MenuItem,
@@ -89,20 +100,52 @@ fn parse(b: &[u8]) -> Option<Vec<Parsed>> {
 fn commit(k: &mut KernelState, parsed: Vec<Parsed>) -> u32 {
     let mut items = Vec::new();
     let mut states = Vec::new();
+    let mut children = Vec::new();
     for mut p in parsed {
         if !p.children.is_empty() {
-            p.item.submenu = commit(k, p.children);
+            let child = commit(k, p.children);
+            if child == 0 {
+                for handle in children {
+                    destroy_owned(k, handle);
+                }
+                return 0;
+            }
+            p.item.submenu = child;
+            children.push(child);
         }
         states.push((p.item.id, p.state));
         items.push(p.item);
     }
-    let h = alloc(k, items);
-    k.menus.insert(h, states.into_iter().collect());
-    h
+    let handle = alloc(k, items);
+    if handle == 0 {
+        for child in children {
+            destroy_owned(k, child);
+        }
+        return 0;
+    }
+    k.menus.insert(handle, states.into_iter().collect());
+    handle
+}
+
+/// An unpublished MENU tree. Inspect labels without allocating runtime handles;
+/// publishing consumes the plan and commits through the ordinary menu owner.
+pub(crate) struct MenuTemplate(Vec<Parsed>);
+impl MenuTemplate {
+    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
+        parse(bytes).map(Self)
+    }
+    pub(crate) fn root_label(&self, index: usize) -> Option<&[u16]> {
+        self.0.get(index).map(|p| p.item.text.as_slice())
+    }
+    pub(crate) fn install(self, kernel: &mut KernelState) -> Option<u32> {
+        let handle = commit(kernel, self.0);
+        (handle != 0).then_some(handle)
+    }
 }
 pub(crate) fn from_bytes(k: &mut KernelState, bytes: &[u8]) -> Option<u32> {
-    Some(commit(k, parse(bytes)?))
+    MenuTemplate::parse(bytes)?.install(k)
 }
+
 pub(super) fn load(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let module = ctx.arg_u32(0)?;
     let raw = ctx.arg_u32(1)?;
@@ -423,23 +466,27 @@ pub(super) fn remove(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     }
     ret(1)
 }
-pub(super) fn destroy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let h = ctx.arg_u32(0)?;
-    let existed = ctx.kernel.menus.contains_key(&h);
-    let mut todo = vec![h];
+pub(crate) fn destroy_owned(k: &mut KernelState, handle: u32) -> bool {
+    let existed = k.menus.contains_key(&handle);
+    let mut todo = vec![handle];
     let mut seen = std::collections::HashSet::new();
     while let Some(h) = todo.pop() {
         if !seen.insert(h) {
             continue;
         }
-        if let Some(items) = ctx.kernel.menu_items.remove(&h) {
+        if let Some(items) = k.menu_items.remove(&h) {
             todo.extend(items.into_iter().map(|i| i.submenu).filter(|h| *h != 0));
         }
-        ctx.kernel.menus.remove(&h);
+        k.menus.remove(&h);
     }
-    ctx.kernel.window_menus.retain(|_, v| !seen.contains(v));
-    ret(u32::from(existed))
+    k.window_menus.retain(|_, v| !seen.contains(v));
+    existed
 }
+pub(super) fn destroy(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    ret(u32::from(destroy_owned(ctx.kernel, handle)))
+}
+
 pub(super) fn get_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = ctx.arg_u32(0)?;
     ret(ctx.kernel.window_menus.get(&h).copied().unwrap_or(0))
@@ -456,6 +503,41 @@ pub(super) fn set_menu(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelE
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exhausted_menu_handles_roll_back_a_partially_committed_resource_tree() {
+        let mut k = crate::gx::tests::fresh_kernel();
+        let root = Parsed {
+            item: MenuItem::default(),
+            state: 0,
+            children: vec![Parsed {
+                item: MenuItem {
+                    id: 12,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        };
+        k.next_menu_handle = u32::MAX - 1;
+        assert_eq!(commit(&mut k, vec![root]), 0);
+        assert!(k.menu_items.is_empty());
+        assert!(k.menus.is_empty());
+    }
+    #[test]
+    fn menu_allocation_does_not_overwrite_existing_or_zero_handles() {
+        let mut k = crate::gx::tests::fresh_kernel();
+        k.next_menu_handle = 0;
+        k.menu_items.insert(
+            1,
+            vec![MenuItem {
+                id: 12,
+                ..Default::default()
+            }],
+        );
+        let handle = alloc(&mut k, Vec::new());
+        assert_eq!(handle, 2);
+        assert_eq!(k.menu_items[&1][0].id, 12);
+        assert!(!k.menu_items.contains_key(&0));
+    }
     #[test]
     fn standard_menu_implicit_and_explicit_separators_preserve_empty_commands() {
         let mut b = vec![0u8; 4];

@@ -5,7 +5,13 @@ use pocket_library::add_data::{self, Destination, PreparedData};
 use std::path::PathBuf;
 
 impl PocketLauncher {
-    pub(super) fn prepare_data(&mut self, id: String, path: PathBuf, extract: bool, destination: Destination) {
+    pub(super) fn prepare_data(
+        &mut self,
+        id: String,
+        path: PathBuf,
+        extract: bool,
+        destination: Destination,
+    ) {
         self.data_game = Some(id.clone());
         self.library_busy = true;
         self.status = "Checking game data…".into();
@@ -50,9 +56,10 @@ impl PocketLauncher {
                 let destination = pending.destination().display().to_string();
                 let selected_game = pending.selected_game_id().map(str::to_owned);
                 pending.apply(&mut Library::open_with_profile(root, profile)?, overwrite)?;
-                Ok((format!(
-                    "Data added successfully.\n\nFiles were placed in:\n{destination}"
-                ), selected_game))
+                Ok((
+                    format!("Data added successfully.\n\nFiles were placed in:\n{destination}"),
+                    selected_game,
+                ))
             })()
             .map_err(|e| format!("{e:#}"));
             let _ = tx.send(UiEvent::DataFinished(result));
@@ -82,14 +89,23 @@ impl PocketLauncher {
             (_, DataChoice::Cancel) => self.status = "Add/Replace Data closed.".into(),
             (DataPrompt::Destination { id, path }, DataChoice::Destination(destination)) => {
                 if add_data::is_zip(&path.to_string_lossy()) {
-                    self.add_data = Some(DataPrompt::Zip { id, path, destination });
+                    self.add_data = Some(DataPrompt::Zip {
+                        id,
+                        path,
+                        destination,
+                    });
                 } else {
                     self.prepare_data(id, path, false, destination);
                 }
             }
-            (DataPrompt::Zip { id, path, destination }, DataChoice::Zip(extract)) => {
-                self.prepare_data(id, path, extract, destination)
-            }
+            (
+                DataPrompt::Zip {
+                    id,
+                    path,
+                    destination,
+                },
+                DataChoice::Zip(extract),
+            ) => self.prepare_data(id, path, extract, destination),
             (DataPrompt::Executable(mut pending), DataChoice::Executable(selected)) => {
                 match pending.choose_executable(selected.as_deref()) {
                     Ok(()) => self.confirm_data(pending),

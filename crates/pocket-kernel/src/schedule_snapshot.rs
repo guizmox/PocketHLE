@@ -114,6 +114,10 @@ impl KernelState {
 }
 
 impl ScheduleSnapshot {
+    pub(crate) fn contains_thread(&self, thread: usize) -> bool {
+        thread <= self.threads.len()
+    }
+
     pub(crate) fn omit_device_objects(&mut self) {
         self.events.clear();
         self.semaphores.clear();
@@ -176,6 +180,7 @@ impl ScheduleSnapshot {
         state.pending_message = self.pending_message;
         state.posted_messages = self.posted_messages;
         state.synthetic_peek_paint_yield = self.synthetic_peek_paint_yield;
+        state.peek_idle_observed = false;
         state.synthetic_message_count = self.synthetic_message_count;
         state.synthetic_message_budget = self.synthetic_message_budget;
         state.synthetic_paint_next_ms = self.synthetic_paint_next_ms;

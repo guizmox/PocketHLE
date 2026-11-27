@@ -57,6 +57,7 @@ fn presentation_phase(
 
 #[derive(Debug, Clone)]
 pub struct Runner {
+    visual: Arc<pocket_session::visual::VisualState>,
     library_profile: pocket_library::LauncherProfile,
     #[cfg(feature = "unicorn")]
     prepared_restore: Arc<Mutex<Option<(String, pocket_session::snapshot::PreparedRestore)>>>,
@@ -69,6 +70,7 @@ pub struct Runner {
 impl Default for Runner {
     fn default() -> Self {
         Self {
+            visual: Default::default(),
             library_profile: Default::default(),
             #[cfg(feature = "unicorn")]
             prepared_restore: Default::default(),
@@ -80,6 +82,9 @@ impl Default for Runner {
     }
 }
 impl Runner {
+    pub fn wait_cursor(&self) -> bool {
+        self.visual.waiting()
+    }
     #[cfg(feature = "unicorn")]
     pub fn cancel_prepared_restore(&self) {
         self.prepared_restore.lock().unwrap().take();
@@ -159,6 +164,8 @@ impl Runner {
         let mut game = game;
         let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut hook = RunHook::new(live_tx, input_rx);
+        self.visual.set_cursor(0);
+        hook.visual = self.visual.clone();
         hook.system_media = system_media;
         hook.gps_notice_tx = gps_notice_tx;
         hook.dependency_notice_tx = dependency_notice_tx;
@@ -396,8 +403,11 @@ impl Runner {
         if !is_gizmondo_game(&game, &library_root)
             && game.settings.accelerometer_output == pocket_library::AccelerometerOutput::Stick
         {
-            hook.accelerometer_keys
-                .set_aim(launcher_config.stylus_stick.clone(), (240, 320), game.settings.controls_mode() == pocket_library::stylus_grid::ControlsMode::Zones);
+            hook.accelerometer_keys.set_aim(
+                launcher_config.stylus_stick.clone(),
+                (240, 320),
+                game.settings.controls_mode() == pocket_library::stylus_grid::ControlsMode::Zones,
+            );
         }
         hook.launch_context = Some(LaunchContext {
             #[cfg(feature = "unicorn")]
@@ -1310,6 +1320,7 @@ impl Drop for ProcessStartup {
 }
 
 struct RunHook {
+    visual: Arc<pocket_session::visual::VisualState>,
     #[cfg(feature = "unicorn")]
     snapshots: pocket_session::snapshot::ProcessSnapshots,
     system_media: SystemMediaView,
@@ -1641,6 +1652,7 @@ impl RunHook {
         let mut hook = Self::new(self.frame_tx.clone(), None);
         hook.dependency_notice_tx = self.dependency_notice_tx.clone();
         hook.system_media = self.system_media.clone();
+        hook.visual = self.visual.clone();
         hook.recording_audio = self.recording_audio.clone();
         hook.recording_audio_pending = true;
         hook.input_rx = self.input_rx.clone();
@@ -1676,6 +1688,7 @@ impl RunHook {
         Self {
             #[cfg(feature = "unicorn")]
             snapshots: Default::default(),
+            visual: Default::default(),
             system_media: SystemMediaView::default(),
             last_system_media: None,
             media_was_foreground: false,
@@ -1725,7 +1738,8 @@ fn run_compact_framework(
     hook: &mut RunHook,
 ) -> (RunOutcome, u32) {
     let tilt = game.settings.effective_tilt_axes(config);
-    hook.accelerometer_keys.set_size(game.settings.screen.resolve_image(image));
+    hook.accelerometer_keys
+        .set_size(game.settings.screen.resolve_image(image));
     let mut input = std::collections::VecDeque::new();
     let sender = hook.frame_tx.clone();
     let mut framebuffer = None;
@@ -1821,6 +1835,9 @@ impl FrameHook for RunHook {
     fn on_frame(&mut self, state: &mut KernelState) -> FrameAction {
         self.reap_children();
         let active = self.foreground.load(Ordering::Acquire) == self.pid;
+        if active {
+            self.visual.set_cursor(state.controls.cursor_handle);
+        }
         let mut stop_requested = if active {
             self.sync_system_media();
             self.accelerometer_keys

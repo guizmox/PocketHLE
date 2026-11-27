@@ -29,6 +29,78 @@ fn belongs(kernel: &KernelState, mut hwnd: u32, dialog: u32) -> bool {
     }
     false
 }
+/// Shared tab traversal uses the same real child/sibling order as GetWindow.
+/// WS_EX_CONTROLPARENT containers contribute their nested controls in place.
+fn next_tab(
+    kernel: &KernelState,
+    dialog: u32,
+    current: u32,
+    previous: bool,
+) -> Result<u32, KernelError> {
+    let mut order = Vec::new();
+    let mut pending = vec![crate::coredll::related_window(kernel, dialog, 5)];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(hwnd) = pending.pop() {
+        if hwnd == 0 {
+            continue;
+        }
+        if !seen.insert(hwnd) || seen.len() > 4096 {
+            return Err(KernelError::Dispatch(
+                "Dialog tab traversal is cyclic or exceeds its bound".into(),
+            ));
+        }
+        pending.push(crate::coredll::related_window(kernel, hwnd, 2));
+        let style = kernel
+            .controls
+            .get(hwnd)
+            .map(|c| c.style)
+            .or_else(|| kernel.window_styles.get(&hwnd).map(|s| s.0))
+            .unwrap_or(0);
+        let ex_style = kernel.window_styles.get(&hwnd).map(|s| s.1).unwrap_or(0);
+        order.push((
+            hwnd,
+            style & 0x10000 != 0
+                && crate::coredll::window_is_visible(kernel, hwnd)
+                && crate::window_enable::input_enabled(kernel, hwnd),
+        ));
+        if ex_style & 0x10000 != 0 {
+            pending.push(crate::coredll::related_window(kernel, hwnd, 5));
+        }
+    }
+    if order.is_empty() {
+        return Ok(0);
+    }
+    let start = order.iter().position(|(h, _)| *h == current);
+    if current != 0 && start.is_none() {
+        return Ok(0);
+    }
+    for step in 1..=order.len() {
+        let index = match start {
+            Some(i) if previous => (i + order.len() - step % order.len()) % order.len(),
+            Some(i) => (i + step) % order.len(),
+            None if previous => order.len() - step,
+            None => step - 1,
+        };
+        if order[index].1 {
+            return Ok(order[index].0);
+        }
+    }
+    Ok(current)
+}
+pub(crate) fn get_next_tab_item(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let dialog = ctx.arg_u32(0)?;
+    let current = ctx.arg_u32(1)?;
+    let previous = ctx.arg_u32(2)? != 0;
+    if !crate::coredll::window_exists(ctx.kernel, dialog)
+        || (current != 0 && !belongs(ctx.kernel, current, dialog))
+    {
+        crate::coredll::set_thread_error(ctx, 1400);
+        return Ok(DispatchOutcome::ReturnedR0(0));
+    }
+    let next = next_tab(ctx.kernel, dialog, current, previous)?;
+    Ok(DispatchOutcome::ReturnedR0(next))
+}
+
 fn restore(ctx: &mut CallCtx<'_>, frame: GuestCallFrame) -> Result<(), KernelError> {
     for (r, v) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
         .into_iter()
@@ -105,29 +177,17 @@ fn process(
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
     if state.key == 9 {
-        let order: Vec<_> = ctx
-            .kernel
-            .controls
-            .children_of(state.dialog)
-            .into_iter()
-            .filter(|h| {
-                ctx.kernel.controls.get(*h).is_some_and(|c| {
-                    c.visible && c.enabled && c.style & 0x10000 != 0 && c.is_focusable()
-                })
-            })
-            .collect();
-        if !order.is_empty() {
-            let index = order.iter().position(|h| *h == ctx.kernel.controls.focus);
-            let shift = ctx.kernel.pressed_keys[0x10]
-                || ctx.kernel.pressed_keys[0xa0]
-                || ctx.kernel.pressed_keys[0xa1];
-            let next = match index {
-                Some(i) if shift => (i + order.len() - 1) % order.len(),
-                Some(i) => (i + 1) % order.len(),
-                None if shift => order.len() - 1,
-                None => 0,
-            };
-            ctx.kernel.controls.focus = order[next];
+        let shift = ctx.kernel.pressed_keys[0x10]
+            || ctx.kernel.pressed_keys[0xa0]
+            || ctx.kernel.pressed_keys[0xa1];
+        let next = next_tab(ctx.kernel, state.dialog, ctx.kernel.controls.focus, shift)?;
+        let next = if next == 0 {
+            next_tab(ctx.kernel, state.dialog, 0, shift)?
+        } else {
+            next
+        };
+        if next != 0 {
+            ctx.kernel.controls.focus = next;
         }
         return Ok(DispatchOutcome::ReturnedR0(1));
     }
@@ -213,5 +273,88 @@ mod tests {
         assert!(wants_key(2, 9));
         assert!(!wants_key(2, 0xd));
         assert!(!wants_key(0x81, 0xd));
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+    #[test]
+    fn tab_queries_share_nested_order_skip_disabled_and_do_not_move_focus() {
+        let (mut cpu, mut kernel, mut dispatcher) = crate::mfc::tests::framework_setup();
+        kernel.window_classes.insert(7, "Dialog".into());
+        kernel.window_visibility.insert(7, true);
+        kernel.window_styles.insert(7, (0x10000000, 0));
+        let a = kernel.controls.create(
+            7,
+            ControlClass::Button,
+            10,
+            "A".into(),
+            0x50010000,
+            0,
+            0,
+            20,
+            20,
+        );
+        let container = kernel.controls.create(
+            7,
+            ControlClass::Static,
+            11,
+            "".into(),
+            0x50000000,
+            20,
+            0,
+            20,
+            20,
+        );
+        kernel
+            .window_styles
+            .insert(container, (0x50000000, 0x10000));
+        let b = kernel.controls.create(
+            container,
+            ControlClass::Edit,
+            12,
+            "B".into(),
+            0x50010000,
+            0,
+            0,
+            20,
+            20,
+        );
+        let c = kernel.controls.create(
+            7,
+            ControlClass::Button,
+            13,
+            "C".into(),
+            0x58010000,
+            40,
+            0,
+            20,
+            20,
+        );
+        kernel.controls.get_mut(c).unwrap().enabled = false;
+        for (current, previous, expected) in [
+            (0, false, a),
+            (a, false, b),
+            (b, false, a),
+            (0, true, b),
+            (b, true, a),
+        ] {
+            assert_eq!(next_tab(&kernel, 7, current, previous).unwrap(), expected);
+        }
+        assert_eq!(kernel.controls.focus, 0);
+        use crate::bluetooth::tests::call;
+        let outcome = call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "coredll.dll",
+            "GetNextDlgTabItem",
+            &[7, a, 0],
+        );
+        assert!(matches!(outcome, DispatchOutcome::ReturnedR0(value) if value == b));
+        kernel.controls.get_mut(a).unwrap().enabled = false;
+        kernel.controls.get_mut(b).unwrap().enabled = false;
+        assert_eq!(next_tab(&kernel, 7, a, false).unwrap(), a);
     }
 }

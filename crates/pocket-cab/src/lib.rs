@@ -155,6 +155,8 @@ pub struct WinCeInstallHeader {
     pub app_name: Option<String>,
     pub provider: Option<String>,
     pub files: Vec<WinCeInstallFile>,
+    /// Declared DIRS entries, including directories with no payload files.
+    pub directories: Vec<String>,
     /// Shallowest directory every installed file sits under, with a
     /// trailing backslash, e.g. `\Program Files\RaymanUltimate\`.
     pub install_dir: Option<String>,
@@ -326,6 +328,9 @@ fn parse_msce(data: &[u8]) -> Option<WinCeInstallHeader> {
     let dirs = parse_dirs(data, dirs_off, dir_count, &strings);
     let files = parse_files(data, files_off, file_count, &dirs);
 
+    header.directories = dirs.into_values().collect();
+    header.directories.sort();
+    header.directories.dedup();
     header.install_dir = pick_install_dir(&files);
     header.files = files;
     header.registry = parse_registry(data, hives_off, hive_count, keys_off, key_count, &strings);
@@ -1366,6 +1371,11 @@ pub fn materialise_setup_names(root: &Path, files: &[CabFile]) -> Vec<(PathBuf, 
         return Vec::new();
     };
     let install_root = script.install_root();
+    materialise_declared_directories(
+        root,
+        install_root.as_deref().map(|p| p.trim_end_matches('\\')),
+        &script.install_dirs,
+    );
 
     let mut created = Vec::new();
     for (short, long) in &script.renames {
@@ -1664,6 +1674,59 @@ impl WinCeInstallHeader {
     }
 }
 
+/// Materialize only application-local, explicitly declared installer folders.
+fn materialise_declared_directories(
+    root: &Path,
+    install_root: Option<&str>,
+    directories: &[String],
+) {
+    if let Some(prefix) = install_root {
+        for directory in directories {
+            let directory = directory.trim_end_matches('\\');
+            let Some(relative) = directory
+                .get(prefix.len()..)
+                .filter(|_| {
+                    directory
+                        .get(..prefix.len())
+                        .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+                })
+                .and_then(|tail| tail.strip_prefix('\\'))
+            else {
+                continue;
+            };
+            if relative.is_empty()
+                || relative
+                    .split(['\\', '/'])
+                    .any(|p| p.is_empty() || p == "." || p == ".." || p.contains([':', '\0']))
+            {
+                continue;
+            }
+            // Reject existing symlinks before creating a component; install
+            // metadata must not escape an extraction through host links.
+            let mut target = root.to_path_buf();
+            let result = relative.split('\\').try_for_each(|part| {
+                target.push(part);
+                match fs::symlink_metadata(&target) {
+                    Ok(_) if plain_path_below(root, &target, true) => Ok(()),
+                    Ok(_) => Err(std::io::Error::other(
+                        "CAB directory path is not a real directory",
+                    )),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        fs::create_dir(&target)
+                    }
+                    Err(error) => Err(error),
+                }
+            });
+            if let Err(error) = result {
+                log::debug!(
+                    "could not create CAB directory {}: {error}",
+                    target.display()
+                );
+            }
+        }
+    }
+}
+
 /// Recreate the long file names a legacy `.000` (MSCE) install header
 /// asks the installer to produce, alongside the short (8.3) names
 /// [`extract_all`] wrote.
@@ -1686,6 +1749,8 @@ pub fn materialise_install_header_names(
         .install_dir
         .as_deref()
         .map(|d| d.trim_end_matches('\\'));
+
+    materialise_declared_directories(root, install_root, &header.directories);
 
     // The numeric extension identifies the member. Keep ambiguous IDs out
     // of the copy list so cleanup cannot consume either candidate.
@@ -2184,6 +2249,36 @@ mod tests {
         assert_eq!(out.len(), MSCE_HEADER_LEN);
         out.extend_from_slice(&body);
         out
+    }
+
+    #[test]
+    fn empty_declared_application_directories_are_materialised_without_flattening_external_paths() {
+        let mut raw = synthetic_msce();
+        raw[52..54].copy_from_slice(&1u16.to_le_bytes()); // data DIR has no FILES record.
+        let mut header = WinCeInstallHeader::parse_bytes(&raw).unwrap();
+        assert!(header.structured);
+        assert!(header
+            .directories
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(r"\Program Files\Game\data\")));
+        header.directories.extend([
+            r"\Windows\Shared\".into(),
+            r"\Program Files\Game\..\escape\".into(),
+            r"\Program Files\Game2\elsewhere\".into(),
+        ]);
+        let root =
+            std::env::temp_dir().join(format!("pocket-cab-empty-dirs-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        materialise_install_header_names(&root, &[], &header);
+        assert!(root.as_path().join("data").is_dir());
+        assert_eq!(fs::read_dir(root.as_path()).unwrap().count(), 1);
+        fs::write(root.as_path().join("data/user.stn"), b"keep").unwrap();
+        materialise_install_header_names(root.as_path(), &[], &header);
+        assert_eq!(
+            fs::read(root.as_path().join("data/user.stn")).unwrap(),
+            b"keep"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

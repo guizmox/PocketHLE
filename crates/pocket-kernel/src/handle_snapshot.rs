@@ -182,10 +182,7 @@ impl HandleSnapshot {
                 .collect(),
             ..Default::default()
         };
-        let table = HandleTable {
-            pid: self.pid,
-            domain: Default::default(),
-        };
+        let table = HandleTable::from_domain(Default::default(), self.pid);
         for (id, object) in self.entries {
             let value = object.map(|object| {
                 if self.coordinated {

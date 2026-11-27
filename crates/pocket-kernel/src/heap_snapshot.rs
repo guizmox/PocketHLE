@@ -34,6 +34,16 @@ impl Heap {
 }
 
 impl HeapSnapshot {
+    pub(crate) fn owns_global_block(&self, address: u32) -> bool {
+        self.live
+            .get(&address)
+            .is_some_and(|allocation| !allocation.cpp)
+    }
+    pub(crate) fn has_allocation(&self, address: u32, size: u32) -> bool {
+        self.live
+            .get(&address)
+            .is_some_and(|allocation| allocation.size == size && !allocation.cpp)
+    }
     /// Restore before CPU image pages so both consumers charge the same
     /// physical device. A failed charge leaves the device unchanged.
     pub fn restore(

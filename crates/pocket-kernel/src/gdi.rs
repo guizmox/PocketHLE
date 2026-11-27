@@ -422,6 +422,9 @@ pub struct GdiState {
     saved_dcs: HashMap<u32, Vec<Dc>>,
     pending_bitmap_deletes: std::collections::HashSet<u32>,
     pub shell_menus: crate::shell_menu::ShellMenus,
+    // Independently versioned optional checkpoint extension; see KernelSnapshot.
+    #[serde(skip)]
+    pub shell_toolbars: HashMap<u32, crate::shell_menu::Toolbar>,
     objects: HashMap<u32, GdiObject>,
     next_handle: u32,
     pub class_values: HashMap<(String, i32), u32>,
@@ -463,6 +466,20 @@ pub struct PaintPresentation {
 /// be supplied by a checkpoint of the font installation source.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct GdiSnapshot(GdiState);
+
+#[path = "gdi_snapshot_v1.rs"]
+mod snapshot_v1;
+/// Preserve the WinCE record envelope while upgrading just its GDI payload.
+pub(crate) fn read_snapshot_record(
+    header: pocket_snapshot::fields::Header,
+    input: &mut dyn std::io::Read,
+) -> std::io::Result<GdiSnapshot> {
+    match header.version {
+        1 => snapshot_v1::read(header, input),
+        2 => pocket_snapshot::fields::read_value(header, input),
+        version => Err(pocket_snapshot::fields::version(0x0501, "gdi", version)),
+    }
+}
 
 impl GdiSnapshot {
     pub fn restore(mut self) -> Result<GdiState, String> {
@@ -529,6 +546,7 @@ impl GdiState {
             saved_dcs: HashMap::new(),
             pending_bitmap_deletes: Default::default(),
             shell_menus: Default::default(),
+            shell_toolbars: Default::default(),
             objects: HashMap::new(),
             next_handle: GDI_HANDLE_BASE,
             class_values: HashMap::new(),

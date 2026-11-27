@@ -120,6 +120,7 @@ pub enum InputCommand {
 /// Shared between the worker thread and the UI thread for the
 /// lifetime of one game session.
 pub(crate) struct SessionState {
+    visual: pocket_session::visual::VisualState,
     user_stop: Arc<AtomicBool>,
     session_error: Arc<Mutex<Option<String>>>,
     restore_requested: AtomicBool,
@@ -180,6 +181,7 @@ impl SessionState {
             presentation: None,
             stop_all: Arc::new(AtomicBool::new(false)),
             latest_frame: Mutex::new(None),
+            visual: Default::default(),
             system_media: Mutex::new(None),
             presentation_stats: Mutex::new(None),
             gps_notice: Mutex::new(None),
@@ -216,6 +218,9 @@ impl Session {
                 );
             }
         }
+    }
+    pub fn wait_cursor(&self) -> bool {
+        self.state.visual.waiting()
     }
     pub fn system_media(&self) -> Option<SystemMediaStatus> {
         self.state.system_media.lock().ok()?.clone()
@@ -1737,6 +1742,10 @@ impl FrameHook for SessionHook {
         }
     }
     fn on_frame(&mut self, kernel: &mut KernelState) -> FrameAction {
+        if self.foreground.load(Ordering::Acquire) == self.pid {
+            self.state.visual.set_cursor(kernel.controls.cursor_handle);
+        }
+
         // Drain any pending UI input into the kernel's queue.
         self.reap_children();
         let mut stop_requested = self.stop_all.load(Ordering::Acquire);

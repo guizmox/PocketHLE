@@ -2,8 +2,11 @@
 //!
 //! SDK ordinals and owned shell window identities.
 
-mod gesture;
+pub(crate) mod activation;
+pub(crate) mod gesture;
+pub(crate) mod menu_bar;
 mod registry_notify;
+pub(crate) mod settings;
 
 use pocket_kernel::gdi::STOCK_SYSTEM_FONT;
 use pocket_kernel::{DispatchOutcome, KernelError};
@@ -22,6 +25,7 @@ const SPI_GETSIPINFO: u32 = 0xE1;
 pub fn register(d: &mut WinCeDispatcher) {
     let dll = "aygshell.dll";
     registry_notify::register(d);
+    settings::register(d);
     for f in [
         "SHInitExtraControls",
         "SHFindMenuBar",
@@ -32,7 +36,6 @@ pub fn register(d: &mut WinCeDispatcher) {
         "SHCreateMenuBarEx",
         "SHCreateMenuBarInternal",
         "SHLoadImageFile",
-        "SHHandleWMActivate",
         "SHHandleWMSettingChange",
         "SHInitDialog",
         "SHSipPreference",
@@ -46,9 +49,7 @@ pub fn register(d: &mut WinCeDispatcher) {
         "SHSetAppKeyWndAssoc",
     ] {
         let handler = match f {
-            "SHCreateMenuBar" | "SHCreateMenuBarEx" | "SHCreateMenuBarInternal" => {
-                sh_create_menu_bar
-            }
+            "SHCreateMenuBar" | "SHCreateMenuBarEx" | "SHCreateMenuBarInternal" => menu_bar::create,
             "SHRecognizeGesture" => gesture::recognize,
             "SHInitDialog" => sh_init_dialog,
             "SHInitExtraControls" => sh_init_extra_controls,
@@ -56,9 +57,11 @@ pub fn register(d: &mut WinCeDispatcher) {
             "SHLoadImageResource" => sh_load_image_resource,
             "SHSendBackToFocusWindow" => crate::coredll::send_back_to_focus_window,
             "SHSetAppKeyWndAssoc" => sh_set_app_key_window,
+            "SHDoneButton" => done_button,
             "SHFullScreen" => sh_full_screen,
             "SHLoadImageFile" => sh_load_image_file,
             "SHSipInfo" => sh_sip_info,
+            "SHHandleWMSettingChange" => settings::handle,
             "SHCloseApps" => sh_close_apps,
             "SHSipPreference" => crate::shell_keyboard::preference,
             _ => ok,
@@ -80,10 +83,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     // real handlers in the PPC2002 block below, which still answers
     // TRUE for 9 — so Pocket DeathMatch keeps the return value its
     // startup path checks.
-    for ord in [12u16, 13, 14, 21, 49, 50, 65, 71, 72, 80, 84, 344] {
+    for ord in [12u16, 13, 14, 21, 49, 50, 65, 71, 72, 80, 344] {
         d.register_handler(dll, &format!("ord:{ord}"), ok);
     }
     for (ordinal, handler) in [
+        (69, done_button as crate::Handler),
         (3, sh_set_app_key_window as crate::Handler),
         (64, sh_load_image_resource),
         (97, crate::coredll::send_back_to_focus_window),
@@ -140,10 +144,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "ord:33", zero);
     d.register_handler(dll, "ord:53", sh_get_ui_font);
     d.register_handler(dll, "ord:54", ok);
-    d.register_handler(dll, "ord:34", sh_create_menu_bar);
+    d.register_handler(dll, "ord:34", menu_bar::create);
     d.register_handler(dll, "ord:56", sh_init_dialog);
     d.register_handler(dll, "ord:21", crate::shell_keyboard::preference);
-    d.register_handler(dll, "ord:74", sh_create_menu_bar);
+    d.register_handler(dll, "ord:74", menu_bar::create);
+    activation::register(d);
 }
 
 /// SHFullScreen changes shell z-order/state; the app must resize itself.
@@ -231,187 +236,6 @@ fn zero(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
-/// `SHCreateMenuBar(SHMENUBARINFO *pmb)`.
-///
-/// The PPC2002 struct is 36 bytes:
-///
-/// ```text
-///   +0x00 cbSize        (36)
-///   +0x04 hwndParent
-///   +0x08 dwFlags
-///   +0x0c nToolBarId
-///   +0x10 hInstRes
-///   +0x14 nBmpId
-///   +0x18 cBmpImages
-///   +0x1c hwndMB        <- out
-///   +0x20 clrBk
-/// ```
-///
-fn resource(ctx: &mut CallCtx<'_>, module: u32, kind: u32, id: u32) -> Option<Vec<u8>> {
-    use pocket_pe::ResourceKey;
-    let (e, base) = crate::coredll::lookup_resource(
-        ctx.kernel,
-        module,
-        &ResourceKey::Id(kind),
-        &ResourceKey::Id(id),
-    )?;
-    if e.size > 1048576 {
-        return None;
-    }
-    ctx.cpu.read_mem(base.checked_add(e.data_rva)?, e.size).ok()
-}
-fn sh_create_menu_bar(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    let p = ctx.arg_u32(0)?;
-    let Ok(info) = ctx.cpu.read_mem(p, 32) else {
-        return zero(ctx);
-    };
-    let get = |o| u32::from_le_bytes(info[o..o + 4].try_into().unwrap());
-    if !matches!(get(0), 32 | 36) {
-        return zero(ctx);
-    }
-    let (parent, flags, id, module) = (get(4), get(8), get(12), get(16));
-    let Some(hwnd) = (0xdead0b01..0xdead0c00).find(|h| !ctx.kernel.window_classes.contains_key(h))
-    else {
-        return zero(ctx);
-    };
-    let mut toolbar_resource = None;
-    let menu = if flags & 1 != 0 {
-        0
-    } else {
-        let menu_id = if flags & 16 != 0 {
-            id
-        } else {
-            let Some(bytes) = resource(ctx, module, 10, id) else {
-                return zero(ctx);
-            };
-            if bytes.len() < 4 {
-                return zero(ctx);
-            }
-            let menu_id = u16::from_le_bytes(bytes[..2].try_into().unwrap()) as u32;
-            toolbar_resource = Some(bytes);
-            menu_id
-        };
-        if flags & 16 != 0 && ctx.kernel.menu_items.contains_key(&menu_id) {
-            menu_id
-        } else {
-            let Some(bytes) = resource(ctx, module, 4, menu_id) else {
-                return zero(ctx);
-            };
-            let Some(h) = crate::coredll::menu_api::from_bytes(ctx.kernel, &bytes) else {
-                return zero(ctx);
-            };
-            h
-        }
-    };
-    if let Some(bytes) = toolbar_resource {
-        let count = u16::from_le_bytes(bytes[2..4].try_into().unwrap()) as usize;
-        if count > 4096 || bytes.len() < 4 + count * 14 {
-            return zero(ctx);
-        }
-        let roots = ctx
-            .kernel
-            .menu_items
-            .get(&menu)
-            .cloned()
-            .unwrap_or_default();
-        let mut buttons = Vec::new();
-        for record in bytes[4..4 + count * 14].chunks_exact(14) {
-            let word = |i| u16::from_le_bytes(record[i..i + 2].try_into().unwrap()) as u32;
-            let mut item = if word(6) & 8 != 0 {
-                roots.get(word(12) as usize).cloned().unwrap_or_default()
-            } else {
-                Default::default()
-            };
-            item.id = word(2);
-            if item.text.is_empty() {
-                let sid = word(8);
-                if let Some(block) = resource(ctx, module, 6, (sid >> 4) + 1) {
-                    let mut offset = 0usize;
-                    for slot in 0..16 {
-                        let Some(length) = block
-                            .get(offset..offset + 2)
-                            .map(|v| u16::from_le_bytes(v.try_into().unwrap()) as usize)
-                        else {
-                            break;
-                        };
-                        offset += 2;
-                        let Some(raw) = block.get(offset..offset + length * 2) else {
-                            break;
-                        };
-                        if slot == sid & 15 {
-                            item.text = raw
-                                .chunks_exact(2)
-                                .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
-                                .collect();
-                            break;
-                        }
-                        offset += length * 2;
-                    }
-                }
-            }
-            buttons.push(item);
-        }
-        ctx.kernel.menu_items.insert(menu, buttons);
-    }
-    if ctx.cpu.write_mem(p + 28, &hwnd.to_le_bytes()).is_err() {
-        return zero(ctx);
-    }
-    let proc = ctx
-        .kernel
-        .dynamic_exports
-        .values()
-        .find_map(|e| e.get("DefWindowProcW").copied())
-        .unwrap_or(0);
-    ctx.kernel
-        .window_classes
-        .insert(hwnd, "ToolbarWindow32".into());
-    ctx.kernel.window_procs.insert(hwnd, proc);
-    ctx.kernel.window_parents.insert(hwnd, parent);
-    ctx.kernel
-        .window_threads
-        .insert(hwnd, ctx.kernel.current_thread);
-    // Shell-owned popup: its screen strip lies outside the application's client area.
-    let visible = flags & 2 == 0;
-    ctx.kernel
-        .window_styles
-        .insert(hwnd, (0x80000000 | if visible { 0x10000000 } else { 0 }, 0));
-    ctx.kernel.window_visibility.insert(hwnd, visible);
-    let w = ctx.kernel.framebuffer.width as i32;
-    let h = ctx.kernel.framebuffer.height as i32;
-    ctx.kernel.window_rects.insert(
-        hwnd,
-        (
-            0,
-            h - pocket_kernel::shell_menu::HEIGHT,
-            w,
-            pocket_kernel::shell_menu::HEIGHT,
-        ),
-    );
-    let color = if flags & 4 != 0 && get(0) == 36 {
-        ctx.cpu
-            .read_mem(p + 32, 4)
-            .ok()
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-            .unwrap_or(0xc0c0c0)
-    } else {
-        0xc0c0c0
-    };
-    let background = (((color & 255) >> 3) << 11
-        | (((color >> 8) & 255) >> 2) << 5
-        | ((color >> 16) & 255) >> 3) as u16;
-    ctx.kernel.gdi.shell_menus.bars.insert(
-        hwnd,
-        pocket_kernel::shell_menu::Bar {
-            owner: parent,
-            menu,
-            sip: flags & 8 == 0 && !ctx.kernel.gdi.shell_menus.sip_button_hidden,
-            background,
-        },
-    );
-    log::debug!("window geometry shell bar hwnd={hwnd:x} owner={parent:x} flags={flags:x} resource={id:x} menu={menu:x} items={:?}",ctx.kernel.menu_items.get(&menu));
-    ctx.kernel.framebuffer.mark_dirty();
-    ok(ctx)
-}
 pub(crate) fn menu_input(
     ctx: &mut CallCtx<'_>,
     ev: pocket_kernel::InputEvent,
@@ -429,6 +253,7 @@ pub(crate) fn menu_input(
         h,
         &ctx.kernel.menu_items,
         &ctx.kernel.menus,
+        &ctx.kernel.gdi.shell_toolbars,
     )?;
     ctx.kernel.framebuffer.mark_dirty();
     use pocket_kernel::shell_menu::Action;
@@ -442,7 +267,7 @@ pub(crate) fn menu_input(
         Action::Consumed => Some(None),
     }
 }
-fn sh_init_dialog(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(crate) fn sh_init_dialog(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let p = ctx.arg_u32(0)?;
     let Ok(b) = ctx.cpu.read_mem(p, 12) else {
         return Ok(DispatchOutcome::ReturnedR0(0));
@@ -1227,4 +1052,41 @@ mod resource_and_focus_tests {
         }
         assert_eq!(cpu.read_reg(ArmReg::Lr).unwrap(), 0x8888);
     }
+}
+
+/// CE3 SHOW/HIDE updates the same caption style consumed by USER painting and
+/// caption hit testing. A successful call must change that real window state.
+pub(crate) fn done_button(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    use crate::guest_callbacks::{self, Frame, WINCE};
+    use pocket_cpu::regs::ArmReg;
+    let owner = guest_callbacks::owner(ctx, WINCE.continue_name)?;
+    let f = Frame::enter(ctx, WINCE, owner)?;
+    let hwnd = f.arg(ctx, 0)?;
+    let state = f.arg(ctx, 1)?;
+    if f.fresh {
+        if !crate::coredll::window_exists(ctx.kernel, hwnd) {
+            crate::coredll::set_thread_error(ctx, 1400);
+            return f.finish(ctx, 0);
+        }
+        if !matches!(state, 1 | 2) {
+            crate::coredll::set_thread_error(ctx, 87);
+            return f.finish(ctx, 0);
+        }
+        return f.call_service(ctx, 1, "GetWindowLongW", &[hwnd, (-20i32) as u32]);
+    }
+    if f.phase(ctx)? == 1 {
+        let ex = ctx.cpu.read_reg(ArmReg::R0)?;
+        let flag = pocket_kernel::controls::DialogPanel::WS_EX_CAPTIONOKBTN;
+        return f.call_service(
+            ctx,
+            2,
+            "SetWindowLongW",
+            &[
+                hwnd,
+                (-20i32) as u32,
+                if state == 1 { ex | flag } else { ex & !flag },
+            ],
+        );
+    }
+    f.finish(ctx, 1)
 }

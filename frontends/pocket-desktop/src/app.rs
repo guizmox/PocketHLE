@@ -1,13 +1,13 @@
 //! egui application: library screen, settings, per-game sheet.
 
-#[path = "stylus_controls_ui.rs"]
-mod stylus_controls_ui;
-#[path = "import_setup_ui.rs"]
-mod import_setup_ui;
-#[path = "add_data_ui.rs"]
-mod add_data_ui;
 #[path = "add_data_prompt.rs"]
 mod add_data_prompt;
+#[path = "add_data_ui.rs"]
+mod add_data_ui;
+#[path = "import_setup_ui.rs"]
+mod import_setup_ui;
+#[path = "stylus_controls_ui.rs"]
+mod stylus_controls_ui;
 use add_data_prompt::DataPrompt;
 #[path = "title_scroll.rs"]
 mod title_scroll;
@@ -100,8 +100,14 @@ enum UpscaleFilter {
     Nearest,
 }
 const GAME_MENU_LABELS: [&str; 8] = [
-    "Information", "Play", "Rename...", "Settings", "Add/Replace Data",
-    "Switch Launch Executable", "Remove", "Game ID",
+    "Information",
+    "Play",
+    "Rename...",
+    "Settings",
+    "Add/Replace Data",
+    "Switch Launch Executable",
+    "Remove",
+    "Game ID",
 ];
 const EXECUTABLE_HEAP_HELP: &str = "Some games need this setting to start or run correctly. It can slow down other games. If a game runs slowly, try turning it off in that game’s settings.";
 
@@ -151,9 +157,15 @@ impl UpscaleFilter {
     }
     fn toolbar_label(self) -> &'static str {
         match self {
-            Self::None => "None", Self::Reconstruction => "Reconstruction", Self::Smaa => "SMAA",
-            Self::SmaaSoft => "SMAA soft", Self::Xbrz => "xBRZ ×3", Self::Bicubic => "Bicubic",
-            Self::Lanczos => "Lanczos", Self::Bilinear => "Bilinear", Self::Nearest => "Nearest",
+            Self::None => "None",
+            Self::Reconstruction => "Reconstruction",
+            Self::Smaa => "SMAA",
+            Self::SmaaSoft => "SMAA soft",
+            Self::Xbrz => "xBRZ ×3",
+            Self::Bicubic => "Bicubic",
+            Self::Lanczos => "Lanczos",
+            Self::Bilinear => "Bilinear",
+            Self::Nearest => "Nearest",
         }
     }
     fn stepped(self, forward: bool) -> Self {
@@ -312,7 +324,8 @@ pub struct PocketLauncher {
     pending_import: Option<PreparedImport>,
     first_import_setups: std::collections::VecDeque<pocket_library::import_setup::Platform>,
     first_import_setup: Option<import_setup_ui::ImportSetupDraft>,
-    pocketpc_import_options: std::collections::VecDeque<(String, pocket_library::gpu_profile::ImportAdvice)>,
+    pocketpc_import_options:
+        std::collections::VecDeque<(String, pocket_library::gpu_profile::ImportAdvice)>,
     updating_import: bool,
     library_busy: bool,
     restore_archive: Option<std::path::PathBuf>,
@@ -745,7 +758,10 @@ impl HeldButtons {
     }
 
     fn is_held(&self, vk: u16) -> bool {
-        self.keyboard.contains(&vk) || self.pointer.contains(&vk) || self.gamepad.contains(&vk) || self.gesture.contains(&vk)
+        self.keyboard.contains(&vk)
+            || self.pointer.contains(&vk)
+            || self.gamepad.contains(&vk)
+            || self.gesture.contains(&vk)
     }
 
     fn is_held_by(&self, source: InputSource, vk: u16) -> bool {
@@ -783,7 +799,10 @@ pub enum UiEvent {
     ImportFinished(Result<ImportedGames, String>),
     ImportPrepared(PreparedImport),
     DemoSplitFinished(String, Result<Vec<GameEntry>, String>),
-    RunFinished(RunOutcome, Option<pocket_library::session_diagnostic::Diagnostic>),
+    RunFinished(
+        RunOutcome,
+        Option<pocket_library::session_diagnostic::Diagnostic>,
+    ),
 }
 
 #[derive(Debug)]
@@ -794,9 +813,16 @@ pub struct ImportedGames {
 }
 
 impl ImportedGames {
-    fn analyze(entries: Vec<GameEntry>, library: &Library, existing_ids: &[String], before: pocket_library::import_setup::Presence) -> Self {
+    fn analyze(
+        entries: Vec<GameEntry>,
+        library: &Library,
+        existing_ids: &[String],
+        before: pocket_library::import_setup::Presence,
+    ) -> Self {
         let first_import_setups = library.config().first_import_setup.requests(
-            before, pocket_library::import_setup::Presence::read(&entries, library.root()));
+            before,
+            pocket_library::import_setup::Presence::read(&entries, library.root()),
+        );
         let pocketpc_import_options = entries
             .iter()
             .filter(|game| !existing_ids.contains(&game.id) && !library.is_demo_card(&game.id))
@@ -1004,7 +1030,10 @@ impl PocketLauncher {
             system_media: SystemMediaView::default(),
             media_keys_down: [false; 2],
             held: HeldButtons::default(),
-            gamepad_rx: crate::gamepad::start(cc.egui_ctx.clone(), profile == pocket_library::LauncherProfile::SteamDeck),
+            gamepad_rx: crate::gamepad::start(
+                cc.egui_ctx.clone(),
+                profile == pocket_library::LauncherProfile::SteamDeck,
+            ),
             gamepad_devices: Vec::new(),
             gamepad_selected: None,
             gamepad_error: None,
@@ -1090,8 +1119,16 @@ impl PocketLauncher {
                     update.version
                 ));
                 ui.add_space(12.0);
-                download |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx,"Download (Enter / {South})")).clicked();
-                dismiss |= crate::controller_ui::button(ui, crate::controller_labels::text(ctx,"Later (Escape / {East})")).clicked();
+                download |= crate::controller_ui::button(
+                    ui,
+                    crate::controller_labels::text(ctx, "Download (Enter / {South})"),
+                )
+                .clicked();
+                dismiss |= crate::controller_ui::button(
+                    ui,
+                    crate::controller_labels::text(ctx, "Later (Escape / {East})"),
+                )
+                .clicked();
             });
         });
         if download {
@@ -1157,7 +1194,10 @@ impl PocketLauncher {
                             self.icon_cache.clear();
                             self.reload_library();
                             self.status = "Game data updated.".into();
-                            if selected_game.as_deref().is_some_and(|id| self.queue_executable_gpu_options(id)) {
+                            if selected_game
+                                .as_deref()
+                                .is_some_and(|id| self.queue_executable_gpu_options(id))
+                            {
                                 continue;
                             }
                             ("Add/Replace Data complete", message)
@@ -1320,8 +1360,13 @@ impl PocketLauncher {
         if let Some((_, receiver)) = &self.snapshot_preflight {
             let result = match receiver.try_recv() {
                 Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err("Snapshot verification was interrupted".into())),
-                Err(mpsc::TryRecvError::Empty) => { ctx.request_repaint_after(Duration::from_millis(100)); None }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Snapshot verification was interrupted".into()))
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    None
+                }
             };
             if let Some(result) = result {
                 let (game, _) = self.snapshot_preflight.take().unwrap();
@@ -1343,7 +1388,10 @@ impl PocketLauncher {
                             slot.timestamp = Some(timestamp);
                         }
                     }
-                    self.status = format!("Snapshot saved {}", pocket_library::snapshot_slot::format_timestamp(timestamp));
+                    self.status = format!(
+                        "Snapshot saved {}",
+                        pocket_library::snapshot_slot::format_timestamp(timestamp)
+                    );
                     self.snapshot_result = None;
                 }
                 Ok(Err(error)) => {
@@ -1354,7 +1402,9 @@ impl PocketLauncher {
                     self.snapshot_result = None;
                     self.show_snapshot_error(false, "Snapshot capture was interrupted".into());
                 }
-                Err(mpsc::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(100))
+                }
             }
         }
         // A second game may be selected while the first worker is still
@@ -1669,7 +1719,17 @@ impl PocketLauncher {
                     .chain(self.held.pointer.iter())
                     .chain(self.held.gamepad.iter())
                 {
-                    if !matches!(*vk, pocket_library::center_tap::COMMAND | pocket_library::keybindings::ROTATION_COMMAND | pocket_library::keybindings::SCREENSHOT_COMMAND | pocket_library::keybindings::STYLUS_CLICK_COMMAND | pocket_library::keybindings::SAVE_SNAPSHOT_COMMAND | pocket_library::keybindings::LOAD_SNAPSHOT_COMMAND) { recording.observe(InputEvent::KeyDown { vk: *vk }); }
+                    if !matches!(
+                        *vk,
+                        pocket_library::center_tap::COMMAND
+                            | pocket_library::keybindings::ROTATION_COMMAND
+                            | pocket_library::keybindings::SCREENSHOT_COMMAND
+                            | pocket_library::keybindings::STYLUS_CLICK_COMMAND
+                            | pocket_library::keybindings::SAVE_SNAPSHOT_COMMAND
+                            | pocket_library::keybindings::LOAD_SNAPSHOT_COMMAND
+                    ) {
+                        recording.observe(InputEvent::KeyDown { vk: *vk });
+                    }
                 }
                 recording.observe(InputEvent::TouchSteeringPosition {
                     x: self.steering_axes.0,
@@ -1740,18 +1800,29 @@ impl PocketLauncher {
             let r = self.recording.lock().unwrap_or_else(|e| e.into_inner());
             (r.active(), r.busy())
         };
-        let snapshot_game = self.running_game_id.as_ref().or(self.selected_game.as_ref())
+        let snapshot_game = self
+            .running_game_id
+            .as_ref()
+            .or(self.selected_game.as_ref())
             .and_then(|id| self.library.get(id));
         if self.snapshot_slot.as_ref().map(|slot| &slot.game_id)
             != snapshot_game.map(|game| &game.id)
         {
             self.snapshot_slot = snapshot_game.map(|game| {
                 let path = pocket_library::snapshot_slot::path_for(self.library.root(), game);
-                let timestamp = pocket_library::snapshot_slot::timestamp(&path).ok().flatten();
-                SnapshotSlotStatus { game_id: game.id.clone(), timestamp }
+                let timestamp = pocket_library::snapshot_slot::timestamp(&path)
+                    .ok()
+                    .flatten();
+                SnapshotSlotStatus {
+                    game_id: game.id.clone(),
+                    timestamp,
+                }
             });
         }
-        let timestamp = self.snapshot_slot.as_ref().and_then(|slot| slot.timestamp)
+        let timestamp = self
+            .snapshot_slot
+            .as_ref()
+            .and_then(|slot| slot.timestamp)
             .map(pocket_library::snapshot_slot::format_timestamp);
         let state = State {
             version: env!("CARGO_PKG_VERSION"),
@@ -1894,9 +1965,18 @@ impl PocketLauncher {
     fn restore_game_snapshot(&mut self) {
         #[cfg(feature = "unicorn")]
         {
-            if self.snapshot_operation_busy() { return; }
-            let Some(game) = self.running_game_id.as_ref().or(self.selected_game.as_ref())
-                .and_then(|id| self.library.get(id)).cloned() else { return; };
+            if self.snapshot_operation_busy() {
+                return;
+            }
+            let Some(game) = self
+                .running_game_id
+                .as_ref()
+                .or(self.selected_game.as_ref())
+                .and_then(|id| self.library.get(id))
+                .cloned()
+            else {
+                return;
+            };
             let context = pocket_session::LaunchContext {
                 library: self.library.root().to_path_buf(),
                 card: game.gizmondo_storage_card_root(self.library.root()),
@@ -2131,13 +2211,15 @@ impl PocketLauncher {
                             self.deck_nav_repeat = None;
                         }
                         direction => {
-                            if let Some(next) =
-                                crate::deck_navigation::menu_index(
-                                    *selection,
-                                    direction,
-                                    GAME_MENU_LABELS.len() - usize::from(self.library_tab == crate::deck_navigation::LibraryTab::Gizmondo),
-                                )
-                            {
+                            if let Some(next) = crate::deck_navigation::menu_index(
+                                *selection,
+                                direction,
+                                GAME_MENU_LABELS.len()
+                                    - usize::from(
+                                        self.library_tab
+                                            == crate::deck_navigation::LibraryTab::Gizmondo,
+                                    ),
+                            ) {
                                 *selection = next;
                             }
                         }
@@ -2319,8 +2401,14 @@ impl PocketLauncher {
                 {
                     let enabled = !matches!(action, 4 | 5)
                         || (self.running_game.is_none() && self.pending_run.is_none());
-                    if (ui.add_enabled(enabled, egui::SelectableLabel::new(index == selection, label)).clicked()
-                        || (activate && index == selection)) && enabled
+                    if (ui
+                        .add_enabled(
+                            enabled,
+                            egui::SelectableLabel::new(index == selection, label),
+                        )
+                        .clicked()
+                        || (activate && index == selection))
+                        && enabled
                     {
                         chosen = Some(action);
                     }
@@ -2347,10 +2435,16 @@ impl PocketLauncher {
                     }
                     4 => {
                         self.data_game = Some(game.id.clone());
-                        self.open_file_dialog(crate::file_dialog::Purpose::AddData, None, String::new());
+                        self.open_file_dialog(
+                            crate::file_dialog::Purpose::AddData,
+                            None,
+                            String::new(),
+                        );
                     }
                     5 => match self.library.launch_executables(&game.id) {
-                        Ok(choices) => self.launch_executable_choices = Some((game.id.clone(), choices)),
+                        Ok(choices) => {
+                            self.launch_executable_choices = Some((game.id.clone(), choices))
+                        }
                         Err(error) => {
                             self.add_data = Some(DataPrompt::Notice {
                                 title: "Could not list executables",
@@ -2359,11 +2453,14 @@ impl PocketLauncher {
                         }
                     },
                     6 => {
-                        self.remove_game=Some(crate::remove_game::Prompt {id:game.id.clone(),name:game.display_name.clone()});
+                        self.remove_game = Some(crate::remove_game::Prompt {
+                            id: game.id.clone(),
+                            name: game.display_name.clone(),
+                        });
                         self.deck_library_actions.clear();
-                        self.deck_nav_repeat=None;
-                        self.game_menu=None;
-                        self.game_menu_parent=None;
+                        self.deck_nav_repeat = None;
+                        self.game_menu = None;
+                        self.game_menu_parent = None;
                     }
                     7 => {
                         ui.ctx().output_mut(|o| o.copied_text = game.id.clone());
@@ -2460,7 +2557,8 @@ impl PocketLauncher {
         let ((width, height), graphics_api) = match self.screen_cache.get(&game.id) {
             Some((pref, size, api)) if *pref == game.settings.screen => (*size, *api),
             _ => {
-                let (size, api) = pocket_library::analysis::game_card_display(game, self.library.root(), giz);
+                let (size, api) =
+                    pocket_library::analysis::game_card_display(game, self.library.root(), giz);
                 self.screen_cache
                     .insert(game.id.clone(), (game.settings.screen, size, api));
                 (size, api)
@@ -2520,7 +2618,9 @@ impl PocketLauncher {
                 .resizable(false)
                 .show(ctx, |ui| {
                     crate::controller_ui::page_scope(ui, "import_cabinet", |ui| {
-                        ui.label("This installer contains several CABs. Which one should be imported?");
+                        ui.label(
+                            "This installer contains several CABs. Which one should be imported?",
+                        );
                         for choice in &choices {
                             if crate::controller_ui::button(
                                 ui,
@@ -2624,8 +2724,10 @@ impl PocketLauncher {
             std::thread::spawn(move || {
                 let result = Library::open_with_profile(root, profile)
                     .and_then(|mut lib| {
-                        let before = pocket_library::import_setup::Presence::read(lib.games(), lib.root());
-                        let existing_ids: Vec<_> = lib.games().iter().map(|game| game.id.clone()).collect();
+                        let before =
+                            pocket_library::import_setup::Presence::read(lib.games(), lib.root());
+                        let existing_ids: Vec<_> =
+                            lib.games().iter().map(|game| game.id.clone()).collect();
                         let entries = lib.apply_prepared_import(pending, false)?;
                         Ok(ImportedGames::analyze(entries, &lib, &existing_ids, before))
                     })
@@ -2687,7 +2789,8 @@ impl PocketLauncher {
                     .and_then(|mut lib| {
                         let existing_ids: Vec<_> =
                             lib.games().iter().map(|game| game.id.clone()).collect();
-                        let before = pocket_library::import_setup::Presence::read(lib.games(), lib.root());
+                        let before =
+                            pocket_library::import_setup::Presence::read(lib.games(), lib.root());
                         let entries = lib.apply_prepared_import(pending, true)?;
                         Ok(ImportedGames::analyze(entries, &lib, &existing_ids, before))
                     })
@@ -2701,7 +2804,8 @@ impl PocketLauncher {
         if let Some(advice) = self.library.get(id).and_then(|game| {
             pocket_library::gpu_profile::ImportAdvice::for_game(game, self.library.root(), false)
         }) {
-            self.pocketpc_import_options.push_back((id.to_owned(), advice));
+            self.pocketpc_import_options
+                .push_back((id.to_owned(), advice));
             true
         } else {
             false
@@ -2726,11 +2830,17 @@ impl PocketLauncher {
         let name = game.display_name.clone();
         let current = game.settings.gpu_compatibility_profile;
         let profile_id = egui::Id::new(("launch_gpu_profile_draft", &id));
-        let mut profile = ctx.data(|data| data.get_temp(profile_id)).unwrap_or(current);
+        let mut profile = ctx
+            .data(|data| data.get_temp(profile_id))
+            .unwrap_or(current);
         let mut open_settings = false;
         let mut dismiss = false;
         egui::CentralPanel::default().show(ctx, |_| {});
-        let title = if advice.show_display_advice { "Pocket PC launch settings" } else { "GPU compatibility profile" };
+        let title = if advice.show_display_advice {
+            "Pocket PC launch settings"
+        } else {
+            "GPU compatibility profile"
+        };
         egui::Window::new(title)
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -2743,16 +2853,29 @@ impl PocketLauncher {
                         crate::controller_ui::ComboBox::from_id_source("launch_gpu_profile")
                             .selected_text(profile.label())
                             .show_ui(ui, |ui| {
-                                for choice in pocket_library::gpu_profile::GpuCompatibilityProfile::ALL {
-                                    crate::controller_ui::selectable_value(ui, &mut profile, choice, choice.label());
+                                for choice in
+                                    pocket_library::gpu_profile::GpuCompatibilityProfile::ALL
+                                {
+                                    crate::controller_ui::selectable_value(
+                                        ui,
+                                        &mut profile,
+                                        choice,
+                                        choice.label(),
+                                    );
                                 }
                             });
                     }
-                    let accept = if profile != current { "Save profile" } else { "Continue" };
+                    let accept = if profile != current {
+                        "Save profile"
+                    } else {
+                        "Continue"
+                    };
                     if crate::controller_ui::button(ui, accept).clicked() {
                         dismiss = true;
                     }
-                    if advice.show_display_advice && crate::controller_ui::button(ui, "Open game settings").clicked() {
+                    if advice.show_display_advice
+                        && crate::controller_ui::button(ui, "Open game settings").clicked()
+                    {
                         open_settings = true;
                     }
                 });
@@ -2779,7 +2902,9 @@ impl PocketLauncher {
                     self.screen = Screen::GameSettings;
                 }
             }
-            ctx.data_mut(|data| data.remove::<pocket_library::gpu_profile::GpuCompatibilityProfile>(profile_id));
+            ctx.data_mut(|data| {
+                data.remove::<pocket_library::gpu_profile::GpuCompatibilityProfile>(profile_id)
+            });
             self.pocketpc_import_options.pop_front();
             ctx.request_repaint();
         }
@@ -3285,7 +3410,9 @@ impl PocketLauncher {
                         }
                     });
                 if old != self.gamepad_selected {
-                    if let Some(device)=self.gamepad_selected {crate::controller_labels::activate(ui.ctx(),device);}
+                    if let Some(device) = self.gamepad_selected {
+                        crate::controller_labels::activate(ui.ctx(), device);
+                    }
                     self.bindings_visual.clear_live();
                     self.deck_nav_repeat = None;
                     self.deck_menu_press = None;
@@ -3641,9 +3768,24 @@ impl PocketLauncher {
                             Some(false) => "Disabled",
                         })
                         .show_ui(ui, |ui| {
-                            crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, None, "Use emulator setting");
-                            crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, Some(true), "Enabled");
-                            crate::controller_ui::selectable_value(ui, &mut draft.executable_heap, Some(false), "Disabled");
+                            crate::controller_ui::selectable_value(
+                                ui,
+                                &mut draft.executable_heap,
+                                None,
+                                "Use emulator setting",
+                            );
+                            crate::controller_ui::selectable_value(
+                                ui,
+                                &mut draft.executable_heap,
+                                Some(true),
+                                "Enabled",
+                            );
+                            crate::controller_ui::selectable_value(
+                                ui,
+                                &mut draft.executable_heap,
+                                Some(false),
+                                "Disabled",
+                            );
                         });
                     ui.end_row();
                     ui.label("");
@@ -4033,7 +4175,9 @@ impl PocketLauncher {
         if self.running_game.is_none() || !screen.is_positive() {
             return;
         }
-        let painter = ui.painter().with_clip_rect(screen.intersect(ui.clip_rect()));
+        let painter = ui
+            .painter()
+            .with_clip_rect(screen.intersect(ui.clip_rect()));
         painter.rect_filled(screen, 0.0, Color32::BLACK);
         let logo = self.loading_logo.get_or_insert_with(|| {
             let image = image::load_from_memory(include_bytes!("../assets/pockethle_logo.png"))
@@ -4065,7 +4209,10 @@ impl PocketLauncher {
             Color32::WHITE,
         );
         painter.galley(
-            Pos2::new(screen.center().x - caption.size().x * 0.5, logo_rect.bottom() + gap),
+            Pos2::new(
+                screen.center().x - caption.size().x * 0.5,
+                logo_rect.bottom() + gap,
+            ),
             caption,
             Color32::from_gray(180),
         );
@@ -4103,7 +4250,9 @@ impl PocketLauncher {
             Vec2::new(width as f32, height as f32) / dpi,
         );
         self.paint_guest_frame(ui, rect);
-        if self.live_grid { self.ui_live_grid(ui, rect, available.bottom()); }
+        if self.live_grid {
+            self.ui_live_grid(ui, rect, available.bottom());
+        }
         self.handle_pointer(ui.ctx(), &rect, guest_size);
     }
 
@@ -4111,9 +4260,12 @@ impl PocketLauncher {
         self.grow_window_for_upscale(ui);
         if self.running_is_gizmondo {
             self.ui_gizmondo(ui);
-            return;
+        } else {
+            self.ui_pocketpc(ui);
         }
-        self.ui_pocketpc(ui);
+        if self.runner.wait_cursor() {
+            ui.output_mut(|out| out.cursor_icon = egui::CursorIcon::Wait);
+        }
     }
 
     /// Host presentation only: fixed controls, native pixels and the existing inverse input transform.
@@ -4125,7 +4277,8 @@ impl PocketLauncher {
         ui.painter()
             .rect_filled(bounds, 0.0, Color32::from_rgb(8, 13, 21));
         let gap = crate::fullscreen_layout::POCKET_PC_GAP;
-        let side = (bounds.width() * 0.19).clamp(72.0, crate::fullscreen_layout::POCKET_PC_MAX_SIDE);
+        let side =
+            (bounds.width() * 0.19).clamp(72.0, crate::fullscreen_layout::POCKET_PC_MAX_SIDE);
         let pad = side.min((bounds.height() - 60.0).max(30.0) * 0.45);
         let pad_top = bounds.bottom() - pad - gap;
         let top = bounds.top() + crate::fullscreen_layout::POCKET_PC_TOOLBAR_HEIGHT;
@@ -4188,9 +4341,30 @@ impl PocketLauncher {
             ui.spacing_mut().item_spacing.x = 5.0;
             ui.horizontal(|ui| {
                 for (label, guest) in [
-                    (if self.running_phone_softkeys { "F1" } else { "TAB" }, GuestButton::Soft1),
-                    (if self.running_phone_softkeys { "F2" } else { "ESC" }, GuestButton::Soft2),
-                    (if self.running_phone_softkeys { "5" } else { "TURBO" }, GuestButton::Turbo),
+                    (
+                        if self.running_phone_softkeys {
+                            "F1"
+                        } else {
+                            "TAB"
+                        },
+                        GuestButton::Soft1,
+                    ),
+                    (
+                        if self.running_phone_softkeys {
+                            "F2"
+                        } else {
+                            "ESC"
+                        },
+                        GuestButton::Soft2,
+                    ),
+                    (
+                        if self.running_phone_softkeys {
+                            "5"
+                        } else {
+                            "TURBO"
+                        },
+                        GuestButton::Turbo,
+                    ),
                 ] {
                     self.vbutton_size(ui, label, guest, Vec2::new(52.0, 24.0));
                 }
@@ -4792,11 +4966,18 @@ impl PocketLauncher {
     }
 
     fn media_active(&self) -> bool {
-        self.system_media.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.system_media
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     fn ui_system_media(&self, ctx: &egui::Context, display: Rect) {
-        let media = self.system_media.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let media = self
+            .system_media
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let Some(media) = media else { return };
         let has_progress = media.duration.is_finite() && media.duration > 0.0;
         let height = if has_progress { 34.0 } else { 25.0 };
@@ -4808,21 +4989,36 @@ impl PocketLauncher {
             .show(ctx, |ui| {
                 ui.set_width(display.width());
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
-                let panel = Rect::from_min_size(ui.cursor().min, Vec2::new(display.width(), height));
-                ui.painter().rect_filled(panel, 0.0, Color32::from_black_alpha(225));
+                let panel =
+                    Rect::from_min_size(ui.cursor().min, Vec2::new(display.width(), height));
+                ui.painter()
+                    .rect_filled(panel, 0.0, Color32::from_black_alpha(225));
                 if has_progress {
-                    ui.add(egui::ProgressBar::new((media.position() / media.duration) as f32)
-                        .desired_width(display.width()).desired_height(9.0));
+                    ui.add(
+                        egui::ProgressBar::new((media.position() / media.duration) as f32)
+                            .desired_width(display.width())
+                            .desired_height(9.0),
+                    );
                 }
                 ui.horizontal(|ui| {
                     for (label, command, enabled) in [
                         ("−10 s", SystemMediaCommand::Rewind, has_progress),
-                        (if media.paused { "Play" } else { "Pause" }, SystemMediaCommand::TogglePause, true),
+                        (
+                            if media.paused { "Play" } else { "Pause" },
+                            SystemMediaCommand::TogglePause,
+                            true,
+                        ),
                         ("Stop", SystemMediaCommand::Stop, true),
                         ("+10 s", SystemMediaCommand::Forward, has_progress),
                     ] {
-                        if ui.add_enabled(enabled, egui::Button::new(label)
-                            .min_size(Vec2::new(display.width() / 4.0, 25.0))).clicked() {
+                        if ui
+                            .add_enabled(
+                                enabled,
+                                egui::Button::new(label)
+                                    .min_size(Vec2::new(display.width() / 4.0, 25.0)),
+                            )
+                            .clicked()
+                        {
                             self.media_command(command);
                         }
                     }
@@ -4838,7 +5034,9 @@ impl PocketLauncher {
     }
 
     fn send_input(&self, ev: InputEvent) {
-        if self.live_grid && self.stylus_editor.is_some() { return; }
+        if self.live_grid && self.stylus_editor.is_some() {
+            return;
+        }
         match ev {
             InputEvent::KeyDown {
                 vk: pocket_library::keybindings::STYLUS_CLICK_COMMAND,
@@ -4914,7 +5112,9 @@ impl PocketLauncher {
     }
 
     fn dispatch_input(&self, ev: InputEvent) {
-        if self.live_grid && self.stylus_editor.is_some() { return; }
+        if self.live_grid && self.stylus_editor.is_some() {
+            return;
+        }
         {
             let mut recording = self.recording.lock().unwrap_or_else(|e| e.into_inner());
             recording.set_gizmondo(self.running_is_gizmondo);
@@ -4955,8 +5155,7 @@ impl PocketLauncher {
         }
         let config = self.library.config();
         let reserved = if controller {
-            matches!(input, "Select" | "Start")
-                || config.gamepad_toggles_fullscreen(input)
+            matches!(input, "Select" | "Start") || config.gamepad_toggles_fullscreen(input)
         } else {
             pocket_library::keybindings::reserved_host_key(input)
         };
@@ -4980,7 +5179,12 @@ impl PocketLauncher {
                 .or_else(|| config.gamepad_bindings.get(input).copied())
                 .map(|b| b.vk())
         } else {
-            pocket_library::keybindings::keyboard_button_for_profile(&config.keybindings, input, self.running_is_gizmondo).map(|b| b.vk())
+            pocket_library::keybindings::keyboard_button_for_profile(
+                &config.keybindings,
+                input,
+                self.running_is_gizmondo,
+            )
+            .map(|b| b.vk())
         };
         let token = format!(
             "{}:{}:{}",
@@ -5012,8 +5216,14 @@ impl PocketLauncher {
             self.steering_axes = (0, 0);
         }
         self.stylus_pointer.cancel_click();
-        self.pending_binding_commands.borrow_mut().retain(|v|!matches!(*v,pocket_library::keybindings::STYLUS_CLICK_COMMAND|pocket_library::keybindings::STYLUS_RELEASE_COMMAND));
-        self.stylus_tick=Instant::now();
+        self.pending_binding_commands.borrow_mut().retain(|v| {
+            !matches!(
+                *v,
+                pocket_library::keybindings::STYLUS_CLICK_COMMAND
+                    | pocket_library::keybindings::STYLUS_RELEASE_COMMAND
+            )
+        });
+        self.stylus_tick = Instant::now();
         self.stylus_keyboard.clear();
         self.stylus_gamepad.clear();
         self.stylus_touch = [0.0; 4];
@@ -5031,8 +5241,12 @@ impl PocketLauncher {
 
     fn update_gamepad_input(&mut self, ctx: &egui::Context) {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        if self.screen!=Screen::InputSettings || !focused {self.bindings_visual.clear_live();}
-        if !focused { self.menu_host_press.clear(); }
+        if self.screen != Screen::InputSettings || !focused {
+            self.bindings_visual.clear_live();
+        }
+        if !focused {
+            self.menu_host_press.clear();
+        }
         if self.screen != Screen::Run
             || !focused
             || self.file_dialog.is_some()
@@ -5044,9 +5258,11 @@ impl PocketLauncher {
             self.release_all_keys();
             self.deck_view_press = view_press;
         }
-        self.gamepad_rx.set_accelerometer_enabled(!self.running_simulated_tilt
-            && !(self.live_grid && self.stylus_editor.is_some())
-            && (!self.running_accelerometer_aim || !self.stylus_pointer.pointer));
+        self.gamepad_rx.set_accelerometer_enabled(
+            !self.running_simulated_tilt
+                && !(self.live_grid && self.stylus_editor.is_some())
+                && (!self.running_accelerometer_aim || !self.stylus_pointer.pointer),
+        );
         self.gamepad_rx.set_output(
             self.gamepad_selected,
             self.screen == Screen::Run
@@ -5109,7 +5325,10 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
-                    if self.file_dialog.is_some() || self.restore_archive.is_some() || self.add_data.is_some() {
+                    if self.file_dialog.is_some()
+                        || self.restore_archive.is_some()
+                        || self.add_data.is_some()
+                    {
                         continue;
                     }
                     if Some(device) == self.gamepad_selected
@@ -5128,7 +5347,8 @@ impl PocketLauncher {
                     {
                         self.route_grid_axis(false, horizontal, value);
                     }
-                    if (self.touch_steering_enabled() || (self.screen == Screen::Run && self.running_simulated_tilt))
+                    if (self.touch_steering_enabled()
+                        || (self.screen == Screen::Run && self.running_simulated_tilt))
                         && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -5149,14 +5369,21 @@ impl PocketLauncher {
                     horizontal,
                     value,
                 } => {
-                    if self.file_dialog.is_some() || self.restore_archive.is_some() || self.add_data.is_some() {
+                    if self.file_dialog.is_some()
+                        || self.restore_archive.is_some()
+                        || self.add_data.is_some()
+                    {
                         continue;
                     }
                     if Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
-                        if self.capture_grid_axis(ctx, true, horizontal, value) { continue; }
-                        if self.running_is_gizmondo { self.route_grid_axis(true, horizontal, value); }
+                        if self.capture_grid_axis(ctx, true, horizontal, value) {
+                            continue;
+                        }
+                        if self.running_is_gizmondo {
+                            self.route_grid_axis(true, horizontal, value);
+                        }
                     }
                     if self.screen == Screen::Run
                         && !self.running_is_gizmondo
@@ -5170,8 +5397,7 @@ impl PocketLauncher {
                         for (name, strength) in [(negative, -value), (positive, value)] {
                             let key = (device, name.to_string());
                             let strength = ((strength - 0.18) / 0.82).clamp(0.0, 1.0);
-                            if strength > 0.0
-                            {
+                            if strength > 0.0 {
                                 self.stylus_gamepad.insert(key, strength);
                             } else {
                                 self.stylus_gamepad.remove(&key);
@@ -5179,9 +5405,17 @@ impl PocketLauncher {
                         }
                     }
                 }
-                crate::gamepad::Event::Error(error) => {self.gamepad_error=Some(error);self.bindings_visual.clear_live();},
+                crate::gamepad::Event::Error(error) => {
+                    self.gamepad_error = Some(error);
+                    self.bindings_visual.clear_live();
+                }
                 crate::gamepad::Event::Devices(devices) => {
-                    if !devices.iter().any(|(id,_)|Some(*id)==self.gamepad_selected) { self.stylus_pointer.cancel_click(); }
+                    if !devices
+                        .iter()
+                        .any(|(id, _)| Some(*id) == self.gamepad_selected)
+                    {
+                        self.stylus_pointer.cancel_click();
+                    }
                     if self
                         .gamepad_selected
                         .is_some_and(|id| !devices.iter().any(|(d, _)| *d == id))
@@ -5198,11 +5432,21 @@ impl PocketLauncher {
                     self.deck_nav_repeat = None;
                     self.deck_menu_press = None;
                     self.deck_view_press = None;
-                    let disconnected:Vec<_>=self.gamepad_devices.iter().filter(|(id,_)|!devices.iter().any(|(new,_)|new==id)).map(|(id,_)|*id).collect();
-                    for id in disconnected {let edges=self.input_gestures.cancel_prefix(&format!("pad:{id}:"));self.send_gesture_edges(edges);}
-                    self.menu_host_press.retain(|(id, _), _| devices.iter().any(|(device, _)| device == id));
+                    let disconnected: Vec<_> = self
+                        .gamepad_devices
+                        .iter()
+                        .filter(|(id, _)| !devices.iter().any(|(new, _)| new == id))
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in disconnected {
+                        let edges = self.input_gestures.cancel_prefix(&format!("pad:{id}:"));
+                        self.send_gesture_edges(edges);
+                    }
+                    self.menu_host_press
+                        .retain(|(id, _), _| devices.iter().any(|(device, _)| device == id));
                     self.gamepad_devices = devices;
-                    self.bindings_visual.retain_live_devices(&self.gamepad_devices);
+                    self.bindings_visual
+                        .retain_live_devices(&self.gamepad_devices);
                     self.stylus_gamepad.retain(|(id, _), _| {
                         self.gamepad_devices.iter().any(|(device, _)| device == id)
                     });
@@ -5236,7 +5480,8 @@ impl PocketLauncher {
                     if down && Some(device) == self.gamepad_selected {
                         crate::controller_labels::activate(ctx, device);
                     }
-                    if self.live_grid && self.screen == Screen::Run
+                    if self.live_grid
+                        && self.screen == Screen::Run
                         && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -5268,38 +5513,61 @@ impl PocketLauncher {
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                         && matches!(control.as_str(), "Select" | "Start")
                     {
-                        if let Some(editor)=self.stylus_editor.as_mut().filter(|e|e.waiting.is_some()) {
-                            if down { editor.reserved_input_attempt(); }
+                        if let Some(editor) =
+                            self.stylus_editor.as_mut().filter(|e| e.waiting.is_some())
+                        {
+                            if down {
+                                editor.reserved_input_attempt();
+                            }
                             continue;
                         }
-                        if down && self.screen==Screen::InputSettings && self.bindings_visual.reserved_input_attempt() {
-                            self.control_notice=Some(("This input is reserved by PocketHLE-Reborn.".into(),Instant::now()+Duration::from_secs(3)));
+                        if down
+                            && self.screen == Screen::InputSettings
+                            && self.bindings_visual.reserved_input_attempt()
+                        {
+                            self.control_notice = Some((
+                                "This input is reserved by PocketHLE-Reborn.".into(),
+                                Instant::now() + Duration::from_secs(3),
+                            ));
                         }
                         self.handle_menu_host_control(ctx, device, &control, down);
                         continue;
                     }
-                    if self.screen==Screen::InputSettings {
-                        let focused=ctx.input(|i|i.viewport().focused.unwrap_or(true));
-                        if Some(device)==self.gamepad_selected && focused {
-                            self.bindings_visual.live_input(device,&control,down);
+                    if self.screen == Screen::InputSettings {
+                        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+                        if Some(device) == self.gamepad_selected && focused {
+                            self.bindings_visual.live_input(device, &control, down);
                             if self.input_controller {
                                 self.bindings_visual.controller_shortcut(device);
                             }
                             ctx.request_repaint();
-                            if !down {self.controller_ui.release(&control);continue;}
+                            if !down {
+                                self.controller_ui.release(&control);
+                                continue;
+                            }
                             continue;
                         }
                     }
-                    if self.screen == Screen::Run && !self.running_is_gizmondo && Some(device) == self.gamepad_selected
-                        && pocket_library::stylus::controller_reserved(&control, false) {
-                        if control == "RightThumb" && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+                    if self.screen == Screen::Run
+                        && !self.running_is_gizmondo
+                        && Some(device) == self.gamepad_selected
+                        && pocket_library::stylus::controller_reserved(&control, false)
+                    {
+                        if control == "RightThumb"
+                            && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                        {
                             self.stylus_button(down);
                         }
                         continue;
                     }
-                    if self.remove_game.is_some() && Some(device)==self.gamepad_selected
-                        && ctx.input(|i|i.viewport().focused.unwrap_or(true)) {
-                        if down && matches!(control.as_str(),"South"|"East") {self.deck_library_actions.push(control.clone());ctx.request_repaint();}
+                    if self.remove_game.is_some()
+                        && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if down && matches!(control.as_str(), "South" | "East") {
+                            self.deck_library_actions.push(control.clone());
+                            ctx.request_repaint();
+                        }
                         continue;
                     }
                     if self.demo_import.is_some()
@@ -5325,7 +5593,8 @@ impl PocketLauncher {
                                 && !pending.updates().is_empty();
                             if !down {
                                 self.controller_ui.release(&control);
-                            } else if control == "East" || (control == "South" && confirming_update) {
+                            } else if control == "East" || (control == "South" && confirming_update)
+                            {
                                 self.deck_library_actions.push(control.clone());
                             } else {
                                 self.controller_ui.press(&control);
@@ -5334,20 +5603,39 @@ impl PocketLauncher {
                             continue;
                         }
                     }
-                    if self.first_import_setup.is_some() && Some(device) == self.gamepad_selected
-                        && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+                    if self.first_import_setup.is_some()
+                        && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
                         if down {
                             if control == "East" {
-                                if let Some(setup) = self.first_import_setup.as_mut() { setup.skip = true; }
-                            } else { self.controller_ui.press(&control); }
-                        } else { self.controller_ui.release(&control); }
+                                if let Some(setup) = self.first_import_setup.as_mut() {
+                                    setup.skip = true;
+                                }
+                            } else {
+                                self.controller_ui.press(&control);
+                            }
+                        } else {
+                            self.controller_ui.release(&control);
+                        }
                         ctx.request_repaint();
                         continue;
                     }
-                    if self.screen==Screen::Library && !self.library_busy && !self.pocketpc_import_options.is_empty() && self.rename_draft.is_none()
-                        && self.file_dialog.is_none() && self.add_data.is_none()
-                        && self.launch_executable_choices.is_none() && Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) {
-                        if down { self.controller_ui.press(&control); } else { self.controller_ui.release(&control); }
+                    if self.screen == Screen::Library
+                        && !self.library_busy
+                        && !self.pocketpc_import_options.is_empty()
+                        && self.rename_draft.is_none()
+                        && self.file_dialog.is_none()
+                        && self.add_data.is_none()
+                        && self.launch_executable_choices.is_none()
+                        && Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                    {
+                        if down {
+                            self.controller_ui.press(&control);
+                        } else {
+                            self.controller_ui.release(&control);
+                        }
                         ctx.request_repaint();
                         continue;
                     }
@@ -5367,8 +5655,15 @@ impl PocketLauncher {
                         ctx.request_repaint();
                         continue;
                     }
-                    if Some(device)==self.gamepad_selected && ctx.input(|i|i.viewport().focused.unwrap_or(true)) && self.route_long_press(true,device,&control,down) {continue;}
-                    if (self.file_dialog.is_some() || self.restore_archive.is_some() || self.add_data.is_some())
+                    if Some(device) == self.gamepad_selected
+                        && ctx.input(|i| i.viewport().focused.unwrap_or(true))
+                        && self.route_long_press(true, device, &control, down)
+                    {
+                        continue;
+                    }
+                    if (self.file_dialog.is_some()
+                        || self.restore_archive.is_some()
+                        || self.add_data.is_some())
                         && Some(device) == self.gamepad_selected
                         && ctx.input(|i| i.viewport().focused.unwrap_or(true))
                     {
@@ -5394,7 +5689,8 @@ impl PocketLauncher {
                         ctx.request_repaint();
                         continue;
                     }
-                    if (self.touch_steering_enabled() || (self.screen == Screen::Run && self.running_simulated_tilt))
+                    if (self.touch_steering_enabled()
+                        || (self.screen == Screen::Run && self.running_simulated_tilt))
                         && control.starts_with("LeftStick")
                         && Some(device) == self.gamepad_selected
                     {
@@ -5623,7 +5919,10 @@ impl PocketLauncher {
                             }
                             continue;
                         }
-                        if self.screen == Screen::About && control == "East" {self.close_about();continue;}
+                        if self.screen == Screen::About && control == "East" {
+                            self.close_about();
+                            continue;
+                        }
                         if self.screen != Screen::Run && control == "East" {
                             self.config_draft = None;
                             self.game_settings_draft = None;
@@ -5726,7 +6025,9 @@ impl PocketLauncher {
                 let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 self.set_fullscreen(ctx, !fullscreen);
             }
-            Some(crate::deck_navigation::ViewAction::ReturnToLibrary) => self.return_to_library(ctx),
+            Some(crate::deck_navigation::ViewAction::ReturnToLibrary) => {
+                self.return_to_library(ctx)
+            }
             None => {}
         }
     }
@@ -5734,7 +6035,9 @@ impl PocketLauncher {
     fn cycle_deck_upscale_filter(&mut self, ctx: &egui::Context, forward: bool) {
         self.upscale_filter = self.upscale_filter.stepped(forward);
         self.library.config_mut().upscale_filter = self.upscale_filter.id().into();
-        if let Some(draft)=self.config_draft.as_mut() {draft.upscale_filter=self.upscale_filter.id().into();}
+        if let Some(draft) = self.config_draft.as_mut() {
+            draft.upscale_filter = self.upscale_filter.id().into();
+        }
         self.status = match self.library.save() {
             Ok(()) => format!("Upscaling filter: {}", self.upscale_filter.label()),
             Err(error) => format!("Could not save filter: {error}"),
@@ -5799,8 +6102,10 @@ impl PocketLauncher {
                         self.return_to_library(ctx);
                     } else {
                         self.pending_run = None;
-        #[cfg(feature = "unicorn")]
-        { self.snapshot_preflight = None; }
+                        #[cfg(feature = "unicorn")]
+                        {
+                            self.snapshot_preflight = None;
+                        }
                         self.release_all_keys();
                         self.screen = Screen::Library;
                         ctx.request_repaint();
@@ -5834,7 +6139,9 @@ impl PocketLauncher {
     }
 
     fn handle_physical_keyboard(&mut self, ctx: &egui::Context) {
-        if self.screen==Screen::InputSettings {return;}
+        if self.screen == Screen::InputSettings {
+            return;
+        }
 
         if self.stylus_editor_keyboard(ctx) {
             return;
@@ -5906,21 +6213,26 @@ impl PocketLauncher {
                 }
                 continue;
             }
-            if self.screen == Screen::About && key == egui::Key::Escape && pressed && !repeat {self.close_about();continue;}
+            if self.screen == Screen::About && key == egui::Key::Escape && pressed && !repeat {
+                self.close_about();
+                continue;
+            }
             if self.screen != Screen::Run {
                 continue;
             }
-            if !text_input && self.route_long_press(false,0,key.name(),pressed) {continue;}
+            if !text_input && self.route_long_press(false, 0, key.name(), pressed) {
+                continue;
+            }
             if !text_input && self.route_grid(HostInput::Keyboard(key.name().into()), pressed) {
                 continue;
             }
             let steering_direction = self.touch_steering_enabled()
-                && self.keyboard_profile_vk(key.name())
+                && self
+                    .keyboard_profile_vk(key.name())
                     .is_some_and(|vk| matches!(vk, 0x25..=0x28));
             if !self.running_is_gizmondo
                 && !text_input
                 && !steering_direction
-
                 && self
                     .library
                     .config()
@@ -6121,7 +6433,8 @@ impl PocketLauncher {
         let tx = self.events_tx.clone();
         std::thread::spawn(move || {
             let result = (|| -> Result<Option<ImportedGames>, String> {
-                let mut lib = Library::open_with_profile(&library_root, profile).map_err(|e| e.to_string())?;
+                let mut lib = Library::open_with_profile(&library_root, profile)
+                    .map_err(|e| e.to_string())?;
                 let parent = path
                     .parent()
                     .map(|p| p.to_path_buf())
@@ -6143,7 +6456,12 @@ impl PocketLauncher {
                 let entries = lib
                     .apply_prepared_import(pending, false)
                     .map_err(|e| e.to_string())?;
-                Ok(Some(ImportedGames::analyze(entries, &lib, &existing_ids, before)))
+                Ok(Some(ImportedGames::analyze(
+                    entries,
+                    &lib,
+                    &existing_ids,
+                    before,
+                )))
             })();
             if let Some(result) = result.transpose() {
                 let _ = tx.send(UiEvent::ImportFinished(result));
@@ -6423,7 +6741,8 @@ impl PocketLauncher {
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
         self.running_simulated_tilt = !self.running_is_gizmondo
-            && game.settings.effective_tilt_input(self.library.config()) != TiltInput::Accelerometer;
+            && game.settings.effective_tilt_input(self.library.config())
+                != TiltInput::Accelerometer;
         self.running_accelerometer_aim = !self.running_is_gizmondo
             && game.settings.accelerometer_arrows.enabled()
             && game.settings.accelerometer_output == pocket_library::AccelerometerOutput::Stick;
@@ -6438,8 +6757,8 @@ impl PocketLauncher {
         } else {
             game.settings.controls_mode()
         };
-        self.stylus_pointer=Default::default();
-        self.stylus_tick=Instant::now();
+        self.stylus_pointer = Default::default();
+        self.stylus_tick = Instant::now();
         self.running_stylus_grid = game.settings.pocketpc_stylus_grid.clone();
         self.live_grid_dirty = false;
         let (frame_tx, frame_rx) = crate::latest_frame::channel();
@@ -6560,7 +6879,9 @@ impl eframe::App for PocketLauncher {
         }
     }
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        if self.screen == Screen::InputSettings || (self.screen == Screen::Run && !ctx.wants_keyboard_input()) {
+        if self.screen == Screen::InputSettings
+            || (self.screen == Screen::Run && !ctx.wants_keyboard_input())
+        {
             crate::host_shortcuts::normalize_number_row(raw);
         }
         if self.screen == Screen::Run {
@@ -6601,35 +6922,63 @@ impl eframe::App for PocketLauncher {
         );
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let released = self.center_tap.borrow_mut().release_due(self.input_gesture_clock.elapsed().as_millis() as u64);
-        if let Some((x,y)) = released { self.dispatch_input(InputEvent::PointerUp {x,y}); }
-        let commands=std::mem::take(&mut *self.pending_binding_commands.borrow_mut());
+        let released = self
+            .center_tap
+            .borrow_mut()
+            .release_due(self.input_gesture_clock.elapsed().as_millis() as u64);
+        if let Some((x, y)) = released {
+            self.dispatch_input(InputEvent::PointerUp { x, y });
+        }
+        let commands = std::mem::take(&mut *self.pending_binding_commands.borrow_mut());
         for command in commands {
-            if matches!(command,pocket_library::keybindings::STYLUS_CLICK_COMMAND|pocket_library::keybindings::STYLUS_RELEASE_COMMAND)
-                && !ctx.input(|i|i.viewport().focused.unwrap_or(true)) {self.stylus_pointer.cancel_click();continue;}
+            if matches!(
+                command,
+                pocket_library::keybindings::STYLUS_CLICK_COMMAND
+                    | pocket_library::keybindings::STYLUS_RELEASE_COMMAND
+            ) && !ctx.input(|i| i.viewport().focused.unwrap_or(true))
+            {
+                self.stylus_pointer.cancel_click();
+                continue;
+            }
             match command {
                 pocket_library::keybindings::STYLUS_CLICK_COMMAND => self.stylus_button(true),
                 pocket_library::keybindings::STYLUS_RELEASE_COMMAND => self.stylus_button(false),
                 pocket_library::keybindings::SAVE_SNAPSHOT_COMMAND => self.save_game_snapshot(),
                 pocket_library::keybindings::LOAD_SNAPSHOT_COMMAND => self.restore_game_snapshot(),
                 pocket_library::keybindings::ROTATION_COMMAND => self.cycle_rotation(ctx),
-                pocket_library::keybindings::SCREENSHOT_COMMAND if self.last_frame_snapshot.is_some() => self.capture_screenshot(),
+                pocket_library::keybindings::SCREENSHOT_COMMAND
+                    if self.last_frame_snapshot.is_some() =>
+                {
+                    self.capture_screenshot()
+                }
                 _ => {}
             }
         }
         self.handle_host_keys(ctx);
         if self.screen == Screen::InputSettings {
-            self.bindings_visual.keyboard_shortcut(ctx, self.input_controller);
+            self.bindings_visual
+                .keyboard_shortcut(ctx, self.input_controller);
         }
         // Input-editor keystrokes are visual tests; the assistant and open popups retain events.
-        if self.screen==Screen::InputSettings && !self.bindings_visual.quick_active()
-            && !ctx.memory(|memory|memory.any_popup_open()) {
-            ctx.input_mut(|input|input.events.retain(|event|!matches!(event,egui::Event::Key{..}|egui::Event::Text(_))));
+        if self.screen == Screen::InputSettings
+            && !self.bindings_visual.quick_active()
+            && !ctx.memory(|memory| memory.any_popup_open())
+        {
+            ctx.input_mut(|input| {
+                input.events.retain(|event| {
+                    !matches!(event, egui::Event::Key { .. } | egui::Event::Text(_))
+                })
+            });
         }
 
-        if self.screen==Screen::Run && ctx.input(|i|i.viewport().focused.unwrap_or(true)) {
-            let edges=self.input_gestures.tick(self.input_gesture_clock.elapsed().as_millis() as u64);self.send_gesture_edges(edges);
-            if self.input_gestures.active() {ctx.request_repaint_after(Duration::from_millis(10));}
+        if self.screen == Screen::Run && ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            let edges = self
+                .input_gestures
+                .tick(self.input_gesture_clock.elapsed().as_millis() as u64);
+            self.send_gesture_edges(edges);
+            if self.input_gestures.active() {
+                ctx.request_repaint_after(Duration::from_millis(10));
+            }
         }
         // Early-return dialogs retain ordinary host repaint behavior. Only a
         // complete Run update enables image-driven redraws.
@@ -6651,7 +7000,12 @@ impl eframe::App for PocketLauncher {
         // Apply startup mode after native restoration, then size a normal window
         // using a fixed physical target capped to the actual monitor, never a game.
         if let Some(fullscreen) = self.startup_window {
-            let target = LibraryViewport { fullscreen, maximized: false, size: None, position: None };
+            let target = LibraryViewport {
+                fullscreen,
+                maximized: false,
+                size: None,
+                position: None,
+            };
             if target.restore(ctx) {
                 if fullscreen {
                     self.startup_window = None;
@@ -6659,17 +7013,28 @@ impl eframe::App for PocketLauncher {
                     let geometry = ctx.input(|input| {
                         let viewport = input.viewport();
                         let monitor = viewport.monitor_size?;
-                        let borders = viewport.inner_rect.zip(viewport.outer_rect)
+                        let borders = viewport
+                            .inner_rect
+                            .zip(viewport.outer_rect)
                             .map_or(Vec2::ZERO, |(inner, outer)| outer.size() - inner.size());
-                        crate::launch_args::startup_window_size([monitor.x, monitor.y], [borders.x, borders.y], input.pixels_per_point)
+                        crate::launch_args::startup_window_size(
+                            [monitor.x, monitor.y],
+                            [borders.x, borders.y],
+                            input.pixels_per_point,
+                        )
                     });
                     if let Some(size) = geometry {
                         let size = Vec2::from(size);
                         let minimum = Vec2::new(640.0, 420.0) / ctx.pixels_per_point();
-                        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(minimum.min(size)));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(
+                            minimum.min(size),
+                        ));
                         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
                         self.fullscreen_window_size = Some(size);
-                        self.library_viewport = LibraryViewport { size: Some(size), ..target };
+                        self.library_viewport = LibraryViewport {
+                            size: Some(size),
+                            ..target
+                        };
                         self.startup_window = None;
                     } else {
                         ctx.request_repaint_after(Duration::from_millis(16));
@@ -6720,22 +7085,42 @@ impl eframe::App for PocketLauncher {
                     .show(ctx, |ui| {
                         let mut contents = |ui: &mut egui::Ui| {
                             ui.label(diagnostic.reason.lines().next().unwrap_or_default());
-                            if crate::controller_ui::button(ui, if *expanded { "Hide details" } else { "Show details" }).clicked() {
+                            if crate::controller_ui::button(
+                                ui,
+                                if *expanded {
+                                    "Hide details"
+                                } else {
+                                    "Show details"
+                                },
+                            )
+                            .clicked()
+                            {
                                 *expanded = !*expanded;
                             }
                             if *expanded {
                                 egui::ScrollArea::vertical()
                                     .max_height((ctx.screen_rect().height() / 2.0).min(320.0))
                                     .show(ui, |ui| {
-                                        ui.add(egui::Label::new(egui::RichText::new(&diagnostic.details).monospace()).wrap(true));
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&diagnostic.details)
+                                                    .monospace(),
+                                            )
+                                            .wrap(true),
+                                        );
                                     });
                             }
                             if crate::controller_ui::button(ui, "Copy diagnostic").clicked() {
-                                ctx.output_mut(|output| output.copied_text = format!(
-                                    "{}\n{}\n\n{}", diagnostic.title, diagnostic.reason, diagnostic.details
-                                ));
+                                ctx.output_mut(|output| {
+                                    output.copied_text = format!(
+                                        "{}\n{}\n\n{}",
+                                        diagnostic.title, diagnostic.reason, diagnostic.details
+                                    )
+                                });
                             }
-                            if can_resume { resume = crate::controller_ui::button(ui, "Continue").clicked(); }
+                            if can_resume {
+                                resume = crate::controller_ui::button(ui, "Continue").clicked();
+                            }
                             back = crate::controller_ui::button(ui, "Return to library").clicked();
                         };
                         if ui.is_enabled() {
@@ -6780,7 +7165,10 @@ impl eframe::App for PocketLauncher {
                 egui::CentralPanel::default().show(ctx, |_| {});
                 let mut close = ctx.input(|input| input.key_pressed(egui::Key::Escape));
                 let mut selected = None;
-                let current = self.library.get(&id).map(|game| game.launch_path(self.library.root()));
+                let current = self
+                    .library
+                    .get(&id)
+                    .map(|game| game.launch_path(self.library.root()));
                 let directory = self.library.root().join("games").join(&id);
                 egui::Window::new("Switch Launch Executable")
                     .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -6790,19 +7178,23 @@ impl eframe::App for PocketLauncher {
                             if choices.is_empty() {
                                 ui.label("No launchable executables found.");
                             }
-                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                                for path in &choices {
-                                    let label = path.strip_prefix("extracted").unwrap_or(path);
-                                    let label = if current.as_deref() == Some(directory.join(path).as_path()) {
-                                        format!("{} (current)", label.display())
-                                    } else {
-                                        label.display().to_string()
-                                    };
-                                    if crate::controller_ui::button(ui, label).clicked() {
-                                        selected = Some(path);
+                            egui::ScrollArea::vertical()
+                                .max_height(320.0)
+                                .show(ui, |ui| {
+                                    for path in &choices {
+                                        let label = path.strip_prefix("extracted").unwrap_or(path);
+                                        let label = if current.as_deref()
+                                            == Some(directory.join(path).as_path())
+                                        {
+                                            format!("{} (current)", label.display())
+                                        } else {
+                                            label.display().to_string()
+                                        };
+                                        if crate::controller_ui::button(ui, label).clicked() {
+                                            selected = Some(path);
+                                        }
                                     }
-                                }
-                            });
+                                });
                             close |= crate::controller_ui::button(ui, "Cancel").clicked();
                         });
                     });
@@ -6970,22 +7362,24 @@ impl eframe::App for PocketLauncher {
             ctx.request_repaint_after(Duration::from_millis(100));
             return;
         }
-        if let Some(prompt)=self.remove_game.as_ref() {
-            self.deck_nav_repeat=None;
+        if let Some(prompt) = self.remove_game.as_ref() {
+            self.deck_nav_repeat = None;
             self.controller_ui.stop_repeat();
-            let actions=std::mem::take(&mut self.deck_library_actions);
-            if let Some(confirm)=prompt.show(ctx,&actions) {
-                let prompt=self.remove_game.take().unwrap();
+            let actions = std::mem::take(&mut self.deck_library_actions);
+            if let Some(confirm) = prompt.show(ctx, &actions) {
+                let prompt = self.remove_game.take().unwrap();
                 if confirm && self.running_game.is_some() {
-                    self.status="Stop the running game before removing a library entry.".into();
+                    self.status = "Stop the running game before removing a library entry.".into();
                 } else if confirm {
                     match self.library.remove(&prompt.id) {
-                        Ok(())=> {
+                        Ok(()) => {
                             self.analysis_cache.remove(&prompt.id);
-                            if self.selected_game.as_deref()==Some(&prompt.id) {self.selected_game=None;}
-                            self.status=format!("Removed {}",prompt.name);
+                            if self.selected_game.as_deref() == Some(&prompt.id) {
+                                self.selected_game = None;
+                            }
+                            self.status = format!("Removed {}", prompt.name);
                         }
-                        Err(error)=>self.status=format!("Remove failed: {error}"),
+                        Err(error) => self.status = format!("Remove failed: {error}"),
                     }
                 }
             }
@@ -7003,7 +7397,9 @@ impl eframe::App for PocketLauncher {
         }
         self.handle_physical_keyboard(ctx);
         self.update_stylus_input(ctx);
-        if !self.pending_binding_commands.borrow().is_empty() {ctx.request_repaint();}
+        if !self.pending_binding_commands.borrow().is_empty() {
+            ctx.request_repaint();
+        }
         self.drain_events(ctx);
         if let Some(result) = self
             .screenshot
@@ -7028,8 +7424,13 @@ impl eframe::App for PocketLauncher {
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         if fullscreen != self.display_fullscreen {
             self.display_fullscreen = fullscreen;
-            if !fullscreen && self.library_restore_pending.is_none() && self.startup_window.is_none() {
-                let size = self.fullscreen_window_size.take()
+            if !fullscreen
+                && self.library_restore_pending.is_none()
+                && self.startup_window.is_none()
+            {
+                let size = self
+                    .fullscreen_window_size
+                    .take()
                     .or(self.library_viewport.size)
                     .unwrap_or(Vec2::new(1280.0, 800.0));
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
@@ -7075,7 +7476,17 @@ impl eframe::App for PocketLauncher {
                         );
                     });
                 });
-                ui.add(egui::Label::new(RichText::new(crate::controller_labels::text(ctx,crate::toolbar_ui::NAV_HINT)).size(12.0).color(Color32::from_gray(153))).wrap(true));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(crate::controller_labels::text(
+                            ctx,
+                            crate::toolbar_ui::NAV_HINT,
+                        ))
+                        .size(12.0)
+                        .color(Color32::from_gray(153)),
+                    )
+                    .wrap(true),
+                );
             });
         }
         let central = egui::CentralPanel::default();
@@ -7207,7 +7618,11 @@ impl eframe::App for PocketLauncher {
             Duration::from_millis(250)
         };
         ctx.request_repaint_after(repaint_after);
-        if self.center_tap.borrow().active() { ctx.request_repaint_after(Duration::from_millis(pocket_library::center_tap::DURATION_MS)); }
+        if self.center_tap.borrow().active() {
+            ctx.request_repaint_after(Duration::from_millis(
+                pocket_library::center_tap::DURATION_MS,
+            ));
+        }
     }
 }
 
@@ -7528,7 +7943,12 @@ mod tests {
             (egui::Key::Num5, GuestButton::GizPiano5),
         ] {
             assert_eq!(
-                pocket_library::keybindings::keyboard_button_for_profile(&bindings, key.name(), true).map(GuestButton::vk),
+                pocket_library::keybindings::keyboard_button_for_profile(
+                    &bindings,
+                    key.name(),
+                    true
+                )
+                .map(GuestButton::vk),
                 Some(expected.vk()),
                 "{} should drive {:?}",
                 key.name(),

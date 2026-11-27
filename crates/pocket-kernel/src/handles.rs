@@ -1,7 +1,10 @@
 //! Process namespaces and system-wide object identities for owned handles.
 use crate::vfs::VfsObject;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 #[path = "handle_snapshot.rs"]
 mod snapshot;
@@ -77,11 +80,18 @@ struct Domain {
     mapping_names: HashMap<String, std::sync::Weak<crate::file_mapping::FileMapping>>,
     mapping_refs: HashMap<(u32, u32), Arc<crate::file_mapping::FileMapping>>,
     imports: HashMap<(u32, u32), VfsObject>,
+    // Host-only invalidation for imported/closed VFS aliases; never archived.
+    file_changes: u64,
 }
-#[derive(Clone)]
 pub struct HandleTable {
     domain: Arc<Mutex<Domain>>,
     pid: u32,
+    files_synced: AtomicU64,
+}
+impl Clone for HandleTable {
+    fn clone(&self) -> Self {
+        Self::from_domain(self.domain.clone(), self.pid)
+    }
 }
 impl Default for HandleTable {
     fn default() -> Self {
@@ -100,13 +110,24 @@ impl Default for HandleTable {
                 suspend_count: 0,
             },
         );
-        Self {
-            domain: Arc::new(Mutex::new(domain)),
-            pid: 1,
-        }
+        Self::from_domain(Arc::new(Mutex::new(domain)), 1)
     }
 }
 impl HandleTable {
+    fn from_domain(domain: Arc<Mutex<Domain>>, pid: u32) -> Self {
+        Self {
+            domain,
+            pid,
+            files_synced: AtomicU64::new(u64::MAX),
+        }
+    }
+    /// One VFS reconciliation per namespace change, not per WinCE call.
+    /// The domain mutex publishes the actual resources; this atomic is only a
+    /// host polling hint. Every clone/restore starts with a full reconciliation.
+    pub(crate) fn poll_file_changes(&self) -> bool {
+        let epoch = self.domain.lock().unwrap().file_changes;
+        self.files_synced.swap(epoch, Ordering::Relaxed) != epoch
+    }
     pub fn process_id(&self) -> u32 {
         self.pid
     }
@@ -434,6 +455,7 @@ impl HandleTable {
     pub fn close_in(&mut self, pid: u32, handle: u32) -> Option<(HandleObject, bool)> {
         let mut d = self.domain.lock().unwrap();
         let object = d.entries.get_mut(&(pid, handle))?.take()?;
+        d.file_changes = d.file_changes.wrapping_add(1);
         d.imports.remove(&(pid, handle));
         d.mapping_refs.remove(&(pid, handle));
         let last = !d.entries.values().any(|o| *o == Some(object));
@@ -488,20 +510,11 @@ impl HandleTable {
         );
         d.active.insert(pid);
         d.child_ids.insert(handle, pid);
-        Some((
-            handle,
-            Self {
-                domain: self.domain.clone(),
-                pid,
-            },
-        ))
+        Some((handle, Self::from_domain(self.domain.clone(), pid)))
     }
     pub fn child(&self, handle: u32) -> Option<Self> {
         let pid = *self.domain.lock().unwrap().child_ids.get(&handle)?;
-        Some(Self {
-            domain: self.domain.clone(),
-            pid,
-        })
+        Some(Self::from_domain(self.domain.clone(), pid))
     }
     pub fn child_id(&self, handle: u32) -> Option<u32> {
         self.domain.lock().unwrap().child_ids.get(&handle).copied()
@@ -565,11 +578,9 @@ impl HandleTable {
         d.files.get(&self.canonical(object, &d)).cloned()
     }
     pub fn queue_file(&self, pid: u32, handle: u32, file: VfsObject) {
-        self.domain
-            .lock()
-            .unwrap()
-            .imports
-            .insert((pid, handle), file);
+        let mut domain = self.domain.lock().unwrap();
+        domain.imports.insert((pid, handle), file);
+        domain.file_changes = domain.file_changes.wrapping_add(1);
     }
     pub(crate) fn snapshot_mapping_bindings(
         &self,
@@ -795,5 +806,27 @@ mod tests {
         assert_eq!(child.take_controls().0, Some(77));
         child.mark_inactive();
         assert!(!root.terminate_remote_process(pid, 99));
+    }
+    #[test]
+    fn late_device_backing_restore_invalidates_observed_namespace_clones() {
+        let source = HandleTable::default();
+        let saved = source.capture_device_handles().unwrap();
+        let metadata = saved.restore_namespace().unwrap();
+        assert!(metadata.poll_file_changes());
+        assert!(!metadata.poll_file_changes());
+        let other = metadata.clone();
+        assert!(other.poll_file_changes());
+        assert!(!other.poll_file_changes());
+        saved
+            .bind_backings(
+                &metadata,
+                &crate::vfs::SnapshotRestoreDomain::default(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(metadata.poll_file_changes());
+        assert!(other.poll_file_changes());
+        assert!(!metadata.poll_file_changes());
+        assert!(!other.poll_file_changes());
     }
 }

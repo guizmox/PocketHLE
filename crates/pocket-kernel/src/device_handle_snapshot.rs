@@ -110,10 +110,7 @@ impl HandleTable {
             .ok()?
             .active
             .contains(&pid)
-            .then(|| Self {
-                domain: self.domain.clone(),
-                pid,
-            })
+            .then(|| Self::from_domain(self.domain.clone(), pid))
     }
 }
 impl DeviceHandleSnapshot {
@@ -179,10 +176,7 @@ impl DeviceHandleSnapshot {
             child_ids: self.child_ids.clone(),
             ..Default::default()
         };
-        Ok(HandleTable {
-            pid,
-            domain: Arc::new(Mutex::new(domain)),
-        })
+        Ok(HandleTable::from_domain(Arc::new(Mutex::new(domain)), pid))
     }
     pub fn bind_backings(
         self,
@@ -200,8 +194,12 @@ impl DeviceHandleSnapshot {
             .lock()
             .map_err(|_| "device handle domain poisoned")?;
         let gate = target.api_gate.clone();
+        let file_changes = target.file_changes.wrapping_add(1);
         *target = std::mem::take(&mut *source);
         target.api_gate = gate;
+        // Metadata may already have been observed by any process table clone.
+        // Replacing its VFS backings invalidates all those local polling hints.
+        target.file_changes = file_changes;
         Ok(())
     }
     pub fn restore(
@@ -288,9 +286,6 @@ impl DeviceHandleSnapshot {
         }) {
             return Err("shared section handle is missing its object".into());
         }
-        Ok(HandleTable {
-            pid,
-            domain: Arc::new(Mutex::new(domain)),
-        })
+        Ok(HandleTable::from_domain(Arc::new(Mutex::new(domain)), pid))
     }
 }

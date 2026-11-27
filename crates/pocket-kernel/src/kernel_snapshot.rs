@@ -25,6 +25,7 @@ pub struct KernelSnapshot {
     0x0203, 1 => handles: handles::HandleSnapshot;
     0x0204, 1 => find_handles: HashMap<u32, std::collections::VecDeque<(String, u64, bool, u32)>>;
     0x0205, 1 => next_find_handle: u32;
+    0x0206, 1 => temporary_files: vfs::TemporaryFiles = vfs::TemporaryFiles::default();
     // Process services.
     0x0301, 1 => registry: registry::RegistryProcessSnapshot;
     0x0302, 1 => crypto: crypto::CryptoState;
@@ -37,7 +38,7 @@ pub struct KernelSnapshot {
     0x0401, 1 => audio: audio::AudioSnapshot;
     0x0402, 1 => gz_files: crate::gz::GzFiles;
     // Graphics.
-    0x0501, 2 => gdi: gdi::GdiSnapshot;
+    0x0501, 2 => gdi: gdi::GdiSnapshot, decode = gdi::read_snapshot_record;
     0x0502, 1 => display: framebuffer::DisplaySnapshot;
     0x0503, 1 => fb_mapped: bool;
     0x0504, 1 => guest_fb_pitch: u32;
@@ -51,6 +52,7 @@ pub struct KernelSnapshot {
     0x050c, 1 => gles_strings: std::collections::HashMap<String, u32>;
     0x050d, 1 => gapi_keys_queried: bool;
     0x050e, 1 => gapi_action_key: u16;
+    0x050f, 1 => shell_toolbars: HashMap<u32, shell_menu::Toolbar> = HashMap::new();
     // Scheduler and continuations.
     0x0601, 1 => schedule: ScheduleSnapshot;
     // Process and modules.
@@ -130,6 +132,11 @@ pub struct KernelSnapshot {
     0x0833, 1 => window_menus: HashMap<u32, u32>;
     0x0834, 1 => next_menu_handle: u32;
     0x0835, 1 => sub_menus: HashMap<(u32, u32), u32>;
+    0x0836, 3 => edit_controls: HashMap<u32, controls::edit::EditState> = HashMap::new();
+    0x0837, 1 => indeterminate_checks: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    0x0838, 1 => window_create_scratch: HashMap<(usize, u32, u32), u32> = HashMap::new();
+    0x0839, 1 => clipboard: crate::clipboard::Clipboard = crate::clipboard::Clipboard::default();
+    0x083a, 1 => document_lists: HashMap<u32, controls::doc_list::DocList> = HashMap::new();
     // Devices and notifications.
     0x0901, 1 => serial: serial::SerialSnapshot;
     0x0902, 1 => pocketpc_processor: Option<processor_info::PocketPcProcessor>;
@@ -221,6 +228,7 @@ impl KernelState {
                 coordinated,
                 at,
             )?,
+            temporary_files: self.vfs.capture_temporary_files()?,
             mappings,
             handles,
             registry: self.registry.capture_process_snapshot()?,
@@ -232,6 +240,7 @@ impl KernelState {
             serial: serial::SerialSnapshot::capture(&self.serial_ports, at)?,
             audio: self.audio.capture_snapshot_at(at)?,
             gdi: self.gdi.capture_snapshot()?,
+            shell_toolbars: self.gdi.shell_toolbars.clone(),
             display: self.framebuffer.capture_snapshot()?,
             schedule,
             zlib: self.zlib_streams.capture_snapshot(),
@@ -301,6 +310,7 @@ impl KernelState {
             create_frame: self.create_frame.clone(),
             create_frame_hwnd: self.create_frame_hwnd,
             create_frame_stack: self.create_frame_stack.clone(),
+            window_create_scratch: self.window_create_scratch.clone(),
             create_stage: self.create_stage,
             dialog_frame: self.dialog_frame,
             dialog_frame_hwnd: self.dialog_frame_hwnd,
@@ -319,6 +329,10 @@ impl KernelState {
             shell_status: self.shell_status,
             status_bar: self.status_bar.clone(),
             controls: self.controls.clone(),
+            clipboard: self.clipboard.clone(),
+            document_lists: self.controls.doc_lists.clone(),
+            edit_controls: self.controls.snapshot_edits(),
+            indeterminate_checks: self.controls.snapshot_checks(),
             modal: self.modal.clone(),
             shell_keyboard: self.shell_keyboard.clone(),
             message_box_spins: self.message_box_spins,
@@ -400,6 +414,15 @@ impl KernelState {
 }
 
 impl KernelSnapshot {
+    /// Recreate only VFS-allocated temporary names, with rollback until the
+    /// entire CPU/GPU/device reconstruction succeeds. Ordinary files retain
+    /// the existing path/identity policy.
+    pub fn prepare_temporary_files(
+        &self,
+        vfs: &mut vfs::Vfs,
+    ) -> Result<vfs::SnapshotFileCommit, String> {
+        vfs.prepare_temporary_files(&self.temporary_files)
+    }
     pub fn prime_device_restore(
         &self,
         vfs: &vfs::Vfs,
@@ -440,6 +463,61 @@ impl KernelSnapshot {
         state: &mut KernelState,
         domain: Option<&DeviceRestoreDomain>,
     ) -> Result<Option<file_mapping::MappingSnapshot>, String> {
+        for (hwnd, list) in &self.document_lists {
+            if self.controls.get(*hwnd).is_none_or(|control| {
+                control.class != controls::ControlClass::ListView
+                    || control.list_items.len() != list.paths.len()
+            }) {
+                return Err("checkpoint document list has no matching list control".into());
+            }
+            if list.filters.len() > 64
+                || list.paths.len() > 0x100000
+                || list.directory.len() > 32768
+                || list.directory.contains('\0')
+                || list
+                    .paths
+                    .iter()
+                    .any(|path| path.len() > 32768 || path.contains('\0'))
+                || list.filters.iter().any(|patterns| {
+                    patterns.len() > 256
+                        || patterns
+                            .iter()
+                            .any(|pattern| pattern.len() > 32768 || pattern.contains('\0'))
+                })
+                || (!list.filters.is_empty()
+                    && (list.filter_index == 0 || list.filter_index as usize > list.filters.len()))
+            {
+                return Err("checkpoint document list exceeds its supported extent".into());
+            }
+        }
+        self.clipboard.validate(&self.heap)?;
+        if self
+            .clipboard
+            .opened_by
+            .is_some_and(|thread| !self.schedule.contains_thread(thread))
+        {
+            return Err("checkpoint clipboard lock has no matching thread".into());
+        }
+        self.controls.validate_edits(&self.edit_controls)?;
+        self.controls.validate_checks(&self.indeterminate_checks)?;
+        let mut creation_buffers = std::collections::HashSet::new();
+        for (&(thread, sp, hwnd), &buffer) in &self.window_create_scratch {
+            let active = self
+                .create_frame
+                .into_iter()
+                .map(|f| (f, self.create_frame_hwnd))
+                .chain(
+                    self.create_frame_stack
+                        .iter()
+                        .map(|(f, _, hwnd)| (*f, *hwnd)),
+                )
+                .any(|(f, h)| f.thread == thread && f.sp == sp && h == hwnd);
+            if !active || !creation_buffers.insert(buffer) || !self.heap.has_allocation(buffer, 64)
+            {
+                return Err("invalid window creation scratch owner".into());
+            }
+        }
+
         self.crypto.validate_snapshot()?;
         self.msxml.validate_snapshot()?;
         self.sdl.validate_snapshot()?;
@@ -490,6 +568,20 @@ impl KernelSnapshot {
             .restore_with_shared_mas(domain.map(|domain| &domain.mas))?;
         state.object_handles = self.handles.restore(&state.vfs, &state.audio)?;
         state.gdi = self.gdi.restore()?;
+        for (hwnd, toolbar) in &self.shell_toolbars {
+            let bar = state
+                .gdi
+                .shell_menus
+                .bars
+                .get(hwnd)
+                .ok_or("saved toolbar has no shell window")?;
+            let items = self
+                .menu_items
+                .get(&bar.menu)
+                .ok_or("saved toolbar has no menu projection")?;
+            toolbar.validate(&state.gdi, items.len())?;
+        }
+        state.gdi.shell_toolbars = self.shell_toolbars;
         state.framebuffer = self.display.restore()?;
         self.schedule
             .restore(state)
@@ -571,6 +663,7 @@ impl KernelSnapshot {
         state.create_frame = self.create_frame;
         state.create_frame_hwnd = self.create_frame_hwnd;
         state.create_frame_stack = self.create_frame_stack;
+        state.window_create_scratch = self.window_create_scratch;
         state.create_stage = self.create_stage;
         state.dialog_frame = self.dialog_frame;
         state.dialog_frame_hwnd = self.dialog_frame_hwnd;
@@ -589,6 +682,10 @@ impl KernelSnapshot {
         state.shell_status = self.shell_status;
         state.status_bar = self.status_bar;
         state.controls = self.controls;
+        state.controls.doc_lists = self.document_lists;
+        state.clipboard = self.clipboard;
+        state.controls.restore_edits(self.edit_controls);
+        state.controls.restore_checks(self.indeterminate_checks);
         state.modal = self.modal;
         state.shell_keyboard = self.shell_keyboard;
         state.message_box_spins = self.message_box_spins;

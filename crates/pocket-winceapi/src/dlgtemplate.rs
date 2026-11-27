@@ -49,6 +49,8 @@ pub struct DialogItem {
     /// Resource identifier retained for SS_BITMAP/SS_ICON dialog items.
     pub title_resource: Option<ItemClass>,
     pub title: String,
+    /// Bytes passed to a custom control in CREATESTRUCT::lpCreateParams.
+    pub creation_data: Vec<u8>,
 }
 
 /// A parsed dialog template.
@@ -63,6 +65,8 @@ pub struct DialogTemplate {
     pub title: String,
     pub items: Vec<DialogItem>,
     pub font: Option<(u16, String)>,
+    pub font_weight: u16,
+    pub font_italic: bool,
 }
 
 /// Dialog-unit to pixel conversion.
@@ -187,20 +191,26 @@ impl<'a> Reader<'a> {
 /// the emulator down with it.
 pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
     let mut r = Reader::new(buf);
-    let style = r.u32()?;
-    let ex_style = r.u32()?;
+    // CE3's EX header differs from the desktop variant: bItalic is a
+    // SHORT, and its item identifiers are still WORDs. Keep one bounded
+    // parser for the common variable-length strings and item creation data.
+    let extended = buf.get(2..4)? == [0xff, 0xff];
+    let (style, ex_style) = if extended {
+        if r.u16()? != 1 || r.u16()? != 0xffff {
+            return None;
+        }
+        let _help_id = r.u32()?;
+        let ex_style = r.u32()?;
+        (r.u32()?, ex_style)
+    } else {
+        (r.u32()?, r.u32()?)
+    };
     let cdit = r.u16()?;
     let x = r.i16()?;
     let y = r.i16()?;
     let cx = r.i16()?;
     let cy = r.i16()?;
 
-    // `DLGTEMPLATEEX` starts with a version/signature pair of 1 and
-    // 0xFFFF. We do not implement it, and misreading one as a classic
-    // template would produce nonsense geometry.
-    if style & 0xFFFF == 0x0001 && style >> 16 == 0xFFFF {
-        return None;
-    }
     // Empty dialogs are valid containers for controls created by the guest
     // during WM_INITDIALOG. Keep their parent/visibility state too.
     // A four-digit count means we are not looking at a template.
@@ -212,8 +222,15 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
     let _menu = r.sz_or_ord()?;
     let _class = r.sz_or_ord()?;
     let title = r.sz()?;
+    let mut font_weight = 400;
+    let mut font_italic = false;
     let font = if style & DS_SETFONT != 0 {
-        Some((r.u16()?, r.sz()?))
+        let points = r.u16()?;
+        if extended {
+            font_weight = r.u16()?;
+            font_italic = r.u16()? != 0;
+        }
+        Some((points, r.sz()?))
     } else {
         None
     };
@@ -221,8 +238,13 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
     let mut items = Vec::with_capacity(cdit as usize);
     for _ in 0..cdit {
         r.align4();
-        let istyle = r.u32()?;
-        let iex = r.u32()?;
+        let (istyle, iex) = if extended {
+            let _help_id = r.u32()?;
+            let iex = r.u32()?;
+            (r.u32()?, iex)
+        } else {
+            (r.u32()?, r.u32()?)
+        };
         let ix = r.i16()?;
         let iy = r.i16()?;
         let icx = r.i16()?;
@@ -238,7 +260,9 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
         // WM_CREATE. Nothing we model reads it, but it has to be
         // stepped over to reach the next item.
         let cb = r.u16()? as usize;
-        r.pos = r.pos.checked_add(cb)?;
+        let end = r.pos.checked_add(cb)?;
+        let creation_data = r.buf.get(r.pos..end)?.to_vec();
+        r.pos = end;
 
         items.push(DialogItem {
             style: istyle,
@@ -251,6 +275,7 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
             class: class?,
             title: ititle,
             title_resource,
+            creation_data,
         });
     }
 
@@ -264,6 +289,8 @@ pub fn parse(buf: &[u8]) -> Option<DialogTemplate> {
         title,
         items,
         font,
+        font_weight,
+        font_italic,
     })
 }
 
@@ -545,4 +572,120 @@ mod tests {
         b.0.pop();
         assert!(parse(&b.0).is_none());
     }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    fn word(b: &mut Vec<u8>, v: u16) {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    fn long(b: &mut Vec<u8>, v: u32) {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    fn text(b: &mut Vec<u8>, s: &str) {
+        b.extend(s.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes));
+    }
+    #[test]
+    fn ce3_extended_template_preserves_word_ids_font_attributes_and_bounded_extra_data() {
+        let mut b = vec![];
+        word(&mut b, 1);
+        word(&mut b, 0xffff);
+        long(&mut b, 77);
+        long(&mut b, 3);
+        long(&mut b, 0x90000040);
+        for n in [2, 1, 2, 100, 80, 0, 0] {
+            word(&mut b, n);
+        }
+        text(&mut b, "Extended");
+        word(&mut b, 9);
+        word(&mut b, 700);
+        word(&mut b, 1);
+        text(&mut b, "Tahoma");
+        for (id, title) in [(0x1234, "One"), (0xabcd, "Two")] {
+            while b.len() % 4 != 0 {
+                b.push(0);
+            }
+            long(&mut b, 22);
+            long(&mut b, 0);
+            long(&mut b, 0x50000006);
+            for n in [1, 2, 30, 12, id, 0xffff, 0x80] {
+                word(&mut b, n);
+            }
+            text(&mut b, title);
+            word(&mut b, 3);
+            b.extend_from_slice(&[0x12, 0x34, 0x56]);
+        }
+        let t = parse(&b).unwrap();
+        assert_eq!(t.font, Some((9, "Tahoma".into())));
+        assert_eq!(t.font_weight, 700);
+        assert!(t.font_italic);
+        assert_eq!(t.items.len(), 2);
+        assert_eq!(t.items[0].id, 0x1234);
+        assert_eq!(t.items[1].id, 0xabcd);
+        assert_eq!(t.items[1].title, "Two");
+        assert!(parse(&b[..b.len() - 1]).is_none());
+        b[0] = 2;
+        assert!(parse(&b).is_none());
+    }
+}
+
+/// Encode an ordinary dialog for an HLE-provided system UI. Creation and input
+/// still use the normal USER template parser and HWND/control owners.
+pub fn encode(template: &DialogTemplate) -> Option<Vec<u8>> {
+    fn string(out: &mut Vec<u8>, text: &str) {
+        out.extend(
+            text.encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes),
+        );
+    }
+    fn class(out: &mut Vec<u8>, class: &ItemClass) {
+        match class {
+            ItemClass::Ordinal(id) => {
+                out.extend(0xffffu16.to_le_bytes());
+                out.extend(id.to_le_bytes());
+            }
+            ItemClass::Named(name) => string(out, name),
+        }
+    }
+    if template.items.len() > u16::MAX as usize
+        || template.font_italic
+        || template.font_weight != 400
+        || (template.style & DS_SETFONT != 0) != template.font.is_some()
+    {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.extend(template.style.to_le_bytes());
+    out.extend(template.ex_style.to_le_bytes());
+    out.extend((template.items.len() as u16).to_le_bytes());
+    for value in [template.x, template.y, template.cx, template.cy] {
+        out.extend(value.to_le_bytes());
+    }
+    out.extend([0u8; 4]);
+    string(&mut out, &template.title);
+    if let Some((size, face)) = &template.font {
+        out.extend(size.to_le_bytes());
+        string(&mut out, face);
+    }
+    for item in &template.items {
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out.extend(item.style.to_le_bytes());
+        out.extend(item.ex_style.to_le_bytes());
+        for value in [item.x, item.y, item.cx, item.cy] {
+            out.extend(value.to_le_bytes());
+        }
+        out.extend(item.id.to_le_bytes());
+        class(&mut out, &item.class);
+        if let Some(resource) = &item.title_resource {
+            class(&mut out, resource);
+        } else {
+            string(&mut out, &item.title);
+        }
+        out.extend(0u16.to_le_bytes());
+    }
+    Some(out)
 }

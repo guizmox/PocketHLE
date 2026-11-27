@@ -40,6 +40,7 @@ pub mod bluetooth;
 pub mod camera;
 pub mod cedb;
 pub mod classic_sip;
+pub mod clipboard;
 pub mod colors;
 pub mod controls;
 pub mod crypto;
@@ -361,6 +362,15 @@ fn install_coalesced_code_hooks(cpu: &mut dyn Cpu, slots: &[u32]) -> Result<(), 
 
 #[derive(Debug, Error)]
 pub enum KernelError {
+    /// A guest runtime exception, raised by the API dispatcher before another
+    /// emulated instruction executes. Context is owned text, never host state.
+    #[error("{runtime} exception {cause} (OS {os_error})")]
+    RuntimeException {
+        runtime: &'static str,
+        cause: u32,
+        os_error: u32,
+        path: Vec<u16>,
+    },
     #[error("cpu error: {0}")]
     Cpu(#[from] CpuError),
     #[error("loader error: {0}")]
@@ -467,8 +477,9 @@ pub struct PendingWaveBuffer {
     pub end_cursor: u64,
 }
 
-/// Guest memory behind a single-header waveOut loop. Interstellar Flames 2
-/// keeps its SFX mixer ring here and edits it after waveOutWrite returns.
+/// Guest memory behind a repeated live wave backing: an explicit single-header
+/// loop or consecutive ordinary WAVEHDR aliases. Interstellar Flames 2 and
+/// LeoFS edit their mixer rings after waveOutWrite returns.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct LiveWaveLoop {
     pub hdr: u32,
@@ -1390,6 +1401,10 @@ pub struct KernelState {
     pub synthetic_message_budget: u64,
     /// After a fabricated PeekMessage paint, let an empty real queue reach idle.
     pub synthetic_peek_paint_yield: std::collections::HashSet<usize>,
+    /// Host cooperative-scheduling hint, not guest queue state: let the first
+    /// empty PM_NOREMOVE readiness query return before handing off workers.
+    /// Reset on restore; no snapshot payload depends on this scheduling choice.
+    pub peek_idle_observed: bool,
     /// Address of the guest's last-registered window procedure. Set
     /// by `RegisterClassW`, used by `DispatchMessageW` to trampoline
     /// into guest-side WM_PAINT / WM_KEYDOWN handlers.
@@ -1476,6 +1491,8 @@ pub struct KernelState {
     /// Suspended outer window callbacks when a WM_CREATE creates another window.
     /// Each entry preserves the outer API continuation, callback kind and HWND.
     pub create_frame_stack: Vec<(WindowCallbackFrame, CreateStage, u32)>,
+    /// CREATESTRUCT buffers owned by synchronous (thread, saved SP, HWND) callbacks.
+    pub window_create_scratch: HashMap<(usize, u32, u32), u32>,
     /// Which leg of the synchronous window-creation message sequence is
     /// in flight inside the guest `WndProc`.
     pub create_stage: CreateStage,
@@ -1523,6 +1540,7 @@ pub struct KernelState {
     /// `WM_COMMAND` for the parent. The application never draws them, so
     /// neither can we leave them to the guest — see [`controls`].
     pub controls: controls::Controls,
+    pub clipboard: clipboard::Clipboard,
     /// The modal message box currently on screen, if any.
     ///
     /// `MessageBoxW` does not return until the user has answered, so the
@@ -1952,6 +1970,9 @@ impl KernelState {
                 threads.get(thread - 1).is_some_and(|t| t.finished)
             }
         };
+        if self.clipboard.opened_by.is_some_and(finished) {
+            self.clipboard.opened_by = None;
+        }
         self.notify_message_frames
             .retain(|frame| !finished(frame.thread));
         let heap = &mut self.heap;
@@ -2102,27 +2123,29 @@ impl KernelState {
             }
         }
 
-        for (handle, object) in self.object_handles.take_files() {
-            if let Some((key, playback)) = object.mas() {
-                self.audio.import_mas_stream(key, playback);
+        if self.object_handles.poll_file_changes() {
+            for (handle, object) in self.object_handles.take_files() {
+                if let Some((key, playback)) = object.mas() {
+                    self.audio.import_mas_stream(key, playback);
+                }
+                self.vfs.import_handle(handle, object);
             }
-            self.vfs.import_handle(handle, object);
-        }
-        for handle in self.vfs.open_handles() {
-            if self.object_handles.is_closed(handle) {
-                if self.vfs.is_mp3_decoder(handle) {
-                    let key = self.vfs.mp3_stream_key(handle);
-                    self.vfs.close(handle);
-                    if !self
-                        .vfs
-                        .mp3_decoder_handles()
-                        .iter()
-                        .any(|&h| self.vfs.mp3_stream_key(h) == key)
-                    {
-                        self.audio.detach_mas_stream(key);
+            for handle in self.vfs.open_handles() {
+                if self.object_handles.is_closed(handle) {
+                    if self.vfs.is_mp3_decoder(handle) {
+                        let key = self.vfs.mp3_stream_key(handle);
+                        self.vfs.close(handle);
+                        if !self
+                            .vfs
+                            .mp3_decoder_handles()
+                            .iter()
+                            .any(|&h| self.vfs.mp3_stream_key(h) == key)
+                        {
+                            self.audio.detach_mas_stream(key);
+                        }
+                    } else {
+                        self.vfs.close(handle);
                     }
-                } else {
-                    self.vfs.close(handle);
                 }
             }
         }
@@ -3397,8 +3420,14 @@ impl Heap {
         None
     }
 
-    /// Look up the user-requested size of `user_ptr`, or `None` if the
-    /// pointer is not the result of a still-live `Heap::alloc`.
+    /// A clipboard/global-memory transfer must not adopt C++ object storage.
+    pub fn owns_global_block(&self, user_ptr: u32) -> bool {
+        self.live
+            .get(&user_ptr)
+            .is_some_and(|allocation| !allocation.cpp)
+    }
+
+    /// Requested size of a still-live guest allocation.
     pub fn msize(&self, user_ptr: u32) -> Option<u32> {
         self.live.get(&user_ptr).map(|allocation| allocation.size)
     }
@@ -4794,6 +4823,7 @@ impl Process {
                 synthetic_message_count: 0,
                 synthetic_message_budget: 240,
                 synthetic_peek_paint_yield: Default::default(),
+                peek_idle_observed: false,
                 wnd_proc: 0,
                 window_class_procs: HashMap::new(),
                 window_background: None,
@@ -4824,6 +4854,7 @@ impl Process {
                 create_frame: None,
                 create_frame_hwnd: 0,
                 create_frame_stack: Vec::new(),
+                window_create_scratch: HashMap::new(),
                 create_stage: CreateStage::Idle,
                 dialog_frame: None,
                 dialog_frame_hwnd: 0,
@@ -4844,6 +4875,7 @@ impl Process {
                 message_frames: Default::default(),
                 notify_message_frames: Default::default(),
                 status_bar: None,
+                clipboard: clipboard::Clipboard::default(),
                 controls: Default::default(),
                 modal: None,
                 shell_keyboard: shell_keyboard::ShellKeyboard::default(),

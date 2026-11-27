@@ -133,6 +133,7 @@ object NativeBridge {
     const val MEDIA_REWIND = 2
     const val MEDIA_FORWARD = 3
 
+    @JvmStatic external fun nativeWaitCursor(handle: Long): Int
     @JvmStatic external fun nativeSystemMedia(handle: Long): String?
     @JvmStatic external fun nativeSystemMediaCommand(handle: Long, command: Int)
 

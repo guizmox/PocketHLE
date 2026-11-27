@@ -146,7 +146,12 @@ impl Assignment {
         match self {
             Self::Unbound => Color32::from_gray(90),
             Self::Guest(GuestButton::CenterTap | GuestButton::StylusClick) => GREEN,
-            Self::Guest(GuestButton::RotateScreen | GuestButton::Screenshot | GuestButton::SaveSnapshot | GuestButton::LoadSnapshot) => PURPLE,
+            Self::Guest(
+                GuestButton::RotateScreen
+                | GuestButton::Screenshot
+                | GuestButton::SaveSnapshot
+                | GuestButton::LoadSnapshot,
+            ) => PURPLE,
             Self::Guest(_) => BLUE,
             Self::Stylus(_) => GREEN,
         }
@@ -264,7 +269,13 @@ fn visible_buttons(gizmondo: bool) -> impl Iterator<Item = GuestButton> {
         let index = GuestButton::ALL.iter().position(|b| b == button).unwrap();
         if gizmondo {
             (index < 16 && *button != GuestButton::Turbo)
-                || matches!(*button, GuestButton::RotateScreen | GuestButton::Screenshot | GuestButton::SaveSnapshot | GuestButton::LoadSnapshot)
+                || matches!(
+                    *button,
+                    GuestButton::RotateScreen
+                        | GuestButton::Screenshot
+                        | GuestButton::SaveSnapshot
+                        | GuestButton::LoadSnapshot
+                )
         } else {
             index < 11 || index >= 16
         }
@@ -462,7 +473,10 @@ fn assignment_targets(
     std::iter::once(Assignment::Unbound)
         .chain(
             visible_buttons(gizmondo)
-                .filter(|b| controller || !matches!(b, GuestButton::SaveSnapshot | GuestButton::LoadSnapshot))
+                .filter(|b| {
+                    controller
+                        || !matches!(b, GuestButton::SaveSnapshot | GuestButton::LoadSnapshot)
+                })
                 .filter(|b| *b != GuestButton::StylusClick || (!long && !controller))
                 .map(Assignment::Guest),
         )
@@ -658,7 +672,8 @@ impl Editor {
                 keyboard_shortcut(input).is_some() || (*long && input == "Escape")
             };
             if fixed {
-                q.message = "This input is reserved by PocketHLE-Reborn. Choose another input.".into();
+                q.message =
+                    "This input is reserved by PocketHLE-Reborn. Choose another input.".into();
                 q.choice = None;
                 q.pressed = None;
                 accept = false;
@@ -786,7 +801,11 @@ impl Editor {
                     q.message = format!(
                         "{} press: {} → {}",
                         if long { "Long" } else { "Short" },
-                        if controller {crate::controller_labels::button(ui.ctx(),&input,&input)} else {input.clone()},
+                        if controller {
+                            crate::controller_labels::button(ui.ctx(), &input, &input)
+                        } else {
+                            input.clone()
+                        },
                         target.label_for(self.gizmondo)
                     );
                     q.done = true;
@@ -881,7 +900,8 @@ impl Editor {
     }
     pub fn reserved_input_attempt(&mut self) -> bool {
         if let Some(quick) = self.quick.as_mut().filter(|q| !q.wait_launch_release) {
-            quick.message = "This input is reserved by PocketHLE-Reborn. Choose another input.".into();
+            quick.message =
+                "This input is reserved by PocketHLE-Reborn. Choose another input.".into();
             return true;
         }
         false
@@ -1006,7 +1026,11 @@ impl Editor {
         } else {
             input
         };
-        ui.heading(if controller {crate::controller_labels::button(ui.ctx(),input,physical)} else {physical.to_owned()});
+        ui.heading(if controller {
+            crate::controller_labels::button(ui.ctx(), input, physical)
+        } else {
+            physical.to_owned()
+        });
         if controller && !self.gizmondo && pocket_library::stylus::controller_reserved(input, false)
         {
             ui.colored_label(GREEN, "Reserved stylus control");
@@ -1103,8 +1127,16 @@ impl Editor {
         }
         let prefix = pocket_library::input_gestures::binding_key(self.gizmondo, controller, "");
         let missing: Vec<_> = visible_buttons(self.gizmondo)
-            .filter(|b| controller || !matches!(b, GuestButton::SaveSnapshot | GuestButton::LoadSnapshot))
-            .filter(|b| if controller { *b != GuestButton::StylusClick } else { !matches!(b, GuestButton::Screenshot | GuestButton::RotateScreen) })
+            .filter(|b| {
+                controller || !matches!(b, GuestButton::SaveSnapshot | GuestButton::LoadSnapshot)
+            })
+            .filter(|b| {
+                if controller {
+                    *b != GuestButton::StylusClick
+                } else {
+                    !matches!(b, GuestButton::Screenshot | GuestButton::RotateScreen)
+                }
+            })
             .filter(|button| {
                 if config.long_press_bindings.iter().any(|(key, b)| {
                     key.starts_with(&prefix)
@@ -1446,8 +1478,12 @@ impl Editor {
         label: &str,
         rect: Rect,
     ) -> bool {
-        let display_label=if controller {crate::controller_labels::button(ui.ctx(),name,label)} else {label.to_owned()};
-        let label=display_label.as_str();
+        let display_label = if controller {
+            crate::controller_labels::button(ui.ctx(), name, label)
+        } else {
+            label.to_owned()
+        };
+        let label = display_label.as_str();
         let reserved = !controller && pocket_library::keybindings::reserved_host_key(name);
         let assignment = if controller {
             controller_assignment(config, name, self.gizmondo)

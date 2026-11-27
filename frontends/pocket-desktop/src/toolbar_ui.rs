@@ -179,7 +179,8 @@ fn separator(ui: &mut Ui) {
     ui.add_space(6.0);
 }
 
-pub const NAV_HINT: &str = "D-pad / left stick: navigate   {South}: open   {East}: back   L3: switch section";
+pub const NAV_HINT: &str =
+    "D-pad / left stick: navigate   {South}: open   {East}: back   L3: switch section";
 
 pub struct Output {
     pub action: Option<Action>,
@@ -231,7 +232,14 @@ pub fn show(ui: &mut Ui, state: &State<'_>) -> Output {
                 );
                 separator(ui);
                 if state.snapshot || state.restore_snapshot {
-                    group(ui, "SNAPSHOT", &[[SaveSnapshot], [RestoreSnapshot]], 128.0, state, &mut action);
+                    group(
+                        ui,
+                        "SNAPSHOT",
+                        &[[SaveSnapshot], [RestoreSnapshot]],
+                        128.0,
+                        state,
+                        &mut action,
+                    );
                     separator(ui);
                 }
                 group(ui, "ABOUT", &[[About]], 80.0, state, &mut action);

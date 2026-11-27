@@ -364,7 +364,16 @@ fn load_icon_kind(ctx: &mut CallCtx<'_>, cursor: bool) -> Result<DispatchOutcome
     let raw = ctx.arg_u32(1)?;
     // Preserve the virtual system cursor handle. Application icons must
     // actually decode; never substitute this cursor for a missing asset.
-    if instance == 0 && raw >= 32512 && raw <= 32651 {
+    if instance == 0 {
+        if cursor {
+            return match pocket_kernel::controls::system_cursor_handle(raw) {
+                Some(handle) => ret(handle),
+                None => {
+                    set_thread_error(ctx, 1814);
+                    ret(0)
+                }
+            };
+        }
         return ret(FAKE_ICON);
     }
     let name = read_wide_resource_key(ctx, raw)?;

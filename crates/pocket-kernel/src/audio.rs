@@ -978,6 +978,66 @@ impl AudioEngine {
         true
     }
 
+    /// Consecutive ordinary WAVEHDRs can alias one guest-writable DMA region.
+    /// Keep one live backing with counted submissions, preserving each header's
+    /// absolute completion cursor rather than freezing repeated initial copies.
+    pub fn queue_wave_alias(&self, handle: u32, previous_end: u64, samples: &[i16]) -> bool {
+        let Ok(mut shared) = self.shared.lock() else {
+            return false;
+        };
+        let active = shared.device_active;
+        let Some(stream) = shared.wave_streams.get_mut(&handle) else {
+            return false;
+        };
+        let length = samples.len() as u64;
+        if length == 0
+            || samples.len() % stream.format.channels.max(1) as usize != 0
+            || previous_end != stream.written
+            || length > previous_end
+        {
+            return false;
+        }
+        stream.advance_virtual(active);
+        if stream.consumed >= previous_end {
+            return false;
+        }
+        if let Some(backing) = stream.loop_buffer.as_mut() {
+            let end = stream
+                .consumed
+                .max(backing.start)
+                .saturating_add(backing.samples.len() as u64 * u64::from(backing.remaining))
+                .saturating_sub(backing.index as u64);
+            if backing.samples.len() != samples.len()
+                || end != previous_end
+                || backing.remaining == u32::MAX
+            {
+                return false;
+            }
+            backing.remaining += 1;
+            backing.samples.copy_from_slice(samples);
+        } else {
+            let start = previous_end - length;
+            let consumed = stream.consumed.saturating_sub(start);
+            let remove = (length - consumed) as usize;
+            if remove > stream.samples.len() {
+                return false;
+            }
+            stream.samples.truncate(stream.samples.len() - remove);
+            stream.loop_buffer = Some(WaveLoop {
+                samples: samples.to_vec(),
+                start,
+                index: consumed as usize,
+                remaining: 2,
+            });
+        }
+        stream.written = stream.written.saturating_add(length);
+        let format = stream.format;
+        if let Some(capture) = shared.capture.as_mut() {
+            capture.write(samples, format);
+        }
+        true
+    }
+
     /// Finish the current loop iteration, preserving its playback position and
     /// the PCM queued afterwards. Returns the old and shortened loop endpoints.
     pub fn break_wave_loop(&self, handle: u32) -> Option<(u64, u64)> {
@@ -1674,6 +1734,43 @@ fn fill_output_u16(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aliased_wave_tail_keeps_cursor_prefix_and_later_pcm_through_snapshot() {
+        let e = AudioEngine::new();
+        let f = GuestFormat {
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: 16,
+        };
+        e.open_wave_stream(1, f);
+        let tap = e.tap();
+        tap.drain_into(&mut []);
+        e.push_wave_samples(1, &[7, 8]); // Distinct earlier PCM must survive.
+        e.push_wave_samples(1, &[10, 20, 30]);
+        let mut out = [0; 3];
+        tap.drain_into(&mut out);
+        assert_eq!(out, [7, 8, 10]);
+        assert!(e.queue_wave_alias(1, 5, &[100, 200, 300]));
+        assert_eq!(e.wave_written_samples(1), 8);
+        assert_eq!(e.wave_playback_cursor(1), 3);
+        let mut one = [0];
+        tap.drain_into(&mut one);
+        assert_eq!(one, [200]);
+        assert!(e.queue_wave_alias(1, 8, &[1000, 2000, 3000]));
+        e.push_wave_samples(1, &[40, 50]); // Distinct later PCM must survive.
+        let restored = e.capture_snapshot().unwrap().restore().unwrap();
+        let t = restored.tap();
+        t.drain_into(&mut []);
+        let mut rest = [0; 9];
+        t.drain_into(&mut rest);
+        assert_eq!(rest, [3000, 1000, 2000, 3000, 1000, 2000, 3000, 40, 50]);
+        assert_eq!(restored.wave_playback_cursor(1), 13);
+        assert_eq!(restored.wave_written_samples(1), 13);
+        // A non-tail/expired submission cannot alter an unrelated stream.
+        assert!(!restored.queue_wave_alias(1, 8, &[1, 2, 3]));
+        assert!(!restored.queue_wave_alias(1, 13, &[1, 2, 3]));
+    }
 
     #[test]
     fn voice_groups_pause_resume_and_stop_independently_without_a_host_device() {

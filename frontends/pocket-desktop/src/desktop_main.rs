@@ -10,13 +10,13 @@
 
 mod app;
 mod bindings_visual;
+mod controller_labels;
 mod controller_ui;
 mod deck_navigation;
 mod desktop_pointer;
 mod file_dialog;
 mod fullscreen_layout;
 mod gamepad;
-mod controller_labels;
 mod gamepad_host;
 mod gizmondo_layout;
 mod host_gpu;
@@ -27,8 +27,8 @@ mod native_share;
 mod reconstruction;
 mod recording;
 mod recordings_gallery;
-mod rumble;
 mod remove_game;
+mod rumble;
 mod runner;
 mod screenshot;
 mod smaa;
@@ -186,7 +186,8 @@ fn run_launcher() -> Result<()> {
     if let Some(path) = log_path {
         log::info!("Logging to {}", path.display());
     }
-    let library = Library::open_with_profile(&library_root, profile).context("opening PocketHLE-Reborn library")?;
+    let library = Library::open_with_profile(&library_root, profile)
+        .context("opening PocketHLE-Reborn library")?;
 
     let launch_game = launch
         .as_ref()

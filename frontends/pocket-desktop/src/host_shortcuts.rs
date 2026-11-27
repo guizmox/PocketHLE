@@ -135,7 +135,10 @@ mod tests {
                 ..Default::default()
             },
             |ctx| {
-                assert_eq!(take(ctx), vec![Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F12]);
+                assert_eq!(
+                    take(ctx),
+                    vec![Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F12]
+                );
                 assert!(ctx.input(|i| i
                     .events
                     .iter()

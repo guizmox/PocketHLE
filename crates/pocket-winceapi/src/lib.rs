@@ -50,12 +50,14 @@ pub use directshow::{
     system_media_command, system_media_status, SystemMediaCommand, SystemMediaInput,
     SystemMediaStatus,
 };
+mod callback_unwind;
 pub mod dlgtemplate;
 pub mod game_dlls;
 pub mod gles;
 pub mod gles2;
 pub mod gles_exports;
 mod gps;
+mod guest_callbacks;
 pub mod gx;
 pub mod hss;
 mod htcsensor;
@@ -75,7 +77,10 @@ mod serial;
 mod shell;
 mod shell_keyboard;
 mod vibration;
+mod wave_alias;
 mod wavein;
+mod window_enable;
+mod window_update;
 mod wininet;
 mod ws2;
 mod zlib;
@@ -306,6 +311,8 @@ impl WinCeDispatcher {
         ce_crypto::register(&mut d);
         ce_database::register(&mut d);
         ce_notify::register(&mut d);
+        guest_callbacks::register(&mut d);
+        window_enable::register(&mut d);
         ce_services::register(&mut d);
         ws2::register(&mut d);
         legacy_services::register(&mut d);
@@ -555,7 +562,11 @@ impl Dispatcher for WinCeDispatcher {
         cpu: &mut dyn Cpu,
         kernel: &mut KernelState,
     ) -> Result<Option<u32>, KernelError> {
-        coredll::attach_static_imports(cpu, kernel, false)
+        let next = coredll::attach_static_imports(cpu, kernel, false)?;
+        if next.is_none() {
+            mfc::bind_data_imports(cpu, kernel)?;
+        }
+        Ok(next)
     }
 
     fn continue_static_attach(
@@ -563,7 +574,11 @@ impl Dispatcher for WinCeDispatcher {
         cpu: &mut dyn Cpu,
         kernel: &mut KernelState,
     ) -> Result<Option<u32>, KernelError> {
-        coredll::attach_static_imports(cpu, kernel, true)
+        let next = coredll::attach_static_imports(cpu, kernel, true)?;
+        if next.is_none() {
+            mfc::bind_data_imports(cpu, kernel)?;
+        }
+        Ok(next)
     }
 
     fn dispatch(
@@ -677,6 +692,22 @@ impl Dispatcher for WinCeDispatcher {
             }
             match handler(&mut ctx) {
                 Ok(o) => Ok(o),
+                Err(KernelError::RuntimeException {
+                    runtime,
+                    cause,
+                    os_error,
+                    path,
+                }) => mfc::raise_runtime_exception(&mut ctx, runtime, cause, os_error, &path),
+                // C++ bridge failures cannot be converted to a valid-looking
+                // null object or successful void method. Preserve the error for
+                // the shared session diagnostic rather than resuming bad state.
+                Err(e)
+                    if mfc::owns_thunk(thunk)
+                        || std::ptr::fn_addr_eq(handler, coredll::longjmp as Handler)
+                        || std::ptr::fn_addr_eq(handler, coredll::setjmp as Handler) =>
+                {
+                    Err(e)
+                }
                 Err(e) => {
                     // A handler that hit bad guest memory shouldn't
                     // bring the whole emulator down — the game itself
@@ -703,13 +734,24 @@ impl Dispatcher for WinCeDispatcher {
                             .last()
                             .map(|p| p.display().to_string())
                             .unwrap_or_default();
-                        format!("No native DLL was found. You can place a compatible WinCE DLL in {folder}. Game-local DLLs take priority.")
+                        if thunk.dll.eq_ignore_ascii_case("mfcce300.dll")
+                            && mfc::owns_runtime_state(kernel)
+                        {
+                            format!("This MFC API has no HLE implementation. A compatible WinCE runtime in {folder} can be selected at the next game launch. Active HLE and native MFC objects cannot be mixed.")
+                        } else {
+                            format!("No native DLL was found. You can place a compatible WinCE DLL in {folder}. Game-local DLLs take priority.")
+                        }
                     };
                     sink(format!("Unavailable API: {label}\n{detail}\nThe game may not work correctly. This call has no implementation."));
                 }
             }
 
-            if self.halt_on_unimplemented {
+            if thunk.dll.eq_ignore_ascii_case("mfcce300.dll") {
+                Err(KernelError::Dispatch(format!(
+                    "Unsupported MFC API: {}",
+                    thunk.label()
+                )))
+            } else if self.halt_on_unimplemented {
                 Ok(DispatchOutcome::Halt)
             } else {
                 Ok(DispatchOutcome::Unimplemented)

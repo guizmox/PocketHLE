@@ -703,7 +703,12 @@ impl Vfs {
             {
                 return Err("invalid writable snapshot file".into());
             }
+            // Owned temporary names were transactionally recreated before
+            // opening descriptions. Their contents are the captured version,
+            // even for a read-only alias whose old host timestamp has vanished.
+            let temporary = self.is_temporary_path(&path)?;
             if record.contents.is_none()
+                && !temporary
                 && !rewinds_backing
                 && (meta.len() != record.length
                     || (!mapped && meta.modified().ok() != record.modified))
@@ -1568,18 +1573,29 @@ pub struct SnapshotFileCommit {
     backups: Vec<(std::fs::File, Vec<u8>)>,
     applied: usize,
     created: Vec<PathBuf>,
+    temporary_names: Option<(VfsShared, HashSet<String>)>,
 }
 
 impl SnapshotFileCommit {
+    pub(super) fn track_temporary_names(&mut self, shared: VfsShared, names: HashSet<String>) {
+        self.temporary_names = Some((shared, names));
+    }
     pub fn commit(mut self) {
         self.applied = 0;
         self.backups.clear();
         self.created.clear();
+        self.temporary_names = None;
     }
 }
 
 impl Drop for SnapshotFileCommit {
     fn drop(&mut self) {
+        if let Some((shared, names)) = self.temporary_names.take() {
+            match shared.0.lock() {
+                Ok(mut state) => state.temporary_files.retain(|name| !names.contains(name)),
+                Err(_) => log::error!("snapshot temporary-name rollback lock poisoned"),
+            }
+        }
         for (file, bytes) in self.backups.iter_mut().take(self.applied).rev() {
             if let Err(error) = replace_file_bytes(file, bytes) {
                 log::error!("snapshot file rollback failed: {error}");
@@ -1615,6 +1631,7 @@ impl Vfs {
             backups: Vec::new(),
             applied: 0,
             created: Vec::new(),
+            temporary_names: None,
         };
         let mut prepared = BTreeMap::new();
         for (path, bytes, create) in writes.0 {

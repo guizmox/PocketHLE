@@ -431,7 +431,10 @@ fn worker(
     let mut next_scan = Instant::now() + Duration::from_secs(1);
     let sensors = sdl.sensor().ok();
     let mut physical_sensor = accelerometer_enabled.load(Ordering::Relaxed);
-    let mut host_accelerometer = sensors.as_ref().filter(|_| physical_sensor).and_then(open_host_accelerometer);
+    let mut host_accelerometer = sensors
+        .as_ref()
+        .filter(|_| physical_sensor)
+        .and_then(open_host_accelerometer);
     let mut next_acceleration = Instant::now();
     let mut acceleration_controller = None;
     let publish_acceleration = pocket_core::kernel::accelerometer::publish;
@@ -695,10 +698,13 @@ fn worker(
                 acceleration_controller = current;
             }
             let sample = if active {
-                let sample = host_accelerometer.as_ref().and_then(|sensor| match sensor.get_data() {
-                    Ok(SensorData::Accel(axes)) => Some(axes),
-                    _ => None,
-                });
+                let sample =
+                    host_accelerometer
+                        .as_ref()
+                        .and_then(|sensor| match sensor.get_data() {
+                            Ok(SensorData::Accel(axes)) => Some(axes),
+                            _ => None,
+                        });
                 if sample.is_none() {
                     host_accelerometer = None;
                 }

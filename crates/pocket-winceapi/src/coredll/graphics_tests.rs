@@ -961,7 +961,27 @@ fn visible_native_child_gets_an_initial_paint_after_its_size_notification() {
         .collect();
     assert_eq!(messages, vec![WM_PAINT]);
     ctx.kernel.posted_messages.clear();
-    call(&mut ctx, move_window, &[hwnd, 12, 14, 100, 80, 1]);
+    for (reg, value) in [ArmReg::R0, ArmReg::R1, ArmReg::R2, ArmReg::R3]
+        .into_iter()
+        .zip([hwnd, 12, 14, 100])
+    {
+        ctx.cpu.write_reg(reg, value).unwrap();
+    }
+    let sp = ctx.cpu.read_reg(ArmReg::Sp).unwrap();
+    ctx.cpu.write_mem(sp, &80u32.to_le_bytes()).unwrap();
+    ctx.cpu.write_mem(sp + 4, &1u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        move_window(&mut ctx).unwrap(),
+        DispatchOutcome::JumpTo(0x2300)
+    );
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R1).unwrap(), WM_SIZE);
+    assert_eq!(ctx.cpu.read_reg(ArmReg::R3).unwrap(), 100 | (80 << 16));
+    ctx.cpu.write_reg(ArmReg::R0, 0).unwrap();
+    assert_eq!(
+        move_window(&mut ctx).unwrap(),
+        DispatchOutcome::ReturnedR0(1)
+    );
+    assert!(ctx.kernel.notify_message_frames.is_empty());
     assert!(ctx
         .kernel
         .posted_messages

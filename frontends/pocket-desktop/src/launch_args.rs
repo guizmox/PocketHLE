@@ -51,10 +51,21 @@ pub fn startup_fullscreen(explicit: Option<bool>) -> bool {
 /// Cap the physical outer window at 1280x800, or the monitor when smaller.
 /// Native viewport geometry is logical: convert the fixed pixel target once,
 /// then subtract measured logical decorations to obtain the client size.
-pub fn startup_window_size(monitor: [f32; 2], decorations: [f32; 2], pixels_per_point: f32) -> Option<[f32; 2]> {
-    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0
-        || monitor.iter().chain(decorations.iter()).any(|v| !v.is_finite())
-        || monitor.iter().any(|v| *v <= 0.0) { return None; }
+pub fn startup_window_size(
+    monitor: [f32; 2],
+    decorations: [f32; 2],
+    pixels_per_point: f32,
+) -> Option<[f32; 2]> {
+    if !pixels_per_point.is_finite()
+        || pixels_per_point <= 0.0
+        || monitor
+            .iter()
+            .chain(decorations.iter())
+            .any(|v| !v.is_finite())
+        || monitor.iter().any(|v| *v <= 0.0)
+    {
+        return None;
+    }
     let size = [
         monitor[0].min(1280.0 / pixels_per_point) - decorations[0].max(0.0),
         monitor[1].min(800.0 / pixels_per_point) - decorations[1].max(0.0),
@@ -110,7 +121,9 @@ pub fn find_game<'a>(
         .collect();
     match matches.as_slice() {
         [(id, _)] => Ok((*id).into()),
-        [] => Err(format!("Game not found in the PocketHLE-Reborn library: {query}")),
+        [] => Err(format!(
+            "Game not found in the PocketHLE-Reborn library: {query}"
+        )),
         _ => Err(format!(
             "Several games are named {query}. Use an ID: {}",
             matches
@@ -211,13 +224,28 @@ mod startup_tests {
     }
     #[test]
     fn fixed_physical_size_is_capped_to_monitor_and_subtracts_borders() {
-        assert_eq!(startup_window_size([1280.,800.],[0.,0.],1.),Some([1280.,800.]));
-        assert_eq!(startup_window_size([1920.,1080.],[16.,39.],1.),Some([1264.,761.]));
-        assert_eq!(startup_window_size([1024.,600.],[8.,24.],1.),Some([1016.,576.]));
-        assert_eq!(startup_window_size([1280.,720.],[8.,24.],2.),Some([632.,376.]));
-        assert_eq!(startup_window_size([600.,400.],[8.,24.],2.),Some([592.,376.]));
-        assert_eq!(startup_window_size([0.,800.],[0.,0.],1.),None);
-        assert_eq!(startup_window_size([f32::NAN,800.],[0.,0.],1.),None);
-        assert_eq!(startup_window_size([1280.,800.],[0.,0.],0.),None);
+        assert_eq!(
+            startup_window_size([1280., 800.], [0., 0.], 1.),
+            Some([1280., 800.])
+        );
+        assert_eq!(
+            startup_window_size([1920., 1080.], [16., 39.], 1.),
+            Some([1264., 761.])
+        );
+        assert_eq!(
+            startup_window_size([1024., 600.], [8., 24.], 1.),
+            Some([1016., 576.])
+        );
+        assert_eq!(
+            startup_window_size([1280., 720.], [8., 24.], 2.),
+            Some([632., 376.])
+        );
+        assert_eq!(
+            startup_window_size([600., 400.], [8., 24.], 2.),
+            Some([592., 376.])
+        );
+        assert_eq!(startup_window_size([0., 800.], [0., 0.], 1.), None);
+        assert_eq!(startup_window_size([f32::NAN, 800.], [0., 0.], 1.), None);
+        assert_eq!(startup_window_size([1280., 800.], [0., 0.], 0.), None);
     }
 }

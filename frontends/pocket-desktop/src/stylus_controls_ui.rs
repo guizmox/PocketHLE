@@ -434,7 +434,12 @@ impl PocketLauncher {
     }
 
     fn resize_live_grid(&mut self, columns: u8, rows: u8) {
-        if (columns, rows) == (self.running_stylus_grid.columns, self.running_stylus_grid.rows) {
+        if (columns, rows)
+            == (
+                self.running_stylus_grid.columns,
+                self.running_stylus_grid.rows,
+            )
+        {
             return;
         }
         self.cancel_grid();
@@ -468,7 +473,9 @@ impl PocketLauncher {
                     editor.message = "Assignment cleared.".into();
                     editor.selected
                 }) {
-                    self.running_stylus_grid.bindings.retain(|binding| binding.cell != cell);
+                    self.running_stylus_grid
+                        .bindings
+                        .retain(|binding| binding.cell != cell);
                     self.live_grid_dirty = true;
                 }
             } else if index >= 2 {
@@ -477,9 +484,16 @@ impl PocketLauncher {
                 let grid = &self.running_stylus_grid;
                 let size = (grid.columns.max(grid.rows), grid.columns.min(grid.rows));
                 let sizes = pocket_library::stylus_grid::StylusGrid::SIZES;
-                let next = sizes.iter().position(|candidate| *candidate == size).map_or(0, |i| (i + 1) % sizes.len());
+                let next = sizes
+                    .iter()
+                    .position(|candidate| *candidate == size)
+                    .map_or(0, |i| (i + 1) % sizes.len());
                 let (columns, rows) = sizes[next];
-                let (columns, rows) = if self.live_grid_portrait() { (rows, columns) } else { (columns, rows) };
+                let (columns, rows) = if self.live_grid_portrait() {
+                    (rows, columns)
+                } else {
+                    (columns, rows)
+                };
                 self.resize_live_grid(columns, rows);
             }
         }
@@ -496,7 +510,10 @@ impl PocketLauncher {
                 editor.waiting = None;
             }
         }
-        let (columns, rows) = (self.running_stylus_grid.columns, self.running_stylus_grid.rows);
+        let (columns, rows) = (
+            self.running_stylus_grid.columns,
+            self.running_stylus_grid.rows,
+        );
         let editing = self.stylus_editor.is_some();
         if editing {
             ui.painter()
@@ -513,19 +530,50 @@ impl PocketLauncher {
             for row in 0..rows {
                 for column in 0..columns {
                     let size = rect.size() / Vec2::new(columns.into(), rows.into());
-                    let cell_rect = Rect::from_min_size(rect.min + size * Vec2::new(column.into(), row.into()), size);
+                    let cell_rect = Rect::from_min_size(
+                        rect.min + size * Vec2::new(column.into(), row.into()),
+                        size,
+                    );
                     let cell = usize::from(row) * usize::from(columns) + usize::from(column);
-                    let binding = self.running_stylus_grid.bindings.iter().find(|binding| binding.cell == cell);
-                    let label = binding.map(|binding| crate::controller_labels::grid(ui.ctx(), &binding.input)).unwrap_or_else(|| (cell + 1).to_string());
-                    ui.painter().rect_stroke(cell_rect, 0.0, egui::Stroke::new(1.0, Color32::from_white_alpha(150)));
-                    ui.painter().text(cell_rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), Color32::WHITE);
+                    let binding = self
+                        .running_stylus_grid
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.cell == cell);
+                    let label = binding
+                        .map(|binding| crate::controller_labels::grid(ui.ctx(), &binding.input))
+                        .unwrap_or_else(|| (cell + 1).to_string());
+                    ui.painter().rect_stroke(
+                        cell_rect,
+                        0.0,
+                        egui::Stroke::new(1.0, Color32::from_white_alpha(150)),
+                    );
+                    ui.painter().text(
+                        cell_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(12.0),
+                        Color32::WHITE,
+                    );
                     if editing {
                         ui.allocate_ui_at_rect(cell_rect, |ui| {
                             let response = crate::controller_ui::add_sized_enabled(
-                                ui, true, cell_rect.size(), egui::Button::new(" ").frame(false),
+                                ui,
+                                true,
+                                cell_rect.size(),
+                                egui::Button::new(" ").frame(false),
                             );
-                            if response.has_focus() || self.stylus_editor.as_ref().is_some_and(|editor| editor.selected == Some(cell)) {
-                                ui.painter().rect_stroke(cell_rect.shrink(2.0), 0.0, egui::Stroke::new(2.0, Color32::LIGHT_BLUE));
+                            if response.has_focus()
+                                || self
+                                    .stylus_editor
+                                    .as_ref()
+                                    .is_some_and(|editor| editor.selected == Some(cell))
+                            {
+                                ui.painter().rect_stroke(
+                                    cell_rect.shrink(2.0),
+                                    0.0,
+                                    egui::Stroke::new(2.0, Color32::LIGHT_BLUE),
+                                );
                             }
                             if response.clicked() {
                                 if let Some(editor) = self.stylus_editor.as_mut() {
@@ -540,7 +588,9 @@ impl PocketLauncher {
             }
             ui.allocate_ui_at_rect(controls, |ui| {
                 let row_width_id = ui.id().with("live_grid_controls_width");
-                let row_width = ui.data_mut(|data| data.get_temp::<f32>(row_width_id)).unwrap_or(202.0);
+                let row_width = ui
+                    .data_mut(|data| data.get_temp::<f32>(row_width_id))
+                    .unwrap_or(202.0);
                 ui.horizontal(|ui| {
                     let padding = ((ui.available_width() - row_width) / 2.0).max(0.0);
                     if padding > 0.0 {
@@ -552,12 +602,18 @@ impl PocketLauncher {
                             .show_ui(ui, |ui| {
                                 for (c, r) in pocket_library::stylus_grid::StylusGrid::SIZES {
                                     let (c, r) = if portrait { (r, c) } else { (c, r) };
-                                    if crate::controller_ui::button(ui, format!("{c} × {r}")).clicked() {
+                                    if crate::controller_ui::button(ui, format!("{c} × {r}"))
+                                        .clicked()
+                                    {
                                         self.resize_live_grid(c, r);
                                     }
                                 }
                             });
-                        let label = if editing { "Resume Game" } else { "Configure Grid" };
+                        let label = if editing {
+                            "Resume Game"
+                        } else {
+                            "Configure Grid"
+                        };
                         if crate::controller_ui::button(ui, label).clicked() {
                             self.toggle_live_grid();
                         }
@@ -592,48 +648,59 @@ impl PocketLauncher {
     pub(super) fn ui_grid_preview(&mut self, ctx: &egui::Context, grid: &StylusGrid) {
         let mut open = true;
         let mut done = false;
-        editor_window(ctx, "View Grid").open(&mut open).show(ctx, |ui| {
-            crate::controller_ui::page_scope(ui, "stylus_grid_preview", |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.label(format!("{} × {}", grid.columns, grid.rows));
-                    let columns = usize::from(grid.columns.max(1));
-                    let rows = usize::from(grid.rows.max(1));
-                    let max_height = (ctx.available_rect().height() - 150.0).max(64.0);
-                    let side = (ui.available_width() / columns as f32)
-                        .min(max_height / rows as f32)
-                        .clamp(14.0, 70.0);
-                    let (rect, _) = ui.allocate_exact_size(
-                        Vec2::new(side * columns as f32, side * rows as f32),
-                        Sense::hover(),
-                    );
-                    for row in 0..rows {
-                        for column in 0..columns {
-                            let cell = row * columns + column;
-                            let rect = Rect::from_min_size(
-                                rect.min + Vec2::new(column as f32 * side, row as f32 * side),
-                                Vec2::splat(side),
-                            );
-                            let label = grid
-                                .bindings
-                                .iter()
-                                .find(|binding| binding.cell == cell)
-                                .map(|binding| crate::controller_labels::grid(ctx, &binding.input))
-                                .unwrap_or_else(|| (cell + 1).to_string());
-                            ui.painter().rect_stroke(
-                                rect, 0.0, egui::Stroke::new(1.0, Color32::GRAY),
-                            );
-                            ui.painter().with_clip_rect(ui.clip_rect().intersect(rect)).text(
-                                rect.center(), egui::Align2::CENTER_CENTER, &label,
-                                egui::FontId::proportional(11.0), Color32::WHITE,
-                            );
-                            ui.interact(rect, ui.id().with(cell), Sense::hover())
-                                .on_hover_text(label);
+        editor_window(ctx, "View Grid")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                crate::controller_ui::page_scope(ui, "stylus_grid_preview", |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label(format!("{} × {}", grid.columns, grid.rows));
+                        let columns = usize::from(grid.columns.max(1));
+                        let rows = usize::from(grid.rows.max(1));
+                        let max_height = (ctx.available_rect().height() - 150.0).max(64.0);
+                        let side = (ui.available_width() / columns as f32)
+                            .min(max_height / rows as f32)
+                            .clamp(14.0, 70.0);
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(side * columns as f32, side * rows as f32),
+                            Sense::hover(),
+                        );
+                        for row in 0..rows {
+                            for column in 0..columns {
+                                let cell = row * columns + column;
+                                let rect = Rect::from_min_size(
+                                    rect.min + Vec2::new(column as f32 * side, row as f32 * side),
+                                    Vec2::splat(side),
+                                );
+                                let label = grid
+                                    .bindings
+                                    .iter()
+                                    .find(|binding| binding.cell == cell)
+                                    .map(|binding| {
+                                        crate::controller_labels::grid(ctx, &binding.input)
+                                    })
+                                    .unwrap_or_else(|| (cell + 1).to_string());
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    0.0,
+                                    egui::Stroke::new(1.0, Color32::GRAY),
+                                );
+                                ui.painter()
+                                    .with_clip_rect(ui.clip_rect().intersect(rect))
+                                    .text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        &label,
+                                        egui::FontId::proportional(11.0),
+                                        Color32::WHITE,
+                                    );
+                                ui.interact(rect, ui.id().with(cell), Sense::hover())
+                                    .on_hover_text(label);
+                            }
                         }
-                    }
-                    done = crate::controller_ui::button(ui, "Done").clicked();
+                        done = crate::controller_ui::button(ui, "Done").clicked();
+                    });
                 });
             });
-        });
         self.grid_preview = open && !done;
     }
 
@@ -643,30 +710,54 @@ impl PocketLauncher {
         };
         let mut open = true;
         let mut done = false;
-        editor_window(ctx, "Test touch steering").open(&mut open).show(ctx, |ui| {
-            crate::controller_ui::page_scope(ui, "stylus_steering_test", |ui| {
-                ui.label("Try your arrows / D-pad and left stick. Release to return to the centre.");
-                let ratio = if editor.portrait { 3.0 / 4.0 } else { 4.0 / 3.0 };
-                let max_height = (ctx.available_rect().height() - 260.0).clamp(130.0, 360.0);
-                let width = ui.available_width().min(480.0).min(max_height * ratio).max(100.0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(width, width / ratio), Sense::hover());
-                let painter = ui.painter();
-                painter.rect_filled(rect, 4.0, Color32::from_rgb(18, 32, 48));
-                painter.line_segment(
-                    [egui::pos2(rect.center().x, rect.top()), egui::pos2(rect.center().x, rect.bottom())],
-                    egui::Stroke::new(1.0, Color32::GRAY),
-                );
-                painter.line_segment(
-                    [egui::pos2(rect.left(), rect.center().y), egui::pos2(rect.right(), rect.center().y)],
-                    egui::Stroke::new(1.0, Color32::GRAY),
-                );
-                painter.circle_filled(
-                    rect.min + Vec2::new(editor.point.0 * rect.width(), editor.point.1 * rect.height()),
-                    7.0, Color32::from_rgb(255, 100, 65),
-                );
-                done = crate::controller_ui::button(ui, "Done").clicked();
+        editor_window(ctx, "Test touch steering")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                crate::controller_ui::page_scope(ui, "stylus_steering_test", |ui| {
+                    ui.label(
+                        "Try your arrows / D-pad and left stick. Release to return to the centre.",
+                    );
+                    let ratio = if editor.portrait {
+                        3.0 / 4.0
+                    } else {
+                        4.0 / 3.0
+                    };
+                    let max_height = (ctx.available_rect().height() - 260.0).clamp(130.0, 360.0);
+                    let width = ui
+                        .available_width()
+                        .min(480.0)
+                        .min(max_height * ratio)
+                        .max(100.0);
+                    let (rect, _) =
+                        ui.allocate_exact_size(Vec2::new(width, width / ratio), Sense::hover());
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 4.0, Color32::from_rgb(18, 32, 48));
+                    painter.line_segment(
+                        [
+                            egui::pos2(rect.center().x, rect.top()),
+                            egui::pos2(rect.center().x, rect.bottom()),
+                        ],
+                        egui::Stroke::new(1.0, Color32::GRAY),
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(rect.left(), rect.center().y),
+                            egui::pos2(rect.right(), rect.center().y),
+                        ],
+                        egui::Stroke::new(1.0, Color32::GRAY),
+                    );
+                    painter.circle_filled(
+                        rect.min
+                            + Vec2::new(
+                                editor.point.0 * rect.width(),
+                                editor.point.1 * rect.height(),
+                            ),
+                        7.0,
+                        Color32::from_rgb(255, 100, 65),
+                    );
+                    done = crate::controller_ui::button(ui, "Done").clicked();
+                });
             });
-        });
         if !open || done {
             self.stylus_editor = None;
             self.controller_ui.stop_repeat();

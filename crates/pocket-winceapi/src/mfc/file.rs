@@ -28,11 +28,30 @@ fn symbol(name: &str) -> String {
     format!("__PocketHLE_CFile_{name}")
 }
 pub(super) const EXPORTS: &[(u16, &str, crate::Handler)] = &[
+    (
+        1469,
+        "?GetRuntimeClass@CFile@@UBAPAUCRuntimeClass@@XZ",
+        runtime,
+    ),
+    (1418, "?GetPosition@CFile@@UBAKXZ", position),
+    (1292, "?GetFileName@CFile@@UBA?AVCString@@XZ", name),
+    (1296, "?GetFileTitle@CFile@@UBA?AVCString@@XZ", title),
+    (1294, "?GetFilePath@CFile@@UBA?AVCString@@XZ", path),
+    (2346, "?SetFilePath@CFile@@UAAXPBG@Z", set_path),
+    (2251, "?Seek@CFile@@UAAJJI@Z", seek),
+    (2368, "?SetLength@CFile@@UAAXK@Z", set_length),
+    (1340, "?GetLength@CFile@@UBAKXZ", length),
+    (2584, "?Write@CFile@@UAAXPBXI@Z", write),
+    (551, "?Abort@CFile@@UAAXXZ", abort),
+    (1168, "?Flush@CFile@@UAAXXZ", flush),
+    (1231, "?GetBufferPtr@CFile@@UAAIIIPAPAX0@Z", buffer),
     (97, "??0CFile@@QAA@XZ", construct as crate::Handler),
     (242, "??1CFile@@UAA@XZ", destruct),
+    (2137, "?Read@CFile@@UAAIPAXI@Z", read),
     (854, "?Close@CFile@@UAAXXZ", close),
     (2063, "?Open@CFile@@UAAHPBGIPAVCFileException@@@Z", open),
-    (2170, "?Rename@CFile@@SAXPBG0@Z", rename),
+    (2220, "?Rename@CFile@@SAXPBG0@Z", rename),
+    (2170, "?Remove@CFile@@SAXPBG@Z", remove_file),
 ];
 
 pub(super) fn register(d: &mut WinCeDispatcher) {
@@ -62,9 +81,15 @@ pub(super) fn register(d: &mut WinCeDispatcher) {
         d.register_handler("coredll.dll", &symbol(name), handler);
     }
     d.register_handler("coredll.dll", &symbol("BaseClass"), base_class);
-    d.register_handler("coredll.dll", &symbol("RootClass"), root_class);
+    for (name, handler) in [
+        ("__PocketHLE_MFC_FileConstruct", construct as crate::Handler),
+        ("__PocketHLE_MFC_FileOpen", open),
+        ("__PocketHLE_MFC_FileDestruct", destruct),
+    ] {
+        d.register_handler("coredll.dll", name, handler);
+    }
 }
-fn class_data(ctx: &mut CallCtx<'_>) -> Result<u32, KernelError> {
+pub(super) fn class_data(ctx: &mut CallCtx<'_>) -> Result<u32, KernelError> {
     let runtime = symbol("Runtime");
     let owner = ctx
         .kernel
@@ -86,20 +111,16 @@ fn class_data(ctx: &mut CallCtx<'_>) -> Result<u32, KernelError> {
         })
         .collect::<Result<_, _>>()?;
     let base = *exports.get(&symbol("BaseClass")).unwrap();
-    let root = *exports.get(&symbol("RootClass")).unwrap();
     // One DLL-lifetime allocation, rooted in the existing guest export map.
     // Heap bytes and this root already participate in native snapshots.
-    let p = alloc(ctx, 160)?;
+    let p = alloc(ctx, 112)?;
     let result = (|| {
         for (i, a) in methods.into_iter().enumerate() {
             put(ctx, p + i as u32 * 4, a)?;
         }
-        ctx.cpu.write_mem(p + 128, b"CFile\0CObject\0")?;
-        for (i, v) in [p + 128, 16, 0xffff, 0, base, 0].into_iter().enumerate() {
+        ctx.cpu.write_mem(p + 104, b"CFile\0")?;
+        for (i, v) in [p + 104, 16, 0xffff, 0, base, 0].into_iter().enumerate() {
             put(ctx, p + 80 + i as u32 * 4, v)?;
-        }
-        for (i, v) in [p + 134, 4, 0xffff, 0, root, 0].into_iter().enumerate() {
-            put(ctx, p + 104 + i as u32 * 4, v)?;
         }
         Ok(())
     })();
@@ -114,34 +135,14 @@ fn class_data(ctx: &mut CallCtx<'_>) -> Result<u32, KernelError> {
         .insert(DATA.into(), p);
     Ok(p)
 }
-/// CArchive's base-CFile bridge must not silently bypass guest virtual I/O.
-pub(super) fn archive_handle(ctx: &mut CallCtx<'_>, object: u32) -> Result<u32, KernelError> {
-    let table = word(ctx, object)?;
-    if !ctx
-        .kernel
-        .dynamic_exports
-        .values()
-        .any(|exports| exports.get(DATA) == Some(&table))
-    {
-        return Err(KernelError::Loader(
-            "CArchive requires a base HLE CFile; guest virtual file overrides are unsupported"
-                .into(),
-        ));
-    }
-    let handle = word(ctx, object + 4)?;
-    ctx.kernel
-        .vfs
-        .is_open(handle)
-        .then_some(handle)
-        .ok_or_else(|| io_error("archive file"))
-}
 #[cfg(test)]
 pub(super) fn install_test_exports(kernel: &mut pocket_kernel::KernelState) {
-    let exports = METHODS
-        .iter()
-        .chain(["BaseClass", "RootClass"].iter())
+    use pocket_kernel::Dispatcher;
+    let exports = WinCeDispatcher::new()
+        .dynamic_names("coredll.dll")
+        .into_iter()
         .enumerate()
-        .map(|(i, name)| (symbol(name), 0x70000100 + i as u32 * 32))
+        .map(|(i, n)| (n, 0x70010000 + i as u32 * 32))
         .collect();
     kernel.dynamic_exports.insert(1, exports);
 }
@@ -159,10 +160,9 @@ fn runtime(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(class_data(ctx)? + 80))
 }
 pub(super) fn base_class(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(class_data(ctx)? + 104))
-}
-fn root_class(_: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    Ok(DispatchOutcome::ReturnedR0(0))
+    Ok(DispatchOutcome::ReturnedR0(super::classes::runtime(
+        ctx, "CObject",
+    )?))
 }
 fn unsupported(_: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Err(KernelError::Loader(
@@ -181,11 +181,30 @@ fn handle(ctx: &mut CallCtx<'_>) -> Result<u32, KernelError> {
     let o = ctx.arg_u32(0)?;
     let h = word(ctx, o + 4)?;
     if !ctx.kernel.vfs.is_open(h) {
-        return Err(KernelError::Loader(
-            "CFile operation on a closed file".into(),
-        ));
+        return Err(failure(ctx, o, 6));
     }
     Ok(h)
+}
+pub(super) fn failure(ctx: &mut CallCtx<'_>, file: u32, os: u32) -> KernelError {
+    match strings::value(ctx, file + 12) {
+        Ok(path) => super::io_exceptions::fault(
+            super::io_exceptions::FILE,
+            if os == u32::MAX {
+                1
+            } else {
+                super::io_exceptions::os_cause(os)
+            },
+            os,
+            path,
+        ),
+        Err(error) => error,
+    }
+}
+fn failure_for_call(ctx: &mut CallCtx<'_>) -> KernelError {
+    match ctx.arg_u32(0) {
+        Ok(file) => failure(ctx, file, u32::MAX),
+        Err(error) => error,
+    }
 }
 fn io_error(operation: &str) -> KernelError {
     KernelError::Loader(format!("CFile::{operation} failed"))
@@ -202,8 +221,17 @@ fn open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     }
     ctx.cpu
         .check_guest_access(o, 16, pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE)?;
+    if error != 0 {
+        ctx.cpu
+            .check_guest_access(error, 20, pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE)?;
+        strings::validate_assignment_target(ctx, error + 16)?;
+    }
     let text = strings::wide(ctx, p)?;
-    let path = String::from_utf16_lossy(&text);
+    let path = ctx
+        .kernel
+        .vfs
+        .full_guest_path(&String::from_utf16_lossy(&text));
+    let text: Vec<_> = path.encode_utf16().collect();
     let access = match mode & 3 {
         0 => 1,
         1 => 2,
@@ -239,29 +267,22 @@ fn open(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             Ok(DispatchOutcome::ReturnedR0(1))
         }
         Err(code) => {
+            log::debug!("CFile::Open({path:?}, mode=0x{mode:x}) failed: WinCE error {code}");
             crate::coredll::set_thread_error(ctx, code);
             if error != 0 {
-                let cause = match code {
-                    2 => 2,
-                    3 => 3,
-                    5 => 5,
-                    32 => 11,
-                    33 => 12,
-                    112 => 13,
-                    _ => 1,
-                };
-                put(ctx, error + 4, cause)?;
-                put(ctx, error + 8, code)?;
-                strings::replace(ctx, error + 12, &text)?;
+                let cause = super::io_exceptions::os_cause(code);
+                put(ctx, error + 8, cause)?;
+                put(ctx, error + 12, code)?;
+                strings::replace(ctx, error + 16, &text)?;
             }
             Ok(DispatchOutcome::ReturnedR0(0))
         }
     }
 }
-fn close_impl(ctx: &mut CallCtx<'_>, o: u32) -> Result<(), KernelError> {
+pub(super) fn close_impl(ctx: &mut CallCtx<'_>, o: u32) -> Result<(), KernelError> {
     let h = word(ctx, o + 4)?;
     if h != u32::MAX && !ctx.kernel.vfs.close(h) {
-        return Err(io_error("Close"));
+        return Err(failure(ctx, o, 6));
     }
     put(ctx, o + 4, u32::MAX)?;
     put(ctx, o + 8, 0)?;
@@ -283,7 +304,7 @@ fn abort(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     strings::replace(ctx, o + 12, &[])?;
     Ok(DispatchOutcome::ReturnedR0(0))
 }
-fn destruct(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+pub(super) fn destruct(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let o = ctx.arg_u32(0)?;
     if word(ctx, o + 8)? != 0 {
         close_impl(ctx, o)?;
@@ -306,9 +327,9 @@ fn position(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         .kernel
         .vfs
         .position(h)
-        .ok_or_else(|| io_error("GetPosition"))?;
+        .ok_or_else(|| failure_for_call(ctx))?;
     Ok(DispatchOutcome::ReturnedR0(
-        u32::try_from(p).map_err(|_| io_error("GetPosition overflow"))?,
+        u32::try_from(p).map_err(|_| failure_for_call(ctx))?,
     ))
 }
 fn length(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -317,9 +338,9 @@ fn length(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         .kernel
         .vfs
         .size(h)
-        .ok_or_else(|| io_error("GetLength"))?;
+        .ok_or_else(|| failure_for_call(ctx))?;
     Ok(DispatchOutcome::ReturnedR0(
-        u32::try_from(n).map_err(|_| io_error("GetLength overflow"))?,
+        u32::try_from(n).map_err(|_| failure_for_call(ctx))?,
     ))
 }
 fn seek(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -335,9 +356,9 @@ fn seek(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         .kernel
         .vfs
         .seek(h, off, kind)
-        .ok_or_else(|| io_error("Seek"))?;
+        .ok_or_else(|| failure_for_call(ctx))?;
     Ok(DispatchOutcome::ReturnedR0(
-        u32::try_from(p).map_err(|_| io_error("Seek overflow"))?,
+        u32::try_from(p).map_err(|_| failure_for_call(ctx))?,
     ))
 }
 fn set_length(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -346,16 +367,16 @@ fn set_length(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     ctx.kernel
         .vfs
         .seek(h, n as i64, SeekKind::Begin)
-        .ok_or_else(|| io_error("SetLength"))?;
+        .ok_or_else(|| failure_for_call(ctx))?;
     let ok = ctx.kernel.vfs.set_end_of_file(h);
     if !ok {
-        return Err(io_error("SetLength"));
+        return Err(failure_for_call(ctx));
     }
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 fn flush(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let h = handle(ctx)?;
-    ctx.kernel.vfs.flush(h).map_err(|_| io_error("Flush"))?;
+    ctx.kernel.vfs.flush(h).map_err(|_| failure_for_call(ctx))?;
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 fn read(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -372,7 +393,7 @@ fn read(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
             .kernel
             .vfs
             .read(h, &mut buffer[..count])
-            .ok_or_else(|| io_error("Read"))?;
+            .ok_or_else(|| failure_for_call(ctx))?;
         ctx.cpu.write_mem(dst + total, &buffer[..got])?;
         total += got as u32;
         if got < count {
@@ -391,7 +412,7 @@ fn write(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
         let count = (n - total).min(65536);
         let buffer = ctx.cpu.read_mem(src + total, count)?;
         if ctx.kernel.vfs.write(h, &buffer) != Some(count as usize) {
-            return Err(io_error("Write"));
+            return Err(failure_for_call(ctx));
         }
         total += count;
     }
@@ -404,24 +425,19 @@ fn path(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     new_string(ctx, out, &text)?;
     Ok(DispatchOutcome::ReturnedR0(out))
 }
-fn name_part(ctx: &mut CallCtx<'_>, title: bool) -> Result<DispatchOutcome, KernelError> {
+fn name_part(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let o = ctx.arg_u32(0)?;
     let out = ctx.arg_u32(1)?;
     let text = String::from_utf16_lossy(&strings::value(ctx, o + 12)?);
     let name = text.rsplit(['\\', '/']).next().unwrap_or("");
-    let name = if title {
-        name.rsplit_once('.').map_or(name, |p| p.0)
-    } else {
-        name
-    };
     new_string(ctx, out, &name.encode_utf16().collect::<Vec<_>>())?;
     Ok(DispatchOutcome::ReturnedR0(out))
 }
 fn name(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    name_part(ctx, false)
+    name_part(ctx)
 }
 fn title(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    name_part(ctx, true)
+    name_part(ctx)
 }
 fn set_path(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let o = ctx.arg_u32(0)?;
@@ -430,26 +446,35 @@ fn set_path(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     strings::replace(ctx, o + 12, &text)?;
     Ok(DispatchOutcome::ReturnedR0(0))
 }
+fn remove_file(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let path = ctx.arg_u32(0)?;
+    let path = String::from_utf16_lossy(&strings::wide(ctx, path)?);
+    ctx.kernel.vfs.delete(&path).map_err(|os| {
+        super::io_exceptions::fault(
+            super::io_exceptions::FILE,
+            super::io_exceptions::os_cause(os),
+            os,
+            path.encode_utf16().collect(),
+        )
+    })?;
+    Ok(DispatchOutcome::ReturnedR0(0))
+}
+
 fn rename(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let a = ctx.arg_u32(0)?;
     let b = ctx.arg_u32(1)?;
     let a = String::from_utf16_lossy(&strings::wide(ctx, a)?);
     let b = String::from_utf16_lossy(&strings::wide(ctx, b)?);
-    ctx.kernel
-        .vfs
-        .rename(&a, &b)
-        .map_err(|_| io_error("Rename"))?;
+    ctx.kernel.vfs.rename(&a, &b).map_err(|os| {
+        super::io_exceptions::fault(
+            super::io_exceptions::FILE,
+            super::io_exceptions::os_cause(os),
+            os,
+            a.encode_utf16().collect(),
+        )
+    })?;
     Ok(DispatchOutcome::ReturnedR0(0))
 }
-fn buffer(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
-    if ctx.arg_u32(1)? != 0 {
-        return Err(KernelError::Loader(
-            "CFile does not expose a direct buffer".into(),
-        ));
-    }
-    Ok(DispatchOutcome::ReturnedR0(0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,4 +603,58 @@ mod tests {
         // The class table has DLL lifetime; the instance's CString does not.
         assert!(kernel.heap.free_bytes() > class_free);
     }
+}
+
+#[cfg(test)]
+mod operation_ordinal_tests {
+    use crate::bluetooth::tests::{call, setup};
+    use pocket_cpu::Cpu;
+    #[test]
+    fn retail_remove_and_rename_ordinals_operate_on_the_distinct_real_vfs_files() {
+        let (mut cpu, mut k, mut d) = setup();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("old.bin"), b"keep data").unwrap();
+        std::fs::write(directory.path().join("remove.bin"), b"delete data").unwrap();
+        k.vfs.mount("\\", directory.path());
+        for (address, path) in [
+            (0x1100, r"\old.bin"),
+            (0x1200, r"\renamed.bin"),
+            (0x1300, r"\remove.bin"),
+        ] {
+            let bytes: Vec<_> = path
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            cpu.write_mem(address, &bytes).unwrap();
+        }
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "mfcce300.dll",
+            "ord:2220",
+            &[0x1100, 0x1200],
+        );
+        assert!(!directory.path().join("old.bin").exists());
+        assert_eq!(
+            std::fs::read(directory.path().join("renamed.bin")).unwrap(),
+            b"keep data"
+        );
+        call(
+            &mut cpu,
+            &mut k,
+            &mut d,
+            "mfcce300.dll",
+            "ord:2170",
+            &[0x1300],
+        );
+        assert!(!directory.path().join("remove.bin").exists());
+        assert!(directory.path().join("renamed.bin").is_file());
+    }
+}
+
+fn buffer(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    // Native base CFile supports no direct-buffer commands.
+    Ok(DispatchOutcome::ReturnedR0(0))
 }

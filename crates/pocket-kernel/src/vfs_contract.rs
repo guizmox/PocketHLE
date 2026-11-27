@@ -8,7 +8,10 @@ const GPS_DRIVER_LEASE: &str = "gps:GPS1";
 const CAMERA_DRIVER_LEASE: &str = "camera:CAM1";
 #[path = "vfs_snapshot.rs"]
 mod snapshot;
+#[path = "vfs_temporary.rs"]
+mod temporary;
 pub use snapshot::{SnapshotFileCommit, SnapshotFileWrites, VfsFileSnapshot};
+pub use temporary::TemporaryFiles;
 
 #[derive(Clone, Default)]
 pub struct VfsShared(pub(super) Arc<Mutex<Shared>>);
@@ -22,6 +25,7 @@ pub(super) struct Shared {
     #[cfg(test)]
     volume_scans: usize,
     attributes: HashMap<String, u32>,
+    temporary_files: std::collections::HashSet<String>,
     bluetooth: crate::bluetooth::Service,
     camera: crate::camera::Service,
     gps: crate::gps::Service,
@@ -1202,6 +1206,8 @@ impl Vfs {
             return Err(5);
         }
         s.attributes.remove(&key);
+        s.temporary_files
+            .retain(|name| !name.eq_ignore_ascii_case(&self.full_guest_path(path)));
         Ok(())
     }
     pub fn delete_file(&self, path: &str) -> bool {
@@ -1243,6 +1249,8 @@ impl Vfs {
         if !self.move_file_raw(from, to) {
             return Err(5);
         }
+        s.temporary_files
+            .retain(|name| !name.eq_ignore_ascii_case(&self.full_guest_path(from)));
         if let Some(a) = s.attributes.remove(&source) {
             s.attributes.insert(dest, a);
         }
@@ -1859,5 +1867,76 @@ mod tests {
         v.seek(h, 10, SeekKind::Begin);
         assert_eq!(v.seek(h, -1, SeekKind::Begin), None);
         assert_eq!(v.seek(h, 0, SeekKind::Current), Some(10));
+    }
+}
+
+impl Vfs {
+    /// WinCE temporary-name contract over the mounted namespace. CREATE_NEW
+    /// arbitrates collisions with sibling processes; no host path is exposed.
+    pub fn temporary_file(
+        &mut self,
+        directory: &str,
+        prefix: &str,
+        unique: u32,
+    ) -> Result<(String, u32), u32> {
+        if self.attributes(directory)? & 0x10 == 0 {
+            return Err(3);
+        }
+        let prefix_units: Vec<_> = prefix.encode_utf16().take(3).collect();
+        let prefix = String::from_utf16_lossy(&prefix_units);
+        if prefix
+            .chars()
+            .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        {
+            return Err(123);
+        }
+        let dir = self.full_guest_path(directory);
+        let first = if unique == 0 {
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u32
+                & 0xffff)
+                .max(1)
+        } else {
+            unique & 0xffff
+        };
+        for offset in 0..if unique == 0 { 65535 } else { 1 } {
+            let number = if unique == 0 {
+                ((first - 1 + offset) % 65535) + 1
+            } else {
+                first
+            };
+            let path = format!(
+                "{}\\{}{:04X}.TMP",
+                dir.trim_end_matches('\\'),
+                prefix,
+                number
+            );
+            if path.encode_utf16().count() >= 260 {
+                return Err(206);
+            }
+            if unique != 0 {
+                return Ok((path, unique));
+            }
+            match self.open_file(&path, 3, 0, 1, false, 0x80) {
+                Ok(file) => {
+                    if !self.close(file.handle) {
+                        let _ = self.delete(&path);
+                        return Err(6);
+                    }
+                    self.shared
+                        .0
+                        .lock()
+                        .unwrap()
+                        .temporary_files
+                        .insert(path.clone());
+                    return Ok((path, number));
+                }
+                Err(80 | 183) => continue,
+                Err(code) => return Err(code),
+            }
+        }
+        Err(80)
     }
 }

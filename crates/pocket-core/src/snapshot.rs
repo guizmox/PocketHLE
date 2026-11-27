@@ -345,6 +345,17 @@ impl Emulator {
             !saved.has_device() && !saved.kernel.is_device_process(),
             "device checkpoint requires the coordinated restore path"
         );
+        let temporary_files = saved
+            .kernel
+            .prepare_temporary_files(
+                &mut self
+                    .process
+                    .as_mut()
+                    .context("missing restore process")?
+                    .state
+                    .vfs,
+            )
+            .map_err(anyhow::Error::msg)?;
         let (restored, contents) = self.restore_snapshot_parts(saved, None)?;
         let state = &mut self
             .process
@@ -363,6 +374,7 @@ impl Emulator {
             contents.install().map_err(anyhow::Error::msg)?;
         }
         files.commit();
+        temporary_files.commit();
         Ok(restored)
     }
 
@@ -1282,6 +1294,734 @@ mod tests {
         assert!(state.gdi.generated_window_paints.contains(&0xdead0001));
         assert_eq!(state.message_frames[&0][0].message, 0x000f);
         assert_eq!(state.image_base, 0x10000);
+        assert!(state.gdi.shell_toolbars.is_empty());
+    }
+
+    #[test]
+    fn pending_mfc_ddx_cold_restores_and_catches_a_real_nonlocal_return() {
+        use pocket_kernel::{DispatchOutcome, Dispatcher, Thunk};
+        use pocket_pe::ImportBinding;
+        fn invoke(
+            e: &mut Emulator,
+            dll: &str,
+            name: &str,
+            va: u32,
+            args: &[u32],
+        ) -> DispatchOutcome {
+            for (i, &v) in args.iter().enumerate() {
+                e.cpu.write_arg(i as u8, v).unwrap();
+            }
+            let thunk = Thunk {
+                thunk_va: va,
+                iat_va: 0,
+                dll: dll.into(),
+                binding: ImportBinding::Name(name.into()),
+                friendly_name: None,
+            };
+            e.dispatcher
+                .dispatch(
+                    e.cpu.as_mut(),
+                    &thunk,
+                    &mut e.process.as_mut().unwrap().state,
+                )
+                .unwrap()
+        }
+        let mut source = fixture(3);
+        source
+            .cpu
+            .map_region(
+                0x60000000,
+                0x10000,
+                pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+            )
+            .unwrap();
+        source.cpu.write_reg(ArmReg::Sp, 0x6000fff0).unwrap();
+        let owner = source
+            .process()
+            .unwrap()
+            .state
+            .dynamic_exports
+            .iter()
+            .find_map(|(&owner, exports)| {
+                exports
+                    .contains_key("__PocketHLE_MFC_UpdateData")
+                    .then_some(owner)
+            })
+            .unwrap();
+        invoke(
+            &mut source,
+            "mfcce300.dll",
+            "ord:206",
+            0x72000000,
+            &[0x60000000],
+        );
+        let table = source.cpu.read_u32_le(0x60000000).unwrap();
+        let bytes = source.cpu.read_mem(table, 40 * 4).unwrap();
+        source.cpu.write_mem(0x60000100, &bytes).unwrap();
+        source
+            .cpu
+            .write_mem(0x60000100 + 33 * 4, &0x11000u32.to_le_bytes())
+            .unwrap();
+        source
+            .cpu
+            .write_mem(0x60000000, &0x60000100u32.to_le_bytes())
+            .unwrap();
+        source
+            .cpu
+            .write_mem(0x60000020, &7u32.to_le_bytes())
+            .unwrap();
+        let DispatchOutcome::ReturnedR0(ts) = invoke(
+            &mut source,
+            "mfcce300.dll",
+            "?AfxGetThreadState@@YAPAV_AFX_THREAD_STATE@@XZ",
+            0x72000000,
+            &[],
+        ) else {
+            panic!()
+        };
+        source
+            .cpu
+            .write_mem(ts + 0x120, &73u32.to_le_bytes())
+            .unwrap();
+        source.cpu.write_reg(ArmReg::Lr, 0x11008).unwrap();
+        source.cpu.write_reg(ArmReg::R4, 0xcafe).unwrap();
+        let update =
+            source.process().unwrap().state.dynamic_exports[&owner]["__PocketHLE_MFC_UpdateData"];
+        assert_eq!(
+            invoke(
+                &mut source,
+                "coredll.dll",
+                "__PocketHLE_MFC_UpdateData",
+                update,
+                &[0x60000000, 1]
+            ),
+            DispatchOutcome::JumpTo(0x11000)
+        );
+        let link = source.cpu.read_u32_le(ts + 0x10).unwrap();
+        assert_ne!(link, 0);
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11000,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        assert_eq!(destination.cpu.read_u32_le(ts + 0x10).unwrap(), link);
+        destination.cpu.write_reg(ArmReg::R4, 0).unwrap();
+        let user = destination.process().unwrap().state.dynamic_exports[&owner]
+            ["__PocketHLE_MFC_ThrowUser"];
+        assert_eq!(
+            invoke(
+                &mut destination,
+                "coredll.dll",
+                "__PocketHLE_MFC_ThrowUser",
+                user,
+                &[]
+            ),
+            DispatchOutcome::ReturnedR0(1)
+        );
+        destination.cpu.write_reg(ArmReg::R0, 1).unwrap();
+        let mut pc = destination.cpu.read_reg(ArmReg::Lr).unwrap();
+        for _ in 0..256 {
+            if pc == 0x11008 {
+                break;
+            }
+            let name = destination.process().unwrap().state.dynamic_exports[&owner]
+                .iter()
+                .find_map(|(n, &v)| (v == pc).then_some(n.clone()))
+                .unwrap();
+            pc = match invoke(&mut destination, "coredll.dll", &name, pc, &[]) {
+                DispatchOutcome::JumpTo(p) => p,
+                DispatchOutcome::ReturnedR0(v) => {
+                    destination.cpu.write_reg(ArmReg::R0, v).unwrap();
+                    destination.cpu.read_reg(ArmReg::Lr).unwrap()
+                }
+                other => panic!("unexpected {other:?}"),
+            };
+        }
+        assert_eq!(pc, 0x11008);
+        assert_eq!(destination.cpu.read_reg(ArmReg::R0).unwrap(), 0);
+        assert_eq!(destination.cpu.read_reg(ArmReg::R4).unwrap(), 0xcafe);
+        assert_eq!(destination.cpu.read_u32_le(ts + 0x120).unwrap(), 73);
+        assert_eq!(destination.cpu.read_u32_le(ts + 0x10).unwrap(), 0);
+        assert!(
+            !destination.process().unwrap().state.dynamic_exports[&owner]
+                .keys()
+                .any(|k| k.starts_with("__PocketHLE_MFC_Frame:"))
+        );
+    }
+
+    #[test]
+    fn pending_mfc_window_callback_cold_restores_the_try_and_saved_msg() {
+        use pocket_kernel::{DispatchOutcome, Dispatcher, Thunk};
+        use pocket_pe::ImportBinding;
+        fn invoke(
+            e: &mut Emulator,
+            dll: &str,
+            name: &str,
+            va: u32,
+            args: &[u32],
+        ) -> DispatchOutcome {
+            for (i, &v) in args.iter().enumerate() {
+                if i < 4 {
+                    e.cpu.write_arg(i as u8, v).unwrap();
+                } else {
+                    let sp = e.cpu.read_reg(ArmReg::Sp).unwrap();
+                    e.cpu
+                        .write_mem(
+                            sp + e.cpu.stack_arg_offset() + (i as u32 - 4) * 4,
+                            &v.to_le_bytes(),
+                        )
+                        .unwrap();
+                }
+            }
+            let thunk = Thunk {
+                thunk_va: va,
+                iat_va: 0,
+                dll: dll.into(),
+                binding: ImportBinding::Name(name.into()),
+                friendly_name: None,
+            };
+            e.dispatcher
+                .dispatch(
+                    e.cpu.as_mut(),
+                    &thunk,
+                    &mut e.process.as_mut().unwrap().state,
+                )
+                .unwrap()
+        }
+        let mut source = fixture(3);
+        source
+            .cpu
+            .map_region(
+                0x60000000,
+                0x10000,
+                pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+            )
+            .unwrap();
+        source.cpu.write_reg(ArmReg::Sp, 0x6000fff0).unwrap();
+        let owner = source
+            .process()
+            .unwrap()
+            .state
+            .dynamic_exports
+            .iter()
+            .find_map(|(&owner, exports)| {
+                exports
+                    .contains_key("__PocketHLE_MFC_CallWndProc")
+                    .then_some(owner)
+            })
+            .unwrap();
+        invoke(
+            &mut source,
+            "mfcce300.dll",
+            "ord:206",
+            0x72000000,
+            &[0x60000000],
+        );
+        let table = source.cpu.read_u32_le(0x60000000).unwrap();
+        let bytes = source.cpu.read_mem(table, 46 * 4).unwrap();
+        source.cpu.write_mem(0x60000100, &bytes).unwrap();
+        source
+            .cpu
+            .write_mem(0x60000100 + 38 * 4, &0x11000u32.to_le_bytes())
+            .unwrap();
+        source
+            .cpu
+            .write_mem(0x60000000, &0x60000100u32.to_le_bytes())
+            .unwrap();
+        source
+            .cpu
+            .write_mem(0x60000020, &7u32.to_le_bytes())
+            .unwrap();
+        let DispatchOutcome::ReturnedR0(ts) = invoke(
+            &mut source,
+            "mfcce300.dll",
+            "?AfxGetThreadState@@YAPAV_AFX_THREAD_STATE@@XZ",
+            0x72000000,
+            &[],
+        ) else {
+            panic!()
+        };
+        source.cpu.write_mem(ts + 0x3c, &[0x5a; 28]).unwrap();
+        source.cpu.write_reg(ArmReg::Lr, 0x11008).unwrap();
+        source.cpu.write_reg(ArmReg::R4, 0xcafe).unwrap();
+        let update =
+            source.process().unwrap().state.dynamic_exports[&owner]["__PocketHLE_MFC_CallWndProc"];
+        assert_eq!(
+            invoke(
+                &mut source,
+                "coredll.dll",
+                "__PocketHLE_MFC_CallWndProc",
+                update,
+                &[0x60000000, 7, 0x400, 42, 0x1234]
+            ),
+            DispatchOutcome::JumpTo(0x11000)
+        );
+        let link = source.cpu.read_u32_le(ts + 0x10).unwrap();
+        assert_ne!(link, 0);
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11000,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        assert_eq!(destination.cpu.read_u32_le(ts + 0x10).unwrap(), link);
+        // Resume the real WindowProc return into its saved TRY-owned frame.
+        destination.cpu.write_reg(ArmReg::R0, 55).unwrap();
+        let mut pc = destination.cpu.read_reg(ArmReg::Lr).unwrap();
+        for _ in 0..256 {
+            if pc == 0x11008 {
+                break;
+            }
+            let name = destination.process().unwrap().state.dynamic_exports[&owner]
+                .iter()
+                .find_map(|(n, &v)| (v == pc).then_some(n.clone()))
+                .unwrap();
+            pc = match invoke(&mut destination, "coredll.dll", &name, pc, &[]) {
+                DispatchOutcome::JumpTo(p) => p,
+                DispatchOutcome::ReturnedR0(v) => {
+                    destination.cpu.write_reg(ArmReg::R0, v).unwrap();
+                    destination.cpu.read_reg(ArmReg::Lr).unwrap()
+                }
+                other => panic!("unexpected {other:?}"),
+            };
+        }
+        assert_eq!(pc, 0x11008);
+        assert_eq!(destination.cpu.read_reg(ArmReg::R0).unwrap(), 55);
+        assert_eq!(destination.cpu.read_reg(ArmReg::R4).unwrap(), 0xcafe);
+        assert_eq!(destination.cpu.read_mem(ts + 0x3c, 28).unwrap(), [0x5a; 28]);
+        assert_eq!(destination.cpu.read_u32_le(ts + 0x10).unwrap(), 0);
+        assert!(
+            !destination.process().unwrap().state.dynamic_exports[&owner]
+                .keys()
+                .any(|k| k.starts_with("__PocketHLE_MFC_Frame:"))
+        );
+    }
+
+    #[test]
+    fn editor_clipboard_and_document_list_owners_survive_cold_restore() {
+        use pocket_cpu::Prot;
+        let mut source = fixture(3);
+        let state = &mut source.process.as_mut().unwrap().state;
+        let hwnd = state.controls.create(
+            7,
+            pocket_kernel::controls::ControlClass::Edit,
+            10,
+            "12345\r\nsecond\r\nthird".into(),
+            0x50010004,
+            1,
+            1,
+            100,
+            20,
+        );
+        let edit = &mut state.controls.get_mut(hwnd).unwrap().edit;
+        edit.selection = Some((4, 1));
+        edit.first_line = 2;
+        edit.scroll_x = 47;
+        edit.limit = 9;
+        edit.modified = true;
+        edit.undo = Some(("previous".into(), Some((0, 3))));
+        edit.tab_stops = vec![4, 8];
+        let list = state.controls.create(
+            7,
+            pocket_kernel::controls::ControlClass::ListView,
+            11,
+            "".into(),
+            0x50000000,
+            0,
+            30,
+            100,
+            60,
+        );
+        state.controls.get_mut(list).unwrap().list_items = vec![("note.txt".into(), 0)];
+        state.controls.doc_lists.insert(
+            list,
+            pocket_kernel::controls::doc_list::DocList {
+                directory: "\\".into(),
+                filters: vec![vec!["*.txt".into()]],
+                filter_index: 1,
+                paths: vec!["\\note.txt".into()],
+                updates_enabled: true,
+                descending: false,
+                recursive: false,
+            },
+        );
+        let clipboard = state.heap.alloc(6).unwrap();
+        state.clipboard.formats.insert(13, clipboard);
+        state.clipboard.opened_by = Some(0);
+        if source
+            .cpu
+            .check_guest_access(clipboard, 6, Prot::WRITE)
+            .is_err()
+        {
+            source
+                .cpu
+                .map_region(clipboard & !4095, 4096, Prot::READ | Prot::WRITE)
+                .unwrap();
+        }
+        source
+            .cpu
+            .write_mem(clipboard, &[65, 0, 66, 0, 0, 0])
+            .unwrap();
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11004,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        for _ in 0..3 {
+            let mut destination = fixture(3);
+            destination
+                .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+                .unwrap();
+            let control = destination
+                .process()
+                .unwrap()
+                .state
+                .controls
+                .get(hwnd)
+                .unwrap();
+            assert_eq!(control.text, "12345\r\nsecond\r\nthird");
+            assert_eq!(control.edit.selection, Some((4, 1)));
+            assert_eq!(control.edit.first_line, 2);
+            assert_eq!(control.edit.scroll_x, 47);
+            assert_eq!(control.edit.limit, 9);
+            assert!(control.edit.modified);
+            assert_eq!(control.edit.undo.as_ref().unwrap().0, "previous");
+            assert_eq!(control.edit.tab_stops, [4, 8]);
+            let state = &destination.process().unwrap().state;
+            assert_eq!(state.clipboard.opened_by, Some(0));
+            assert_eq!(state.clipboard.formats[&13], clipboard);
+            assert!(state.heap.owns_global_block(clipboard));
+            assert_eq!(state.controls.doc_lists[&list].paths, ["\\note.txt"]);
+            assert_eq!(
+                destination.cpu.read_mem(clipboard, 6).unwrap(),
+                [65, 0, 66, 0, 0, 0]
+            );
+            let control = destination
+                .process
+                .as_mut()
+                .unwrap()
+                .state
+                .controls
+                .get_mut(hwnd)
+                .unwrap();
+            assert!(control.edit.undo(&mut control.text));
+            assert_eq!(control.text, "previous");
+        }
+    }
+
+    #[test]
+    fn archive_identity_map_cold_restores_and_keeps_its_borrowed_vfs_description() {
+        use pocket_kernel::{DispatchOutcome, Dispatcher, Thunk};
+        fn invoke(e: &mut Emulator, ordinal: u16, args: &[u32]) -> u32 {
+            for (i, &v) in args.iter().enumerate() {
+                e.cpu.write_arg(i as u8, v).unwrap();
+            }
+            e.cpu.write_reg(ArmReg::Lr, 0x11008).unwrap();
+            drive(e, ordinal, 0x72000000, 0x11008);
+            e.cpu.read_reg(ArmReg::R0).unwrap()
+        }
+        fn drive(e: &mut Emulator, ordinal: u16, mut pc: u32, stop: u32) {
+            let start = Thunk {
+                thunk_va: 0x72000000,
+                iat_va: 0,
+                dll: "mfcce300.dll".into(),
+                binding: pocket_pe::ImportBinding::Ordinal(ordinal),
+                friendly_name: None,
+            };
+            for _ in 0..16384 {
+                if pc == stop {
+                    return;
+                }
+                let thunk = if pc == start.thunk_va {
+                    start.clone()
+                } else {
+                    let name = e
+                        .process()
+                        .unwrap()
+                        .state
+                        .dynamic_exports
+                        .values()
+                        .find_map(|exports| {
+                            exports
+                                .iter()
+                                .find_map(|(name, &va)| (va == pc).then_some(name.clone()))
+                        })
+                        .unwrap_or_else(|| panic!("unexpected archive guest callback {pc:08x}"));
+                    Thunk {
+                        thunk_va: pc,
+                        iat_va: 0,
+                        dll: "coredll.dll".into(),
+                        binding: pocket_pe::ImportBinding::Name(name),
+                        friendly_name: None,
+                    }
+                };
+                pc = match e
+                    .dispatcher
+                    .dispatch(
+                        e.cpu.as_mut(),
+                        &thunk,
+                        &mut e.process.as_mut().unwrap().state,
+                    )
+                    .unwrap()
+                {
+                    DispatchOutcome::JumpTo(target) => target,
+                    DispatchOutcome::ReturnedR0(value) => {
+                        e.cpu.write_reg(ArmReg::R0, value).unwrap();
+                        e.cpu.read_reg(ArmReg::Lr).unwrap()
+                    }
+                    other => panic!("unexpected archive outcome {other:?}"),
+                };
+            }
+            panic!("archive callback budget exceeded")
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("graph.bin");
+        std::fs::write(&path, []).unwrap();
+        let mut source = fixture(3);
+        source
+            .cpu
+            .map_region(
+                0x60000000,
+                0x10000,
+                pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+            )
+            .unwrap();
+        source.cpu.write_reg(ArmReg::Sp, 0x6000fff0).unwrap();
+        let state = &mut source.process.as_mut().unwrap().state;
+        state.vfs.mount_save_dir(r"\Data\", directory.path());
+        let handle = state
+            .vfs
+            .open(
+                r"\Data\graph.bin",
+                pocket_kernel::vfs::Access::ReadWrite,
+                false,
+            )
+            .unwrap();
+        invoke(&mut source, 97, &[0x60000000]);
+        source
+            .cpu
+            .write_mem(0x60000004, &handle.to_le_bytes())
+            .unwrap();
+        source
+            .cpu
+            .write_mem(0x6000fff0, &0u32.to_le_bytes())
+            .unwrap();
+        invoke(&mut source, 38, &[0x60000100, 0x60000000, 0, 128]);
+        for n in 1..=150 {
+            invoke(&mut source, 1754, &[0x60000100, 0x60001000 + n * 4]);
+        }
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11004,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .vfs
+            .mount_save_dir(r"\Data\", directory.path());
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        assert_eq!(destination.cpu.read_u32_le(0x60000130).unwrap(), 151);
+        invoke(&mut destination, 2590, &[0x60000100, 0x60001000 + 150 * 4]);
+        // Park with real CFile::Write arguments prepared, before the borrowed
+        // file is touched. Capture the actual archive/stream continuation chain.
+        let file_table = destination.cpu.read_u32_le(0x60000000).unwrap();
+        let write_target = destination.cpu.read_u32_le(file_table + 15 * 4).unwrap();
+        destination.cpu.write_arg(0, 0x60000100).unwrap();
+        destination.cpu.write_reg(ArmReg::Lr, 0x11008).unwrap();
+        drive(&mut destination, 851, 0x72000000, write_target);
+        assert_eq!(destination.cpu.read_arg(0).unwrap(), 0x60000000);
+        assert_eq!(destination.cpu.read_arg(2).unwrap(), 2);
+        assert!(std::fs::read(&path).unwrap().is_empty());
+        let saved = SessionSnapshot::capture(
+            destination.cpu.as_mut(),
+            destination.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: write_target,
+            },
+        )
+        .unwrap();
+        let mut pending_bytes = Vec::new();
+        saved.write(&mut pending_bytes).unwrap();
+        drop(saved);
+        drop(destination);
+        let mut destination = fixture(3);
+        destination
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .vfs
+            .mount_save_dir(r"\Data\", directory.path());
+        destination
+            .restore_snapshot(SessionSnapshot::read(pending_bytes.as_slice()).unwrap())
+            .unwrap();
+        drive(&mut destination, 851, write_target, 0x11008);
+
+        assert_eq!(std::fs::read(&path).unwrap(), [150, 0]);
+        assert!(destination.process().unwrap().state.vfs.is_open(handle));
+        assert_eq!(
+            destination.process.as_mut().unwrap().state.vfs.seek(
+                handle,
+                0,
+                pocket_kernel::vfs::SeekKind::Current
+            ),
+            Some(2)
+        );
+        assert!(!destination
+            .process()
+            .unwrap()
+            .state
+            .dynamic_exports
+            .values()
+            .any(|exports| exports
+                .keys()
+                .any(|key| key.starts_with("__PocketHLE_MFC_Frame:"))));
+        invoke(&mut destination, 212, &[0x60000100]);
+        assert_eq!(destination.cpu.read_u32_le(0x60000134).unwrap(), 0);
+    }
+
+    #[test]
+    fn three_state_check_survives_cold_restore_without_changing_the_required_control_record() {
+        let mut source = fixture(3);
+        let state = &mut source.process.as_mut().unwrap().state;
+        let hwnd = state.controls.create(
+            7,
+            pocket_kernel::controls::ControlClass::Button,
+            11,
+            "Three states".into(),
+            0x50000006,
+            1,
+            1,
+            100,
+            20,
+        );
+        state.controls.get_mut(hwnd).unwrap().set_check_state(2);
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11004,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        let mut destination = fixture(3);
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        let controls = &mut destination.process.as_mut().unwrap().state.controls;
+        assert_eq!(controls.get(hwnd).unwrap().check_state(), 2);
+        controls.focus = hwnd;
+        controls.key_down(0x20);
+        assert_eq!(controls.get(hwnd).unwrap().check_state(), 0);
+    }
+
+    #[test]
+    fn persisted_snapshot_keeps_shell_toolbar_records_and_owned_bitmap_strips() {
+        let mut source = fixture(3);
+        let state = &mut source.process.as_mut().unwrap().state;
+        let hwnd = 0xdead0b01;
+        let bitmap = state.gdi.create_compatible_bitmap(16, 16);
+        state.gdi.bitmap_mut(bitmap).unwrap().pixels[..2].copy_from_slice(&0x07e0u16.to_le_bytes());
+        state.menu_items.insert(
+            10,
+            vec![pocket_kernel::MenuItem {
+                id: 81,
+                ..Default::default()
+            }],
+        );
+        state.gdi.shell_menus.bars.insert(
+            hwnd,
+            pocket_kernel::shell_menu::Bar {
+                owner: 0xdead0001,
+                menu: 10,
+                sip: false,
+                background: 0xc618,
+            },
+        );
+        let mut toolbar = pocket_kernel::shell_menu::Toolbar::default();
+        toolbar.state.buttons.push([0, 81, 4, 0x1234, 0]);
+        toolbar.state.bitmaps.push((bitmap, 1));
+        toolbar.owned_bitmaps.push(bitmap);
+        toolbar.strings.push("Go".encode_utf16().collect());
+        state.gdi.shell_toolbars.insert(hwnd, toolbar);
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11004,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        let state = &destination.process().unwrap().state;
+        assert_eq!(
+            state.gdi.shell_toolbars[&hwnd].state.buttons,
+            vec![[0, 81, 4, 0x1234, 0]]
+        );
+        assert_eq!(state.gdi.shell_toolbars[&hwnd].owned_bitmaps, vec![bitmap]);
+        assert_eq!(
+            state.gdi.shell_toolbars[&hwnd].strings,
+            vec!["Go".encode_utf16().collect::<Vec<_>>()]
+        );
+        assert_eq!(
+            state.gdi.bitmap(bitmap).unwrap().pixels[..2],
+            0x07e0u16.to_le_bytes()
+        );
     }
 
     #[test]
@@ -1318,6 +2058,67 @@ mod tests {
         assert!(state.gdi.generated_window_paints.contains(&0xdead0001));
         assert_eq!(state.message_frames[&0][0].message, 0x000f);
         assert_eq!(state.message_frames[&0][0].args, frame.args);
+    }
+
+    #[test]
+    fn persisted_snapshot_retains_nested_window_creation_scratch_owners() {
+        use pocket_kernel::{CreateStage, GuestCallFrame, WindowCallbackFrame};
+        let mut source = fixture(3);
+        let state = &mut source.process.as_mut().unwrap().state;
+        let outer = state.heap.alloc(64).unwrap();
+        let inner = state.heap.alloc(64).unwrap();
+        let callback = |sp| WindowCallbackFrame {
+            thread: 0,
+            frame: GuestCallFrame {
+                args: [0; 4],
+                lr: 0x11004,
+                sp,
+            },
+        };
+        state
+            .create_frame_stack
+            .push((callback(0x1f000), CreateStage::Create, 0xdead1000));
+        state.create_frame = Some(callback(0x1ef00));
+        state.create_frame_hwnd = 0xdead1001;
+        state.create_stage = CreateStage::Create;
+        state
+            .window_create_scratch
+            .insert((0, 0x1f000, 0xdead1000), outer);
+        state
+            .window_create_scratch
+            .insert((0, 0x1ef00, 0xdead1001), inner);
+        source.cpu.write_mem(outer, &[0xa5; 64]).unwrap();
+        source.cpu.write_mem(inner, &[0x5a; 64]).unwrap();
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11004,
+            },
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        saved.write(&mut bytes).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination
+            .restore_snapshot(SessionSnapshot::read(bytes.as_slice()).unwrap())
+            .unwrap();
+        let state = &destination.process.as_ref().unwrap().state;
+        assert_eq!(
+            state.window_create_scratch.get(&(0, 0x1f000, 0xdead1000)),
+            Some(&outer)
+        );
+        assert_eq!(
+            state.window_create_scratch.get(&(0, 0x1ef00, 0xdead1001)),
+            Some(&inner)
+        );
+        assert_eq!(state.heap.msize(outer), Some(64));
+        assert_eq!(state.heap.msize(inner), Some(64));
+        assert_eq!(destination.cpu.read_mem(outer, 64).unwrap(), [0xa5; 64]);
+        assert_eq!(destination.cpu.read_mem(inner, 64).unwrap(), [0x5a; 64]);
     }
 
     #[test]
@@ -1447,6 +2248,132 @@ mod tests {
                 .state
                 .process_exit_code,
             Some(42)
+        );
+    }
+    #[test]
+    fn checkpoint_cold_restores_native_rect_code_mid_operation() {
+        use pocket_kernel::native_thunks::{self, SMALL_COPY_HELPER};
+        let mut source = fixture(3);
+        let rect = 0x60000000;
+        source
+            .cpu
+            .map_region(
+                rect,
+                0x1000,
+                pocket_cpu::Prot::READ | pocket_cpu::Prot::WRITE,
+            )
+            .unwrap();
+        // Resume between the left/top and right/bottom stores of InflateRect.
+        // There is no host-side pending operation to serialize or reconstruct.
+        let before: Vec<_> = [7i32, 16, 40, 60]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        source.cpu.write_mem(rect, &before).unwrap();
+        source.cpu.write_reg(ArmReg::R0, rect).unwrap();
+        source.cpu.write_reg(ArmReg::R1, 3).unwrap();
+        source.cpu.write_reg(ArmReg::R2, 4).unwrap();
+        source.cpu.write_reg(ArmReg::Lr, 0x11004).unwrap();
+        let continuation: Vec<_> = [0xe51ff004, pocket_kernel::PROCESS_EXIT_TRAMPOLINE_VA]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        source.cpu.write_mem(0x11004, &continuation).unwrap();
+        let point = ResumePoint {
+            main_entry: 0x11000,
+            pc: SMALL_COPY_HELPER + 0x300 + 32,
+        };
+        let saved =
+            SessionSnapshot::capture(source.cpu.as_mut(), source.process.as_mut().unwrap(), point)
+                .unwrap();
+        let mut encoded = Vec::new();
+        saved.write(&mut encoded).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        // Poison the freshly loaded helper. Correct restoration must supply the
+        // captured machine code, not depend on reinstalling the current helper.
+        destination
+            .cpu
+            .write_mem(SMALL_COPY_HELPER + 0x300, &[0; 64])
+            .unwrap();
+        let restored = destination
+            .restore_snapshot(SessionSnapshot::read(encoded.as_slice()).unwrap())
+            .unwrap();
+        assert!(native_thunks::native_thunk_at(
+            "coredll.dll",
+            "InflateRect",
+            pocket_kernel::THUNK_REGION_BASE
+        )
+        .is_some());
+        destination
+            .run_restored(restored, &mut |_state: &mut KernelState| {
+                FrameAction::Continue
+            })
+            .unwrap();
+        let expected: Vec<_> = [7i32, 16, 43, 64]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        assert_eq!(destination.cpu.read_mem(rect, 16).unwrap(), expected);
+        assert_eq!(
+            destination
+                .process
+                .as_ref()
+                .unwrap()
+                .state
+                .process_exit_code,
+            Some(1)
+        );
+    }
+    #[test]
+    fn cold_restore_reconciles_a_pending_remote_file_closure() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("pending.bin"), b"content").unwrap();
+        let mut source = fixture(3);
+        let state = &mut source.process.as_mut().unwrap().state;
+        state.vfs.mount_save_dir(r"\Data\", directory.path());
+        let handle = state
+            .vfs
+            .open_file(r"\Data\pending.bin", 3, 3, 3, false, 0)
+            .unwrap()
+            .handle;
+        state.publish_handles();
+        state.sync_transferred_handles();
+        let pid = state.object_handles.process_id();
+        assert!(state.object_handles.close_in(pid, handle).is_some());
+        assert!(state.vfs.is_open(handle));
+        let saved = SessionSnapshot::capture(
+            source.cpu.as_mut(),
+            source.process.as_mut().unwrap(),
+            ResumePoint {
+                main_entry: 0x11000,
+                pc: 0x11000,
+            },
+        )
+        .unwrap();
+        let mut encoded = Vec::new();
+        saved.write(&mut encoded).unwrap();
+        drop(saved);
+        drop(source);
+        let mut destination = fixture(3);
+        destination
+            .process
+            .as_mut()
+            .unwrap()
+            .state
+            .vfs
+            .mount_save_dir(r"\Data\", directory.path());
+        destination
+            .restore_snapshot(SessionSnapshot::read(encoded.as_slice()).unwrap())
+            .unwrap();
+        let state = &mut destination.process.as_mut().unwrap().state;
+        assert!(state.object_handles.is_closed(handle));
+        state.sync_transferred_handles();
+        assert!(!state.vfs.is_open(handle));
+        assert_eq!(
+            std::fs::read(directory.path().join("pending.bin")).unwrap(),
+            b"content"
         );
     }
 }

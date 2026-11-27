@@ -41,14 +41,15 @@ pub fn register(d: &mut WinCeDispatcher) {
         d.register_handler(dll, &format!("ord:{ord}"), ok);
     }
 
-    // #2, #4 and #5 are successful no-op common-control calls in the
-    // PPC2003 ordinal space used by Cubis.
+    // CE's #5 is CommandBar_AddBitmap, including the native MFC import.
+    // Keep bitmap loading and ownership in the shared toolbar service.
     d.register_handler(dll, "InitCommonControls", init_controls);
     d.register_handler(dll, "InitCommonControlsEx", init_controls_ex);
     d.register_handler(dll, "ord:1", init_controls);
     d.register_handler(dll, "ord:2", init_controls_ex);
     d.register_handler(dll, "ord:4", ok);
-    d.register_handler(dll, "ord:5", ok);
+    d.register_handler(dll, "ord:5", command_bar_add_bitmap);
+    d.register_handler(dll, "CommandBar_AddBitmap", command_bar_add_bitmap);
 
     // #17 is `CreateStatusWindowW` in the PPC2002 ordinal space.
     // PPC2002 Solitaire calls it as
@@ -143,4 +144,19 @@ fn read_status_text(ctx: &mut CallCtx<'_>, p: u32) -> Vec<u16> {
 
 fn ok(_ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(1))
+}
+
+fn command_bar_add_bitmap(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let args = [
+        ctx.arg_u32(0)?,
+        ctx.arg_u32(1)?,
+        ctx.arg_u32(2)?,
+        ctx.arg_u32(3)?,
+    ];
+    if ctx.arg_u32(4)? != 0 || ctx.arg_u32(5)? != 0 {
+        return Ok(DispatchOutcome::ReturnedR0(u32::MAX));
+    }
+    Ok(DispatchOutcome::ReturnedR0(
+        crate::coredll::toolbar::add_bitmap(ctx, args[0], args[1], args[2], args[3])?,
+    ))
 }

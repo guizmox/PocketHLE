@@ -41,3 +41,5 @@ impl Control {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
     }
 }
+
+pub mod visual;

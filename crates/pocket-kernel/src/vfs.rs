@@ -29,7 +29,9 @@ use std::sync::{Arc, Mutex};
 mod contracts;
 #[path = "vfs_mapping.rs"]
 mod mapping;
-pub use contracts::{FileInfo, OpenResult, SnapshotFileCommit, VfsFileSnapshot, VfsShared};
+pub use contracts::{
+    FileInfo, OpenResult, SnapshotFileCommit, TemporaryFiles, VfsFileSnapshot, VfsShared,
+};
 pub use mapping::MappedFile;
 
 /// `INVALID_HANDLE_VALUE` from `<windows.h>`.
@@ -836,6 +838,23 @@ impl Vfs {
             d.push('\\');
         }
         self.default_dir = d;
+    }
+
+    /// Absolute guest spelling for profile/MRU APIs. This does not resolve a
+    /// host path, require the file to exist, or cross a mount through `..`.
+    pub fn full_guest_path(&self, guest_path: &str) -> String {
+        let absolute = self.absolute(guest_path);
+        let mut parts = Vec::new();
+        for part in absolute.split('\\') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                _ => parts.push(part),
+            }
+        }
+        format!("\\{}", parts.join("\\"))
     }
 
     /// Expand a guest path to an absolute one: strip `.\` prefixes and

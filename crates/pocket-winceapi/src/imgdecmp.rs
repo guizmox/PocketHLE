@@ -1057,3 +1057,52 @@ mod tests {
         assert!(ctx.kernel.gdi.image_decode_frames.is_empty());
     }
 }
+
+/// Only the pending decoder's reference belongs to this callback. Extra guest
+/// AddRefs, caller buffers and bitmaps borrowed by the renderer retain owners.
+pub(crate) struct ImageUnwindPlan {
+    renderers: Vec<u32>,
+    thread: usize,
+    sp: u32,
+}
+pub(crate) fn prepare_unwind(ctx: &CallCtx<'_>, sp: u32) -> Result<ImageUnwindPlan, KernelError> {
+    let thread = ctx.kernel.current_thread;
+    let mut renderers = Vec::new();
+    let mut references = std::collections::HashMap::<u32, u32>::new();
+    for f in &ctx.kernel.gdi.image_decode_frames {
+        if f.thread == thread && f.frame.sp <= sp {
+            if let Some((_, renderer)) = f.completion {
+                let count = references.entry(renderer).or_default();
+                *count += 1;
+                if ctx
+                    .kernel
+                    .gdi
+                    .image_renderers
+                    .get(&renderer)
+                    .is_none_or(|state| state.refs < *count)
+                {
+                    return Err(KernelError::Dispatch(
+                        "Invalid decoder exceptional renderer owner".into(),
+                    ));
+                }
+                renderers.push(renderer);
+            }
+        }
+    }
+    Ok(ImageUnwindPlan {
+        renderers,
+        thread,
+        sp,
+    })
+}
+impl ImageUnwindPlan {
+    pub(crate) fn apply(self, ctx: &mut CallCtx<'_>) {
+        for renderer in self.renderers {
+            release_renderer(ctx, renderer);
+        }
+        ctx.kernel
+            .gdi
+            .image_decode_frames
+            .retain(|f| f.thread != self.thread || f.frame.sp > self.sp);
+    }
+}

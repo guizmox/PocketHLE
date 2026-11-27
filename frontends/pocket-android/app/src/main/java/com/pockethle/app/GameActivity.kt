@@ -48,6 +48,7 @@ class GameActivity : AppCompatActivity() {
     private lateinit var surface: GLSurfaceView
     private lateinit var loadingOverlay: View
     private lateinit var status: TextView
+    private var waitIndicator: ProgressBar? = null
     private lateinit var fpsOverlay: TextView
     private val fpsMeter = FrameRateMeter()
     private var frontendFps: Double? = null
@@ -156,6 +157,43 @@ class GameActivity : AppCompatActivity() {
 
     private fun mediaCommand(command: Int) {
         if (session != 0L) NativeBridge.nativeSystemMediaCommand(session, command)
+    }
+
+    private fun updateWaitCursor() {
+        val waiting = NativeBridge.nativeWaitCursor(session) != 0
+        if (android.os.Build.VERSION.SDK_INT >= 24) {
+            surface.pointerIcon = android.view.PointerIcon.getSystemIcon(this,
+                if (waiting) android.view.PointerIcon.TYPE_WAIT else android.view.PointerIcon.TYPE_DEFAULT)
+        }
+        if (!waiting) { waitIndicator?.visibility = View.GONE; return }
+        val host = findViewById<FrameLayout>(android.R.id.content)
+        val indicator = waitIndicator ?: ProgressBar(this).apply {
+            isIndeterminate = true
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            host.addView(this, FrameLayout.LayoutParams(0, 0))
+            waitIndicator = this
+        }
+        val frame = lastFrame
+        val rect = if (frame != null) renderedDisplayRect(surface.width, surface.height,
+            frame.width, frame.height, frame.textureWidth, frame.textureHeight,
+            rotationDegrees, !gizmondoGame, controllerFullscreenHost.active)
+            else DisplayRect(0, 0, surface.width, surface.height)
+        val screen = IntArray(2).also { surface.getLocationInWindow(it) }
+        val origin = IntArray(2).also { host.getLocationInWindow(it) }
+        val size = (24 * resources.displayMetrics.density).toInt()
+        val layout = indicator.layoutParams as FrameLayout.LayoutParams
+        val left = screen[0] - origin[0] + rect.left + rect.width / 2 - size / 2
+        val top = screen[1] - origin[1] + rect.top + rect.height / 2 - size / 2
+        if (layout.width != size || layout.height != size || layout.leftMargin != left || layout.topMargin != top) {
+            layout.width = size; layout.height = size
+            layout.leftMargin = left; layout.topMargin = top
+            layout.gravity = android.view.Gravity.TOP or android.view.Gravity.LEFT
+            indicator.layoutParams = layout
+        }
+        indicator.visibility = View.VISIBLE
+        indicator.bringToFront()
     }
 
     private fun updateMediaBar() {
@@ -332,6 +370,7 @@ class GameActivity : AppCompatActivity() {
             NativeBridge.nativePollGpsNotice(session)?.let { message ->
                 android.widget.Toast.makeText(this@GameActivity, message, android.widget.Toast.LENGTH_LONG).show()
             }
+            updateWaitCursor()
             updateMediaBar()
             updateSnapshotControls()
             positionRateOverlays()
@@ -679,6 +718,8 @@ class GameActivity : AppCompatActivity() {
      * session, and surface the textual summary in the status panel.
      */
     private fun finishSession(reportFailure: Boolean = false) {
+        waitIndicator?.visibility = View.GONE
+        if (android.os.Build.VERSION.SDK_INT >= 24) surface.pointerIcon = null
         val handle = session
         if (handle == 0L) return
         joiningSession = true

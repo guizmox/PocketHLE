@@ -305,14 +305,28 @@ impl DeviceRestoreGroup {
                 && saved.kernel.is_device_process(),
             "invalid process in device checkpoint"
         );
-        let process = emulator
-            .process
-            .as_ref()
-            .context("load the saved executable before restoring")?;
-        saved
-            .kernel
-            .prime_device_restore(&process.state.vfs, &self.domain)
-            .map_err(anyhow::Error::msg)?;
+        let temporary_files = {
+            // Sibling processes can refer to the same temporary backing. Use
+            // the reconstruction gate for name creation and rollback ownership.
+            let _gate = self
+                .domain
+                .serial
+                .lock()
+                .map_err(|_| anyhow::anyhow!("device reconstruction gate poisoned"))?;
+            let process = emulator
+                .process
+                .as_mut()
+                .context("load the saved executable before restoring")?;
+            let files = saved
+                .kernel
+                .prepare_temporary_files(&mut process.state.vfs)
+                .map_err(anyhow::Error::msg)?;
+            saved
+                .kernel
+                .prime_device_restore(&process.state.vfs, &self.domain)
+                .map_err(anyhow::Error::msg)?;
+            files
+        };
         {
             let mut state = self
                 .progress
@@ -439,6 +453,7 @@ impl DeviceRestoreGroup {
             .lock()
             .map_err(|_| anyhow::anyhow!("device restore coordinator poisoned"))?
             .resumed;
+        temporary_files.commit();
         Ok(restored)
     }
 }
