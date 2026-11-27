@@ -207,6 +207,12 @@ thumb, recessed channel, separate focus indication and horizontal/vertical tick
 styles; TBS_NOTHUMB suppresses the thumb. Native control colors are not replaced
 with a game-specific skin.
 
+UpdateWindow synchronously paints an invalid visible window. It does not enter
+hidden windows or children of hidden parents; their invalid/erase state remains
+available for a later show. Explicit SendMessage painting is not filtered by
+this UpdateWindow policy. This uses the existing USER visibility tree and
+continuation owner, without a separate snapshot field.
+
 EDIT layout, painting, selection, caret movement, hit testing and line messages
 share the selected-font layout engine. Viewport, undo and modified state belong
 to the control. Clipboard transfers retain normal global-memory ownership;

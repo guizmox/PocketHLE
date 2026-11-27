@@ -1,10 +1,2 @@
-crates/pocket-library/src/lib.rs
-crates/pocket-pe/src/lib.rs
-docs/GIZMONDO.md
-frontends/pocket-cli/src/main.rs
-frontends/pocket-desktop/src/app.rs
-frontends/pocket-desktop/src/file_dialog.rs
-frontends/pocket-desktop/src/toolbar_ui.rs
-crates/pocket-library/src/vhd.rs
-crates/pocket-pe/src/gizmondo.rs
-crates/pocket-pe/src/gizmondo_tables.rs
+crates/pocket-winceapi/src/window_update.rs
+docs/MFC.md
