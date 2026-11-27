@@ -156,7 +156,7 @@ internal class AndroidFrameRenderer(context: Context, private var filter: String
             val draw = timing.start()
             glBindFramebuffer(GL_FRAMEBUFFER,0)
             val rect = renderedDisplayRect(viewW,viewH,frame.width,frame.height,
-                frame.textureWidth,frame.textureHeight,turn,pocketPc,controllerFullscreen)
+                frame.presentationWidth,frame.presentationHeight,turn,pocketPc,controllerFullscreen)
             val drawnW=rect.width;val drawnH=rect.height
             val x=rect.left;val y=viewH-rect.top-drawnH
             glViewport(x,y,drawnW,drawnH);glUseProgram(program)

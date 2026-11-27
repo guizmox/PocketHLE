@@ -170,6 +170,18 @@ contents. [Local timing and validation records](history/VALIDATION.md#electopia-
 describe the measured sequences. Physical GPU timing on Windows, Steam Deck
 and Android remains pending for these comparisons.
 
+### EGL window recreation
+
+A deleted surface may retain backing while still current, but only live surfaces
+reserve their native window during `eglCreateWindowSurface`. The Gizmondo kiosk
+MultiBoot launcher destroys its current context/surface, terminates EGL, launches
+a child and initializes EGL again on return without an intermediate unbind.
+The replacement surface must receive a fresh handle. Keep the old backing until
+the successful context switch collects it; do not resurrect deleted objects or
+reset the whole parent renderer. Normal duplicate-window rejection, and the
+GoForce profile's acceptance of a repeated live window, remain in place.
+This EGL lifetime fix is shared by desktop/Android and software/GPU rendering.
+
 ### Intel 2700G depth-bias model
 
 **Intel 2700G depth-bias compatibility** retains the reference driver's integer
@@ -412,6 +424,16 @@ their original detail. Multipliers increase pixel count quadratically and may
 increase GPU, memory or logical-resolve cost.
 
 ## Display size and filters
+
+For Gizmondo, the selected internal-resolution policy also supplies a host-only
+presentation density floor for non-GLES images, including GDI/GAPI and media.
+A native 320×240 upload can therefore use the same display fitting as a GLES
+640×480, 960×720 or 1280×960 image. The existing presentation filter samples the
+original texture; this adds no CPU resize or guest framebuffer allocation.
+Actual texture dimensions/byte counts, GLES renders and guest coordinates stay
+unchanged. Desktop and Android apply their existing viewport limits and
+proportional downscale when this reference size exceeds the available screen.
+PocketPC presentation is unchanged. Capture/recording source pixels are unchanged.
 
 Display geometry uses produced image dimensions, preserves aspect ratio and
 shares its rectangle with inverse input mapping. Prefer the applicable integer

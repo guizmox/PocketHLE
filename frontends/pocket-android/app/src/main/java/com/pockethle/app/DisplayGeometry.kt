@@ -61,3 +61,21 @@ internal fun aspectDisplayRect(viewW:Int,viewH:Int,nativeW:Int,nativeH:Int):Disp
     else {height=h;width=(h*nw/nh).toInt().coerceAtLeast(1)}
     return DisplayRect((w-width)/2,(h-height)/2,width,height)
 }
+
+/** Host presentation density only: never enlarge the CPU pixel payload or guest coordinates.
+ * Passing this size through renderedDisplayRect retains GLES integer fit and small-screen downscale.
+ */
+internal fun gizmondoPresentationSize(nativeW:Int,nativeH:Int,textureW:Int,textureH:Int,policy:Int):Pair<Int,Int> {
+    val qvga = (nativeW == 320 && nativeH == 240) || (nativeW == 240 && nativeH == 320)
+    val requested = when(policy) {
+        2 -> 2
+        6 -> 3
+        7 -> 4
+        3 -> if(qvga) 2 else 1
+        4 -> if(qvga) 3 else 1
+        5 -> if(qvga) 4 else 1
+        else -> 1
+    }
+    val scale = if(maxOf(nativeW,nativeH) > 8192 / requested) 1 else requested
+    return maxOf(textureW,nativeW*scale) to maxOf(textureH,nativeH*scale)
+}

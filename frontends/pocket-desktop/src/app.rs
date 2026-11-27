@@ -405,6 +405,7 @@ pub struct PocketLauncher {
     running_game_id: Option<String>,
     /// True while the current title is a Gizmondo game.
     running_is_gizmondo: bool,
+    running_gizmondo_presentation_policy: u8,
     /// Guest button waiting for the user to press the host key that
     /// should drive it, while the keybinding editor is in "press a
     /// key" mode.
@@ -1059,6 +1060,7 @@ impl PocketLauncher {
             game_rotation: RotationPref::None,
             running_game_id: None,
             running_is_gizmondo: false,
+            running_gizmondo_presentation_policy: 1,
             input_gestures: Default::default(),
             input_gesture_clock: Instant::now(),
             input_controller: false,
@@ -1597,10 +1599,11 @@ impl PocketLauncher {
         let central = ui.available_rect_before_wrap().size();
         let chrome = (current - central).max(Vec2::ZERO);
         let required = if self.running_is_gizmondo {
+            let [width, height] = self.gizmondo_presentation_size(frame);
             Vec2::new(
-                2.0 * frame.texture_width as f32 / dpi
+                2.0 * width as f32 / dpi
                     + 2.0 * (crate::gizmondo_layout::MAX_SIDE + crate::gizmondo_layout::GAP),
-                2.0 * frame.texture_height as f32 / dpi
+                2.0 * height as f32 / dpi
                     + crate::gizmondo_layout::HEADER
                     + crate::gizmondo_layout::GAP,
             )
@@ -4218,13 +4221,23 @@ impl PocketLauncher {
         );
     }
 
+    fn gizmondo_presentation_size(&self, frame: &FrameSnapshot) -> [u32; 2] {
+        pocket_core::winceapi::gles::gizmondo_presentation_size(
+            self.running_gizmondo_presentation_policy,
+            [frame.width, frame.height],
+            [frame.texture_width, frame.texture_height],
+        )
+    }
+
     fn ui_fullscreen_game(&mut self, ui: &mut egui::Ui) {
         let Some(frame) = self.last_frame_snapshot.as_ref() else {
             self.paint_game_loading(ui, ui.available_rect_before_wrap());
             return;
         };
         let guest_size = Vec2::new(frame.width as f32, frame.height as f32);
-        let native = if !self.running_is_gizmondo && self.game_rotation.is_quarter_turn() {
+        let native = if self.running_is_gizmondo {
+            self.gizmondo_presentation_size(frame)
+        } else if self.game_rotation.is_quarter_turn() {
             [frame.texture_height, frame.texture_width]
         } else {
             [frame.texture_width, frame.texture_height]
@@ -4535,7 +4548,7 @@ impl PocketLauncher {
         let native = self
             .last_frame_snapshot
             .as_ref()
-            .map_or([320, 240], |f| [f.texture_width, f.texture_height]);
+            .map_or([320, 240], |f| self.gizmondo_presentation_size(f));
         let guest = self
             .last_frame_snapshot
             .as_ref()
@@ -6740,6 +6753,7 @@ impl PocketLauncher {
         self.running_game = Some(game.display_name.clone());
         self.running_game_id = Some(game.id.clone());
         self.running_is_gizmondo = is_gizmondo_game(game, self.library.root());
+        self.running_gizmondo_presentation_policy = self.library.config().gles_internal_resolution;
         self.running_simulated_tilt = !self.running_is_gizmondo
             && game.settings.effective_tilt_input(self.library.config())
                 != TiltInput::Accelerometer;

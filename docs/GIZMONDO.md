@@ -85,6 +85,18 @@ previous level 3; the new level 3 blends one twenty-fourth toward white, halfway
 between neutral level 2 and the new maximum. Neither blacks out
 nor whites out the screen. Screenshots follow the existing displayed-image path.
 
+## Display scaling and card launchers
+
+The internal-resolution multiplier also keeps Gizmondo non-GLES menu/media
+screens on the same host presentation grid as GLES. These screens use the
+selected upscaling filter, with the normal fit/downscale to available screen
+space; their guest framebuffer and source pixels remain native. This is not
+additional geometry detail. See [display size and filters](GPU.md#display-size-and-filters).
+
+Kiosk card launchers may destroy their current EGL surface before launching a
+child and recreate it on return. Deleted backings are retained until unbound,
+without preventing the launcher from creating its replacement window surface.
+
 ## Battery, shell status and video
 
 Battery APIs use the host adapter where supported, with existing simulated or

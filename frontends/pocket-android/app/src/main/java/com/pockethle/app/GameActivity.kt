@@ -69,6 +69,7 @@ class GameActivity : AppCompatActivity() {
      * repaint after `surfaceChanged` resizes the SurfaceView even if
      * the worker has not produced a new frame yet. */
     private var lastFrame: FrameSnapshot? = null
+    private var gizmondoPresentationPolicy: Int = 1
 
     @Volatile private var audioRunning = false
     @Volatile private var audioGeneration = 0L
@@ -177,7 +178,7 @@ class GameActivity : AppCompatActivity() {
         }
         val frame = lastFrame
         val rect = if (frame != null) renderedDisplayRect(surface.width, surface.height,
-            frame.width, frame.height, frame.textureWidth, frame.textureHeight,
+            frame.width, frame.height, frame.presentationWidth, frame.presentationHeight,
             rotationDegrees, !gizmondoGame, controllerFullscreenHost.active)
             else DisplayRect(0, 0, surface.width, surface.height)
         val screen = IntArray(2).also { surface.getLocationInWindow(it) }
@@ -239,8 +240,8 @@ class GameActivity : AppCompatActivity() {
         mediaButtons[1].text = if (status.getBoolean("paused")) "Play" else "Pause"
         mediaButtons[3].isEnabled = seekable
         val rect = renderedDisplayRect(
-            surface.width, surface.height, frame.width, frame.height, frame.textureWidth,
-            frame.textureHeight, rotationDegrees, !gizmondoGame,
+            surface.width, surface.height, frame.width, frame.height, frame.presentationWidth,
+            frame.presentationHeight, rotationDegrees, !gizmondoGame,
             controllerFullscreenHost.active,
         )
         val screen = IntArray(2).also { surface.getLocationInWindow(it) }
@@ -271,7 +272,7 @@ class GameActivity : AppCompatActivity() {
         val parent = surface.parent as? FrameLayout ?: return
         if (surface.width <= 0 || surface.height <= 0) return
         val rect = renderedDisplayRect(surface.width, surface.height, frame.width, frame.height,
-            frame.textureWidth, frame.textureHeight, rotationDegrees, !gizmondoGame, controllerFullscreenHost.active)
+            frame.presentationWidth, frame.presentationHeight, rotationDegrees, !gizmondoGame, controllerFullscreenHost.active)
         val gap = (6 * resources.displayMetrics.density).toInt()
         var top = surface.top + rect.top + gap
         // When the image fills the physical corner, keep the rate badge below L.
@@ -400,6 +401,7 @@ class GameActivity : AppCompatActivity() {
         gameId = intent.getStringExtra(EXTRA_GAME_ID) ?: ""
         gameRoot = LibraryPaths.root(this)
         gizmondoGame = gameId.isNotEmpty() && NativeBridge.isGizmondoGame(gameRoot,gameId)
+        gizmondoPresentationPolicy = if (gizmondoGame) config.glesInternalResolution else 1
         bindings = InputBindings(config,gizmondoGame)
         requestedOrientation = if (gizmondoGame) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         setContentView(if (gizmondoGame) R.layout.activity_game else R.layout.activity_game_pocketpc)
@@ -955,7 +957,8 @@ class GameActivity : AppCompatActivity() {
 
     private fun decodeFrame(raw: ByteArray): FrameSnapshot? {
         val frame = decodeFramePayload(raw) ?: return null
-        return FrameSnapshot(frame.width, frame.height, raw, frame.rgbaOffset, frame.textureWidth, frame.textureHeight, frame.sharedToken, frame.rgb565, frame.backlight)
+        val shown = if (gizmondoGame) gizmondoPresentationSize(frame.width, frame.height, frame.textureWidth, frame.textureHeight, gizmondoPresentationPolicy) else null
+        return FrameSnapshot(frame.width, frame.height, raw, frame.rgbaOffset, frame.textureWidth, frame.textureHeight, frame.sharedToken, frame.rgb565, frame.backlight, shown?.first ?: frame.textureWidth, shown?.second ?: frame.textureHeight)
     }
 
     private fun updateIpsOverlay() {
@@ -1018,8 +1021,8 @@ class GameActivity : AppCompatActivity() {
 
     private fun updatePocketPcDisplayGeometry(frame: FrameSnapshot) {
         val quarter=rotationDegrees==90 || rotationDegrees==270
-        val renderW=if(quarter) frame.textureHeight else frame.textureWidth
-        val renderH=if(quarter) frame.textureWidth else frame.textureHeight
+        val renderW=if(quarter) frame.presentationHeight else frame.presentationWidth
+        val renderH=if(quarter) frame.presentationWidth else frame.presentationHeight
         controllerFullscreenHost.setDisplaySize(renderW,renderH)
         if (gizmondoGame) return
         val width=if(quarter) frame.height else frame.width
@@ -1036,7 +1039,7 @@ class GameActivity : AppCompatActivity() {
         updatePocketPcDisplayGeometry(frame)
         liveGrid?.let { grid ->
             val rect = renderedDisplayRect(surface.width, surface.height, frame.width, frame.height,
-                frame.textureWidth, frame.textureHeight, rotationDegrees, true, controllerFullscreenHost.active)
+                frame.presentationWidth, frame.presentationHeight, rotationDegrees, true, controllerFullscreenHost.active)
             grid.updateDisplay(rect, rect.height > rect.width)
         }
         glRenderer.submit(frame)
@@ -1532,7 +1535,7 @@ class GameActivity : AppCompatActivity() {
                 val f=lastFrame ?: return
                 val p=stylusPointer.position() ?: return
                 if(!stylusPointer.pointer || gizmondoGame) return
-                val rect=renderedDisplayRect(width,height,f.width,f.height,f.textureWidth,f.textureHeight,rotationDegrees,true,controllerFullscreenHost.active)
+                val rect=renderedDisplayRect(width,height,f.width,f.height,f.presentationWidth,f.presentationHeight,rotationDegrees,true,controllerFullscreenHost.active)
                 val w=f.width.toFloat();val h=f.height.toFloat();val x=p.first.toFloat();val y=p.second.toFloat()
                 val uv=when(rotationDegrees) {90->(h-1-y)/h to x/w;180->(w-1-x)/w to (h-1-y)/h;270->y/h to (w-1-x)/w;else->x/w to y/h}
                 val cx=rect.left+uv.first*rect.width;val cy=rect.top+uv.second*rect.height
@@ -1823,7 +1826,7 @@ class GameActivity : AppCompatActivity() {
         frame: FrameSnapshot,
         pointerIndex: Int = 0,
     ): Pair<Int, Int>? {
-        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,!gizmondoGame,controllerFullscreenHost.active,frame.textureWidth,frame.textureHeight)
+        return displayPointToGuest(event.getX(pointerIndex),event.getY(pointerIndex),v.width,v.height,frame.width,frame.height,rotationDegrees,!gizmondoGame,controllerFullscreenHost.active,frame.presentationWidth,frame.presentationHeight)
     }
 
     data class FrameSnapshot(
@@ -1836,6 +1839,8 @@ class GameActivity : AppCompatActivity() {
         val sharedToken: Long = 0,
         val rgb565: Boolean = false,
         val backlight: Int = 11,
+        val presentationWidth: Int = textureWidth,
+        val presentationHeight: Int = textureHeight,
     )
 
     companion object {

@@ -2324,9 +2324,16 @@ fn egl_create_window_surface(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     let (w, h) = (ctx.kernel.framebuffer.width, ctx.kernel.framebuffer.height);
     let handle = SURFACES.with(|s| {
         let mut s = s.borrow_mut();
-        if let Some((&handle, _)) = s.images.iter().find(|(_, i)| i.window == Some(window)) {
+        // The kiosk MultiBoot launcher destroys its current surface before SDCreateProcess
+        // and recreates it on return. A deleted image keeps its backing until unbound,
+        // but must not reserve the native window against a new live surface.
+        if let Some((&handle, _)) = s
+            .images
+            .iter()
+            .find(|(_, i)| !i.deleted && i.window == Some(window))
+        {
             // Keep the historical repeated-window acceptance in the GoForce profile.
-            if goforce && !s.images[&handle].deleted {
+            if goforce {
                 return handle;
             }
             set_egl_error(pocket_gles::EGL_BAD_ALLOC);
@@ -7046,6 +7053,112 @@ mod tests {
         );
     }
 
+    fn window_recreation_after_destroy(gpu: bool) {
+        for profile in [false, true] {
+            for terminate in [false, true] {
+                reset_for_test(8, 8);
+                set_gizmondo_goforce_driver(profile);
+                set_internal_resolution(2);
+                set_gpu_renderer(gpu);
+                let (mut cpu, mut kernel) = (fresh_cpu(), fresh_kernel());
+                let window = 0x1234;
+                SURFACES.with(|s| {
+                    s.borrow_mut()
+                        .images
+                        .get_mut(&SURFACE_HANDLE)
+                        .unwrap()
+                        .window = Some(window)
+                });
+                with_ctx(|c| {
+                    c.clear_color = [1., 0., 0., 1.];
+                    c.clear(pocket_gles::GL_COLOR_BUFFER_BIT);
+                });
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_destroy_context,
+                    &[DISPLAY_HANDLE, CONTEXT_HANDLE],
+                );
+                call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_destroy_surface,
+                    &[DISPLAY_HANDLE, SURFACE_HANDLE],
+                );
+                if terminate {
+                    call(&mut cpu, &mut kernel, egl_terminate, &[DISPLAY_HANDLE]);
+                    call(
+                        &mut cpu,
+                        &mut kernel,
+                        egl_initialize,
+                        &[DISPLAY_HANDLE, 0, 0],
+                    );
+                }
+                let replacement = call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_create_context,
+                    &[DISPLAY_HANDLE, CONFIG_HANDLE, 0, 0],
+                );
+                let surface = call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_create_window_surface,
+                    &[DISPLAY_HANDLE, CONFIG_HANDLE, window, 0],
+                );
+                assert_ne!(surface, 0);
+                assert_ne!(surface, SURFACE_HANDLE);
+                // Allocating a new image must not release the still-current old backing.
+                with_ctx(|c| {
+                    c.sync_gpu();
+                    assert_eq!(&c.target.color[..4], &[255, 0, 0, 255]);
+                });
+                assert_eq!(
+                    call(
+                        &mut cpu,
+                        &mut kernel,
+                        egl_make_current,
+                        &[DISPLAY_HANDLE, surface, surface, replacement]
+                    ),
+                    EGL_TRUE
+                );
+                SURFACES.with(|s| {
+                    let s = s.borrow();
+                    assert!(!s.images.contains_key(&SURFACE_HANDLE));
+                    assert!(!s.contexts.contains_key(&CONTEXT_HANDLE));
+                    assert_eq!(s.images[&surface].window, Some(window));
+                });
+                with_ctx(|c| {
+                    c.clear_color = [0., 1., 0., 1.];
+                    c.clear(pocket_gles::GL_COLOR_BUFFER_BIT);
+                    c.sync_gpu();
+                    assert_eq!(&c.target.color[..4], &[0, 255, 0, 255]);
+                    assert_eq!(c.gpu_active(), gpu);
+                });
+                let duplicate = call(
+                    &mut cpu,
+                    &mut kernel,
+                    egl_create_window_surface,
+                    &[DISPLAY_HANDLE, CONFIG_HANDLE, window, 0],
+                );
+                assert_eq!(duplicate, if profile { surface } else { 0 });
+            }
+        }
+    }
+
+    #[test]
+    fn egl_recreated_window_keeps_deferred_old_pixels_until_rebind() {
+        let _g = guard();
+        window_recreation_after_destroy(false);
+    }
+
+    #[test]
+    #[ignore = "requires native OpenGL"]
+    fn gpu_egl_recreated_window_keeps_deferred_old_pixels_until_rebind() {
+        let _g = guard();
+        window_recreation_after_destroy(true);
+    }
+
     #[test]
     fn egl_context_creation_and_queries_validate_without_modifying_the_binding() {
         let _g = guard();
@@ -8263,3 +8376,37 @@ mod tests {
 
 /// Deferred kernel image adapter; not active in the main framebuffer yet.
 pub mod deferred_frame;
+
+/// Host-only density floor for Gizmondo CPU/media frames. Keep actual texture storage and
+/// guest coordinates unchanged; frontend fitting applies the same downscale as GLES.
+pub fn gizmondo_presentation_size(policy: u8, logical: [u32; 2], texture: [u32; 2]) -> [u32; 2] {
+    let scale = pocket_gles::gpu::render_scale_for(policy, logical[0], logical[1]);
+    [
+        texture[0].max(logical[0] * scale),
+        texture[1].max(logical[1] * scale),
+    ]
+}
+
+#[cfg(test)]
+mod presentation_density_tests {
+    use super::gizmondo_presentation_size;
+    #[test]
+    fn gizmondo_cpu_density_matches_gles_without_resizing_storage() {
+        for policy in 1..=7 {
+            for logical in [[320, 240], [240, 320], [640, 480]] {
+                let scale = pocket_gles::gpu::render_scale_for(policy, logical[0], logical[1]);
+                let dense = logical.map(|n| n * scale);
+                assert_eq!(gizmondo_presentation_size(policy, logical, logical), dense);
+                assert_eq!(gizmondo_presentation_size(policy, logical, dense), dense);
+            }
+        }
+        assert_eq!(
+            gizmondo_presentation_size(3, [320, 240], [1280, 960]),
+            [1280, 960]
+        );
+        assert_eq!(
+            gizmondo_presentation_size(7, [2560, 1440], [2560, 1440]),
+            [2560, 1440]
+        );
+    }
+}
