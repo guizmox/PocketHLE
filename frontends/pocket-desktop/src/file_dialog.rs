@@ -29,7 +29,7 @@ impl Purpose {
         }
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let extensions: &[&str] = match self {
-            Self::Import => &["rar", "cab", "zip", "exe", "dll"],
+            Self::Import => &["rar", "cab", "zip", "vhd", "exe", "dll"],
             _ => &["zip"],
         };
         extensions.iter().any(|e| extension.eq_ignore_ascii_case(e))
@@ -102,6 +102,7 @@ fn file_kind(entry: &Entry) -> String {
         .as_str()
     {
         "zip" => "ZIP archive".into(),
+        "vhd" => "VHD SD-card image".into(),
         "cab" => "CAB archive".into(),
         "rar" => "RAR archive".into(),
         "exe" => "Application".into(),

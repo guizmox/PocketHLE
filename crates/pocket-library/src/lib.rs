@@ -47,6 +47,7 @@ use thiserror::Error;
 
 pub mod analysis;
 mod installer;
+mod vhd;
 pub use analysis::{analyze_game, detect_gizmondo_title_id, game_gizmondo_title_id, GameAnalysis};
 
 pub mod gizmondo_titles;
@@ -191,6 +192,17 @@ fn is_gizmondo_at(entry: &GameEntry, extracted: &Path) -> bool {
         || entry.source_cab.starts_with("gzga-collection:")
         || is_gizmondo_title_id(&entry.id)
         || has_gizmondo_marker(extracted)
+        || fs::File::open(
+            extracted
+                .parent()
+                .unwrap_or(extracted)
+                .join(&entry.executable),
+        )
+        .ok()
+        .is_some_and(|mut f| {
+            let mut header = [0; 8];
+            f.read_exact(&mut header).is_ok() && pocket_pe::gizmondo::is_encrypted(&header)
+        })
         || (entry
             .source_cab
             .to_ascii_lowercase()
@@ -2005,6 +2017,8 @@ impl Library {
         } else {
             let entry = if signature == *b"MSCF" || ext == "cab" {
                 provisional.import_cab(path)?
+            } else if ext == "vhd" {
+                provisional.import_vhd(path)?
             } else if signature == *b"Rar!" || ext == "rar" {
                 provisional.import_rar(path)?
             } else {
@@ -2741,12 +2755,60 @@ impl Library {
         &mut self,
         zip_path: impl AsRef<Path>,
     ) -> Result<Vec<GameEntry>, LibraryError> {
-        let zip_path = zip_path.as_ref();
-        let source_name = zip_path
+        self.import_archive_single(zip_path.as_ref(), |dest| {
+            let mut archive = zip::ZipArchive::new(fs::File::open(zip_path.as_ref())?)?;
+            let mut written = Vec::with_capacity(archive.len());
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i)?;
+                let Some(rel) = entry.enclosed_name().map(Path::to_path_buf) else {
+                    continue;
+                };
+                if rel.as_os_str().is_empty() {
+                    continue;
+                }
+                let path = dest.join(rel);
+                if entry.is_dir() {
+                    fs::create_dir_all(&path)?;
+                    continue;
+                }
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                std::io::copy(&mut entry, &mut fs::File::create(&path)?)?;
+                written.push(path);
+            }
+            Ok(written)
+        })
+    }
+
+    /// Import SD-card files without interpreting or changing their contents.
+    /// Encrypted EXEs are recognised during selection and decoded by pocket-pe
+    /// only when loaded, including EXEs subsequently launched by a demo menu.
+    pub fn import_vhd(&mut self, path: impl AsRef<Path>) -> Result<&GameEntry, LibraryError> {
+        let entries = self
+            .import_archive_single(path.as_ref(), |dest| Ok(vhd::extract(path.as_ref(), dest)?))?;
+        let id = &entries.first().ok_or(LibraryError::NoExecutable)?.id;
+        self.get(id).ok_or(LibraryError::NoExecutable)
+    }
+
+    fn import_archive_single(
+        &mut self,
+        source_path: &Path,
+        extract: impl FnOnce(&Path) -> Result<Vec<PathBuf>, LibraryError>,
+    ) -> Result<Vec<GameEntry>, LibraryError> {
+        let is_vhd = source_path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("vhd"));
+        let source_name = source_path
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown.zip".to_string());
-        let id = sanitize_id(zip_path.file_stem().map(|s| s.to_string_lossy()).as_deref());
+        let id = sanitize_id(
+            source_path
+                .file_stem()
+                .map(|s| s.to_string_lossy())
+                .as_deref(),
+        );
         if id.is_empty() {
             return Err(LibraryError::InvalidId(source_name));
         }
@@ -2760,37 +2822,14 @@ impl Library {
         let extracted_dir = game_dir.join("extracted");
         fs::create_dir_all(&extracted_dir)?;
 
-        // Extract every entry next to the would-be executable.
-        let f = fs::File::open(zip_path)?;
-        let mut archive = zip::ZipArchive::new(f)?;
-        let mut written: Vec<PathBuf> = Vec::with_capacity(archive.len());
-        for i in 0..archive.len() {
-            let mut entry = archive.by_index(i)?;
-            let Some(rel) = entry.enclosed_name().map(Path::to_path_buf) else {
-                continue;
-            };
-            if rel.as_os_str().is_empty() {
-                continue;
-            }
-            let dest = extracted_dir.join(&rel);
-            if entry.is_dir() {
-                fs::create_dir_all(&dest)?;
-                continue;
-            }
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut out = fs::File::create(&dest)?;
-            std::io::copy(&mut entry, &mut out)?;
-            written.push(dest);
-        }
+        let mut written = extract(&extracted_dir)?;
         if written.is_empty() {
             return Err(LibraryError::NoExecutable);
         }
         // Strip only sole enclosing folders; retain a GZGA boundary so its
         // identity and the demo-card/GZGA priority are not lost.
         let mut content_root = extracted_dir.clone();
-        loop {
+        while !is_vhd {
             let children: Vec<_> = fs::read_dir(&content_root)?.collect::<Result<_, _>>()?;
             if children.len() != 1 || !children[0].file_type()?.is_dir() {
                 break;
@@ -2813,7 +2852,19 @@ impl Library {
                 .collect();
         }
 
-        let demo_launcher = demo_card_launcher(&written, &extracted_dir);
+        let demo_launcher = if is_vhd {
+            written
+                .iter()
+                .find(|p| {
+                    p.parent() == Some(extracted_dir.as_path())
+                        && p.file_name()
+                            .is_some_and(|n| n.eq_ignore_ascii_case("autorun.exe"))
+                        && is_guest_exe(p)
+                })
+                .cloned()
+        } else {
+            demo_card_launcher(&written, &extracted_dir)
+        };
 
         // ZIPs that are really just installer wrappers around a CAB —
         // recurse so we get the proper PocketPC display metadata
@@ -2827,7 +2878,8 @@ impl Library {
             })
             .cloned()
             .collect();
-        if demo_launcher.is_none()
+        if !is_vhd
+            && demo_launcher.is_none()
             && gzga_collection_root(&written, &extracted_dir).is_none()
             && !nested_cabs.is_empty()
         {
@@ -2845,7 +2897,7 @@ impl Library {
                 .unwrap_or_else(|| nested_cabs[0].clone());
             log::info!(
                 "zip {} contains nested cabinets; importing {} with its companion cabinets",
-                zip_path.display(),
+                source_path.display(),
                 main_cab.display(),
             );
             let nested_dir = self.root.join("games").join(format!(".{id}-nested-cabs"));
@@ -2894,13 +2946,22 @@ impl Library {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| exe_abs.clone());
 
-        let display_name = if is_demo_card {
+        let display_name = if source_path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("vhd"))
+        {
+            source_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        } else if is_demo_card {
             "Demo Card".to_string()
         } else {
             pretty_id(&id)
         };
         let entry = GameEntry {
-            platform: None,
+            platform: is_vhd.then_some(GamePlatform::Gizmondo),
             id: id.clone(),
             display_name,
             provider: None,
@@ -2919,11 +2980,11 @@ impl Library {
             companions: record_extracted_libraries(&extracted_dir, &game_dir),
         };
 
-        if !is_demo_card && gzga_collection_root(&written, &extracted_dir).is_some() {
+        if !is_vhd && !is_demo_card && gzga_collection_root(&written, &extracted_dir).is_some() {
             return self.import_game_trees(staging, entry, &extracted_dir, &written, None);
         }
         let mut entry = entry;
-        if !is_demo_card {
+        if !is_vhd && !is_demo_card {
             if let Some(code) = detect_gizmondo_title_id(&extracted_dir).or_else(|| {
                 // A flat card ZIP may carry its only explicit title ID in the
                 // archive name (Android normalizes that name to lowercase).
@@ -2934,6 +2995,13 @@ impl Library {
                     .unwrap_or(&entry.id)
                     .to_owned();
             }
+        }
+        if is_vhd {
+            entry.display_name = source_path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
         }
         let previous = self.previous_import(&entry.id, &source_name)?;
         self.preserve_import_preferences(&mut entry, previous.as_ref(), &game_dir)?;
@@ -3330,6 +3398,7 @@ impl Library {
         match ext.as_deref() {
             Some("cab") => self.import_cab(path),
             Some("zip") => self.import_zip(path),
+            Some("vhd") => self.import_vhd(path),
             Some("rar") => self.import_rar(path),
             _ => self.import_exe(path),
         }
@@ -4469,6 +4538,17 @@ fn sniff_pe(path: &Path) -> std::io::Result<Option<PeSniff>> {
     let n = f.read(&mut head)?;
     if n < 0x40 {
         return Ok(None);
+    }
+    if pocket_pe::gizmondo::is_encrypted(&head) {
+        // Recognition only. Do not decrypt files as an import side effect.
+        return Ok(path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+            .then_some(PeSniff {
+                machine: pocket_pe::machine::ARM,
+                managed: false,
+                characteristics: 0x0002,
+            }));
     }
     if &head[0..2] != b"MZ" {
         return Ok(None);

@@ -113,7 +113,7 @@ fn button(ui: &mut Ui, action: Action, state: &State<'_>, width: f32) -> bool {
         );
         let response = match action {
             Library => response.on_hover_text("Return to the game library (F8)"),
-            Import => response.on_hover_text("Import .CAB / .ZIP / .RAR"),
+            Import => response.on_hover_text("Import .CAB / .ZIP / .RAR / .VHD"),
             Backup => {
                 response.on_hover_text("Save a ZIP backup of the library; stop the game first")
             }

@@ -142,6 +142,26 @@ Demo cards kept as launchers retain their internal shared card layout; split
 cards use the same independent game layout. Reimporting a legacy collection
 migrates matching entries while retaining their settings, custom names and saves.
 
+Gizmondo SD-card dumps can also be imported from fixed `.vhd` images with one
+FAT12/16/32 partition (or an unpartitioned FAT volume). The importer validates
+VHD bounds/checksum, cluster chains and filenames, then copies the complete
+card tree without unwrapping folders or splitting GZGA games. VHD imports
+select Gizmondo directly, bypassing platform/title detection. A root
+`autorun.exe` takes priority. The suggested name is the exact VHD filename
+without its extension; existing custom names survive reimport. Dynamic,
+differencing and VHDX images are currently rejected with an explicit error.
+
+VHD import and executable decryption are independent. Import only recognises
+the known Gizmondo encrypted header for executable selection; it preserves all
+file bytes. The shared `pocket-pe` loader decodes a recognised encrypted image
+in memory before PE parsing, regardless of VHD/ZIP/raw-EXE provenance, including
+child EXEs loaded through the same loader. Ordinary PE images are untouched;
+recognised corrupt envelopes fail loading. The native Rust implementation has
+the supplied `giz_exe_dec` utility's 256 header/key variants, 1 KiB record resets
+and seven-byte feedback. No Windows helper process is required on Android.
+This is distinct from SDK `libSDProt` card-identity checks and does not alter
+those existing services.
+
 Platform identification accepts an exact GZxx plus six-digit directory name even
 when the directory is empty: CatData.zip has root Autorun.exe and GZGA800069/,
 without a serial marker file. This is Gizmondo, not PocketPC. The directory serial

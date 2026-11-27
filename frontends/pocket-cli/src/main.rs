@@ -42,7 +42,7 @@ enum Command {
         #[arg(short, long)]
         out_dir: Option<PathBuf>,
     },
-    /// Import a `.CAB` / `.ZIP` / `.RAR` / `.exe` into the launcher library so
+    /// Import a `.CAB` / `.ZIP` / `.RAR` / `.VHD` / `.exe` into the launcher library so
     /// the desktop and Android frontends can see it.
     ///
     /// Same code path the GUI's "Import" button uses, which makes it

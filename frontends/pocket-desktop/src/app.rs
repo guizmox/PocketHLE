@@ -2181,7 +2181,7 @@ impl PocketLauncher {
                 ui.add_space(8.0);
                 ui.label("Use Import to add a game to this platform.");
                 ui.add_space(20.0);
-                if crate::controller_ui::button(ui, "Import .CAB / .ZIP / .RAR...").clicked() {
+                if crate::controller_ui::button(ui, "Import .CAB / .ZIP / .RAR / .VHD...").clicked() {
                     self.spawn_import_dialog();
                 }
             });

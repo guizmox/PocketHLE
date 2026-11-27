@@ -20,6 +20,7 @@ use goblin::pe::{options::ParseOptions, PE};
 use indexmap::IndexMap;
 use thiserror::Error;
 
+pub mod gizmondo;
 pub mod icon;
 pub use icon::{icon_from_pe_bytes, IconImage};
 
@@ -274,6 +275,22 @@ fn load_bytes_inner(
     bytes: &[u8],
     max_section_bytes: Option<u64>,
 ) -> Result<LoadedImage, LoadError> {
+    // Exact Gizmondo envelope recognition is independent of archive/source.
+    // Decode only the loading copy; installed files and VHDs stay untouched.
+    let mut decoded;
+    let bytes = if gizmondo::is_encrypted(bytes) {
+        if bytes.len() > 256 * 1024 * 1024 {
+            return Err(LoadError::NotPe(
+                "Encrypted Gizmondo image exceeds size limit".into(),
+            ));
+        }
+        decoded = bytes.to_vec();
+        gizmondo::decode(&mut decoded)?;
+        log::info!("decoded encrypted Gizmondo executable in memory");
+        decoded.as_slice()
+    } else {
+        bytes
+    };
     let pe = parse_wince_pe(bytes)?;
     if pe.is_64 {
         return Err(LoadError::UnsupportedMachine(pe.header.coff_header.machine));
