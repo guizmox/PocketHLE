@@ -78,6 +78,7 @@ pub struct KernelSnapshot {
     0x0714, 1 => modules: Vec<LoadedModule>;
     0x0715, 1 => next_module_base: u32;
     0x0716, 1 => free_module_bases: Vec<u32>;
+    0x0717, 1 => disabled_dll_thread_notifications: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     // Windows and shell.
     0x0801, 1 => wnd_proc: u32;
     0x0802, 1 => window_class_procs: HashMap<String, u32>;
@@ -268,6 +269,7 @@ impl KernelState {
             runtime_thunks: self.runtime_thunks.clone(),
             module_attach_frames: self.module_attach_frames.clone(),
             static_module_roots: self.static_module_roots.clone(),
+            disabled_dll_thread_notifications: self.disabled_dll_thread_notifications.clone(),
             dll_notification_frame: self.dll_notification_frame.clone(),
             next_module_handle: self.next_module_handle,
             modules: self.modules.clone(),
@@ -463,6 +465,13 @@ impl KernelSnapshot {
         state: &mut KernelState,
         domain: Option<&DeviceRestoreDomain>,
     ) -> Result<Option<file_mapping::MappingSnapshot>, String> {
+        if self
+            .disabled_dll_thread_notifications
+            .iter()
+            .any(|handle| !self.modules.iter().any(|module| module.handle == *handle))
+        {
+            return Err("DLL thread notification opt-out has no loaded module".into());
+        }
         for (hwnd, list) in &self.document_lists {
             if self.controls.get(*hwnd).is_none_or(|control| {
                 control.class != controls::ControlClass::ListView
@@ -618,6 +627,7 @@ impl KernelSnapshot {
         state.runtime_thunks = self.runtime_thunks;
         state.module_attach_frames = self.module_attach_frames;
         state.static_module_roots = self.static_module_roots;
+        state.disabled_dll_thread_notifications = self.disabled_dll_thread_notifications;
         state.dll_notification_frame = self.dll_notification_frame;
         state.next_module_handle = self.next_module_handle;
         state.modules = self.modules;

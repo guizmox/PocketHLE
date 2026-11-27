@@ -1910,7 +1910,7 @@ impl FrameHook for RunHook {
                         let shared = if state.framebuffer.has_system_video() {
                             None
                         } else if !state.shell_keyboard.visible
-                            && state.gdi.shell_menus.tracking.is_none()
+                            && state.presentation_menu_handle().is_none()
                         {
                             pocket_core::winceapi::gles::take_shared_window_frame(
                                 &state.framebuffer,
@@ -1923,7 +1923,7 @@ impl FrameHook for RunHook {
                             let (reason, bit) = if state.shell_keyboard.visible {
                                 ("shell_keyboard_visible", 1)
                             } else {
-                                ("shell_menu_tracking", 2)
+                                ("shell_menu_visible", 2)
                             };
                             if SEEN.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
                                 log::info!("SHARED_HANDOFF=CPU reason={reason} (first occurrence this process)");

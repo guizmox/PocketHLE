@@ -1852,7 +1852,7 @@ impl FrameHook for SessionHook {
                     || !export
                     || kernel.framebuffer.has_system_video()
                     || kernel.shell_keyboard.visible
-                    || kernel.gdi.shell_menus.tracking.is_some()
+                    || kernel.presentation_menu_handle().is_some()
                 {
                     None
                 } else {

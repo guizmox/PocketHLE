@@ -64,6 +64,17 @@ of whether host OpenGL runs on a GPU or through a software driver.
 - Finish the worker before closing the UI share group. Preserve parent/child
   context restoration, EGL surface lifetime and restart behavior.
 
+## Shell popup composition
+
+Command-bar dropdowns and TrackPopupMenu popups are drawn onto the same temporary
+CPU presentation copy used by the SIP overlay. Ordinary command bars retain
+their window composite, but popup pixels never enter the guest GDI/GAPI buffer.
+Closing a popup therefore reveals the existing game image even when the guest
+has no new paint pending (Springer's static title screen exercises this case).
+`KernelState::presentation_menu_handle` is the shared visibility decision used
+by Desktop and Android to suspend shared-texture handoff while a popup is shown.
+No popup-specific backing cache or additional snapshot state is required.
+
 ## PocketPC graphics compatibility options
 
 PocketPC games select **GPU compatibility profile** in their own **Graphics**

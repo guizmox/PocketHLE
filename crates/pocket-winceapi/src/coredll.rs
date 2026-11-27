@@ -180,7 +180,11 @@ pub fn register(d: &mut WinCeDispatcher) {
     d.register_handler(dll, "#1", crate::imgdecmp::decompress);
     d.register_handler(dll, "_strupr", strupr);
     d.register_handler(dll, "FreeLibrary", free_library);
-    d.register_constant(dll, "DisableThreadLibraryCalls", 1, one_returning);
+    d.register_handler(
+        dll,
+        "DisableThreadLibraryCalls",
+        disable_thread_library_calls,
+    );
 
     // ---- CRT prologue helpers ----
     d.register_handler(dll, "__chkstk", chkstk);
@@ -5362,6 +5366,28 @@ fn begin_module_attach(ctx: &mut CallCtx<'_>, base: u32) -> Result<DispatchOutco
             error: None,
         },
     )
+}
+
+/// CE has no static TLS restriction: any valid DLL can suppress thread callbacks.
+fn disable_thread_library_calls(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let handle = ctx.arg_u32(0)?;
+    if ctx
+        .kernel
+        .modules
+        .iter()
+        .any(|module| module.handle == handle)
+    {
+        // Shift's Maestro DLL tears down shared audio tables on any non-attach
+        // notification. Honoring its opt-out prevents dangling lookup tables.
+        ctx.kernel.disabled_dll_thread_notifications.insert(handle);
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
+    if handle != ctx.kernel.image_base && ctx.kernel.dynamic_exports.contains_key(&handle) {
+        // HLE DLLs have no guest DllMain to notify.
+        return Ok(DispatchOutcome::ReturnedR0(1));
+    }
+    set_thread_error(ctx, ERROR_INVALID_HANDLE);
+    Ok(DispatchOutcome::ReturnedR0(0))
 }
 
 fn free_library(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
@@ -32205,6 +32231,150 @@ mod tests {
         );
     }
 
+    fn disable_test_thread_notifications(
+        cpu: &mut dyn Cpu,
+        kernel: &mut KernelState,
+        handle: u32,
+    ) -> u32 {
+        let mut dispatcher = crate::WinCeDispatcher::new();
+        let mut thunk = dummy_thunk();
+        thunk.binding = pocket_pe::ImportBinding::Name("DisableThreadLibraryCalls".into());
+        let handler = dispatcher.resolve_handler(&thunk).unwrap();
+        cpu.write_arg(0, handle).unwrap();
+        match handler(&mut CallCtx {
+            cpu,
+            kernel,
+            thunk: &thunk,
+        })
+        .unwrap()
+        {
+            DispatchOutcome::ReturnedR0(value) => value,
+            other => panic!("unexpected notification opt-out result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dll_thread_opt_out_validates_handles_and_keeps_process_detach() {
+        use pocket_kernel::dll_lifecycle::DllContinuation;
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel
+            .modules
+            .push(lifecycle_test_module(0x30000000, 0x30001000));
+        kernel
+            .modules
+            .push(lifecycle_test_module(0x31000000, 0x31001000));
+        for handle in [0, kernel.image_base, 0x40000000] {
+            assert_eq!(
+                disable_test_thread_notifications(&mut cpu, &mut kernel, handle),
+                0
+            );
+            assert_eq!(kernel.thread_last_errors[&0], ERROR_INVALID_HANDLE);
+        }
+        kernel
+            .dynamic_exports
+            .insert(0x10000001, Default::default());
+        assert_eq!(
+            disable_test_thread_notifications(&mut cpu, &mut kernel, 0x10000001),
+            1
+        );
+        assert!(kernel.disabled_dll_thread_notifications.is_empty());
+        for _ in 0..2 {
+            assert_eq!(
+                disable_test_thread_notifications(&mut cpu, &mut kernel, 0x30000000),
+                1
+            );
+        }
+        assert_eq!(kernel.disabled_dll_thread_notifications.len(), 1);
+        for reason in [2, 3] {
+            assert_eq!(
+                kernel
+                    .begin_dll_notifications(&mut cpu, reason, DllContinuation::Resume(0x11000))
+                    .unwrap(),
+                Some(0x31001000)
+            );
+            assert_eq!(
+                kernel.next_dll_notification(&mut cpu).unwrap(),
+                Some(0x11000)
+            );
+        }
+        assert_eq!(
+            kernel
+                .begin_dll_notifications(&mut cpu, 0, DllContinuation::ExitProcess(0))
+                .unwrap(),
+            Some(0x31001000)
+        );
+        assert_eq!(
+            kernel.next_dll_notification(&mut cpu).unwrap(),
+            Some(0x30001000)
+        );
+        kernel.next_dll_notification(&mut cpu).unwrap();
+        assert!(kernel.modules.is_empty());
+        assert!(kernel.disabled_dll_thread_notifications.is_empty());
+        kernel
+            .modules
+            .push(lifecycle_test_module(0x30000000, 0x30001000));
+        assert_eq!(
+            kernel
+                .begin_dll_notifications(&mut cpu, 2, DllContinuation::Resume(0x11000))
+                .unwrap(),
+            Some(0x30001000)
+        );
+    }
+
+    #[test]
+    fn dll_thread_opt_out_applies_to_an_already_pending_callback() {
+        use pocket_kernel::dll_lifecycle::DllContinuation;
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel
+            .modules
+            .push(lifecycle_test_module(0x30000000, 0x30001000));
+        kernel
+            .modules
+            .push(lifecycle_test_module(0x31000000, 0x31001000));
+        assert_eq!(
+            kernel
+                .begin_dll_notifications(&mut cpu, 2, DllContinuation::Resume(0x11000))
+                .unwrap(),
+            Some(0x30001000)
+        );
+        assert_eq!(
+            disable_test_thread_notifications(&mut cpu, &mut kernel, 0x31000000),
+            1
+        );
+        assert_eq!(
+            kernel.next_dll_notification(&mut cpu).unwrap(),
+            Some(0x11000)
+        );
+    }
+
+    #[test]
+    fn dll_thread_opt_out_survives_a_process_checkpoint() {
+        use pocket_kernel::dll_lifecycle::DllContinuation;
+        let mut cpu = scanf_cpu();
+        let mut kernel = fresh_kernel();
+        kernel
+            .modules
+            .push(lifecycle_test_module(0x30000000, 0x30001000));
+        assert_eq!(
+            disable_test_thread_notifications(&mut cpu, &mut kernel, 0x30000000),
+            1
+        );
+        let saved = kernel.capture_snapshot().unwrap();
+        let mut restored = fresh_kernel();
+        saved.restore(&mut restored).unwrap();
+        assert!(restored
+            .disabled_dll_thread_notifications
+            .contains(&0x30000000));
+        assert_eq!(
+            restored
+                .begin_dll_notifications(&mut cpu, 3, DllContinuation::Resume(0x11000))
+                .unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn dll_thread_callbacks_restore_context_and_reverse_detach_order() {
         use pocket_kernel::dll_lifecycle::DllContinuation;
@@ -34171,6 +34341,7 @@ mod tests {
             runtime_thunks: std::collections::HashMap::new(),
             module_attach_frames: Vec::new(),
             static_module_roots: Vec::new(),
+            disabled_dll_thread_notifications: std::collections::BTreeSet::new(),
             dll_notification_frame: None,
             next_module_handle: 0x1000_0001,
             modules: Vec::new(),

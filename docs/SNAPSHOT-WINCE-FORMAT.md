@@ -137,6 +137,7 @@ See [`snapshot_fields!`](../crates/pocket-snapshot/src/fields.rs) for flag handl
 | `0x0714` | 1 | Required | Process and modules | `modules` |
 | `0x0715` | 1 | Required | Process and modules | `next_module_base` |
 | `0x0716` | 1 | Required | Process and modules | `free_module_bases` |
+| `0x0717` | 1 | Optional | Process and modules | `disabled_dll_thread_notifications` (empty when absent) |
 | `0x0801` | 1 | Required | Windows and shell | `wnd_proc` |
 | `0x0802` | 1 | Required | Windows and shell | `window_class_procs` |
 | `0x0803` | 1 | Required | Windows and shell | `window_background` |
@@ -216,3 +217,9 @@ capture/restore checks live beside
 checks live in [`pocket-core`](../crates/pocket-core/src/snapshot.rs). Follow the
 [shared snapshot guide](SNAPSHOTS.md) for restore ownership and preflight rules,
 and the [validation index](testing/README.md) for available dated evidence.
+
+DLL thread-notification opt-outs are process-owned loader policy. Record `0x0717`
+retains them independently of the module layout; absence preserves the previous
+behavior of delivering thread callbacks to all native DLLs. An opted-out DLL still
+receives process teardown. Unloading removes its opt-out before a module slot can
+be reused. Desktop and Android use the same policy and checkpoint record.

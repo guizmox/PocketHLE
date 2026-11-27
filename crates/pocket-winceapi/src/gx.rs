@@ -592,6 +592,7 @@ pub(crate) mod tests {
             runtime_thunks: std::collections::HashMap::new(),
             module_attach_frames: Vec::new(),
             static_module_roots: Vec::new(),
+            disabled_dll_thread_notifications: std::collections::BTreeSet::new(),
             dll_notification_frame: None,
             next_module_handle: 0x1000_0001,
             modules: Vec::new(),

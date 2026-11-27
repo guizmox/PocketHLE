@@ -1,4 +1,12 @@
+crates/pocket-kernel/src/lib.rs
+crates/pocket-kernel/src/dll_lifecycle.rs
+crates/pocket-kernel/src/kernel_snapshot.rs
+crates/pocket-kernel/src/shell_menu.rs
 crates/pocket-winceapi/src/coredll.rs
-crates/pocket-winceapi/src/window_enable.rs
-crates/pocket-winceapi/src/mfc/file.rs
-docs/MFC.md
+crates/pocket-winceapi/src/lib.rs
+crates/pocket-winceapi/src/gx.rs
+frontends/pocket-desktop/src/runner.rs
+frontends/pocket-android-jni/src/runner.rs
+docs/AGENTS.md
+docs/GPU.md
+docs/SNAPSHOT-WINCE-FORMAT.md

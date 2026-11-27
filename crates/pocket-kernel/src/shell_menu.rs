@@ -517,6 +517,10 @@ impl ShellMenus {
         }
         None
     }
+    pub fn has_popup(&self, handle: u32) -> bool {
+        self.active == handle && !self.path.is_empty()
+    }
+
     pub fn render(
         &self,
         handle: u32,
@@ -524,6 +528,17 @@ impl ShellMenus {
         gdi: &GdiState,
         menus: &HashMap<u32, Vec<MenuItem>>,
         states: &HashMap<u32, HashMap<u32, u32>>,
+    ) {
+        self.render_bar(handle, surface, gdi, menus);
+        self.render_popup(handle, surface, gdi, menus, states);
+    }
+
+    pub fn render_bar(
+        &self,
+        handle: u32,
+        surface: &mut Surface<'_>,
+        gdi: &GdiState,
+        menus: &HashMap<u32, Vec<MenuItem>>,
     ) {
         let Some(bar) = self.bars.get(&handle) else {
             return;
@@ -582,6 +597,19 @@ impl ShellMenus {
                 }
             }
         }
+    }
+    // Popups belong to the host presentation copy, not to guest-owned pixels.
+    fn render_popup(
+        &self,
+        handle: u32,
+        surface: &mut Surface<'_>,
+        gdi: &GdiState,
+        menus: &HashMap<u32, Vec<MenuItem>>,
+        states: &HashMap<u32, HashMap<u32, u32>>,
+    ) {
+        let (w, h) = surface.dimensions();
+        let (w, h) = (w as i32, h as i32);
+        let font = text::selected(gdi, STOCK_SYSTEM_FONT);
         if self.active != handle {
             return;
         }

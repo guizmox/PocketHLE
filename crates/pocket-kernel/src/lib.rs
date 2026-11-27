@@ -1297,6 +1297,8 @@ pub struct KernelState {
     pub module_attach_frames: Vec<ModuleAttachFrame>,
     /// Native modules referenced directly by the main image IAT.
     pub static_module_roots: Vec<u32>,
+    /// DLLs that opted out of thread attach/detach callbacks; cleared on unload.
+    pub disabled_dll_thread_notifications: std::collections::BTreeSet<u32>,
     pub dll_notification_frame: Option<dll_lifecycle::DllNotificationFrame>,
     pub next_module_handle: u32,
     /// DLLs the guest brought in at runtime via `LoadLibraryW`, in load
@@ -2265,14 +2267,13 @@ impl KernelState {
     /// [`Framebuffer::mark_dirty`] — it runs at the presentation
     /// boundary, and dirtying there would ask for another frame
     /// forever.
-    /// Host-owned SIP overlay. Never write its pixels into the guest's GDI/GAPI
-    /// framebuffer: hiding or rotating the keyboard must not leave stale pixels.
+    /// Host-owned SIP and popup overlays. Their pixels never enter the guest's
+    /// GDI/GAPI framebuffer, so dismissal reveals the unmodified game image.
     pub fn presentation_framebuffer(
         &mut self,
     ) -> Result<std::borrow::Cow<'_, Framebuffer>, String> {
-        if (!self.shell_keyboard.sip || !self.shell_keyboard.visible)
-            && self.gdi.shell_menus.tracking.is_none()
-        {
+        let menu = self.presentation_menu_handle();
+        if (!self.shell_keyboard.sip || !self.shell_keyboard.visible) && menu.is_none() {
             return Ok(std::borrow::Cow::Borrowed(
                 self.framebuffer.presentation_cpu()?,
             ));
@@ -2280,9 +2281,9 @@ impl KernelState {
         let mut frame = self.framebuffer.presentation_cpu()?.clone();
         // Native GDI/SIP overlays use guest coordinates and take precedence.
         frame.clear_render_presentation();
-        if self.gdi.shell_menus.tracking.is_some() {
+        if let Some(handle) = menu {
             self.gdi.shell_menus.render(
-                shell_menu::TRACKING_HANDLE,
+                handle,
                 &mut gdi::Surface::Screen(&mut frame),
                 &self.gdi,
                 &self.menu_items,
@@ -2292,6 +2293,16 @@ impl KernelState {
         self.shell_keyboard
             .render(&mut gdi::Surface::Screen(&mut frame));
         Ok(std::borrow::Cow::Owned(frame))
+    }
+
+    /// Shared host-overlay policy for CPU presentation and GPU handoff adapters.
+    pub fn presentation_menu_handle(&self) -> Option<u32> {
+        if self.gdi.shell_menus.tracking.is_some() {
+            Some(shell_menu::TRACKING_HANDLE)
+        } else {
+            self.active_shell_bar()
+                .filter(|&handle| self.gdi.shell_menus.has_popup(handle))
+        }
     }
 
     /// Walk child parents, never popup owners. The fallback preserves the
@@ -2860,13 +2871,9 @@ impl KernelState {
             }
         });
         if let Some(handle) = shell_bar {
-            self.gdi.shell_menus.render(
-                handle,
-                &mut surf,
-                &self.gdi,
-                &self.menu_items,
-                &self.menus,
-            );
+            self.gdi
+                .shell_menus
+                .render_bar(handle, &mut surf, &self.gdi, &self.menu_items);
         }
         if taskbar {
             self.gdi
@@ -4795,6 +4802,7 @@ impl Process {
                 runtime_thunks: HashMap::new(),
                 module_attach_frames: Vec::new(),
                 static_module_roots: Vec::new(),
+                disabled_dll_thread_notifications: std::collections::BTreeSet::new(),
                 dll_notification_frame: None,
                 next_module_handle: 0x1000_0001,
                 modules: Vec::new(),
@@ -6161,6 +6169,113 @@ mod tests {
             &k.framebuffer.resident_cpu().unwrap().pixels[..2],
             &0xf800u16.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn shell_popup_presentation_does_not_overwrite_game_pixels_when_toggled_closed() {
+        let mut cpu = StubCpu::new();
+        let mut process = Process::map_into(
+            image_based_at(0x10000, 0x1000),
+            &mut cpu,
+            &|_, _| None,
+            &NullDispatcher,
+        )
+        .unwrap();
+        let k = &mut process.state;
+        k.gapi_action_key = gapi::VK_RETURN;
+        k.framebuffer.resize(240, 320);
+        let (owner, bar) = (0xdead0001, 0xdead0b01);
+        k.active_window = owner;
+        k.window_styles.insert(owner, (0x10000000, 0));
+        k.window_styles.insert(bar, (0x90000000, 0));
+        k.window_visibility.insert(owner, true);
+        k.window_visibility.insert(bar, true);
+        k.gdi.shell_menus.bars.insert(
+            bar,
+            shell_menu::Bar {
+                owner,
+                menu: 10,
+                sip: false,
+                background: 0x8410,
+            },
+        );
+        k.menu_items.insert(
+            10,
+            vec![MenuItem {
+                id: 0,
+                kind: 0x10,
+                submenu: 11,
+                text: "Game".encode_utf16().collect(),
+                ..Default::default()
+            }],
+        );
+        k.menu_items.insert(
+            11,
+            vec![MenuItem {
+                id: 100,
+                kind: 0,
+                submenu: 0,
+                text: "Start".encode_utf16().collect(),
+                ..Default::default()
+            }],
+        );
+        k.framebuffer.fill(0x07e0);
+        k.composite_controls();
+        let under = ((280 * 240 + 40) * 2) as usize;
+        let green = 0x07e0u16.to_le_bytes();
+        for _ in 0..2 {
+            for ev in [
+                InputEvent::PointerDown { x: 10, y: 306 },
+                InputEvent::PointerUp { x: 10, y: 306 },
+            ] {
+                assert!(k
+                    .gdi
+                    .shell_menus
+                    .input(
+                        bar,
+                        ev,
+                        240,
+                        320,
+                        &k.menu_items,
+                        &k.menus,
+                        &k.gdi.shell_toolbars
+                    )
+                    .is_some());
+            }
+            assert_eq!(k.presentation_menu_handle(), Some(bar));
+            k.composite_controls();
+            assert_eq!(
+                &k.framebuffer.resident_cpu().unwrap().pixels[under..under + 2],
+                &green
+            );
+            let visible = k.presentation_framebuffer().unwrap();
+            assert!(matches!(&visible, std::borrow::Cow::Owned(_)));
+            assert_ne!(&visible.pixels[under..under + 2], &green);
+            drop(visible);
+            // A second press on the same title cancels its dropdown.
+            for ev in [
+                InputEvent::PointerDown { x: 10, y: 306 },
+                InputEvent::PointerUp { x: 10, y: 306 },
+            ] {
+                assert_eq!(
+                    k.gdi.shell_menus.input(
+                        bar,
+                        ev,
+                        240,
+                        320,
+                        &k.menu_items,
+                        &k.menus,
+                        &k.gdi.shell_toolbars
+                    ),
+                    Some(shell_menu::Action::Consumed)
+                );
+            }
+            assert_eq!(k.presentation_menu_handle(), None);
+            k.composite_controls();
+            let closed = k.presentation_framebuffer().unwrap();
+            assert!(matches!(&closed, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(&closed.pixels[under..under + 2], &green);
+        }
     }
 
     #[test]

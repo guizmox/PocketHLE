@@ -1012,11 +1012,11 @@ mod tests {
     }
 
     #[test]
-    fn constant_for_returns_one_for_known_one_stub() {
+    fn disabling_dll_thread_notifications_is_not_a_constant() {
         let d = WinCeDispatcher::new();
-        // Pinned system-library thread notifications need no guest callback.
+        // Native DLL opt-outs must update process-owned loader policy.
         let t = fake_thunk("coredll.dll", "DisableThreadLibraryCalls");
-        assert_eq!(d.constant_for(&t), Some(1));
+        assert_eq!(d.constant_for(&t), None);
     }
 
     #[test]

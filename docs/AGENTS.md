@@ -1579,3 +1579,19 @@ cache fixes should not alter payloads. Change a record version and add a local
 conversion when its nested bincode representation changes; optional extensions
 need explicit safe defaults. Preserve the synthetic reference fixture and
 compatibility tests. See [the format contract](SNAPSHOT-WINCE-FORMAT.md).
+
+### DLL thread notification opt-outs
+
+[`DisableThreadLibraryCalls`](https://learn.microsoft.com/en-us/previous-versions/ms939452(v=msdn.10))
+is stateful. Native DLL handles are recorded in
+`KernelState::disabled_dll_thread_notifications`; only thread attach/detach
+notifications are suppressed, including callbacks still queued behind another
+DLL. Process detach and ordinary unload retain their callback and resource
+teardown paths. Unload removes the module's opt-out. HLE DLL handles have no guest
+entry point; invalid handles fail with `ERROR_INVALID_HANDLE`. The policy is
+shared by Desktop/Android and saved in optional WinCE record `0x0717`.
+
+This is required by NFS Shift's Maestro plug-in: its DllMain requests the opt-out
+on process attach and frees shared synthesis lookup tables on other reasons.
+Reporting success without applying the opt-out frees live audio tables during
+worker-thread creation/exit and corrupts resampling lengths and playback steps.

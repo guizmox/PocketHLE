@@ -50,7 +50,11 @@ impl KernelState {
             .modules
             .iter()
             .filter(|module| {
-                module.attached
+                (!matches!(reason, 2 | 3)
+                    || !self
+                        .disabled_dll_thread_notifications
+                        .contains(&module.base))
+                    && module.attached
                     && module.image_entry != 0
                     && !self
                         .module_attach_frames
@@ -98,6 +102,12 @@ impl KernelState {
             ));
         }
         while let Some((base, entry)) = frame.pending.pop() {
+            // A prior callback can disable notifications for a DLL still in this queue.
+            if matches!(frame.reason, 2 | 3)
+                && self.disabled_dll_thread_notifications.contains(&base)
+            {
+                continue;
+            }
             // A callback must not jump through a module already unloaded by another callback.
             if !self
                 .modules
@@ -198,6 +208,7 @@ impl KernelState {
             self.modules[index].resident_regions.pop();
         }
         let satellites = self.modules.remove(index).satellites;
+        self.disabled_dll_thread_notifications.remove(&base);
         self.static_module_roots.retain(|&root| root != base);
         for satellite in satellites {
             if let Some(module) = self
