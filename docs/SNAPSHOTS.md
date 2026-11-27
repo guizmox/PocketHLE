@@ -48,7 +48,7 @@ skip unknown optional sections and rejects unknown required sections.
 
 ## Independently versioned WinCE records
 
-WinCE container 12 replaces the monolithic section-11 payload with 117 stable,
+WinCE container 12 replaces the monolithic section-11 payload with stable,
 length-bounded typed records, grouped by domain ID. New optional records use
 explicit safe defaults; required data and unsupported versions fail preflight.
 An owner can migrate a single record through a scoped decoder without copying

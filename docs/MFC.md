@@ -279,20 +279,12 @@ resources use their existing independently versioned WinCE records. No MFC
 snapshot file, frontend-specific state branch or duplicate allocator is added.
 Host scheduling/lookup hints are transient and reset on restore.
 
-EDIT extensions, clipboard ownership, document-list metadata, window-creation
-scratch and mirror-file names are captured by their existing owner records.
-Their WinCE record owners are:
-
-| Record | State |
-| --- | --- |
-| `0x0206` | Allocator-registered mirror-file temporary names |
-| `0x0836`, version 3 | EDIT selection, viewport, undo and editing state |
-| `0x0838` | Nested window-creation scratch ownership |
-| `0x0839` | Clipboard formats, transferred memory and thread lock |
-| `0x083a` | CE document-list HWND/path/filter metadata |
-
-The independently versioned format is specified in
-[the WinCE snapshot contract](SNAPSHOT-WINCE-FORMAT.md).
+EDIT extensions, indeterminate check states, clipboard ownership, document-list
+metadata, shell toolbars, window-creation scratch and mirror-file names are
+captured by their USER/GDI/VFS owners. The
+[WinCE record registry](SNAPSHOT-WINCE-FORMAT.md#permanent-record-registry) owns
+the record IDs, current payload versions and required/optional flags; those
+values are not maintained in a second MFC-specific schema.
 Current-thread identity, saved stack/return frames and borrowed versus owned
 resources must survive restoration together. A code change to host painting or
 routing alone does not require a serialized schema change.

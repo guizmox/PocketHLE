@@ -1555,7 +1555,8 @@ allocation/handle ownership and partial-support boundary. Additional ordinal
 names come from the same export tables as their handlers. Ordinary CFile opens
 must not set the VFS append flag. Pattern brushes own pixel copies independently
 of source bitmap handles; paint operations share the existing GDI authority and
-clipping paths. Their pixels and DC origins belong to WinCE snapshot section 11.
+clipping paths. Their pixels and DC origins belong to the independently versioned
+GDI record `0x0501` in the [WinCE snapshot registry](SNAPSHOT-WINCE-FORMAT.md#permanent-record-registry).
 
 ### Host motion mapping ownership
 

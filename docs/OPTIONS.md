@@ -30,7 +30,7 @@ contracts, not a promise that every platform exposes the same controls.
 | Option | Choices and behavior |
 | --- | --- |
 | **GPU rendering** | On by default. Selects host OpenGL for GLES 1.x; off selects PocketHLE's software rasterizer for GLES 1.x. GLES 2.0 uses host OpenGL regardless. This does not change GDI/GAPI software drawing into GPU game rendering. |
-| **OpenGL ES internal resolution (host OpenGL)** | **Native**, **2×**, **3×**, **4×**; default Native. Multiplies the native EGL surface size for supported GLES 1.x and 2.0 rendering. Driver/engine limits still apply. |
+| **OpenGL ES internal resolution (host OpenGL)** | **Native**, **2×**, **3×**, **4×**; default Native. Multiplies the native EGL surface size for supported GLES 1.x and 2.0 rendering. Driver/engine limits still apply. For Gizmondo, the selected multiplier also sets the non-GLES presentation size floor; see [internal resolution](GPU.md#internal-resolution). |
 | **Apply to all resolutions, including sizes other than 320×240** | With a multiplier selected, unchecked restricts scaling to 320×240 and 240×320. Checked also scales other surface sizes. It does not force the guest to report another screen size. |
 | **Frame rate limit** | **10**, **15**, **20**, **30**, **45**, **60**, **120 fps**, **Unlimited**; default 60. The default for games without an override. Caps completed presentations, including eligible GDI paint completion, GAPI, DirectDraw and EGL; intermediate updates can be coalesced. A limit cannot speed up a slow game and is independent of recording FPS. |
 

@@ -655,8 +655,10 @@ and image codecs) retain the workspace zlib-rs backend. See
 [Snapshot internals](SNAPSHOTS.md#live-decompressor-checkpoints) for the saved
 state and ABI checks. This is not a universal decoder performance guarantee.
 
-EverQuest Episode I reproduced the original black framebuffer with its supplied
-native MFC runtime while GapiDraw calls returned zero after dependency-load
+The following reproduction used the supplied native runtime; it is not a
+requirement to supply that DLL for the supported [MFC bridge](MFC.md), nor
+validation of the HLE MFC path. EverQuest Episode I reproduced the original
+black framebuffer with its supplied native MFC runtime while GapiDraw calls returned zero after dependency-load
 failure. After these common fixes it reaches the character-slot screen through GAPI;
 a scheduled pointer tap opens class selection/name entry. Further gameplay and
 device-specific behavior require separate validation.

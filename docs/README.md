@@ -49,8 +49,7 @@ Keep operating instructions beside tools that are distributed or used separately
   notices. License texts remain with the corresponding dependency.
 - [Validation index](testing/README.md), [proof index](../proof/README.md) and
   [validation artifacts](../validation/README.md) distinguish recorded campaigns
-  from current instructions. See the [documentation audit](testing/DOCUMENTATION-AUDIT-2026-11-20.md)
-  for this cleanup's scope and checks.
+  from current instructions.
 
 ## Historical records
 
