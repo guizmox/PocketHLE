@@ -2436,6 +2436,28 @@ impl Vfs {
         self.volumes.get(&handle)
     }
 
+    /// Identity of the original removable medium beneath a writable overlay.
+    /// The overlay holds saves, not a replacement physical SD card. Derive
+    /// this from existing mounts so open-volume snapshots need no new fields.
+    pub fn volume_backing_serial(&self, handle: u32) -> Option<u32> {
+        let volume = self.volume(handle)?;
+        let Some(lower) = self
+            .mounts
+            .iter()
+            .find(|m| m.storage_card && m.read_only && m.prefix == volume.prefix)
+        else {
+            return Some(volume.serial());
+        };
+        Some(
+            OpenVolume {
+                prefix: lower.prefix.clone(),
+                host_dir: lower.host_dir.clone(),
+                read_only: lower.read_only,
+            }
+            .serial(),
+        )
+    }
+
     /// Whether `handle` came from opening the `MAS1:` MP3 decoder.
     pub fn is_mp3_decoder(&self, handle: u32) -> bool {
         self.decoders.contains_key(&handle)

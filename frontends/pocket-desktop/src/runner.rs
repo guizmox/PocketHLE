@@ -859,6 +859,11 @@ impl Runner {
                 paths.save_prefix
             ));
         }
+        if is_gizmondo {
+            for (prefix, directory) in game.gizmondo_card_save_mounts(&library_root) {
+                emu.mount_save_dir(&prefix, directory);
+            }
+        }
         if !is_gizmondo {
             for (prefix, directory) in game.application_data_mounts(&library_root) {
                 emu.mount_isolated_save_dir(&prefix, directory);

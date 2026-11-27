@@ -177,6 +177,16 @@ The SDK encoding is numeric title ID minus volume serial minus one, modulo
 2^32. Reading only nested markers regressed Toy Golf startup after flattening;
 the storage driver now decodes either direct files or original nested markers.
 
+Gizmondo SD-card writes use persistent per-entry backing under
+`games/<id>/saves/sd-card/`. This supports games such as SSX that save at the
+card root instead of Flash Disk. Desktop and Android apply the same mount plan
+for SD Card, Storage Card and installed card aliases; read-only assets remain
+unchanged beneath the writable overlays. Explicit existing SD save backings
+are retained. The original imported card still supplies the Gizmondo storage-ID
+serial used by SDK protection, including after restoring open-volume handles.
+PocketPC mount and storage-ID behavior is unchanged. This does not add a
+per-frame rendering path or change snapshot schemas.
+
 New installations enable Camera, GPS and Bluetooth in Gizmondo options by
 default. Existing serialized preferences, including disabled values, are
 preserved. Host services are still acquired only when requested by the guest;

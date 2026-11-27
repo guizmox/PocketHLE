@@ -4520,7 +4520,21 @@ fn device_io_control(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelErr
     // "SD card removed" for.
     if code == IOCTL_DISK_GET_STORAGEID {
         let prefix = volume.prefix.clone();
-        let serial = volume.serial();
+        // Gizmondo's writable SD-card overlay must not replace the imported
+        // medium's identity: SDK SD protection still checks its original marker.
+        // Keep the established PocketPC storage-ID path unchanged.
+        let gizmondo = matches!(
+            ctx.kernel.registry.value(r"HKLM\System\Platform", "PlatformType"),
+            Some(pocket_kernel::registry::RegistryValue::Sz(name)) if name.eq_ignore_ascii_case("Gizmondo Terminal")
+        );
+        let serial = if gizmondo {
+            ctx.kernel
+                .vfs
+                .volume_backing_serial(handle)
+                .unwrap_or_else(|| volume.serial())
+        } else {
+            volume.serial()
+        };
         let mfr = b"PocketHLE\0";
         let serial_text = format!("{serial}\0").into_bytes();
         let total = 16 + mfr.len() + serial_text.len();
@@ -42433,7 +42447,7 @@ mod tests {
         let mut kernel = fresh_kernel();
         cpu.map_region(0x1000, 0x1000, Prot::READ | Prot::WRITE)
             .unwrap();
-        kernel.vfs.mount("\\SD Card\\", dir.path());
+        kernel.vfs.mount_read_only("\\SD Card\\", dir.path());
         let handle = kernel
             .vfs
             .open("\\SD Card\\Vol:", Access::Read, false)
@@ -42505,6 +42519,31 @@ mod tests {
             u32::from_le_bytes(cpu.read_mem(RETURNED, 4).unwrap().try_into().unwrap()),
             needed
         );
+        let upper = dir.path().join("save-overlay");
+        kernel.vfs.mount_save_dir("\\SD Card\\", &upper);
+        let writable = kernel
+            .vfs
+            .open("\\SD Card\\Vol:", Access::Read, false)
+            .unwrap();
+        let legacy_serial = kernel.vfs.volume(writable).unwrap().serial();
+        assert_ne!(legacy_serial, declared_serial);
+        let read_serial = |cpu: &mut StubCpu| {
+            let bytes = cpu.read_mem(OUT, 128).unwrap();
+            let offset = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+            let text = bytes[offset..].split(|v| *v == 0).next().unwrap();
+            std::str::from_utf8(text).unwrap().parse::<u32>().unwrap()
+        };
+        // PocketPC retains its existing storage-ID behavior even with an overlay.
+        assert_eq!(call(writable, 128, &mut cpu, &mut kernel), 1);
+        assert_eq!(read_serial(&mut cpu), legacy_serial);
+        kernel.registry.set_volatile_value(
+            r"HKLM\System\Platform",
+            "PlatformType",
+            pocket_kernel::registry::RegistryValue::Sz("Gizmondo Terminal".into()),
+        );
+        assert_eq!(call(writable, 128, &mut cpu, &mut kernel), 1);
+        assert_eq!(read_serial(&mut cpu), declared_serial);
+        assert!(!kernel.vfs.volume(writable).unwrap().read_only);
     }
 
     /// `EventModify` is the CE-native form of `SetEvent` / `ResetEvent` /

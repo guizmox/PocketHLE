@@ -50,6 +50,7 @@ mod installer;
 mod vhd;
 pub use analysis::{analyze_game, detect_gizmondo_title_id, game_gizmondo_title_id, GameAnalysis};
 
+mod gizmondo_card;
 pub mod gizmondo_titles;
 pub mod keybindings;
 pub mod save_data;
