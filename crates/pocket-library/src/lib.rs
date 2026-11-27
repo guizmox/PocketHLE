@@ -2830,17 +2830,19 @@ impl Library {
         // Strip only sole enclosing folders; retain a GZGA boundary so its
         // identity and the demo-card/GZGA priority are not lost.
         let mut content_root = extracted_dir.clone();
-        while !is_vhd {
-            let children: Vec<_> = fs::read_dir(&content_root)?.collect::<Result<_, _>>()?;
-            if children.len() != 1 || !children[0].file_type()?.is_dir() {
-                break;
+        if !is_vhd {
+            loop {
+                let children: Vec<_> = fs::read_dir(&content_root)?.collect::<Result<_, _>>()?;
+                if children.len() != 1 || !children[0].file_type()?.is_dir() {
+                    break;
+                }
+                let child = children[0].path();
+                let name = children[0].file_name().to_string_lossy().to_string();
+                if is_gizmondo_title_id(&name) {
+                    break;
+                }
+                content_root = child;
             }
-            let child = children[0].path();
-            let name = children[0].file_name().to_string_lossy().to_string();
-            if is_gizmondo_title_id(&name) {
-                break;
-            }
-            content_root = child;
         }
         if content_root != extracted_dir {
             let unwrapped = staging.path().join("unwrapped");
