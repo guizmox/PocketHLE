@@ -310,9 +310,9 @@ struct Mount {
     /// Installed archives may need suffix aliases; an already laid-out device
     /// filesystem supplies exact paths, never a recursive asset search pool.
     resource_fallback: bool,
-    /// Read-only mounts are a session snapshot for recursive fallback.
+    /// Read-only mounts are a session snapshot, indexed by ASCII-folded basename.
     /// Exact lookups remain live; writable mounts never use this index.
-    fallback_files: RefCell<Option<Vec<PathBuf>>>,
+    fallback_files: RefCell<Option<HashMap<String, Vec<PathBuf>>>>,
 }
 
 /// The Gizmondo registration service device exposed as `REG1:`.
@@ -1416,8 +1416,29 @@ impl Vfs {
     fn find_path_recursive(&self, mount: &Mount, wanted: &[&str]) -> (usize, Vec<PathBuf>) {
         if mount.read_only {
             let mut files = mount.fallback_files.borrow_mut();
-            let files = files.get_or_insert_with(|| Self::collect_fallback_files(&mount.host_dir));
-            self.rank_fallback_files(mount, wanted, files)
+            let index = files.get_or_insert_with(|| {
+                let mut index: HashMap<String, Vec<PathBuf>> = HashMap::new();
+                for path in Self::collect_fallback_files(&mount.host_dir) {
+                    if let Some(name) = path.file_name() {
+                        index
+                            .entry(name.to_string_lossy().to_ascii_lowercase())
+                            .or_default()
+                            .push(path);
+                    }
+                }
+                index
+            });
+            // Toy Golf probes loose resources before reading its CFL archive. On a
+            // full demo card, ranking every installed asset for each missing leaf
+            // costs tens of seconds. Only identical basenames can have a nonzero
+            // suffix score. Keep the existing ranking/isolation/ambiguity rules
+            // for that bucket, including its original filesystem traversal order.
+            let candidates = wanted
+                .last()
+                .and_then(|name| index.get(&name.to_ascii_lowercase()))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            self.rank_fallback_files(mount, wanted, candidates)
         } else {
             let files = Self::collect_fallback_files(&mount.host_dir);
             self.rank_fallback_files(mount, wanted, &files)
@@ -2878,6 +2899,50 @@ mod tests {
             Some(movie.clone())
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_only_basename_buckets_match_full_suffix_ranking() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "A/one.bmp",
+            "B/one.bmp",
+            "A/nested/Two.CMF",
+            "hidden/private.dat",
+            "exact.txt",
+            "A/ü.bmp",
+        ] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"asset").unwrap();
+        }
+        let mut v = Vfs::new();
+        v.mount_read_only("\\SD Card\\", root.path());
+        v.mount_isolated_save_dir("\\Private\\", root.path().join("hidden"));
+        let mount = &v.mounts[0];
+        let full = Vfs::collect_fallback_files(root.path());
+        for wanted in [
+            vec!["one.bmp"],
+            vec!["a", "one.bmp"],
+            vec!["b", "one.bmp"],
+            vec!["nested", "two.cmf"],
+            vec!["missing.wav"],
+            vec![],
+            vec!["hidden", "private.dat"],
+            vec!["exact.txt"],
+            vec!["ü.bmp"],
+            vec!["Ü.bmp"],
+        ] {
+            assert_eq!(
+                v.find_path_recursive(mount, &wanted),
+                v.rank_fallback_files(mount, &wanted, &full),
+                "{wanted:?}"
+            );
+        }
+        let cached = mount.fallback_files.borrow();
+        let index = cached.as_ref().unwrap();
+        assert_eq!(index["one.bmp"].len(), 2);
+        assert!(!index.contains_key("missing.wav"));
     }
 
     #[test]

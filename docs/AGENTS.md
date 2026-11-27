@@ -1129,9 +1129,13 @@ overlays and symlinks. Find records carry the same attributes as attribute queri
 Extra attributes are shared session state, not persistent filesystem metadata.
 
 VFS resolves exact paths across the eligible mounts before trying the recursive
-fallback. A read-only mount lazily keeps a list of candidate files for repeated
-fallback lookups. The ranking and ambiguity checks still run on the candidates.
+fallback. A read-only mount lazily indexes candidates by ASCII-folded basename.
+Only a matching basename can have a nonzero suffix score; apply the existing
+suffix ranking, isolation and ambiguity checks within that bucket, retaining
+filesystem traversal order. Toy Golf probes loose resources before reading its
+CFL archive; a missing name must not rerank every asset on a full demo card.
 Exact lookups and writable mounts continue to observe the live filesystem.
+The index is a transient host cache and is not part of the snapshot format.
 
 Host-backed paths also resolve conventional, unambiguous DOS `~1` aliases for
 mount ancestors and existing directory/file names. Brothers in Arms 3D builds
