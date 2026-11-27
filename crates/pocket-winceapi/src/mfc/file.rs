@@ -46,6 +46,7 @@ pub(super) const EXPORTS: &[(u16, &str, crate::Handler)] = &[
     (1168, "?Flush@CFile@@UAAXXZ", flush),
     (1231, "?GetBufferPtr@CFile@@UAAIIIPAPAX0@Z", buffer),
     (97, "??0CFile@@QAA@XZ", construct as crate::Handler),
+    (96, "??0CFile@@QAA@PBGI@Z", construct_path),
     (242, "??1CFile@@UAA@XZ", destruct),
     (2137, "?Read@CFile@@UAAIPAXI@Z", read),
     (854, "?Close@CFile@@UAAXXZ", close),
@@ -158,6 +159,48 @@ fn construct(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
 }
 fn runtime(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(class_data(ctx)? + 80))
+}
+fn construct_path(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
+    let object = ctx.arg_u32(0)?;
+    let filename = ctx.arg_u32(1)?;
+    let mode = ctx.arg_u32(2)?;
+    construct(ctx)?;
+    // The retail constructor calls the base Open implementation, not a
+    // derived virtual, and throws CFileException when opening fails.
+    let opened = (|| {
+        ctx.cpu.write_arg(0, object)?;
+        ctx.cpu.write_arg(1, filename)?;
+        ctx.cpu.write_arg(2, mode)?;
+        ctx.cpu.write_arg(3, 0)?;
+        open(ctx)
+    })();
+    let error = match opened {
+        Ok(DispatchOutcome::ReturnedR0(value)) if value != 0 => {
+            return Ok(DispatchOutcome::ReturnedR0(object));
+        }
+        Ok(DispatchOutcome::ReturnedR0(0)) => {
+            let os = ctx
+                .kernel
+                .thread_last_errors
+                .get(&ctx.kernel.current_thread)
+                .copied()
+                .unwrap_or(0);
+            failure(ctx, object, os)
+        }
+        Err(error) => error,
+        _ => KernelError::Dispatch("Unexpected CFile constructor Open continuation".into()),
+    };
+    // A failed constructor has no live CFile owner. Capture the exception's
+    // path before retiring its initialized CString and any acquired handle.
+    let handle = word(ctx, object + 4)?;
+    if handle != u32::MAX {
+        ctx.kernel.vfs.close(handle);
+        put(ctx, object + 4, u32::MAX)?;
+        put(ctx, object + 8, 0)?;
+    }
+    release_string(ctx, object + 12)?;
+    put(ctx, object + 12, 0)?;
+    Err(error)
 }
 pub(super) fn base_class(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     Ok(DispatchOutcome::ReturnedR0(super::classes::runtime(
@@ -486,6 +529,149 @@ mod tests {
             _ => panic!("unexpected outcome"),
         }
     }
+    #[test]
+    fn filename_constructor_opens_real_vfs_data_and_destructor_releases_ownership() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.bin"), b"data").unwrap();
+        kernel.vfs.mount("\\", dir.path());
+        install_test_exports(&mut kernel);
+        let bytes: Vec<_> = "\\data.bin"
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        cpu.write_mem(0x2100, &bytes).unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "mfcce300.dll",
+            "ord:97",
+            &[0x2000],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "mfcce300.dll",
+            "ord:242",
+            &[0x2000],
+        );
+        let baseline = kernel.heap.free_bytes();
+        let handles = kernel.vfs.open_handles();
+        for _ in 0..32 {
+            assert_eq!(
+                returned(call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "mfcce300.dll",
+                    "ord:96",
+                    &[0x2000, 0x2100, 0x40]
+                )),
+                0x2000
+            );
+            let handle = cpu.read_u32_le(0x2004).unwrap();
+            assert_eq!(cpu.read_u32_le(0x2008).unwrap(), 1);
+            assert_eq!(kernel.vfs.position(handle), Some(0));
+            assert_eq!(
+                returned(call(
+                    &mut cpu,
+                    &mut kernel,
+                    &mut dispatcher,
+                    "mfcce300.dll",
+                    "ord:2137",
+                    &[0x2000, 0x2300, 4]
+                )),
+                4
+            );
+            assert_eq!(cpu.read_mem(0x2300, 4).unwrap(), b"data");
+            call(
+                &mut cpu,
+                &mut kernel,
+                &mut dispatcher,
+                "mfcce300.dll",
+                "ord:242",
+                &[0x2000],
+            );
+            assert!(!kernel.vfs.is_open(handle));
+            assert_eq!(kernel.vfs.open_handles(), handles);
+            assert_eq!(kernel.heap.free_bytes(), baseline);
+        }
+    }
+
+    #[test]
+    fn failed_filename_constructor_preserves_typed_error_and_retires_its_initialized_string() {
+        let (mut cpu, mut kernel, mut dispatcher) = setup();
+        cpu.map_region(0x50000000, 0x10000, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        kernel.vfs.mount("\\", dir.path());
+        install_test_exports(&mut kernel);
+        let bytes: Vec<_> = "\\missing.bin"
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        cpu.write_mem(0x2100, &bytes).unwrap();
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "mfcce300.dll",
+            "ord:97",
+            &[0x2000],
+        );
+        call(
+            &mut cpu,
+            &mut kernel,
+            &mut dispatcher,
+            "mfcce300.dll",
+            "ord:242",
+            &[0x2000],
+        );
+        let baseline = kernel.heap.free_bytes();
+        let handles = kernel.vfs.open_handles();
+        let thunk = pocket_kernel::Thunk {
+            thunk_va: 0x70000000,
+            iat_va: 0,
+            dll: "mfcce300.dll".into(),
+            binding: pocket_pe::ImportBinding::Ordinal(96),
+            friendly_name: None,
+        };
+        for _ in 0..32 {
+            for (i, value) in [0x2000, 0x2100, 0x40].into_iter().enumerate() {
+                cpu.write_arg(i as u8, value).unwrap();
+            }
+            let mut ctx = CallCtx {
+                cpu: &mut cpu,
+                kernel: &mut kernel,
+                thunk: &thunk,
+            };
+            let error = construct_path(&mut ctx).unwrap_err();
+            match error {
+                KernelError::RuntimeException {
+                    runtime,
+                    cause,
+                    os_error,
+                    path,
+                } => {
+                    assert_eq!(runtime, super::super::io_exceptions::FILE);
+                    assert_eq!((cause, os_error), (2, 2));
+                    assert_eq!(String::from_utf16(&path).unwrap(), "\\missing.bin");
+                }
+                other => panic!("Unexpected constructor error: {other:?}"),
+            }
+            assert_eq!(cpu.read_u32_le(0x2004).unwrap(), u32::MAX);
+            assert_eq!(cpu.read_u32_le(0x200c).unwrap(), 0);
+            assert_eq!(kernel.vfs.open_handles(), handles);
+            assert_eq!(kernel.heap.free_bytes(), baseline);
+        }
+    }
+
     #[test]
     fn file_reads_from_start_seeks_and_releases_its_owned_resources() {
         let (mut cpu, mut kernel, mut dispatcher) = setup();

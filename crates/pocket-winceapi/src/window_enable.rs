@@ -182,6 +182,94 @@ mod tests {
         }
     }
     #[test]
+    fn modal_owner_without_a_procedure_never_enters_another_windows_dispatcher() {
+        let (mut cpu, mut k, mut d) = framework_setup();
+        let owner = super::super::coredll::FAKE_HWND;
+        k.wnd_proc = 0x6200;
+        k.window_classes.insert(7, "Dialog".into());
+        k.window_styles.insert(7, (0x10000000, 0));
+        k.window_procs.insert(7, 0x6100);
+        k.window_parents.insert(7, owner);
+        let baseline = k.heap.free_bytes();
+        for (enabled, previous) in [(0, 0), (1, 1)] {
+            cpu.write_arg(0, owner).unwrap();
+            cpu.write_arg(1, enabled).unwrap();
+            assert_eq!(
+                drive(&mut cpu, &mut k, &mut d, entry(), |pc, _| {
+                    panic!("Unbound modal owner entered guest procedure {pc:x}")
+                }),
+                previous
+            );
+            assert_eq!(super::locally_enabled(&k, owner), enabled != 0);
+            assert!(super::locally_enabled(&k, 7));
+            assert_eq!(k.heap.free_bytes(), baseline);
+            assert!(!k.window_procs.contains_key(&owner));
+        }
+        // The dialog still receives its own synchronous notifications rather
+        // than inheriting the process's most recently registered procedure.
+        cpu.write_arg(0, 7).unwrap();
+        cpu.write_arg(1, 0).unwrap();
+        let mut messages = Vec::new();
+        drive(&mut cpu, &mut k, &mut d, entry(), |pc, cpu| {
+            assert_eq!(pc, 0x6100);
+            assert_eq!(cpu.read_arg(0).unwrap(), 7);
+            messages.push(cpu.read_arg(1).unwrap());
+            0
+        });
+        assert_eq!(messages, [0x1f, 0xa]);
+        assert_eq!(k.heap.free_bytes(), baseline);
+    }
+
+    #[test]
+    fn send_and_dispatch_keep_legacy_single_window_routing_without_claiming_unknown_windows() {
+        use crate::bluetooth::tests::call;
+        use pocket_kernel::DispatchOutcome;
+        let (mut cpu, mut k, mut d) = framework_setup();
+        let owner = super::super::coredll::FAKE_HWND;
+        k.wnd_proc = 0x6200;
+        assert!(matches!(
+            call(
+                &mut cpu,
+                &mut k,
+                &mut d,
+                "coredll.dll",
+                "SendMessageW",
+                &[owner, 10, 1, 0]
+            ),
+            DispatchOutcome::JumpTo(0x6200)
+        ));
+        k.window_procs.insert(7, 0x6100);
+        for hwnd in [owner, 0xdead1004] {
+            assert!(matches!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "coredll.dll",
+                    "SendMessageW",
+                    &[hwnd, 10, 1, 0]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            ));
+            for (offset, value) in [(0, hwnd), (4, 10), (8, 1), (12, 0)] {
+                cpu.write_mem(0x1800 + offset, &value.to_le_bytes())
+                    .unwrap();
+            }
+            assert!(matches!(
+                call(
+                    &mut cpu,
+                    &mut k,
+                    &mut d,
+                    "coredll.dll",
+                    "DispatchMessageW",
+                    &[0x1800]
+                ),
+                DispatchOutcome::ReturnedR0(0)
+            ));
+        }
+    }
+
+    #[test]
     fn enable_transitions_send_synchronously_return_previous_disabled_state_and_release_frames() {
         let (mut cpu, mut k, mut d) = framework_setup();
         k.window_classes.insert(7, "Window".into());

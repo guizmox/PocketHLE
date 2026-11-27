@@ -182,6 +182,10 @@ calls Default. Splitter display changes recalculate layout only for a live,
 visible HWND. USER/GDI read live metrics; the bridge adds no separate metric cache.
 
 The parent is disabled and restored through actual EnableWindow callbacks.
+Synchronous SendMessageW and queued DispatchMessageW resolve the same per-HWND
+procedure, including native control subclasses. A synthetic owner without an
+application procedure does not inherit another window's dispatcher. The legacy
+primary-window fallback is retained only while no per-HWND procedures exist.
 Tab traversal uses the same child/sibling walk as GetNextDlgTabItem, respecting
 visibility, disabled ancestors and WS_EX_CONTROLPARENT.
 
@@ -248,6 +252,10 @@ close-on-delete flag and CString filename. Its 20-slot table retains the native
 virtual order. Open/share/create, bounded read/write, seek, truncate, flush,
 rename and remove use real VFS operations. SetLength leaves the cursor at the
 new length. Scoped wrappers do not introduce a host path resolver or file cache.
+The filename/mode constructor reuses base Open and owns the resulting handle.
+Failure raises the ordinary CFileException with its OS cause and guest path,
+after retiring the initialized filename and any acquired handle; it does not
+leave a partly constructed file owner behind.
 
 CAB installation preserves explicitly declared empty application directories
 from structured MSCE DIRS and XML FileOperation metadata. Import materializes

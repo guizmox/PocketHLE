@@ -14051,12 +14051,7 @@ pub(crate) fn send_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, K
     if Controls::is_child_hwnd(hwnd) {
         return def_window_proc_w(ctx);
     }
-    let proc = ctx
-        .kernel
-        .window_procs
-        .get(&hwnd)
-        .copied()
-        .unwrap_or(ctx.kernel.wnd_proc);
+    let proc = message_window_proc(ctx.kernel, hwnd);
     if proc == 0 {
         return Ok(DispatchOutcome::ReturnedR0(0));
     }
@@ -14148,19 +14143,7 @@ fn dispatch_message_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelEr
     } else {
         FAKE_HWND
     };
-    let wnd_proc = ctx
-        .kernel
-        .window_procs
-        .get(&hwnd)
-        .copied()
-        .or_else(|| builtin_window_proc(ctx.kernel, hwnd))
-        .unwrap_or_else(|| {
-            if hwnd == FAKE_HWND && ctx.kernel.window_procs.is_empty() {
-                ctx.kernel.wnd_proc
-            } else {
-                0
-            }
-        });
+    let wnd_proc = message_window_proc(ctx.kernel, hwnd);
     if lp_msg == 0 {
         // No registered WndProc / no message → behave like the old
         // stub: return 0, control resumes from LR.
@@ -20415,11 +20398,26 @@ fn find_window_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> 
     Ok(DispatchOutcome::ReturnedR0(0))
 }
 
-/// `LONG SetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong)` —
-/// returns the previous value (always `0` in our model). When
-/// `nIndex == GWL_WNDPROC` (`-4`), we also re-bind the captured
-/// guest `WndProc` so the synthetic message pump dispatches to the
-/// right entry point if the game subclasses its own window.
+/// Synchronous and queued messages share the same HWND procedure identity.
+fn message_window_proc(kernel: &KernelState, hwnd: u32) -> u32 {
+    kernel
+        .window_procs
+        .get(&hwnd)
+        .copied()
+        .or_else(|| builtin_window_proc(kernel, hwnd))
+        .unwrap_or_else(|| {
+            // Legacy single-window callers have no per-HWND table. Once real
+            // windows exist, an unbound synthetic owner must not inherit the
+            // latest application's procedure. SimCity's modal EnableWindow
+            // otherwise enters its MFC dispatcher without an attached CWnd.
+            if hwnd == FAKE_HWND && kernel.window_procs.is_empty() {
+                kernel.wnd_proc
+            } else {
+                0
+            }
+        })
+}
+
 fn builtin_window_proc(kernel: &KernelState, hwnd: u32) -> Option<u32> {
     kernel.controls.get(hwnd)?;
     // Use a real mapped HLE entry point: MFC saves this value as its
@@ -20433,6 +20431,8 @@ fn builtin_window_proc(kernel: &KernelState, hwnd: u32) -> Option<u32> {
     )
 }
 
+/// SetWindowLongW returns the previous value and retains per-HWND procedures,
+/// including a subclass's real superclass procedure.
 fn set_window_long_w(ctx: &mut CallCtx<'_>) -> Result<DispatchOutcome, KernelError> {
     let hwnd = ctx.arg_u32(0)?;
     let n_index = ctx.arg_u32(1)? as i32;
