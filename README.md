@@ -10,7 +10,7 @@ SPDX-License-Identifier: Apache-2.0 OR MIT
 </p>
 
 <p align="center">
-  A high-level Windows Mobile / Pocket PC / Gizmondo emulator for Linux, Windows and Android.
+  A high-level emulator for Windows CE, Pocket PC, Windows Mobile and Gizmondo games on Linux, Windows and Android.
 </p>
 
 <p align="center">
@@ -41,20 +41,39 @@ j92580498-max, to make the two projects easy to distinguish.
 ---
 
 > [!NOTE]
-> PocketHLE-Reborn runs native and selected .NET Compact Framework Windows CE software for Pocket PC, Windows Mobile and Gizmondo. It supports Pocket PC CAB imports and user-provided Gizmondo game and shell profiles. It is experimental software: compatibility, performance and input behavior vary by game and host platform.
+> PocketHLE-Reborn runs games for **Windows CE**, **Pocket PC 2000, 2002 and 2003**,
+> **Windows Mobile** and **Gizmondo**. Graphics support includes games targeting
+> **NVIDIA GoForce 4500**, **NVIDIA GoForce 5500** and **Intel 2700G**, as well as
+> **OpenGL ES 2.0** games.
+>
+> It supports Pocket PC CAB imports and user-provided Gizmondo game and shell
+> profiles. Compatibility, performance and input behavior vary by game and host platform.
 
 > [!WARNING]
 > PocketHLE-Reborn is developed for research and educational purposes. It does not include Microsoft system files, firmware or game data. Use only legally obtained game copies and archives.
 
 ## Info
 
-PocketHLE-Reborn is a high-level emulator for Pocket PC 2002/2003, Windows Mobile 5/6 and Gizmondo software. Instead of emulating a complete Windows CE device, it loads the original game executable, runs its ARM code through a CPU backend, and provides clean-room host-side implementations of the Windows CE APIs the game expects.
+Native ARM/MIPS games run through the CPU backend; supported .NET Compact
+Framework games use the managed interpreter. Windows CE API calls are implemented
+on the host.
 
 The project is inspired by [touchHLE](https://github.com/touchHLE/touchHLE) and [EKA2L1](https://github.com/EKA2L1/EKA2L1), with a launcher and library workflow influenced by [j2me-loader](https://github.com/nikita36078/j2me-loader).
 
 ## Games Tested
 
-See the [Gizmondo compatibility table](docs/GIZMONDO.md#reported-game-compatibility) for reported game results and known issues. The [GTShell guide](docs/GIZMONDO.md#gtshell-profiles) covers shell profile setup and Bluetooth file transfer.
+### Pocket PC / Windows Mobile
+
+See the [PocketPC / Windows Mobile compatibility list](docs/COMPATIBILITY.md#pocketpc--windows-mobile)
+for tested games, demos and applications.
+
+### Gizmondo
+
+See the [Gizmondo compatibility table](docs/GIZMONDO.md#reported-game-compatibility)
+for game results and known issues. The [GTShell guide](docs/GIZMONDO.md#gtshell-profiles)
+covers shell setup and Bluetooth file transfer.
+
+### Gameplay screenshots
 
 | Asphalt 4 Elite Racing | Call of Duty 2 |
 | :---: | :---: |

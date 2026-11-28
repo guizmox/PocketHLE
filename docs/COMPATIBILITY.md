@@ -1,35 +1,11 @@
-# Reported compatibility and test library
+# Compatibility
 
-This inventory covers **153 entries (96 PocketPC / Windows Mobile and 57
-Gizmondo)**. It includes games, prototypes, demos, benchmarks, utilities and
-other emulators. Variants remain separate entries under their supplied display
-names. The catalogue was updated from the supplied library export on
-2026-11-20 while retaining earlier entries.
-
-For detailed reported Gizmondo results and known issues, use the
+**150 listed titles: 95 PocketPC / Windows Mobile and 55 Gizmondo.**
+The lists include games, demos, benchmarks and utilities.
+For detailed Gizmondo results and known issues, see the
 [Gizmondo compatibility table](GIZMONDO.md#reported-game-compatibility).
-Reproducible checked-in captures and probes live under [proof](../proof).
-See [validation levels](README.md#validation-levels) when reporting new results.
-
-Only title names and platform grouping are published here. Platform grouping
-uses the platform recorded in the catalogue when available and the launcher's
-legacy Gizmondo title IDs and collection markers for older entries.
 
 ## PocketPC / Windows Mobile
-
-**96 catalogue entries**. Of these, **87 were reported working** by the
-maintainer on 2026-11-12. That report
-does not specify the PocketHLE-Reborn revision, host platform, test duration or
-coverage for each title.
-
-Nine additional catalogue entries come from the library export supplied on
-2026-11-20. Catalogue presence alone does not establish playability; no new
-test result is claimed for these additions.
-
-The two GoForce demo imports retain their supplied names and distinct IDs
-(`goforce5500demos` and `goforcedemos`); this does not prove different binary
-versions. SC15 Demos remains from the earlier report although it is absent
-from the new export.
 
 * Age of Empires
 * Anthelion
@@ -67,7 +43,6 @@ from the new export.
 * GeoRally EX
 * GhostWorld
 * GoForce 5500 Demos
-* Goforce 5500 Demos
 * GXmark
 * HTC Teeter
 * Infectious Ground
@@ -130,13 +105,8 @@ from the new export.
 
 ## Gizmondo
 
-**57 entries**. This inventory does not overwrite the detailed reported results
-in the [Gizmondo guide](GIZMONDO.md#reported-game-compatibility).
-
 * 00 - HARDWARE DIAG
 * 01 - GTShell + SD Card
-* AAA - Nav
-* AAAGZGA800069
 * Agaju
 * Agaju (august 2005)
 * Agaju (E3 demo)

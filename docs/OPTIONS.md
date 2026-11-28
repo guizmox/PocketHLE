@@ -117,7 +117,7 @@ Both frontends provide separate **Keyboard bindings** and **External controller
 bindings** editors (Desktop toolbar: **Keyboard**, **Controller**). Select the
 PocketPC or Gizmondo device profile, inspect assignments, then use **Assign an
 input…**. Short and long presses can have different assignments; a long press
-uses the shared 0.65-second threshold. Reset restores the selected factory profile.
+uses the shared 0.65-second threshold. Reset restores that input device’s factory bindings for both device profiles; Save commits the change.
 
 **Stylus speed (pixels)** ranges from 30 to 1200, default 240. It controls
 PocketPC relative stylus movement. The controller editor uses connected host
@@ -218,7 +218,7 @@ These are actions or live controls, rather than additional per-game settings.
 | --- | --- |
 | **Information** | Both; detected game/API/hardware information and the selected launch executable. |
 | **Switch Launch Executable** | PocketPC only, below **Add/Replace Data** in the game menu. Lists installed executables, saves the selection and runs the shared launch-advice workflow where necessary. No permanent library rescan is required. |
-| **Add/Replace Data** | PocketPC only. **Application Folder** targets `extracted`; **My Documents** targets `saves/my-documents`. ZIP directory structure is retained. My Documents uses overwrite decisions without an executable-selection step. |
+| **Add/Replace Data** | PocketPC and Gizmondo. **Application Folder** targets `extracted`; **My Documents** targets `saves/my-documents`. ZIP directory structure is retained. My Documents uses overwrite decisions without an executable-selection step. |
 | **Rename**, **Remove**, **Game ID** | Library management. Removing a title is distinct from stopping its emulation. |
 | **Upscale ×2** | Desktop presentation/window-size action for both device profiles and all graphics paths. Makes room for the enlarged image; separate from GLES render scaling and absent from Android's UI. |
 | **Filter**, **Rotation**, **Fullscreen** | Presentation actions. Desktop F9 cycles filters, F7 rotates and F12 toggles fullscreen. Android exposes its display controls and filter setting. |

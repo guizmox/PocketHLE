@@ -60,8 +60,8 @@ Menu remains the reserved filter shortcut, including in the library. L1/L2 move 
 wrapping through Gizmondo, PocketPC and Recordings. Selection stays in view.
 
 The game menu contains Information, Play, Rename, Settings, Add/Replace Data,
-Switch Launch Executable, Remove and Game ID. Add/Replace Data and the executable
-switch are PocketPC-only actions. A accepts;
+Switch Launch Executable, Remove and Game ID. Add/Replace Data is available for
+both platforms; the executable switch is PocketPC-only. A accepts;
 B returns to the parent menu, then closes it. In settings, up/down moves focus,
 left/right adjusts sliders and A activates the selected control. Dropdowns use
 up/down, A to accept and B to cancel. Pages scroll to keep focus visible.

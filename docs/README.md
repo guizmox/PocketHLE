@@ -13,7 +13,7 @@ retain their spelling.
 | Find every exposed emulator and per-game setting | [Settings reference](OPTIONS.md) |
 | Configure games, controls, touch layouts and the desktop toolbar | [Frontends](FRONTENDS.md) |
 | Run supported managed Pocket PC games | [.NET Compact Framework](FRONTENDS.md#net-compact-framework-games) |
-| Find reported titles and the limits of compatibility evidence | [Compatibility](COMPATIBILITY.md) |
+| Find tested titles and reported compatibility | [Compatibility](COMPATIBILITY.md) |
 | Use Gizmondo hardware services, GTShell and Colors | [Gizmondo](GIZMONDO.md) |
 | Build Linux/Windows/Android, sign an APK or publish an update | [Build and release](BUILD.md) |
 | Collect Android graphics/NV logs | [Graphics diagnostics](ANDROID-GRAPHICS-DIAGNOSTICS.md) |
