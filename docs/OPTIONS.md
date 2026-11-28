@@ -5,6 +5,10 @@ It separates emulator defaults from settings for one PocketPC or Gizmondo game.
 For import, controller navigation and the live grid editor, see [Frontend workflows](FRONTENDS.md).
 For rendering details and limits, see [Graphics](GPU.md).
 
+Unless marked **Desktop only** or **Android only**, settings apply to both host
+platforms. **PocketPC** and **Gizmondo** identify the emulated device, independently
+of the host platform. Platform-specific headings apply to every row below them.
+
 ## Where to change settings
 
 On Desktop, open **Emulator**, **PocketPC**, **Gizmondo**, **Keyboard** or
@@ -58,7 +62,7 @@ available on both platforms and is a separate feature.
 | **Show FPS on game screen** / **Show FPS** | Both; on by default. Displays the presentation counter inside the game image. It is not a count of game simulation steps or unique visual changes. |
 | **Show IPS on game screen** / **Show IPS** | Both; off by default. Changed images per second, based on the logical RGB565 image. GLES measurement uses CPU pixel readback and can affect performance; this is not an instruction counter. |
 | **Executable heap** | Both; Enabled or Disabled, default Enabled. Some games require executable heap memory; others can run faster with it disabled. PocketPC games can override it individually. |
-| **Library root** / **Game library folder** | Read-only display of the active library directory. Not a folder picker. Desktop can select a custom root with `POCKETHLE_LIBRARY`; see [library storage](../README-DETAILED.md#library). |
+| **Library root** / **Game library folder** | Both; read-only display of the active library directory. Not a folder picker. Desktop can select a custom root with `POCKETHLE_LIBRARY`; see [library storage](../README-DETAILED.md#library). |
 | **Clean up CAB install files** | Both. Moves verified redundant installer aliases into `cab-alias-backup-*` under the library root, preserving their game-relative paths. The result reports the backup path and skipped/failed folders. It does not delete files merely because they have a numbered extension. Run while no game/import is active. |
 | **Verbosity (0..3)** / **Log verbosity** | Both; normal default 1. Higher levels produce more diagnostic output and can affect timing. |
 | **Log unimplemented APIs** / **Unimplemented API report** | Both. Separate missing-API report: Desktop `pockethle-unimplemented-apis.log`, Android `pockethle-unimplemented.log`, under the library root. Desktop applies after Save, including a running game. |
@@ -113,19 +117,18 @@ they cannot guarantee that hardware or permission is present. See the
 
 ## Keyboard and external controller options
 
-Both frontends provide separate **Keyboard bindings** and **External controller
-bindings** editors (Desktop toolbar: **Keyboard**, **Controller**). Select the
-PocketPC or Gizmondo device profile, inspect assignments, then use **Assign an
-input…**. Short and long presses can have different assignments; a long press
-uses the shared 0.65-second threshold. Reset restores that input device’s factory bindings for both device profiles; Save commits the change.
+Both frontends provide **Keyboard bindings** and **External controller bindings**
+for PocketPC and Gizmondo. Short and long presses can have different assignments.
+See the [input editor workflow](FRONTENDS.md#visual-input-editor--desktop-and-android)
+for capture, timing, reset and saving.
 
 **Stylus speed (pixels)** ranges from 30 to 1200, default 240. It controls
 PocketPC relative stylus movement. The controller editor uses connected host
 controllers; pairing and driver configuration remain host OS tasks.
 
 **Save Snapshot** and **Load Snapshot** are assignable controller commands for
-both device profiles. Physical **F5–F12** are reserved host shortcuts and cannot
-be assigned to a guest command or grid zone. The interface marks reserved keys
+both device profiles. Physical **F5–F12** on Desktop and **F7–F12** on Android are reserved
+host shortcuts and cannot be assigned to a guest command or grid zone. The interface marks reserved keys
 in red. See the [input editor](FRONTENDS.md#visual-input-editor--desktop-and-android)
 and [host shortcut table](FRONTENDS.md#colors-physical-feedback-and-host-shortcuts)
 for the full command list, reset behavior and immutable shortcuts.
@@ -144,19 +147,10 @@ for the full command list, reset behavior and immutable shortcuts.
 | **Swap action / P buttons** | Exchanges A/B/C/Action with P1–P4 for the supported control paths. Separate from the Tab/Esc/Turbo mapping. |
 | **Control mode** | **Normal**, **Touch steering**, **Touch zone mapping**. Touch steering exposes its test workflow. Touch zone mapping exposes **Configure Grid** and **View Grid**. |
 
-**Configure Grid** launches the game with a grid overlay. Below the image,
-choose the grid size and enter/leave editing with **Configure Grid / Resume Game**.
-**L1 + R1** cycles sizes, **L2 + R2** toggles editing and **L3 + R3** clears the
-selected assignment; these combinations are listened to only in this workflow.
-The strong dark veil appears only during editing, when the game receives no
-configuration inputs. **Clear grid** clears all assignments. Resume commits
-assignments; they persist after closing and reopening the game.
-
-Landscape sizes are **4×3**, **5×4**, **6×5**, **7×6**, **8×7**; portrait uses
-the transposed sizes **3×4** through **7×8**. Assign keyboard keys, controller
-inputs or Android layout buttons. **View Grid** previews saved assignments
-without launching the configurator. This maps to the existing single stylus;
-it does not add a multitouch API to a game.
+**Configure Grid** edits assignments over the running game; **View Grid** previews
+saved assignments. See the [touch-grid workflow](FRONTENDS.md#touch-zone-mapping)
+for sizes, shortcuts and saving. The grid maps inputs to the existing single
+stylus; it does not add a multitouch API to a game.
 
 ### Graphics
 
@@ -217,15 +211,16 @@ These are actions or live controls, rather than additional per-game settings.
 | Action | Availability and purpose |
 | --- | --- |
 | **Information** | Both; detected game/API/hardware information and the selected launch executable. |
-| **Switch Launch Executable** | PocketPC only, below **Add/Replace Data** in the game menu. Lists installed executables, saves the selection and runs the shared launch-advice workflow where necessary. No permanent library rescan is required. |
-| **Add/Replace Data** | PocketPC and Gizmondo. **Application Folder** targets `extracted`; **My Documents** targets `saves/my-documents`. ZIP directory structure is retained. My Documents uses overwrite decisions without an executable-selection step. |
-| **Rename**, **Remove**, **Game ID** | Library management. Removing a title is distinct from stopping its emulation. |
+| **Switch Launch Executable** | Both platforms, PocketPC only, below **Add/Replace Data** in the game menu. Lists installed executables, saves the selection and runs the shared launch-advice workflow where necessary. No permanent library rescan is required. |
+| **Add/Replace Data** | Both platforms, PocketPC and Gizmondo. **Application Folder** targets `extracted`; **My Documents** targets `saves/my-documents`. ZIP directory structure is retained. My Documents uses overwrite decisions without an executable-selection step. |
+| **Rename**, **Remove**, **Game ID** | Both platforms; library management. Removing a title is distinct from stopping its emulation. |
 | **Upscale ×2** | Desktop presentation/window-size action for both device profiles and all graphics paths. Makes room for the enlarged image; separate from GLES render scaling and absent from Android's UI. |
 | **Filter**, **Rotation**, **Fullscreen** | Presentation actions. Desktop F9 cycles filters, F7 rotates and F12 toggles fullscreen. Android exposes its display controls and filter setting. |
 | **Screenshot**, **Record video** | Desktop F10 and F11. Separate from snapshots and game FPS. |
 | **Save Snapshot**, **Restore Snapshot** | Desktop F5/F6; Android **S / L** at the physical window corners. One slot per game, timestamp shown on success; an empty restore does nothing. Errors use the diagnostic dialog. See [snapshot controls](FRONTENDS.md#experimental-snapshots) and [format/coverage](SNAPSHOTS.md). |
 | **Volume**, **Brightness**, **Power**, **Geofence** | Gizmondo device controls. Colors can use the startup **Fake GPS** choice, manual coordinates or a randomized location near the Eiffel Tower; language, multiplayer origin and unlock workflow are described in [Colors](GIZMONDO.md#colors). |
-| **Backup**, **Restore**, capture library and updates | Launcher maintenance workflows; see [Frontends](FRONTENDS.md). Backup restoration is distinct from loading a game snapshot. |
+| **Backup**, **Restore**, updates | Both platforms; launcher maintenance. Backup restoration is distinct from loading a game snapshot. |
+| Capture library (**Recordings**) | Desktop only; browse screenshots and videos. See the [capture gallery](FRONTENDS.md#desktop-capture-gallery). |
 
 Import assistants configure the same settings listed here; they are not a
 second set of options. A diagnostic dialog offers details, copy and return to

@@ -114,7 +114,7 @@ The Pocket PC importer supports these installer and archive families:
   CabWiz INF layouts without a prebuilt CE CAB;
 * NSIS installers, including supported solid and legacy bzip2 variants;
 * legacy Inno Setup 2.0.11 installers with internal zlib payloads;
-* supported Wise sequential DEFLATE, VISE ESIV and PocketSetup PS2 installers.
+* supported Wise sequential DEFLATE, VISE ESIV and PocketSetup PS2/EC2 installers.
 
 Support depends on the actual installer variant and its payload. Keep matching
 header and volume files together in the archive when the installer uses a set.

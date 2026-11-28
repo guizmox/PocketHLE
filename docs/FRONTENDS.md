@@ -4,6 +4,8 @@ User workflows for Desktop, Steam Deck and Android. Use the [settings reference]
 for option lists, [Graphics](GPU.md) for rendering, [Snapshots](SNAPSHOTS.md) for
 checkpoint internals, and [Build and release](BUILD.md) for installation/builds.
 Deck setup is covered in the [Steam Deck guide](STEAMDECK.md).
+Unless a heading or paragraph specifies a host platform, workflows apply to both
+Desktop and Android. PocketPC/Gizmondo labels refer to the emulated device.
 
 - [Import and launch](#desktop-focus-and-import-launch-settings-prompt)
 - [Add data](#adding-data-to-an-installed-game) and [remove games](#removing-library-games)
@@ -12,13 +14,6 @@ Deck setup is covered in the [Steam Deck guide](STEAMDECK.md).
 - [Touch grid](#touch-zone-mapping), [stylus](#pocketpc-right-stick-stylus-modes) and [motion input](#pocketpc-accelerometer)
 - [Android controls](#android-controls) and [image fitting](#image-geometry-and-input)
 - [Session diagnostics](#session-diagnostics)
-
-## Shared settings
-
-Desktop settings use **Save** and **Cancel**; Android saves accepted changes
-immediately. Per-game overrides take precedence over global defaults. Relaunch
-the game to apply device, graphics and input-source settings unless the control
-explicitly supports live changes. The complete choices are in [OPTIONS.md](OPTIONS.md).
 
 ## Desktop runtime launch profiles
 
@@ -54,6 +49,9 @@ those defaults unchanged. Android also previews its control layout and size;
 Big controls can reduce the space available for the game image.
 
 ## Desktop focus and import launch-settings prompt
+
+The import and executable-selection workflow below applies to both Desktop and
+Android; Desktop additionally manages focus between its toolbar and dialogs.
 
 Import keeps the detected game name; use **Rename** in the game menu to change it.
 If several launchable executables are found, choose one before completing import.
@@ -197,7 +195,8 @@ View/Select and Menu/Start are immutable on both platforms:
 | Menu/Start | Next filter | Toggle recording on Desktop; consumed without action on Android |
 
 Host shortcuts take priority over assignments and touch grids. Desktop reserves
-physical F5–F12:
+physical F5–F12; Android reserves F7–F12. In this table, unqualified actions
+apply to both platforms:
 
 | Key | Action |
 | --- | --- |
@@ -209,7 +208,8 @@ physical F5–F12:
 | F11 | Toggle video recording on Desktop |
 | F12 | Toggle fullscreen |
 
-F10/F11 remain reserved without an action on Android. Screenshot assignments
+F5/F6 have no fixed snapshot action on Android; use S/L or assigned controller
+commands. F10/F11 remain reserved without an action on Android. Screenshot assignments
 are Desktop-only. PocketPC also reserves the controller's right-stick directions
 and R3. Reserving a physical host key does not reserve its guest virtual-key code:
 Gizmondo Power can still send guest F11 through the default keyboard **5**.
@@ -264,23 +264,12 @@ The assignable PocketPC **Center tap** command taps the logical screen centre
 for 60 ms. Holding it does not repeat or extend the tap. Real touches and grid
 strokes take priority. The default key is **² / grave**; Guide sends Tab instead.
 
-## PocketPC phone soft keys
-
-Per-game **Map Tab/Esc/Turbo to F1/F2/5** converts those commands to Windows Mobile
-context keys F1/F2 and digit 5. The virtual labels change accordingly, and existing
-keyboard/controller assignments keep working for both press and release. Relaunch
-to apply it. Other guest buttons, pointer input and host shortcuts are unchanged.
-
 ## PocketPC accelerometer
 
-**Tilt input (accelerometer)** supplies readings to games that use a guest sensor.
-A per-game choice can inherit the global default. Changes apply at the next launch.
-
-| Source | Behavior |
-| --- | --- |
-| **Use physical accelerometer** | Android device sensor; Desktop SDL host sensor, then the selected controller's sensor |
-| **Simulate left/right tilt with arrows** | Directions or left stick generate horizontal tilt |
-| **Simulate tilt in four directions with arrows** | Directions or left stick generate horizontal and vertical tilt |
+Guest sensor input comes from a physical accelerometer or simulated directions.
+Choose the source in [PocketPC settings](OPTIONS.md#global-pocketpc-options).
+On Desktop, physical input uses the SDL host sensor, then the selected controller's
+sensor; Android uses the device sensor.
 
 Simulated buttons override the stick on their axis; opposite directions cancel.
 Full input supplies up to 0.5 g per enabled axis. Neutral rests flat, screen up.
@@ -304,11 +293,10 @@ Stream handles are released with CloseHandle.
 
 ### Physical accelerometer mapping
 
-This is the reverse conversion: **real tilt → arrows or aiming**, available per
-game on Desktop and Android for PocketPC and Gizmondo. Choose **Disabled**, **Low**,
-**Medium** or **High** sensitivity. PocketPC adds **Arrows / Stick** output;
-Gizmondo uses arrows. Stick supplements relative aiming, without activating the
-visible pointer or touch-grid bindings; direct touch takes priority.
+This is the reverse conversion: **real tilt → arrows or aiming**. Enable it in
+per-game Controls; see [OPTIONS.md](OPTIONS.md#per-game-pocketpc-options) for
+sensitivity and output choices. Relative aiming does not activate the visible
+pointer or touch-grid bindings; direct touch takes priority.
 
 The first valid sample calibrates neutral, and movement follows display rotation.
 Lost focus, stale/missing samples or grid editing releases motion inputs and

@@ -46,8 +46,12 @@ j92580498-max, to make the two projects easy to distinguish.
 > **NVIDIA GoForce 4500**, **NVIDIA GoForce 5500** and **Intel 2700G**, as well as
 > **OpenGL ES 2.0** games.
 >
-> It supports Pocket PC CAB imports and user-provided Gizmondo game and shell
-> profiles. Compatibility, performance and input behavior vary by game and host platform.
+> It imports Pocket PC CABs directly or extracts CABs and game files from
+> [supported Windows installers](README-DETAILED.md#using) (InstallShield 5–13,
+> NSIS, Inno Setup 2.0.11, Wise DEFLATE, VISE ESIV, PocketSetup PS2/EC2,
+> and ZIP/RAR 3 self-extracting archives), without running the installer.
+> It also supports user-provided Gizmondo game and shell profiles. Compatibility,
+> performance and input behavior vary by game and host platform.
 
 > [!WARNING]
 > PocketHLE-Reborn is developed for research and educational purposes. It does not include Microsoft system files, firmware or game data. Use only legally obtained game copies and archives.
